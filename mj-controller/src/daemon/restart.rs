@@ -52,10 +52,11 @@ impl RuntimeState {
                 LifecycleKind::Restart,
                 super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
                 Some(acceptance),
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, session_admission| async move {
                     let _workspace_admission = _workspace_admission;
                     state
                         .restart_admitted_with_acceptance(
+                            &session_admission,
                             session_id,
                             cancelled,
                             None,
@@ -140,11 +141,17 @@ impl RuntimeState {
                         deferrable_admission: None,
                         holds_through_drain: false,
                     },
-                    move |state, session_id, cancelled| async move {
+                    move |state, session_id, cancelled, session_admission| async move {
                         // A recovered intent keeps the rules it was started with,
                         // including an automatic one's refusal to interrupt work.
                         state
-                            .restart_admitted(session_id, cancelled, Some(intent), false)
+                            .restart_admitted(
+                                &session_admission,
+                                session_id,
+                                cancelled,
+                                Some(intent),
+                                false,
+                            )
                             .await
                     },
                 )
@@ -176,12 +183,14 @@ impl RuntimeState {
 
     pub(super) async fn restart_admitted(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
     ) -> Result<DaemonLifecycleResult> {
         self.restart_admitted_with_acceptance(
+            session_admission,
             session_id,
             cancelled,
             recovered,
@@ -193,6 +202,7 @@ impl RuntimeState {
 
     async fn restart_admitted_with_acceptance(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
@@ -206,6 +216,7 @@ impl RuntimeState {
             self.request_close(&session_id);
         }
         let result = Box::pin(self.restart_admitted_inner(
+            session_admission,
             &session_id,
             cancelled,
             recovered,
@@ -219,6 +230,7 @@ impl RuntimeState {
 
     async fn restart_admitted_inner(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
@@ -298,6 +310,7 @@ impl RuntimeState {
             }
             let operation_id = intent.operation_id.clone();
             Box::pin(controller.upgrade_container_worker(
+                session_admission,
                 session_id,
                 plan,
                 intent.phase == crate::database::SessionRestartPhase::RecreatingContainer,
@@ -356,6 +369,7 @@ impl RuntimeState {
             ensure_target_unavailable_for_fallback(&controller, session_id, &executor)?;
             tracing::info!(%session_id, "Restart selected suspend-and-resume fallback");
             self.restart_fallback(
+                session_admission,
                 session_id,
                 &intent.operation_id,
                 &mut controller,
@@ -403,6 +417,7 @@ impl RuntimeState {
                     "Restart selected suspend-and-resume because the target was unavailable before checkpointing"
                 );
                 self.restart_fallback(
+                    session_admission,
                     session_id,
                     &intent.operation_id,
                     &mut controller,
@@ -432,6 +447,7 @@ impl RuntimeState {
             .await?;
             tracing::info!(%session_id, "Restart selected in-place checkpoint and restore");
             let suspended = Box::pin(controller.suspend_session_for_restart(
+                session_admission,
                 session_id,
                 &executor,
                 &self.session_manager,
@@ -783,6 +799,7 @@ impl RuntimeState {
 
     async fn restart_fallback(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         restart_intent: &str,
         controller: &mut Controller,
@@ -814,7 +831,15 @@ impl RuntimeState {
         self.begin_restart_container_teardown(session_id, restart_intent)?;
         let stopped = async {
             match self
-                .suspend_with_loaded_controller(session_id, controller, executor, true, false, None)
+                .suspend_with_loaded_controller(
+                    session_admission,
+                    session_id,
+                    controller,
+                    executor,
+                    true,
+                    false,
+                    None,
+                )
                 .await?
             {
                 DaemonLifecycleResult::Done => {}

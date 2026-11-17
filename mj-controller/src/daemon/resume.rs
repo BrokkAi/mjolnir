@@ -66,7 +66,7 @@ impl RuntimeState {
                 LifecycleKind::Resume,
                 super::lifecycle::LifecycleStart::request(key, Some(workspace_id), None),
                 Some(acceptance),
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     let _admission = _admission;
                     let session = blocking({
                         let session_id = session_id.clone();
@@ -196,7 +196,7 @@ impl RuntimeState {
                 LifecycleKind::ForceStop,
                 super::lifecycle::LifecycleStart::request(key, None, Some(control.clone())),
                 Some(acceptance),
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     let failure_state = state.clone();
                     let failure_session = session_id.clone();
                     let result = async {
@@ -563,7 +563,7 @@ impl RuntimeState {
         let retained = Arc::new(Mutex::new(None));
         self.run_lifecycle(session_id, kind, {
             let retained = retained.clone();
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, _session_admission| async move {
                 blocking(move || {
                     let mut controller = Controller::load()?;
                     let executor = DaemonStageReportingExecutor::new(
@@ -802,7 +802,7 @@ impl RuntimeState {
                 kind,
                 request.lifecycle_start(key),
                 Some(acceptance),
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     let _upgrade_work = _upgrade_work;
                     let children = blocking({
                         let session_id = session_id.clone();

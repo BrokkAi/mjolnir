@@ -283,8 +283,12 @@ fn subagent_report_key(
     ))
 }
 
-/// Move reports owned by an old wait result into the mailbox before retiring it.
-pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool> {
+/// Move old wait-owned reports to the mailbox and durably replace its answer.
+/// The compatibility result remains replayable until worker acknowledgement.
+pub(crate) fn retire_legacy_wait(
+    parent: String,
+    request: String,
+) -> Result<Option<StoredDelegationResult>> {
     let retired = submit_database_write("retire legacy wait", move |connection| {
         let transaction = connection.transaction()?;
         let row: Option<(String, Option<String>)> = transaction.query_row(
@@ -292,7 +296,7 @@ pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool
             params![parent, request], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         let Some((prepared, result)) = row else {
-            return Ok(false);
+            return Ok(None);
         };
         let prepared: PreparedDelegation = serde_json::from_str(&prepared)?;
         if !matches!(
@@ -300,101 +304,107 @@ pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool
             mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                 | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
         ) {
-            return Ok(false);
+            return Ok(None);
         }
-        if let Some(result) = result {
-            let stored = decode_stored_result(&result)?;
-            if !stored.reported_finishes.is_empty() {
-                let payload: serde_json::Value = serde_json::from_str(&stored.result.message)?;
-                for (child, identity) in stored.reported_finishes {
-                    let relation: Option<String> = transaction.query_row(
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let mut stored = decode_stored_result(&result)?;
+        if !stored.reported_finishes.is_empty() {
+            let payload: serde_json::Value = serde_json::from_str(&stored.result.message)?;
+            for (child, identity) in std::mem::take(&mut stored.reported_finishes) {
+                let relation: Option<String> = transaction.query_row(
                         "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
                         params![child, parent], |row| row.get(0),
                     ).optional()?;
-                    let Some(relation) = relation else {
-                        continue;
-                    };
-                    let relation: mj_core::subagent::SubagentRecord =
-                        serde_json::from_str(&relation)?;
-                    if relation.reported_finish.as_ref() != Some(&identity) {
-                        continue;
-                    }
-                    let mut entry = payload["agents"]
-                        .as_array()
-                        .and_then(|agents| {
-                            agents
-                                .iter()
-                                .find(|entry| entry["child_session_id"] == child)
-                        })
-                        .cloned()
-                        .context("legacy wait is missing its marked child report")?;
-                    // Name the child as the session list does now; a child whose
-                    // record is gone keeps the task name.
-                    let live_name: Option<String> = transaction
-                        .query_row(
-                            "SELECT title, session_title_override, acp_session_title
-                             FROM sessions WHERE session_id=?1",
-                            [&child],
-                            |row| {
-                                let title: String = row.get(0)?;
-                                let title_override: Option<String> = row.get(1)?;
-                                let acp_title: Option<String> = row.get(2)?;
-                                Ok(mj_core::state::bounded_one_line(
-                                    mj_core::state::listed_session_title(
-                                        &child,
-                                        &title,
-                                        title_override.as_deref(),
-                                        acp_title.as_deref(),
-                                    ),
-                                    mj_core::state::MESSAGE_NAME_CHARS,
-                                ))
-                            },
-                        )
-                        .optional()?;
-                    if let Some(name) = live_name {
-                        entry["child_name"] = name.into();
-                    }
-                    entry["task_name"] = relation.task_name.into();
-                    let report = serde_json::from_value(entry)?;
-                    let key = subagent_report_key(&parent, &child, &identity)?;
-                    let exists: bool = transaction.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
-                        [&key],
-                        |row| row.get(0),
-                    )?;
-                    if exists {
-                        continue;
-                    }
-                    // The old model may have seen this report before an acknowledgement
-                    // was lost. Deliver it again rather than risk losing it on upgrade.
-                    let event = mj_core::mailbox::MailboxEvent {
-                        key: key.clone(),
-                        source: "mjolnir".into(),
-                        wake: true,
-                        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
-                        body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
-                            report: Box::new(report),
-                        },
-                    };
-                    super::mailbox::enqueue_mailbox_event_with(
-                        &transaction,
-                        &key,
-                        &parent,
-                        &serde_json::to_string(&event)?,
-                        true,
-                        false,
-                    )?;
+                let Some(relation) = relation else {
+                    continue;
+                };
+                let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&relation)?;
+                if relation.reported_finish.as_ref() != Some(&identity) {
+                    continue;
                 }
+                let mut entry = payload["agents"]
+                    .as_array()
+                    .and_then(|agents| {
+                        agents
+                            .iter()
+                            .find(|entry| entry["child_session_id"] == child)
+                    })
+                    .cloned()
+                    .context("legacy wait is missing its marked child report")?;
+                // Name the child as the session list does now; a child whose
+                // record is gone keeps the task name.
+                let live_name: Option<String> = transaction
+                    .query_row(
+                        "SELECT title, session_title_override, acp_session_title
+                             FROM sessions WHERE session_id=?1",
+                        [&child],
+                        |row| {
+                            let title: String = row.get(0)?;
+                            let title_override: Option<String> = row.get(1)?;
+                            let acp_title: Option<String> = row.get(2)?;
+                            Ok(mj_core::state::bounded_one_line(
+                                mj_core::state::listed_session_title(
+                                    &child,
+                                    &title,
+                                    title_override.as_deref(),
+                                    acp_title.as_deref(),
+                                ),
+                                mj_core::state::MESSAGE_NAME_CHARS,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some(name) = live_name {
+                    entry["child_name"] = name.into();
+                }
+                entry["task_name"] = relation.task_name.into();
+                let report = serde_json::from_value(entry)?;
+                let key = subagent_report_key(&parent, &child, &identity)?;
+                let exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+                    [&key],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    continue;
+                }
+                // The old model may have seen this report before an acknowledgement
+                // was lost. Deliver it again rather than risk losing it on upgrade.
+                let event = mj_core::mailbox::MailboxEvent {
+                    key: key.clone(),
+                    source: "mjolnir".into(),
+                    wake: true,
+                    created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                    body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                        report: Box::new(report),
+                    },
+                };
+                super::mailbox::enqueue_mailbox_event_with(
+                    &transaction,
+                    &key,
+                    &parent,
+                    &serde_json::to_string(&event)?,
+                    true,
+                    false,
+                )?;
             }
         }
+        stored.result.is_error = false;
+        stored.result.message = serde_json::json!({
+            "status": "reports_arrive_as_messages",
+            "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION,
+        })
+        .to_string();
         transaction.execute(
-            "DELETE FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2",
-            params![parent, request],
+            "UPDATE delegation_effects SET phase='result', result_json=?3 WHERE parent_session_id=?1 AND request_id=?2",
+            params![parent, request, serde_json::to_string(&stored)?],
         )?;
         transaction.commit()?;
-        Ok(true)
+        Ok(Some(stored))
     })?;
-    if retired {
+    if retired.is_some() {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(retired)
@@ -624,7 +634,7 @@ mod tests {
         .to_string();
         submit_database_write("seed old result", move |connection| {
             connection.execute("UPDATE delegation_effects SET result_json=?1, phase='result'", [stored])?;
-            connection.execute_batch("CREATE TEMP TRIGGER reject_retirement BEFORE DELETE ON delegation_effects BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;")?;
+            connection.execute_batch("CREATE TEMP TRIGGER reject_retirement BEFORE UPDATE OF result_json ON delegation_effects BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;")?;
             Ok(())
         }).unwrap();
         assert!(retire_legacy_wait("parent".into(), "old-wait".into()).is_err());
@@ -635,8 +645,33 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert!(retire_legacy_wait("parent".into(), "old-wait".into()).unwrap());
-        assert!(!retire_legacy_wait("parent".into(), "old-wait".into()).unwrap());
+        let replaced = retire_legacy_wait("parent".into(), "old-wait".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retire_legacy_wait("parent".into(), "old-wait".into())
+                .unwrap()
+                .unwrap(),
+            replaced
+        );
+        assert_eq!(
+            load_delegation("parent", "old-wait")
+                .unwrap()
+                .unwrap()
+                .1
+                .unwrap(),
+            replaced
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replaced.result.message).unwrap()["status"],
+            "reports_arrive_as_messages"
+        );
+        acknowledge_delegation("parent".into(), "old-wait".into()).unwrap();
+        assert!(
+            retire_legacy_wait("parent".into(), "old-wait".into())
+                .unwrap()
+                .is_none()
+        );
         assert!(load_delegation("parent", "old-wait").unwrap().is_none());
         let rows = pending_mailbox_events(10).unwrap();
         assert_eq!(rows.len(), 1);

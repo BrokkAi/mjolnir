@@ -366,7 +366,7 @@ impl RuntimeState {
                 holds_through_drain: false,
             },
             Some(acceptance),
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, session_admission| async move {
                 let result = async {
                     let _capacity_lease = state.reserve_container_capacity_for_move(&request).await?;
                 let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
@@ -377,7 +377,7 @@ impl RuntimeState {
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled_with_admission(
+                                .move_session_managed_controlled_with_admission(&session_admission,
                                     &catalog,
                                     request, quota_move, &executor, &manager,
                                     move || { accepted.send_replace(Some(Ok(()))); },
@@ -500,7 +500,7 @@ impl RuntimeState {
                         deferrable_admission: None,
                         holds_through_drain: false,
                     },
-                    move |state, session_id, cancelled| async move {
+                    move |state, session_id, cancelled, session_admission| async move {
                         state
                             .run_move_controller_work(
                                 session_id,
@@ -508,7 +508,10 @@ impl RuntimeState {
                                 |mut controller, executor, manager| async move {
                                     controller
                                         .recover_move_managed_controlled(
-                                            operation, &executor, &manager,
+                                            &session_admission,
+                                            operation,
+                                            &executor,
+                                            &manager,
                                         )
                                         .await
                                 },
@@ -585,7 +588,7 @@ impl RuntimeState {
                 .start_automatic_lifecycle(
                     id.clone(),
                     LifecycleKind::Cleanup,
-                    |state, id, cancelled| async move {
+                    |state, id, cancelled, _session_admission| async move {
                         state
                         .run_move_controller_work(
                             id.clone(),
@@ -823,7 +826,7 @@ mod admission_tests {
             .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
@@ -919,7 +922,7 @@ mod admission_tests {
             .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,

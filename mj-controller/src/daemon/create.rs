@@ -607,7 +607,7 @@ impl RuntimeState {
         }
         self.admit_lifecycle(
             session_id, LifecycleKind::Create, start,
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, _session_admission| async move {
                 tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
                     "session launch lifecycle scheduled");
                 let _total =

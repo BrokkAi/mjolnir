@@ -405,6 +405,9 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             .unwrap();
         let outcome = runtime
             .block_on(controller.recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 &ProcessExecutor,
                 &manager.control,
@@ -2015,6 +2018,7 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
             };
             let error = controller
                 .prepare_move_source_checkpoint(
+                    &crate::controller::test_support::session_admission(&session.id),
                     &session.id,
                     &executor,
                     &manager.control,
@@ -2847,6 +2851,8 @@ struct RecordingProcessExecutor {
     move_stop_calls: std::sync::atomic::AtomicUsize,
     /// Purpose substring whose command fails instead of running.
     fail_purpose: Option<&'static str>,
+    cancelled: std::sync::atomic::AtomicBool,
+    drain_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(unix)]
@@ -2882,6 +2888,10 @@ impl RecordingProcessExecutor {
 impl CommandExecutor for RecordingProcessExecutor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn cancellation_requested_without_deadline(&self) -> bool {
@@ -2941,6 +2951,11 @@ impl CommandExecutor for RecordingProcessExecutor {
 
     fn notify_notice(&self, notice: &str) {
         self.notices.lock().unwrap().push(notice.to_owned());
+        if notice == "Waiting for subagent requests to finish"
+            && let Some(wait) = &self.drain_wait
+        {
+            wait.notify_one();
+        }
     }
 
     fn before_move_source_stop(
@@ -3240,6 +3255,9 @@ fn run_in_place_move(
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 None,
                 executor,
@@ -3375,6 +3393,9 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         let admitted = std::sync::atomic::AtomicBool::new(false);
         let outcome = controller
             .move_session_managed_controlled_with_admission(
+                &crate::controller::test_support::session_admission(
+                    request.preparation.selection.session_id.as_str(),
+                ),
                 &crate::server_runtime::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
@@ -4081,7 +4102,14 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
     let outcome = runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let outcome = controller
-            .recover_move_managed_controlled(operation, &executor, &channels.control)
+            .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
+                operation,
+                &executor,
+                &channels.control,
+            )
             .await;
         channels.shutdown.shutdown().await.unwrap();
         outcome.unwrap()
@@ -4329,6 +4357,9 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 None,
                 &executor,
@@ -4361,24 +4392,29 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 /// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
 #[cfg(unix)]
 // Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
+// Hard-won: dd56c0341: foreground Move blocked the result delivery its mutation drain needed.
+// Hard-won: 05b7a7f89: review holds blocked replies and legacy wait retirement discarded delivery state.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
     if std::env::var_os("MJ_MOVE_NATIVE_DRAIN_CHILD").is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(name)
-            .env("MJ_MOVE_NATIVE_DRAIN_CHILD", "1")
-            .env(
-                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
-                "1",
-            )
-            .env(
-                crate::controller::checkpoint::tests::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
-                crate::controller::checkpoint::tests::LATE_HARNESS_NOTIFICATION,
-            )
-            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
-            .isolated_store(directory.path())
-            .run();
+        for mode in ["complete", "cancel"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(name.clone())
+                .env("MJ_MOVE_NATIVE_DRAIN_MODE", mode)
+                .env("MJ_MOVE_NATIVE_DRAIN_CHILD", "1")
+                .env(
+                    crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                    "1",
+                )
+                .env(
+                    crate::controller::checkpoint::tests::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+                    crate::controller::checkpoint::tests::LATE_HARNESS_NOTIFICATION,
+                )
+                .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+                .isolated_store(directory.path())
+                .run();
+        }
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -4408,8 +4444,216 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
     seed_quota_recovery(&mut relay, "native-source-quota-turn");
     drop(relay);
-    let executor = RecordingProcessExecutor::default();
-    run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
+    // An accepted mutation stays pending at the worker while its effect runs.
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "native-mutation".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "already-accepted-child".into(),
+            message: "finish before Move".into(),
+        },
+    };
+    crate::database::prepare_delegation(
+        LATCH_RELAY_SESSION.into(),
+        crate::database::PreparedDelegation {
+            request: request.clone(),
+            turn_target: None,
+            spawn: None,
+        },
+    )
+    .unwrap();
+    let queue_path = worker_root.join("subagents.json");
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&serde_json::json!({
+        "requests": {request.request_id.clone(): request}, "results": {}, "mutating_admission_open": true,
+    })).unwrap()).unwrap();
+    let review_request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "review-acceptance".into(),
+        created_at_ms: 2,
+        action: mj_core::subagent::SubagentToolAction::RequestReview { path: None },
+    };
+    let legacy_request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "legacy-acceptance".into(),
+        created_at_ms: 3,
+        action: mj_core::subagent::SubagentToolAction::LegacyWaitAgents,
+    };
+    let mut queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+    for request in [&review_request, &legacy_request] {
+        crate::database::prepare_delegation(
+            LATCH_RELAY_SESSION.into(),
+            crate::database::PreparedDelegation {
+                request: request.clone(),
+                turn_target: None,
+                spawn: None,
+            },
+        )
+        .unwrap();
+        queue["requests"].as_object_mut().unwrap().insert(
+            request.request_id.clone(),
+            serde_json::to_value(request).unwrap(),
+        );
+        crate::database::record_delegation_result(
+            LATCH_RELAY_SESSION.into(),
+            mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id.clone(),
+                completed_at_ms: 4,
+                is_error: false,
+                message: if request.request_id == "legacy-acceptance" {
+                    "old wait answer"
+                } else {
+                    "review registered"
+                }
+                .into(),
+            },
+        )
+        .unwrap();
+    }
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap()).unwrap();
+    let review_result =
+        crate::database::load_delegation(LATCH_RELAY_SESSION, &review_request.request_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap();
+    let legacy_result =
+        crate::database::retire_legacy_wait(LATCH_RELAY_SESSION.into(), legacy_request.request_id)
+            .unwrap()
+            .unwrap();
+    let wait = std::sync::Arc::new(tokio::sync::Notify::new());
+    let executor = RecordingProcessExecutor {
+        drain_wait: Some(wait.clone()),
+        ..Default::default()
+    };
+    let mode = std::env::var("MJ_MOVE_NATIVE_DRAIN_MODE").unwrap();
+    let stored = crate::database::StoredDelegationResult {
+        result: mj_core::subagent::SubagentToolResult {
+            request_id: "native-mutation".into(),
+            completed_at_ms: 2,
+            is_error: false,
+            message: "accepted mutation finished".into(),
+        },
+        reported_finishes: Vec::new(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let handle = channels
+            .control
+            .wait_for_session(LATCH_RELAY_SESSION, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+        // A worker-owned review can outlive a foreground Move; its compatible
+        // reservation must not exclude the completion work Move waits for.
+        let review = gate.reserve_when_idle(LATCH_RELAY_SESSION).await;
+        let acceptance = gate.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::DelegationDelivery)
+            .expect("review acceptance replies cannot wait for the review to finish");
+        for result in [review_result, legacy_result] {
+            crate::daemon::delegation::deliver(&handle, &acceptance, result, async {}).await.unwrap();
+        }
+        drop(acceptance);
+        let delivered: serde_json::Value = serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+        assert_eq!(delivered["results"]["review-acceptance"]["message"], "review registered");
+        let compatibility: serde_json::Value = serde_json::from_str(delivered["results"]["legacy-acceptance"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(compatibility["status"], "reports_arrive_as_messages");
+        assert!(crate::database::load_delegation(LATCH_RELAY_SESSION, "legacy-acceptance").unwrap().is_none());
+        let admission = crate::recovery_gate::SessionAdmission::Foreground(
+            gate.enter_foreground(
+                LATCH_RELAY_SESSION,
+                "Move",
+                &std::sync::atomic::AtomicBool::new(false),
+                &ProcessExecutor,
+            )
+            .await
+            .unwrap(),
+        );
+        let mut moving = Box::pin(controller.execute_move(
+            &admission,
+            &mut operation,
+            None,
+            &executor,
+            &channels.control,
+            MoveSourceRelay::default(),
+        ));
+        tokio::select! {
+            result = &mut moving => panic!("Move finished before its mutation: {result:?}"),
+            () = wait.notified() => {}
+        }
+        let delivery = gate.try_start(LATCH_RELAY_SESSION,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery).expect("the owner admits required completion work during drain");
+        assert!(gate.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::WorkerReplacement).is_err());
+        let delivery_lease = handle.lease_connection(&delivery).await.unwrap();
+        let deferred = handle.sync_now().await.unwrap_err();
+        assert!(crate::session_manager::RelayJobDeferred::marks(&deferred), "{deferred:#}");
+        // The actual drain must wait for this known lease deferral rather
+        // than treating it as an unavailable worker or a failed Move.
+        tokio::select! {
+            result = &mut moving => panic!("Move failed during a delivery lease: {result:?}"),
+            () = wait.notified() => {}
+        }
+        let queue: serde_json::Value =
+            serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
+        assert_eq!(queue["mutating_admission_open"], false, "{queue}");
+        assert!(queue["requests"]["native-mutation"].is_object());
+        if mode == "cancel" {
+            executor.cancelled.store(true, std::sync::atomic::Ordering::Release);
+            tokio::select! {
+                () = crate::recovery_gate::wait_until_cancelled(&delivery) => {},
+                result = &mut moving => panic!("Move returned before the admitted delivery released ownership: {result:?}"),
+            }
+            assert!(futures::poll!(&mut moving).is_pending());
+            drop(delivery_lease);
+        } else {
+            delivery_lease.release();
+            let result = stored.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::database::record_stored_delegation_result(LATCH_RELAY_SESSION.into(), result)
+            }).await.unwrap().unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
+            // A cached retry of the acknowledged result issues no second RPC.
+            crate::daemon::delegation::deliver(&handle, &delivery, stored, async {}).await.unwrap();
+        }
+        drop(delivery);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), &mut moving)
+            .await
+            .expect("Move drain must complete or cancel while dispatch keeps delivery ownership");
+        drop(moving);
+        if mode == "cancel" {
+            let error = result.unwrap_err();
+            assert!(format!("{error:#}").contains("Move cancelled"), "{error:#}");
+            assert!(
+                crate::database::load_delegation(LATCH_RELAY_SESSION, "native-mutation")
+                    .unwrap()
+                    .unwrap()
+                    .1
+                    .is_none()
+            );
+            assert_eq!(fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(), "review-acceptance\nlegacy-acceptance\n");
+        } else {
+            result.unwrap();
+            assert!(
+                crate::database::load_delegation(LATCH_RELAY_SESSION, "native-mutation")
+                    .unwrap()
+                    .is_none(),
+                "the admitted background delivery must acknowledge the durable result"
+            );
+            assert_eq!(
+                fs::read_to_string(queue_path.with_extension("deliveries")).unwrap(),
+                "review-acceptance\nlegacy-acceptance\nnative-mutation\n"
+            );
+        }
+        channels.shutdown.shutdown().await.unwrap();
+        drop(admission);
+        drop(review);
+        assert!(gate.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::DelegationDelivery).is_ok(),
+            "completion and cancellation must both release the foreground phase");
+    });
     assert_eq!(
         executor.move_stop_calls(),
         0,
@@ -4418,8 +4662,25 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
 
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
-    assert_eq!(queue["admission_transitions"][0], false, "{queue}");
+    let transitions = queue["admission_transitions"].as_array().unwrap();
+    assert_eq!(
+        &transitions[transitions.len() - 2..],
+        &[
+            serde_json::Value::Bool(false),
+            serde_json::Value::Bool(true)
+        ],
+        "Move must close mutation admission and reopen it after completion or cancellation: {queue}"
+    );
     assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+    if mode == "cancel" {
+        assert!(queue["requests"]["native-mutation"].is_object(), "{queue}");
+    } else {
+        assert!(queue["requests"].as_object().unwrap().is_empty(), "{queue}");
+        assert_eq!(
+            queue["results"]["native-mutation"]["message"], "accepted mutation finished",
+            "{queue}"
+        );
+    }
 }
 
 /// The same source, failing after the close, gets its queue back.
@@ -4473,6 +4734,9 @@ fn in_place_move_reopens_the_queue_of_a_native_source_after_a_failure() {
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 None,
                 &executor,
@@ -4561,6 +4825,9 @@ fn in_place_closing_source_recovery_reopens_gate_after_restoring_running_session
             let channels = start_source_relay_manager(&source_relay);
             let outcome = controller
                 .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(
+                        &operation.selection.session_id,
+                    ),
                     operation,
                     &RecordingProcessExecutor::default(),
                     &channels.control,
@@ -5502,6 +5769,9 @@ fn in_place_move_failure_retains_environment_for_retry() {
         );
         controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 Some(&preparation),
                 &RecordingProcessExecutor::default(),
@@ -5563,6 +5833,7 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
         let channels = start_source_relay_manager(&source_relay);
         let deferred = controller
             .suspend_session_for_move(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,
@@ -5584,7 +5855,14 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
     let outcome = runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let outcome = controller
-            .recover_move_managed_controlled(operation, &executor, &channels.control)
+            .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
+                operation,
+                &executor,
+                &channels.control,
+            )
             .await;
         channels.shutdown.shutdown().await.unwrap();
         outcome.unwrap()
@@ -5660,6 +5938,7 @@ fn in_place_move_killed_at(
         let channels = start_source_relay_manager(source_relay);
         let deferred = controller
             .suspend_session_for_move(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &RecordingProcessExecutor::default(),
                 &channels.control,
@@ -5736,6 +6015,9 @@ fn restart_daemon_and_recover_move(controller: &mut Controller) -> mj_core::stat
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let outcome = controller
             .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 &RecordingProcessExecutor::default(),
                 &channels.control,
@@ -5879,6 +6161,9 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
             let result = fixture
                 .controller
                 .execute_move(
+                    &crate::controller::test_support::session_admission(
+                        &operation.selection.session_id,
+                    ),
                     &mut operation,
                     Some(&preparation),
                     &RecordingProcessExecutor::default(),
@@ -6047,6 +6332,9 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
         let result = fixture
             .controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 Some(&preparation),
                 &RecordingProcessExecutor::default(),
@@ -6257,6 +6545,7 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
         let result = fixture
             .controller
             .suspend_session_for_restart(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,

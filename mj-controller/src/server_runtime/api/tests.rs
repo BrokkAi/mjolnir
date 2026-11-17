@@ -5744,10 +5744,15 @@ async fn legacy_worker_wait_requests_answer_immediately_without_marking_reports(
             .unwrap();
         let recovered: serde_json::Value = serde_json::from_str(&recovered.result.message).unwrap();
         assert_eq!(recovered, payload);
-        assert!(
-            crate::database::load_delegation("parent-1", &recovered_id)
-                .unwrap()
-                .is_none()
+        let retained = crate::database::load_delegation("parent-1", &recovered_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&retained.result.message).unwrap(),
+            payload,
+            "compatibility answers must remain durable through relay delivery"
         );
     }
     backend.reconcile_parent_reports("parent-1").await.unwrap();

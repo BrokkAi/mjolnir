@@ -82,7 +82,7 @@ impl RuntimeState {
                 deferrable_admission: None,
                 holds_through_drain: false,
             },
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, session_admission| async move {
                 let admitted = blocking({
                     let session_id = session_id.clone();
                     let cancelled = cancelled.clone();
@@ -104,7 +104,7 @@ impl RuntimeState {
                 };
                 state.bind_restart_intent(&session_id, &intent.operation_id)?;
                 let _ = accepted.send(Ok(()));
-                state.restart_admitted(session_id, cancelled, Some(intent), false).await
+                state.restart_admitted(&session_admission, session_id, cancelled, Some(intent), false).await
             },
         ).await?;
         let runtime = self.clone();

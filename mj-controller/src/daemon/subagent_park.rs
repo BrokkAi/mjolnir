@@ -201,7 +201,7 @@ impl RuntimeState {
             .run_lifecycle(
                 child_session_id,
                 LifecycleKind::Park,
-                move |state, session_id, _cancelled| async move {
+                move |state, session_id, _cancelled, session_admission| async move {
                     // A park is short and not cancellable: a close that asks for
                     // the child waits for it instead, so it never finds a worker
                     // stopped under a record that still says running.
@@ -239,6 +239,7 @@ impl RuntimeState {
                         None => {
                             controller
                                 .park_subagent_worker(
+                                    &session_admission,
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
@@ -248,6 +249,7 @@ impl RuntimeState {
                         Some(cause) => {
                             controller
                                 .fail_subagent_start_worker(
+                                    &session_admission,
                                     &session_id,
                                     cause,
                                     &executor,
@@ -284,7 +286,7 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
-                |state, session_id, cancelled| async move {
+                |state, session_id, cancelled, _session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
                         CancellableProcessExecutor::new(cancelled.clone())
                             .with_deadline(UNPARK_TIMEOUT),

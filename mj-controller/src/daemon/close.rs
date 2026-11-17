@@ -189,12 +189,13 @@ impl RuntimeState {
                 ..super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
             },
             Some(acceptance),
-            move |state, session_id, _| async move {
+            move |state, session_id, _, session_admission| async move {
                 let result = async {
                     state.persist_suspension_intent(&session_id).await?;
                     accepted.send_replace(Some(Ok(())));
                     state
                         .suspend_admitted(
+                            &session_admission,
                             session_id.clone(),
                             control,
                             acknowledge_unpublished_work,
@@ -535,9 +536,9 @@ impl RuntimeState {
                 LifecycleKind::Suspend,
                 super::lifecycle::LifecycleStart::request(key, None, Some(control.clone()))
                     .automatic(),
-                move |state, session_id, _cancelled| async move {
+                move |state, session_id, _cancelled, session_admission| async move {
                     state
-                        .suspend_admitted(session_id, control, true, false)
+                        .suspend_admitted(&session_admission, session_id, control, true, false)
                         .await
                 },
             )
@@ -553,6 +554,7 @@ impl RuntimeState {
     /// it holds, and the close commits through it.
     async fn suspend_admitted(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         control: LifecycleControl,
         acknowledge_unpublished_work: bool,
@@ -568,6 +570,7 @@ impl RuntimeState {
             session_id.clone(),
         );
         self.suspend_with_loaded_controller(
+            session_admission,
             &session_id,
             &mut controller,
             &executor,
@@ -581,8 +584,10 @@ impl RuntimeState {
     /// `commit` is the control a daemon close commits through at its point of
     /// no return. A Restart's fallback passes none: it holds its own teardown
     /// phase for the whole stop instead.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(super) async fn suspend_with_loaded_controller(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         controller: &mut Controller,
         executor: &(impl CommandExecutor + Sync),
@@ -619,6 +624,7 @@ impl RuntimeState {
             CloseRoute::Subagent => {
                 controller
                     .suspend_subagent_controlled(
+                        session_admission,
                         session_id,
                         executor,
                         Some(&self.session_manager),
@@ -631,6 +637,7 @@ impl RuntimeState {
             CloseRoute::RecoverInterrupted => {
                 controller
                     .recover_interrupted_close_managed(
+                        session_admission,
                         session_id,
                         executor,
                         &self.session_manager,
@@ -656,6 +663,7 @@ impl RuntimeState {
             _ => {
                 controller
                     .suspend_session_managed_controlled(
+                        session_admission,
                         session_id,
                         executor,
                         &self.session_manager,
@@ -681,7 +689,7 @@ impl RuntimeState {
             .start_automatic_lifecycle(
                 session_id.clone(),
                 LifecycleKind::Cleanup,
-                |state, session_id, cancelled| async move {
+                |state, session_id, cancelled, _session_admission| async move {
                     blocking(move || {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
@@ -745,7 +753,7 @@ impl RuntimeState {
                 .start_automatic_lifecycle(
                     session_id.clone(),
                     LifecycleKind::StartupCleanup,
-                    |_state, session_id, _cancelled| async move {
+                    |_state, session_id, _cancelled, _session_admission| async move {
                         blocking(move || {
                             let mut controller = Controller::load()?;
                             // The decision follows lifecycle admission, so a competing
