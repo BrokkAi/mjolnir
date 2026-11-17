@@ -1,0 +1,14 @@
+{
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "profile": "codex4",
+  "target": "podman",
+  "items": 44,
+  "briefs_per_writer": 22,
+  "quota_floor_percent": 25,
+  "quota_before_run_week_percent": 65,
+  "amendment_commit": "5a00ed1025fafe34608a1ee620a535a5300992ee",
+  "contains_rule_sha256": "d989e66e01df153ac98450c2e5906ccf5e8c37a0721924596cab6ab1c4ea5609",
+  "key_sha256": "fd6d89dc2d88073f49e89c016c3545dd1e19e1ae730119c66504ef52e3407404",
+  "role": "diagnostic only; registered writer decision unchanged"
+}

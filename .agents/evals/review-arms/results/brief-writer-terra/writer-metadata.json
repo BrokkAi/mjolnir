@@ -1,0 +1,314 @@
+{
+  "jobs": [
+    {
+      "bug": "archive-resume-hint-without-prompt",
+      "session_id": "e20e77cbf9dcc8aa0b7ec8df117cb837",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "7dea21e29e00e0757a2cfd804014249b12d6cc42bbe39b3d3824fe792356662e",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "catalog-cache-key-collision",
+      "session_id": "b510b9a7df29caa5103b9bbe471b173e",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "a70e3af4f6d77f0069c6e17110c89a7e4d9eeaa257e0f13fd5da195052cbac50",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "child-model-wrong-efforts",
+      "session_id": "9c1889d18c5e91ddfba232d898b48ee8",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "93d328e4129fa1d5acf43656b6f5cf0c650ef46a1efc44e81f44b86f7d43d9d7",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "codex-effort-alias-lost",
+      "session_id": "62784f2e00ff60574b14affd113cbd8c",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "6f5cdfa56d8fe4de5256b33509d3c1547657b91930f136682a8a61f546949a76",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "export-relative-read-root",
+      "session_id": "89f4c7c4c9765f6b082065a6cb25607f",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "58ed3c6ed5d706b0a901a06dfffbe0303210a52d3a93049aa9a7c5844d7da913",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "session_id": "0ed9f99443808dc69e6de768f9798c43",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "c341d5fa79da6b46141f2115b3cbe29f810c8b5811c821037563b33d652b08be",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "held-prompt-ignores-interrupt",
+      "session_id": "e217fb2720862272a602660e6d9d3895",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "2ad0da764353a9648bfd72e86233c8e9c4685ca1eb07b2fe4b508cb48407505c",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "journal-valid-json-corruption",
+      "session_id": "e1729a8ada57d1b8e4e8683f94204a45",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "2ba02cb902afe7600a68cacce5b6070680913838bffc132985a108e636035c22",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "path-completion-lost-on-step-redraw",
+      "session_id": "99e119c4e0653a68dd2646000f0b5ebb",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "20bc3cf25b1e7e05111e44b5922e8e10d21eb6d291d9a667ea4c8cd1958a3e88",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "pending-assessment-hidden-when-idle",
+      "session_id": "971a3d8800a5ec29268884cc3460820c",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "328c27de350a92bc2db57a49d521f1c8e98b99d4abaa4255a9e99801afd2d0e8",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "projection-mixed-sqlite-snapshots",
+      "session_id": "21eec5b36f18ac38dd09c6434b39f735",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "2465412a3e05731169b8523a51e87cb890a8d1b422ff334e9e1e0f8592efd5fb",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "reserved-workspace-internal-error",
+      "session_id": "7a722ce8c99835af41c6f9ee5e1e845f",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "0bad6c658f59c7825331409dd9e201049c3ca4edf330d50b31a6ffdb2064fbad",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "restore-through-profile-symlink",
+      "session_id": "6ae245f4239ef1dbc9db4dcd869fda04",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "45931b5a28fcabc3d83960c88ea837af17883cc3ca05ece8c230fdb2c2d9efa9",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "stale-model-launch-spec",
+      "session_id": "f7d890347fffce45a672ba43c53ee527",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "0aac5cca752a513131ed3809102afdf5ee2fa1db89fa0332335d5a65e6e78960",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "symbol-change-keeps-cached-transcript",
+      "session_id": "256abfb83f68422b567cc5609694be18",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "c51b31e75bdebe5acd4eedb46eedd84bc794611f6c471942e8c7a2af8f331dea",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "terminal-id-reused",
+      "session_id": "78085f419a40241ed19a1f221eae11a2",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "3f240348679daff2158ea84f479bcb924df78b010e195229863d6bfe13bffceb",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "unused-thread-above-archive-floor",
+      "session_id": "61b7c9ad551c457aad181769791d4e84",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "7ba0312638f56d78987dc2117e4dce118a5de025533c87b033d280ac26b07f87",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "web-feed-self-deadlock",
+      "session_id": "47cb7ffaaec19b8e311e7d93db41b5ec",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "0798408ef53ef34804ab45980142b407415c89bc845e5f49795ac58c5723237a",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "activity-recorder-kills-api",
+      "session_id": "fcaaeb24ce622d286fe1b4e30bc6166e",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "983ba593081b5c893eb16ce9b074a18f1a06434202493650872c66881c344fcb",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "dropdown-click-hits-covered-field",
+      "session_id": "9f60995704611406012860e1bc7ccbd7",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "97e2da2f23c626c74c453c421ac1d1936f8a7836ae8d10694374d528ab2db210",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "session_id": "aebea250ec9ed57abae468256d9851b6",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 0,
+      "writer_brief_sha256": "a6525fa2bcee53fad9a5853a4c7db324e7997b8aa3f3141bb4b17af5a8abd382",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    },
+    {
+      "bug": "shortcut-escape-opens-unvisited-manager",
+      "session_id": "c61072ef172100fa06f90c29487d7fcb",
+      "writer_model": "gpt-6.1-terra",
+      "writer_effort": "high",
+      "image": "a13305cd304b446a93a11af00e792e25561d53a043d3c7be55ea5704cab1f84d",
+      "fix_rounds": 1,
+      "writer_brief_sha256": "5d17426c46b64fea6e197c5dc6f2e676f350ebedf010546e2e183e9d06547041",
+      "lint_problems": [],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      }
+    }
+  ],
+  "data_root": "/mnt/optane/review-arms-20261113",
+  "image_id_per_job_recorded": true
+}

@@ -1,10 +1,12 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Load the account's login exports, then interpret our script as POSIX sh.
 /// User shells such as zsh have reserved variables and different syntax.
 pub fn ssh_login_script(ssh: &SshTarget, script: &str) -> CommandSpec {
     let login_command = format!("exec /bin/sh -c {}", posix_quote(script));
     ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "sh",
@@ -48,6 +50,7 @@ pub fn bootstrap_probe_plan(
     validate_executable(harness.executable)?;
     let mut commands = vec![
         at_boundary(
+            SshTrafficClass::Control,
             boundary,
             std::iter::once(harness.executable)
                 .chain(harness.version_args.iter().copied())
@@ -59,12 +62,21 @@ pub fn bootstrap_probe_plan(
     if let Some(bridge) = harness.bridge_executable {
         validate_executable(bridge)?;
         commands.push(
-            at_boundary(boundary, vec![bridge.to_owned(), "--version".to_owned()])
-                .purpose("probe ACP bridge version"),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec![bridge.to_owned(), "--version".to_owned()],
+            )
+            .purpose("probe ACP bridge version"),
         );
     }
     commands.push(
-        at_boundary(boundary, vec!["git".to_owned(), "--version".to_owned()]).purpose("probe Git"),
+        at_boundary(
+            SshTrafficClass::Control,
+            boundary,
+            vec!["git".to_owned(), "--version".to_owned()],
+        )
+        .purpose("probe Git"),
     );
     Ok(CommandPlan {
         description: "probe reusable target tools".to_owned(),
@@ -149,6 +161,7 @@ pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
         description: "install missing Git".to_owned(),
         commands: vec![
             at_boundary(
+                SshTrafficClass::Control,
                 boundary,
                 vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             )
@@ -332,9 +345,13 @@ pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
     CommandPlan {
         description: "install EC2 Move transport".into(),
         commands: vec![
-            at_boundary(boundary, vec!["sh".into(), "-c".into(), script.into()])
-                .purpose("install supported rsync")
-                .stage(ProvisionStage::Provisioning),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec!["sh".into(), "-c".into(), script.into()],
+            )
+            .purpose("install supported rsync")
+            .stage(ProvisionStage::Provisioning),
         ],
     }
 }

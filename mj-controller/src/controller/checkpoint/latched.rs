@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 impl Controller {
     #[allow(clippy::too_many_arguments)]
@@ -946,7 +947,7 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
         }
         let mut args = vec!["rm".to_owned(), "-rf".to_owned(), "--".to_owned()];
         args.extend(self.paths.iter().cloned());
-        let command = targets::locator_command(self.backend, args)
+        let command = targets::locator_command(SshTrafficClass::Control, self.backend, args)
             .purpose("remove unused target checkpoint files");
         match self.executor.execute(&command) {
             Ok(output) if output.status == 0 => {}
@@ -974,6 +975,29 @@ mod cancel_log_tests {
     struct CancelledExecutor;
 
     impl CommandExecutor for CancelledExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn cancellation_requested(&self) -> bool {
             true
         }

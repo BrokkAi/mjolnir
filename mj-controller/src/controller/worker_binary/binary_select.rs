@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::hex::lower_hex;
+use mj_core::targets::SshTrafficClass;
 
 /// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
 /// marker belongs in a message but never in a decision, which `is_file` makes.
@@ -101,8 +102,12 @@ pub(in crate::controller) fn preflight_host_worker_binary(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
-        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-            .purpose("detect target platform");
+        let command = targets::ssh_command(
+            SshTrafficClass::Control,
+            &SshTarget::from(ssh),
+            ["uname", "-sm"],
+        )
+        .purpose("detect target platform");
         let platform = probe_platform(executor, command)?;
         return materialize_worker_source(worker_binary_for_arch(
             platform.architecture,
@@ -149,8 +154,12 @@ pub(crate) fn worker_source_problem(
         return None;
     }
     if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
-        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-            .purpose("detect target platform");
+        let command = targets::ssh_command(
+            SshTrafficClass::Control,
+            &SshTarget::from(ssh),
+            ["uname", "-sm"],
+        )
+        .purpose("detect target platform");
         let platform = probe_platform(executor, command).ok()?;
         return worker_binary_for_arch(
             platform.architecture,
@@ -185,8 +194,12 @@ pub fn ssh_worker_binary_prerequisite(
     let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template else {
         return None;
     };
-    let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
-        .purpose("detect target platform");
+    let command = targets::ssh_command(
+        SshTrafficClass::Control,
+        &SshTarget::from(ssh),
+        ["uname", "-sm"],
+    )
+    .purpose("detect target platform");
     let platform = probe_platform(executor, command).ok()?;
     let requirement = WorkerBinaryRequirement::for_os(platform.os);
     Some((

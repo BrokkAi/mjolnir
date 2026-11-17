@@ -4400,7 +4400,11 @@ mod tests {
         };
         catalog.sync(&config);
         let validation = crate::controller::profile_config::validate_session_subagent_policy(
-            &catalog, &config, "parent", &policy,
+            &catalog,
+            &config,
+            "parent",
+            &policy,
+            "localhost",
         );
         tokio::pin!(validation);
         assert!(futures::poll!(&mut validation).is_pending());
@@ -4434,7 +4438,11 @@ mod tests {
         };
         for _ in 0..2 {
             crate::controller::profile_config::validate_session_subagent_policy(
-                &catalog, &config, "parent", &policy,
+                &catalog,
+                &config,
+                "parent",
+                &policy,
+                "localhost",
             )
             .await
             .unwrap();

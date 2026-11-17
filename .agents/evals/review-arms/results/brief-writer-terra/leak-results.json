@@ -1,0 +1,651 @@
+{
+  "kind": "blind-terra",
+  "judge_model": "gemini-4-carbon",
+  "judge_effort": "high",
+  "judges": [
+    {
+      "session_id": "012ad968760daf565a1b5631f45ae4f5",
+      "profile": "gemini2",
+      "time_ns": 1794876493033971191,
+      "config": {
+        "model": "gemini-4-carbon",
+        "effort": "high"
+      },
+      "prompted": 1794876531818055271
+    },
+    {
+      "session_id": "3aa50f6bb26645db47161a27eeccbef4",
+      "profile": "gemini2",
+      "time_ns": 1794877231468895833,
+      "config": {
+        "model": "gemini-4-carbon",
+        "effort": "high"
+      },
+      "prompted": 1794877258396578945
+    }
+  ],
+  "records": [
+    {
+      "id": "archive-resume-hint-without-prompt",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "7dea21e29e00e0757a2cfd804014249b12d6cc42bbe39b3d3824fe792356662e",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output is a neutral summary of callers, paths, and value flow that reports no defect findings. It never mentions wiki_session unconditionally printing the `mj resume --wiki` hint or that promptless archived Mjolnir sessions cannot be restored.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output consists only of neutral caller, path, and value-flow descriptions and reports no defects. It traces SessionWiki lookup and `resume_wiki` routing without mentioning `api_commands::wiki_session`'s unconditional `mj resume --wiki` hint or `snapshot_of` requiring a user prompt.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "catalog-cache-key-collision",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "a70e3af4f6d77f0069c6e17110c89a7e4d9eeaa257e0f13fd5da195052cbac50",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output only provides descriptive call and data-flow notes with no defect findings. While it notes that catalog caching and profile configuration choices both use `profile_config_cache`, it never identifies that both use the empty model key `\"\"` or that they overwrite each other's rows.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output gives only neutral structural notes and makes no defect claims. Although one bullet notes that catalog caching shares the `profile_config_cache` table with profile configuration choices, it neither identifies the shared empty model key (`\"\"`) on the same profile row nor mentions that discovery and catalog writes overwrite each other.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "child-model-wrong-efforts",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "93d328e4129fa1d5acf43656b6f5cf0c650ef46a1efc44e81f44b86f7d43d9d7",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally traces sub-agent selection paths without reporting any findings. Although it notes that an omitted effort is checked against `chosen.choices`, it fails to recognize that `chosen.choices` reflects the profile's default model rather than the selected child model and can pass an unsupported effort to the child.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output lists only descriptive call-graph and data-flow facts without reporting any bug. It notes that an omitted effort is filtered against `chosen.choices` at line 138, but fails to recognize that `chosen.choices` reflects the profile's default model rather than the selected child model or that an unsupported effort can fail child startup.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "codex-effort-alias-lost",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "6f5cdfa56d8fe4de5256b33509d3c1547657b91930f136682a8a61f546949a76",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output summarizes checkpoint restore value flow without raising any findings. It restates that the seed selects only `model` and `effort`, without identifying that Codex stores its effort under `reasoning_effort` and therefore loses the selected effort on native resume.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output contains only neutral code-flow descriptions and reports no findings. It restates that the restore seed copies only nonblank `model` and `effort` entries without noticing that Codex stores its selector under `reasoning_effort` and therefore loses the accepted effort on native resume.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "export-relative-read-root",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "58ed3c6ed5d706b0a901a06dfffbe0303210a52d3a93049aa9a7c5844d7da913",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output gives only neutral descriptions of export routes and repository layout with zero defect findings. It does not identify `ApiBackend::read_file` passing `workspace_root` instead of the primary repository working directory for relative file exports.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output provides only factual caller, path, and value-flow summaries with no defect findings. It describes `session_export_layout` and worker command invocation generally, without identifying that `ApiBackend::read_file` resolves relative paths against `workspace_root` instead of the primary repository where the agent runs.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "github-token-in-container-argv",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "c341d5fa79da6b46141f2115b3cbe29f810c8b5811c821037563b33d652b08be",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally describes token injection appending a `--env` entry to `extra_run_args` and reports no defect findings. It never identifies that formatting the literal GitHub token into container or SSH process argv exposes the secret in process listings and command diagnostics.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output consists solely of neutral flow descriptions and identifies no security issue or faulty behavior. While it notes that token injection appends a `--env` entry to `extra_run_args` passed to container and SSH Podman commands, it never states that the literal token value is embedded in process `argv` or exposed to process listings and command diagnostics.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "held-prompt-ignores-interrupt",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "2ad0da764353a9648bfd72e86233c8e9c4685ca1eb07b2fe4b508cb48407505c",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output describes the prompt readiness wait loop neutrally and reports no findings. It never connects held prompts to `interrupt_turn` failing to withdraw them or to subsequent unwanted prompt submission once the worker attaches.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output gives only neutral descriptions of the `turns::prompt` readiness loop and snapshot projection without reporting any defect. It never mentions `interrupt_turn`, failing to withdraw a held prompt during startup, or submitting unwanted work once the worker attaches.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "journal-valid-json-corruption",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "2ba02cb902afe7600a68cacce5b6070680913838bffc132985a108e636035c22",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output is a purely descriptive trace of relay journal callers and scanning behavior with no defect findings. It does not mention `Recover` mode omitting digest self-validation after JSON parsing or allowing corrupted valid-JSON records through.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output contains only descriptive notes on journal scanning and `Strict`-mode callers, with no defect findings. It mentions `read_bounded_line` and recovery gap byte counts, but misses that `Recover` mode accepts any parseable JSON record without validating its digest.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "path-completion-lost-on-step-redraw",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "20bc3cf25b1e7e05111e44b5922e8e10d21eb6d291d9a667ea4c8cd1958a3e88",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally summarizes path-completion handlers and UI wiring without reporting any findings. It does not mention project-step redraws replacing the input DOM element or causing `activeElement`/element-local checks to drop valid in-flight completion replies.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output lists only factual call and data-flow notes for path completion and reports no bugs. It mentions `pathField` attaching suggestion handlers to `textField` inputs, but does not identify step redraws on project catalog load replacing the input element or `activeElement` checks dropping valid in-flight completions.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pending-assessment-hidden-when-idle",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "328c27de350a92bc2db57a49d521f1c8e98b99d4abaa4255a9e99801afd2d0e8",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally traces `retry_assessment_pending` and `is_idle` into `sessionActivityLabel` without reporting any findings. It never identifies that a worker is legitimately idle while its completed turn is still being assessed, causing `!session.is_idle` to hide ongoing `Checking response` status.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output provides only neutral code-flow notes around `sessionActivityLabel` and reports no defects. Although it notes that line 1129 reads both `retry_assessment_pending` and `is_idle`, it does not recognize that a worker is legitimately idle while its completed turn is being assessed, hiding ongoing `Checking response` status.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "projection-mixed-sqlite-snapshots",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "2465412a3e05731169b8523a51e87cb890a8d1b422ff334e9e1e0f8592efd5fb",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output provides only descriptive call and value-flow notes for the windowed projection loader and reports no findings. It does not identify the missing read transaction across separate frontier and transcript `SELECT` queries or inconsistent snapshots under concurrent commits.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output contains only descriptive caller, path, and value-flow bullets with no defect claims. It mentions the bounded tail loader counting rows, reading transcript tails, and validating the materialized session, without identifying the separate autocommit `SELECT`s or inconsistent snapshots under concurrent projection commits.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reserved-workspace-internal-error",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "0bad6c658f59c7825331409dd9e201049c3ca4edf330d50b31a6ffdb2064fbad",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally traces workspace lookup and creation callers without raising any findings. Although it notes `create_or_get_workspace` reaching the default-name guard, it never identifies `create_workspace` propagating that refusal as an HTTP 500 internal error instead of a client bad-request response.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output offers only neutral flow descriptions and reports no defects on the workspace creation API. It notes that `create_or_get_workspace` and `create_workspace` reach the reserved `default` name guard in the database layer, without identifying that `server/api/workspaces.rs` turns that caller mistake into an HTTP 500 internal error.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "restore-through-profile-symlink",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "45931b5a28fcabc3d83960c88ea837af17883cc3ca05ece8c230fdb2c2d9efa9",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally summarizes profile-home linking and worker installation paths with zero defect findings. It does not identify `clear_relay_state_plan` leaving `<worker_root>/profile` symlinks intact on local restore into a reused worker root, allowing checkpoint restore to write through the symlink into the user's profile home.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output lists only neutral execution and value-flow facts and identifies no defect. It describes startup profile-home symlinking and `install.rs` unlinking symlinks during worker file installation, without noticing that `clear_relay_state_plan` leaves `<worker_root>/profile` linked on a reused local root so checkpoint restore can overwrite the user's profile home.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stale-model-launch-spec",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "0aac5cca752a513131ed3809102afdf5ee2fa1db89fa0332335d5a65e6e78960",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally describes startup model pinning and live selector updates without reporting any findings. It misses that the primary worker persists the supervisor environment only once at startup, leaving subsequent accepted model changes out of later in-worker bridge restarts.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output presents only descriptive notes on model pinning and reports no findings. It notes that `run_daemon` pins the accepted Codex model before writing the supervisor spec and that later selector commands update live accepted configuration, without identifying that the persisted supervisor file is never updated for subsequent in-worker bridge restarts.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "symbol-change-keeps-cached-transcript",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "c51b31e75bdebe5acd4eedb46eedd84bc794611f6c471942e8c7a2af8f331dea",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output only summarizes notices and symbol configuration flow without reporting any findings. It never mentions `prepare_render_cache` in `mj-chat/src/chat/transcript.rs` omitting the active symbol set from transcript row-cache invalidation.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output contains only neutral summaries of notice logging, Git status formatting, and symbol scoping in `render_combined`, with no defect findings. It never mentions `mj-chat/src/chat/transcript.rs`, `prepare_render_cache`, or cached Unicode transcript rows surviving a switch to ASCII symbols.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "terminal-id-reused",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "3f240348679daff2158ea84f479bcb924df78b010e195229863d6bfe13bffceb",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally traces terminal creation and projection matching without reporting any findings. Although it notes that each registry assigns connection-local IDs starting at `term-1` and matches them in projection, it never identifies ID collisions across ACP reconnects or output misassociation onto earlier tool calls.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output gives only neutral descriptions of terminal creation and output projection, reporting no defects. Although it states that `TerminalRegistry` assigns connection-local IDs starting at `term-1` and matches them in projection, it never connects ACP reconnects to counter resets, duplicate terminal IDs, or output attaching to earlier tool calls.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unused-thread-above-archive-floor",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "7ba0312638f56d78987dc2117e4dce118a5de025533c87b033d280ac26b07f87",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally summarizes `native_session_may_have_history` inputs and session-opening paths with no defect findings. It does not identify that treating every nonzero recovery floor as proof of history misclassifies a fresh, unprompted native thread opened above the restored archive floor and blocks recreating it.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output lists only factual caller, path, and value-flow notes for native session history tracking and reports no bugs. It notes that `native_session_may_have_history` reads the recovery floor, use flag, and prompt dispatch states, without identifying that treating every nonzero recovery floor as history misclassifies a fresh unused thread opened above a restored archive floor.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "web-feed-self-deadlock",
+      "group": "P",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "0798408ef53ef34804ab45980142b407415c89bc845e5f49795ac58c5723237a",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output is a neutral caller/path summary with zero defect findings, though its first bullet notes that `session_projection` holds the controller mutex while calling `active_lifecycles` and `active_lifecycles` now acquires that same mutex. Because it never flags this as a defect or identifies the resulting self-deadlock/daemon hang required by `match_rule` (or any symptom for `partial`), the lower label `missed` is chosen.",
+              "confidence": "low"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The first bullet states that `session_projection` holds the controller mutex while calling `active_lifecycles` and that `active_lifecycles` now acquires that same mutex, but presents this neutrally among 13 descriptive code-flow bullets without identifying a self-deadlock, daemon hang, or any faulty behavior. Because `caught` and the `match_rule` require identifying the resulting self-deadlock and `partial` requires naming a related symptom, and we are unsure between `partial` and `missed` when the exact re-locking call chain is stated without claiming a defect, the lower label (`missed`) is chosen.",
+              "confidence": "low"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "activity-recorder-kills-api",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "983ba593081b5c893eb16ce9b074a18f1a06434202493650872c66881c344fcb",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally describes the activity recorder running alongside server tasks and reports no findings. It never identifies database write errors propagating out of `record_activity_stream` into the server `select` and terminating the API server.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output provides only neutral architectural notes and reports no defects. It mentions that the activity recorder observes a cloned snapshot receiver alongside the server tasks, without identifying that `record_activity_stream` propagates SQLite write errors into the server `select!` and terminates the entire API server.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dropdown-click-hits-covered-field",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "97e2da2f23c626c74c453c421ac1d1936f8a7836ae8d10694374d528ab2db210",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally summarizes combobox hitbox registration and event routing without reporting any findings. It does not identify `Form::hit` reverse-registration hit testing letting a later-registered underlying control capture clicks ahead of an open covering dropdown popup.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output consists solely of descriptive combobox and form event-routing notes without any defect claims. It mentions `ComboBox::render` registering field and popup hitboxes with `Form`, but misses that reverse-registration hit testing in `Form::hit` lets later-registered underlying controls steal clicks from an open covering popup.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "metadata-checkpoint-overwrites-checkout",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "a6525fa2bcee53fad9a5853a4c7db324e7997b8aa3f3141bb4b17af5a8abd382",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally paraphrases setting `review_refs_metadata_only` from whether saved review refs are empty and using that marker to suppress checkout restoration, without reporting any findings. It fails to recognize that a metadata-only capture with no `refs/mj/` refs is left unmarked and causes restore to check out and overwrite a shared working tree.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output gives only separate, neutral value-flow descriptions and reports no defect. Although one bullet notes that metadata capture sets `review_refs_metadata_only` from whether `saved_refs` is nonempty and another notes that the flag suppresses checkout content restoration, it never connects an empty `saved_refs` map to a metadata-only restore overwriting a shared working checkout.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "shortcut-escape-opens-unvisited-manager",
+      "group": "S",
+      "rounds": [
+        {
+          "round": 0,
+          "label": "missed",
+          "brief_sha256": "5d17426c46b64fea6e197c5dc6f2e676f350ebedf010546e2e183e9d06547041",
+          "judge_dir": "/mnt/optane/review-arms-20261113/briefs/blind-terra-leak-0",
+          "verdicts": [
+            {
+              "judge": "A",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output neutrally traces workspace management and shortcut opening paths with zero defect findings. It never identifies Escape or Cancel from a direct dashboard Rename/Close shortcut landing on the unvisited Workspaces list instead of returning to the dashboard.",
+              "confidence": "high"
+            },
+            {
+              "judge": "B",
+              "label": "missed",
+              "matching_finding": null,
+              "rationale": "The output contains only neutral caller, path, and value-flow summaries and reports no bugs. It notes that direct workspace shortcuts load the manager and open the rename or close view, without identifying that pressing Escape or Cancel resets to the unvisited Workspaces list instead of returning to the dashboard.",
+              "confidence": "high"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "labels": {
+    "missed": 22,
+    "partial": 0,
+    "caught": 0
+  },
+  "rewrites": 0
+}

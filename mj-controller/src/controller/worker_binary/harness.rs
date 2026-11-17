@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -122,7 +123,10 @@ pub(in crate::controller) fn preflight_harness(
             let ssh = SshTarget::from(ssh);
             if profile.environment.contains_key("PATH") {
                 args.insert(0, "sh".into());
-                (crate::targets::ssh_command(&ssh, args), ssh.destination)
+                (
+                    crate::targets::ssh_command(SshTrafficClass::Control, &ssh, args),
+                    ssh.destination,
+                )
             } else {
                 (
                     crate::targets::ssh_login_script(&ssh, &script),

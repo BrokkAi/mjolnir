@@ -1,5 +1,6 @@
 //! Session provisioning, rollback, and worker-side Git bootstrap.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1457,6 +1458,7 @@ pub(super) fn install_attached_resources(
     }
     for resource in &session.additional_mounts {
         let install = targets::command_on_locator(
+            SshTrafficClass::Bulk,
             backend,
             session_id,
             vec![
@@ -1665,7 +1667,7 @@ fn cleanup_failed_provision_named(
         }
     };
     let purpose = plan
-        .commands
+        .scripts()
         .iter()
         .map(|command| command.purpose.clone())
         .collect::<Vec<_>>()
@@ -1967,6 +1969,14 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.inner.execute(&self.staged(command))
     }
@@ -1993,6 +2003,19 @@ impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
         self.inner.execute_with_stdin(&self.staged(command), input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.inner.execute_without_deadline(&self.staged(command))
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.inner
+            .execute_with_stdin_without_deadline(&self.staged(command), input)
     }
 }
 
@@ -2062,6 +2085,7 @@ fn inherited_git_setting_commands(
         )
     });
     Ok(vec![targets::command_on_locator(
+        SshTrafficClass::Control,
         locator,
         session_id,
         targets::step_script(steps),

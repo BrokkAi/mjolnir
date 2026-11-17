@@ -705,6 +705,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -868,6 +869,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -4888,7 +4890,7 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ subagents_configured: false, profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
 const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
@@ -5093,6 +5095,26 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
         ),
         (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
             "/api/settings/save",
             serde_json::json!({"page": ["subagents"]}),
         ),
@@ -5144,6 +5166,22 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
         "opus"
+    );
+    assert!(!saved.subagents.use_same_on_all_targets);
+    assert_eq!(
+        saved.subagents.yolo.straightforward.as_ref().unwrap().model,
+        "opus"
+    );
+    assert_eq!(
+        saved
+            .subagents
+            .yolo
+            .straightforward
+            .as_ref()
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high")
     );
 
     let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();

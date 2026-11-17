@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
+use mj_core::worker_launch::ReviewChildRole;
 
 /// Delegation policy is delivered through initialization, never a tool description.
 const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Each of your tool calls re-reads your context, so build-test-fix cycles cost you most, but a child starts cold: do few-call changes yourself and hand off ones that grow. Say who builds when. You own design, integrated review, commit and acceptance. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
@@ -422,17 +423,38 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
         _ => SERVER_INSTRUCTIONS.as_str(),
     };
-    let reviewer = std::fs::read(socket.with_file_name("launch.json"))
+    let launch = std::fs::read(socket.with_file_name("launch.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|launch| !launch["reviewer_launch"].is_null());
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let review_role = launch
+        .as_ref()
+        .and_then(|launch| launch.get("reviewer_launch"))
+        .filter(|launch| !launch.is_null())
+        .map(|launch| {
+            launch
+                .get("role")
+                .map_or(Ok(ReviewChildRole::Reviewer), |role| {
+                    serde_json::from_value::<ReviewChildRole>(role.clone())
+                })
+        })
+        .transpose()
+        .context("read review child MCP output contract")?;
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
             "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
             mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
         )
     });
-    let reviewer_instructions = REVIEWER_INSTRUCTIONS.as_str();
+    static BRIEF_WRITER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "You are a Mjolnir brief writer. Call handback once as your last action with the relation brief requested in your task: repository relations with file:line anchors, not review findings. Your report may contain up to {} characters. After calling handback, stop.",
+            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
+        )
+    });
+    let review_instructions = review_role.map(|role| match role {
+        ReviewChildRole::Reviewer => REVIEWER_INSTRUCTIONS.as_str(),
+        ReviewChildRole::BriefWriter => BRIEF_WRITER_INSTRUCTIONS.as_str(),
+    });
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (
             parent_instructions,
@@ -458,19 +480,13 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
                 let description = tools[0]["description"].as_str().unwrap();
                 tools[0]["description"] = json!(format!("{description} {}", budget.note()));
             }
-            if reviewer {
-                tools[0]["description"] = json!(&reviewer_instructions);
-                tools[0]["inputSchema"]["properties"]["message"]["description"] = json!(format!(
-                    "Complete reviewer rubric JSON, at most {} characters",
-                    mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
-                ));
+            if let Some(instructions) = review_instructions {
+                tools[0]["description"] = json!(instructions);
+                tools[0]["inputSchema"]["properties"]["message"]["description"] =
+                    json!(instructions);
             }
             (
-                if reviewer {
-                    reviewer_instructions
-                } else {
-                    CHILD_INSTRUCTIONS.as_str()
-                },
+                review_instructions.unwrap_or(CHILD_INSTRUCTIONS.as_str()),
                 tools,
             )
         }
@@ -1678,38 +1694,62 @@ mod tests {
         assert_eq!(reply["report"], expected);
     }
 
+    // Hard-won: 5fc728617: the brief writer received the reviewer's findings-only MCP contract.
     #[test]
     fn reviewer_mcp_instructions_preserve_the_full_rubric_budget() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("launch.json"),
-            br#"{"reviewer_launch":{},"environment":{}}"#,
-        )
-        .unwrap();
-        let input = format!(
-            "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
-        );
-        let output = Arc::new(Mutex::new(Vec::new()));
-        run(
-            input.as_bytes(),
-            ContractWriter(output.clone()),
-            &root.path().join("subagents.sock"),
-            Some(HarnessKind::Claude),
-            SubagentMcpRole::Child,
-        )
-        .unwrap();
-        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(
-            output.contains(
-                &mj_core::subagent::SubagentKind::Reviewer
-                    .max_handback_chars()
-                    .to_string()
+        for role in [None, Some(ReviewChildRole::BriefWriter)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut launch = json!({"reviewer_launch":{},"environment":{}});
+            if let Some(role) = role {
+                launch["reviewer_launch"]["role"] = json!(role);
+            }
+            std::fs::write(
+                root.path().join("launch.json"),
+                serde_json::to_vec(&launch).unwrap(),
             )
-        );
-        assert!(!output.contains("4,000"));
-        assert!(output.contains("plain-text findings"));
+            .unwrap();
+            let input = format!(
+                "{}\n{}\n",
+                json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+            );
+            let output = Arc::new(Mutex::new(Vec::new()));
+            run(
+                input.as_bytes(),
+                ContractWriter(output.clone()),
+                &root.path().join("subagents.sock"),
+                Some(HarnessKind::Claude),
+                SubagentMcpRole::Child,
+            )
+            .unwrap();
+            let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+            let replies: Vec<Value> = output
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let instructions = replies[0]["result"]["instructions"].as_str().unwrap();
+            let handback = &replies[1]["result"]["tools"][0];
+            assert_eq!(handback["description"], instructions);
+            assert_eq!(
+                handback["inputSchema"]["properties"]["message"]["description"],
+                instructions
+            );
+            assert!(
+                instructions.contains(
+                    &mj_core::subagent::SubagentKind::Reviewer
+                        .max_handback_chars()
+                        .to_string()
+                )
+            );
+            if role == Some(ReviewChildRole::BriefWriter) {
+                assert!(instructions.contains("relation brief"));
+                assert!(!instructions.contains("plain-text findings"));
+                assert!(!output.contains("No findings."));
+            } else {
+                assert!(instructions.contains("plain-text findings"));
+                assert!(instructions.contains("No findings."));
+            }
+        }
     }
 
     struct ContractWriter(Arc<Mutex<Vec<u8>>>);

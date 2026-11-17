@@ -1,0 +1,36 @@
+{
+  "round": "brief-judge-j",
+  "judge_model": "gpt-6.1-sol",
+  "judge_effort": "high",
+  "profile": "codex4",
+  "quota_floor_percent": 25,
+  "quota_before_judging_week_percent": 86,
+  "bugs_per_batch": 8,
+  "batches": [
+    {
+      "name": "batch-0.json",
+      "bugs": 8,
+      "outputs": 98,
+      "sha256": "9078206cc671de670f2d0ee0f598f5d64f344ba292015f52f8f57fb8e5cecd6d"
+    },
+    {
+      "name": "batch-1.json",
+      "bugs": 8,
+      "outputs": 98,
+      "sha256": "613b7596b4472be4b67abac8abc54baa11612331f0b10e913f58bc9259ef6aad"
+    },
+    {
+      "name": "batch-2.json",
+      "bugs": 6,
+      "outputs": 74,
+      "sha256": "69e75c6baa4f70f1e44b43de8dd56e80cf8b9393acfa684cbf4fe14907ad6c15"
+    }
+  ],
+  "judges_per_batch": 2,
+  "amendment": "PLAN-writer-terra.md, 2026-11-17 before any judging",
+  "no_brief_sol_included": 66,
+  "decision_reads_only": "gpt-6.1-terra/high",
+  "outputs": 270,
+  "target": "podman",
+  "concurrency": 2
+}

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Every top-level session of every harness gets the message-only `mj-agents`
 /// server, and that server carries ask_oracle; a child never does.
@@ -6,8 +7,9 @@ pub(super) fn oracle_launch_enabled(
     session: &mj_core::state::SessionRecord,
     managed_child: bool,
     choices: &mj_core::config::SubagentConfig,
+    yolo: bool,
 ) -> bool {
-    !managed_child && session.effective_oracle(choices).is_some()
+    !managed_child && session.effective_oracle(choices, yolo).is_some()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -243,6 +245,7 @@ impl Controller {
             let output = execute_checked(
                 executor,
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     session_id,
                     vec![
@@ -572,7 +575,7 @@ impl Controller {
             }
         };
         let binary_failure = worker_binary_probe_failure(executor, &backend, &worker_root);
-        let probe = match probe_worker(executor, &backend, &worker_root) {
+        let probe = match diagnose_worker_read_only(executor, &backend, &worker_root) {
             Ok(probe) => probe.to_string(),
             Err(error) => format!("the worker could not be probed: {error:#}"),
         };
@@ -600,17 +603,24 @@ impl Controller {
                 .context("session target is missing")?,
             target: targets::target_recovery_plan(&backend, session_id)?,
             workspace,
-            liveness_probe: worker_liveness_command(&backend, &worker_root),
+            liveness_probe: targets::WorkerControlPlan::new(
+                format!("probe the worker of session {session_id}"),
+                vec![worker_liveness_command(&backend, &worker_root)],
+                &backend,
+                session_id,
+            )?,
             exit_record: Some(worker_exit_record_command(&backend, &worker_root)),
             binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
             launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
-            restart: CommandPlan {
-                description: format!("restart Mjolnir worker for session {session_id}"),
-                commands: vec![
+            restart: targets::WorkerControlPlan::new(
+                format!("restart Mjolnir worker for session {session_id}"),
+                vec![
                     stop_worker_command(&backend, &worker_root),
-                    start_worker_command(&backend, &worker_root),
+                    start_worker_command(&backend, &worker_root).into(),
                 ],
-            },
+                &backend,
+                session_id,
+            )?,
         })
     }
 
@@ -735,12 +745,18 @@ impl Controller {
             .for_launch(profile.kind, subagent.is_some());
         // Only a delegating parent's spawn tool reads this. Other sessions keep
         // the default, so their launch files do not change.
+        let yolo = session.is_yolo_target(&self.config);
         launch.subtle_subagents = !launch.subagents.uses_mjolnir()
-            || self.config.subagents.offers_subtle(&launch.subagents);
-        launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &self.config.subagents);
+            || self
+                .config
+                .subagents
+                .offers_subtle_for(&launch.subagents, yolo);
+        launch.oracle =
+            oracle_launch_enabled(session, subagent.is_some(), &self.config.subagents, yolo);
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
+
         // The child's harness opens on its spawn model instead of switching
         // to it from the profile default before the first turn (issue 1217).
         launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());

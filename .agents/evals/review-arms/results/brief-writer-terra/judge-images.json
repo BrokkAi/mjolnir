@@ -1,0 +1,46 @@
+[
+  {
+    "name": "handcheck",
+    "session_id": "a2056dba42c630befaf700c1a5413f9d",
+    "container_id": "16514226177f",
+    "status": "ok",
+    "image_id": "84c6427949eb73b470132e4376cf4a4cbfee9814e6c0d11c188e86797fd0d111",
+    "error": null
+  },
+  {
+    "name": "batch-0-A",
+    "session_id": "1580fe321fe5c3f6fce6e39983eb7841",
+    "status": "no-running-container",
+    "image_id": null
+  },
+  {
+    "name": "batch-0-B",
+    "session_id": "767540780acc1dea4af20657c3a30b75",
+    "status": "no-running-container",
+    "image_id": null
+  },
+  {
+    "name": "batch-1-A",
+    "session_id": "4a1556c2d862be3254547c2c9da5cb95",
+    "status": "no-running-container",
+    "image_id": null
+  },
+  {
+    "name": "batch-1-B",
+    "session_id": "a28c3294b83c92392afd244bd5df4359",
+    "status": "no-running-container",
+    "image_id": null
+  },
+  {
+    "name": "batch-2-A",
+    "session_id": "4f4cafcd42ca6b27e1f6b36346c68c40",
+    "status": "no-running-container",
+    "image_id": null
+  },
+  {
+    "name": "batch-2-B",
+    "session_id": "367e758575d0a42ce003364d6c20a4e7",
+    "status": "no-running-container",
+    "image_id": null
+  }
+]

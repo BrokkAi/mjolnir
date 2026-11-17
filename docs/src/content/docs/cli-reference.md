@@ -448,8 +448,9 @@ mj new --workspace eval --bundle product --target builder \
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
   refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
   profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
-  choice in `[subagents.straightforward]` or a session override. The subtle
-  choice in `[subagents.subtle]` is optional. Configure global defaults in
+  choice in `[subagents.straightforward]`, or `[subagents.yolo.straightforward]`
+  on an SSH bare target with `permissions = "yolo"`, or a session override. The subtle
+  choice in the same set is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
   `--subagent-straightforward M` and `--subagent-subtle M` override only their
   named task type; an unspecified type uses its global choice. Either implies

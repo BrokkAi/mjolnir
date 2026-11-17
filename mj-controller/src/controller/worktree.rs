@@ -1,5 +1,6 @@
 //! Managed worktrees and raw-to-workspace project conversion.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -199,6 +200,7 @@ impl Controller {
             }
         };
         let output = executor.execute(&managed_git_command(
+            SshTrafficClass::Control,
             &target,
             origin_directory,
             ["config", "--get", "remote.origin.url"],
@@ -482,8 +484,8 @@ pub(crate) struct RemoteGitExecutor<'a, E> {
     pub(crate) ssh: SshTarget,
 }
 
-impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+impl<E: CommandExecutor> RemoteGitExecutor<'_, E> {
+    fn remote(&self, command: &CommandSpec) -> CommandSpec {
         let mut arguments = vec!["env".to_owned()];
         arguments.extend(
             command
@@ -493,8 +495,36 @@ impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
         );
         arguments.push(command.program.clone());
         arguments.extend(command.args.clone());
+        crate::targets::ssh_command(SshTrafficClass::Control, &self.ssh, arguments)
+            .purpose(&command.purpose)
+    }
+}
+
+impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute(&self.remote(command))
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.executor
-            .execute(&crate::targets::ssh_command(&self.ssh, arguments).purpose(&command.purpose))
+            .execute_without_deadline(&self.remote(command))
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        // Like `execute_with_stdin`, streamed input is not supported here.
+        self.execute_with_stdin(command, input)
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -518,6 +548,7 @@ fn managed_clone_starting_branch(
 ) -> Result<(String, bool)> {
     if let Some(branch) = selected {
         let format = executor.execute(&managed_git_command(
+            SshTrafficClass::Control,
             target,
             repository,
             ["check-ref-format", "--branch", branch],
@@ -529,6 +560,7 @@ fn managed_clone_starting_branch(
             (format!("refs/remotes/origin/{branch}"), true),
         ] {
             let present = executor.execute(&managed_git_command(
+                SshTrafficClass::Control,
                 target,
                 repository,
                 ["show-ref", "--verify", "--quiet", &reference],
@@ -543,6 +575,7 @@ fn managed_clone_starting_branch(
         bail!("selected branch {branch:?} is unavailable in the source repository");
     }
     let remote_head = managed_git_command(
+        SshTrafficClass::Control,
         target,
         repository,
         [
@@ -566,6 +599,7 @@ fn managed_clone_starting_branch(
         }
         1 => {
             let origin = executor.execute(&managed_git_command(
+                SshTrafficClass::Control,
                 target,
                 repository,
                 ["config", "--get", "remote.origin.url"],
@@ -573,6 +607,7 @@ fn managed_clone_starting_branch(
             ))?;
             if origin.status == 0 {
                 let remote = origin_network_git_stdout(
+                    SshTrafficClass::Control,
                     executor,
                     target,
                     repository,
@@ -588,6 +623,7 @@ fn managed_clone_starting_branch(
                     })
                     .context("origin did not advertise a default branch")?;
                 let cached = executor.execute(&managed_git_command(
+                    SshTrafficClass::Control,
                     target,
                     repository,
                     [
@@ -636,6 +672,7 @@ fn refresh_source_origin(
     repository: &Path,
 ) -> Result<()> {
     let origin = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         target,
         repository,
         ["config", "--get", "remote.origin.url"],
@@ -668,6 +705,7 @@ fn refresh_source_origin(
     };
     let purpose = "fetch origin";
     origin_network_git_stdout(
+        SshTrafficClass::Bulk,
         executor,
         target,
         repository,
@@ -695,6 +733,7 @@ fn refresh_source_origin(
 /// sessions there push over HTTPS. So when a GitHub SSH origin fails, the
 /// command runs once more over HTTPS with the host's own credential helpers.
 fn origin_network_git_stdout(
+    class: SshTrafficClass,
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     repository: &Path,
@@ -704,7 +743,7 @@ fn origin_network_git_stdout(
 ) -> Result<String> {
     let result = command_stdout(
         executor.execute(&managed_network_git_command(
-            target, repository, args, purpose,
+            class, target, repository, args, purpose,
         ))?,
         purpose,
     );
@@ -725,6 +764,7 @@ fn origin_network_git_stdout(
     let purpose = format!("{purpose} over HTTPS");
     command_stdout(
         executor.execute(&managed_network_git_command(
+            class,
             target,
             repository,
             https_args,
@@ -766,12 +806,13 @@ fn source_fetch_lock(
 /// for credentials no one is present to give. Over SSH the far side has no
 /// terminal, so Git cannot prompt there.
 fn managed_network_git_command(
+    class: SshTrafficClass,
     target: &ManagedWorktreeTarget,
     directory: &Path,
     args: impl IntoIterator<Item = impl AsRef<str>>,
     purpose: impl Into<String>,
 ) -> CommandSpec {
-    let mut command = managed_git_command(target, directory, args, purpose);
+    let mut command = managed_git_command(class, target, directory, args, purpose);
     if matches!(target, ManagedWorktreeTarget::Local) {
         mj_core::local_git::unattended_git_environment(&mut command);
     }
@@ -792,6 +833,7 @@ fn managed_target_ssh(target: &ManagedWorktreeTarget) -> Option<SshTarget> {
 }
 
 pub(super) fn managed_target_command(
+    class: SshTrafficClass,
     target: &ManagedWorktreeTarget,
     program: &str,
     args: impl IntoIterator<Item = impl AsRef<str>>,
@@ -805,12 +847,13 @@ pub(super) fn managed_target_command(
         Some(ssh) => {
             let mut remote = vec![program.to_owned()];
             remote.extend(args);
-            crate::targets::ssh_command(&ssh, remote)
+            crate::targets::ssh_command(class, &ssh, remote)
         }
     }
 }
 
 pub(super) fn managed_git_command(
+    class: SshTrafficClass,
     target: &ManagedWorktreeTarget,
     directory: &Path,
     args: impl IntoIterator<Item = impl AsRef<str>>,
@@ -818,7 +861,7 @@ pub(super) fn managed_git_command(
 ) -> CommandSpec {
     let mut command_args = vec!["-C".to_owned(), directory.to_string_lossy().into_owned()];
     command_args.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-    managed_target_command(target, "git", command_args).purpose(purpose)
+    managed_target_command(class, target, "git", command_args).purpose(purpose)
 }
 
 fn command_stdout(output: CommandOutput, purpose: &str) -> Result<String> {
@@ -841,7 +884,7 @@ fn managed_git_stdout(
     args: impl IntoIterator<Item = impl AsRef<str>>,
     purpose: &str,
 ) -> Result<String> {
-    let command = managed_git_command(target, directory, args, purpose);
+    let command = managed_git_command(SshTrafficClass::Control, target, directory, args, purpose);
     command_stdout(executor.execute(&command)?, purpose)
 }
 
@@ -877,6 +920,7 @@ fn resolve_git_root(
             command
         }
         ManagedWorktreeTarget::Ssh { .. } => managed_target_command(
+            SshTrafficClass::Control,
             target,
             "env",
             ["LC_ALL=C".to_owned(), "git".into()]
@@ -1492,6 +1536,7 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
                 id,
             } => {
                 let mut command = crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     id,
                     args,
@@ -1511,6 +1556,7 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
                 );
                 remote.extend(args);
                 crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     id,
                     remote,
@@ -1554,6 +1600,7 @@ fn origin_refs_available(executor: &impl CommandExecutor, checkout: &Path) -> Re
     // A checkout that has never fetched has no origin refs yet. Try once; a
     // remote that cannot be reached leaves the count unreported, not failed.
     let fetch = managed_git_command(
+        SshTrafficClass::Bulk,
         &ManagedWorktreeTarget::Local,
         checkout,
         ["fetch", "origin"],
@@ -1589,6 +1636,7 @@ struct DirtyFileCounts {
 /// record names the original path, so it is consumed rather than counted.
 fn dirty_file_counts(executor: &impl CommandExecutor, checkout: &Path) -> Result<DirtyFileCounts> {
     let command = managed_git_command(
+        SshTrafficClass::Control,
         &ManagedWorktreeTarget::Local,
         checkout,
         ["status", "--porcelain=v1", "-z"],
@@ -1632,6 +1680,7 @@ fn dirty_file_counts(executor: &impl CommandExecutor, checkout: &Path) -> Result
 /// file list instead.
 fn untracked_bytes(executor: &impl CommandExecutor, checkout: &Path) -> Result<u64> {
     let command = managed_git_command(
+        SshTrafficClass::Control,
         &ManagedWorktreeTarget::Local,
         checkout,
         ["ls-files", "--others", "--exclude-standard", "-z"],
@@ -1685,6 +1734,7 @@ fn read_checkout_position(
         "resolve checkout head commit",
     )?;
     let branch_command = managed_git_command(
+        SshTrafficClass::Control,
         target,
         directory,
         ["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -1725,6 +1775,7 @@ pub(super) fn managed_worktree_base_commit(
     }
     let reference = format!("refs/heads/{}", worktree.branch);
     let reflog_command = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["reflog", "show", "--format=%H", &reference],
@@ -1876,6 +1927,7 @@ fn inspect_raw_project(
         )?,
     )?;
     let branch_command = managed_git_command(
+        SshTrafficClass::Control,
         target,
         selected,
         ["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -1928,6 +1980,7 @@ fn ensure_managed_worktree_excluded(
         ManagedCheckoutKind::Clone => (".mj/clones/", "/.mj/clones/"),
     };
     let check = managed_git_command(
+        SshTrafficClass::Control,
         target,
         repository,
         ["check-ignore", "--quiet", "--no-index", "--", path],
@@ -1984,6 +2037,7 @@ fn ensure_managed_worktree_excluded(
         ManagedWorktreeTarget::Ssh { .. } => {
             const SCRIPT: &str = "set -eu\nexclude=$1\nentry=$2\nmkdir -p \"$(dirname \"$exclude\")\"\ntouch \"$exclude\"\nif ! grep -Fqx \"$entry\" \"$exclude\"; then\n  if [ -s \"$exclude\" ] && [ \"$(tail -c 1 \"$exclude\" | wc -l)\" -eq 0 ]; then printf '\\n' >>\"$exclude\"; fi\n  printf '# Hel managed worktrees\\n%s\\n' \"$entry\" >>\"$exclude\"\nfi";
             let command = managed_target_command(
+                SshTrafficClass::Control,
                 target,
                 "sh",
                 [
@@ -2011,8 +2065,13 @@ pub(crate) fn path_exists_on_managed_target(
             .try_exists()
             .with_context(|| format!("check managed project path {}", path.display())),
         ManagedWorktreeTarget::Ssh { .. } => {
-            let command = managed_target_command(target, "test", ["-e", &path.to_string_lossy()])
-                .purpose("check managed worktree path");
+            let command = managed_target_command(
+                SshTrafficClass::Control,
+                target,
+                "test",
+                ["-e", &path.to_string_lossy()],
+            )
+            .purpose("check managed worktree path");
             let output = executor.execute(&command)?;
             match output.status {
                 0 => Ok(true),
@@ -2103,12 +2162,18 @@ pub(super) fn create_managed_worktree(
         .context("managed worktree root has no parent")?;
     execute_checked(
         executor,
-        managed_target_command(&worktree.target, "mkdir", ["-p", &parent.to_string_lossy()])
-            .purpose("create managed worktree directory"),
+        managed_target_command(
+            SshTrafficClass::Control,
+            &worktree.target,
+            "mkdir",
+            ["-p", &parent.to_string_lossy()],
+        )
+        .purpose("create managed worktree directory"),
     )?;
     execute_checked(
         executor,
         managed_git_command(
+            SshTrafficClass::Control,
             &worktree.target,
             &worktree.source_repository,
             [
@@ -2126,6 +2191,7 @@ pub(super) fn create_managed_worktree(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &worktree.target,
                 &worktree.worktree_root,
                 ["branch", "--set-upstream-to", upstream, &worktree.branch],
@@ -2150,13 +2216,19 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
     );
     execute_checked(
         executor,
-        managed_target_command(&checkout.target, "mkdir", ["-p", &parent.to_string_lossy()])
-            .purpose("create managed clone parent"),
+        managed_target_command(
+            SshTrafficClass::Control,
+            &checkout.target,
+            "mkdir",
+            ["-p", &parent.to_string_lossy()],
+        )
+        .purpose("create managed clone parent"),
     )?;
     let create = (|| -> Result<()> {
         execute_checked(
             executor,
             managed_target_command(
+                SshTrafficClass::Bulk,
                 &checkout.target,
                 "git",
                 [
@@ -2172,6 +2244,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
             .purpose("seed independent managed clone"),
         )?;
         let origin = executor.execute(&managed_git_command(
+            SshTrafficClass::Control,
             &checkout.target,
             &checkout.source_repository,
             ["config", "--get", "remote.origin.url"],
@@ -2180,6 +2253,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 &staging,
                 ["remote", "remove", "origin"],
@@ -2192,6 +2266,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
                 execute_checked(
                     executor,
                     managed_git_command(
+                        SshTrafficClass::Control,
                         &checkout.target,
                         &staging,
                         ["remote", "add", "origin", url.trim()],
@@ -2211,6 +2286,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 &staging,
                 [
@@ -2230,6 +2306,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
             execute_checked(
                 executor,
                 managed_git_command(
+                    SshTrafficClass::Control,
                     &checkout.target,
                     &staging,
                     [
@@ -2244,6 +2321,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
             execute_checked(
                 executor,
                 managed_git_command(
+                    SshTrafficClass::Control,
                     &checkout.target,
                     &staging,
                     [
@@ -2259,6 +2337,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
         execute_checked(
             executor,
             managed_target_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 "mv",
                 [
@@ -2275,6 +2354,7 @@ fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorkt
         execute_checked(
             executor,
             managed_target_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 "rm",
                 ["-rf", "--", &staging.to_string_lossy()],
@@ -2291,6 +2371,7 @@ fn copy_clone_push_configuration(
     staging: &Path,
 ) -> Result<()> {
     let output = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &checkout.target,
         &checkout.source_repository,
         ["config", "--local", "--get-all", "remote.origin.pushurl"],
@@ -2305,6 +2386,7 @@ fn copy_clone_push_configuration(
                 execute_checked(
                     executor,
                     managed_git_command(
+                        SshTrafficClass::Control,
                         &checkout.target,
                         staging,
                         ["remote", "set-url", "--push", "--add", "origin", url],
@@ -2338,6 +2420,7 @@ fn copy_source_origin_refs(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Bulk,
                 &checkout.target,
                 staging,
                 [
@@ -2363,6 +2446,7 @@ fn copy_clone_local_git_preferences(
     staging: &Path,
 ) -> Result<()> {
     let config = executor.execute(&managed_git_command(
+        SshTrafficClass::Control,
         &checkout.target,
         &checkout.source_repository,
         ["config", "--local", "--null", "--list"],
@@ -2389,6 +2473,7 @@ fn copy_clone_local_git_preferences(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 staging,
                 ["config", "--local", "--add", key, value],
@@ -2430,6 +2515,7 @@ fn copy_clone_local_git_preferences(
         execute_checked(
             executor,
             managed_target_command(
+                SshTrafficClass::Control,
                 &checkout.target,
                 "cp",
                 [
@@ -2478,6 +2564,7 @@ pub(super) fn restore_managed_worktree(
     );
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["show-ref", "--verify", "--quiet", &branch_ref],
@@ -2500,6 +2587,7 @@ pub(super) fn restore_managed_worktree(
     execute_checked(
         executor,
         managed_git_command(
+            SshTrafficClass::Control,
             &worktree.target,
             &worktree.source_repository,
             ["worktree", "prune"],
@@ -2512,12 +2600,18 @@ pub(super) fn restore_managed_worktree(
         .context("managed worktree root has no parent")?;
     execute_checked(
         executor,
-        managed_target_command(&worktree.target, "mkdir", ["-p", &parent.to_string_lossy()])
-            .purpose("recreate managed worktree directory"),
+        managed_target_command(
+            SshTrafficClass::Control,
+            &worktree.target,
+            "mkdir",
+            ["-p", &parent.to_string_lossy()],
+        )
+        .purpose("recreate managed worktree directory"),
     )?;
     execute_checked(
         executor,
         managed_git_command(
+            SshTrafficClass::Control,
             &worktree.target,
             &worktree.source_repository,
             [
@@ -2548,6 +2642,7 @@ fn ensure_managed_worktree_available(
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["show-ref", "--verify", "--quiet", &branch_ref],
@@ -2583,6 +2678,7 @@ fn retained_managed_worktree_branch_available(
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["show-ref", "--verify", "--quiet", &branch_ref],
@@ -2638,6 +2734,7 @@ pub(super) fn preserve_retained_managed_worktree_branch(
     )?;
     let recovery_ref = format!("refs/mj/recovery/{session_id}/{tip}");
     let existing = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["show-ref", "--verify", "--quiet", &recovery_ref],
@@ -2663,6 +2760,7 @@ pub(super) fn preserve_retained_managed_worktree_branch(
             execute_checked(
                 executor,
                 managed_git_command(
+                    SshTrafficClass::Control,
                     &worktree.target,
                     &worktree.source_repository,
                     ["update-ref", &recovery_ref, &tip],
@@ -2697,6 +2795,7 @@ pub(super) fn retire_managed_worktree(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &worktree.target,
                 &worktree.source_repository,
                 ["cat-file", "-e", &format!("{base}^{{commit}}")],
@@ -2732,6 +2831,7 @@ fn remove_managed_worktree_checkout(
             execute_checked(
                 executor,
                 managed_target_command(
+                    SshTrafficClass::Control,
                     &worktree.target,
                     "rm",
                     ["-rf", "--", &worktree.worktree_root.to_string_lossy()],
@@ -2746,6 +2846,7 @@ fn remove_managed_worktree_checkout(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &worktree.target,
                 &worktree.source_repository,
                 [
@@ -2762,6 +2863,7 @@ fn remove_managed_worktree_checkout(
     execute_checked(
         executor,
         managed_git_command(
+            SshTrafficClass::Control,
             &worktree.target,
             &worktree.source_repository,
             ["worktree", "prune"],
@@ -2851,6 +2953,7 @@ pub(super) fn cleanup_managed_worktree_branch(
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
+        SshTrafficClass::Control,
         &worktree.target,
         &worktree.source_repository,
         ["show-ref", "--verify", "--quiet", &branch_ref],
@@ -2888,6 +2991,7 @@ pub(super) fn cleanup_managed_worktree_branch(
         execute_checked(
             executor,
             managed_git_command(
+                SshTrafficClass::Control,
                 &worktree.target,
                 &worktree.source_repository,
                 ["branch", "-D", "--", &worktree.branch],
@@ -2926,6 +3030,7 @@ fn remove_empty_managed_worktree_directories(
         }
         ManagedWorktreeTarget::Ssh { .. } => {
             let command = managed_target_command(
+                SshTrafficClass::Control,
                 &worktree.target,
                 "rmdir",
                 ["--", &worktrees.to_string_lossy(), &hel.to_string_lossy()],

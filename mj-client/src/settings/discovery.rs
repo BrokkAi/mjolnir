@@ -18,8 +18,22 @@ pub fn fill_subagent_options(
 ) -> Result<Option<String>, serde_json::Error> {
     let config = super::draft::config_from_draft(draft.clone())?;
     let mut unreachable = None;
-    for task in ["straightforward", "subtle", "oracle"] {
-        let model = draft["subagents"][task]["model"].as_str();
+    for (scope, task) in [
+        ("", "straightforward"),
+        ("", "subtle"),
+        ("", "oracle"),
+        ("yolo.", "straightforward"),
+        ("yolo.", "subtle"),
+        ("yolo.", "oracle"),
+    ] {
+        if !scope.is_empty() && super::schema::shared_subagents(&draft["subagents"]) {
+            continue;
+        }
+        let model = if scope.is_empty() {
+            draft["subagents"][task]["model"].as_str()
+        } else {
+            draft["subagents"]["yolo"][task]["model"].as_str()
+        };
         let mut options = capabilities.options(&config, None);
         let mut efforts_pending = false;
         if let Some(options) = &mut options {
@@ -32,9 +46,9 @@ pub fn fill_subagent_options(
                 None => efforts_pending = true,
             }
         }
-        draft["_subagent_options"][task] = match options {
+        draft["_subagent_options"][format!("{scope}{task}")] = match options {
             Some(options) => {
-                if !options.unavailable.is_empty() {
+                if !options.unavailable.is_empty() && unreachable.is_none() {
                     unreachable = Some(format!("Discovery: {}", options.unavailable.join("; ")));
                 }
                 let mut options = serde_json::to_value(options).expect("options serialize");

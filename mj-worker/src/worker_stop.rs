@@ -3,9 +3,14 @@
 //! The worker holds that lock from before it writes anything until the kernel
 //! closes its descriptors, so "the lock cannot be taken" is the whole answer to
 //! "is a worker running for this root". It needs no process listing, and a
-//! recycled pid cannot confuse it. A shell cannot test a lock portably (macOS
-//! has no `flock(1)`), so the controller asks `hel worker liveness|stop|holder`
-//! on the target.
+//! recycled pid cannot confuse it. The controller asks
+//! `hel worker liveness|stop|holder` on the target, run from this build's
+//! control worker staged in the root, rather than testing the lock from a
+//! shell. Two measured reasons rule out a shell probe (#1550): minimal images
+//! such as ubi9-minimal have neither `flock(1)` nor Perl, and `/proc/locks`
+//! drops a lock's line once the process that took it has exited, even while a
+//! forked child still holds the descriptor (#1257), so it would report a live
+//! worker as free in any pid namespace other than the initial one.
 
 use std::path::Path;
 use std::time::{Duration, Instant};

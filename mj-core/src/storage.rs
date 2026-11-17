@@ -314,6 +314,9 @@ pub struct ActiveReviewGroup {
     pub driver: crate::review::driver::ReviewDriverSnapshot,
     pub reviewers: Vec<crate::review::settings::ResolvedReviewSettings>,
     pub registrations: Vec<ReviewerRegistration>,
+    /// The resolved brief writer, when this review has one. Its registration
+    /// is in `registrations` under `BRIEF_WRITER_ROLE`.
+    pub brief_writer: Option<crate::review::settings::ResolvedReviewSettings>,
 }
 
 #[derive(serde::Deserialize)]
@@ -324,6 +327,8 @@ struct ActiveReviewGroupInput {
     #[serde(default)]
     reviewer: Option<crate::review::settings::ResolvedReviewSettings>,
     registrations: Vec<ReviewerRegistration>,
+    #[serde(default)]
+    brief_writer: Option<crate::review::settings::ResolvedReviewSettings>,
 }
 impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
     fn from(input: ActiveReviewGroupInput) -> Self {
@@ -339,6 +344,7 @@ impl From<ActiveReviewGroupInput> for ActiveReviewGroup {
             driver: input.driver,
             reviewers,
             registrations: input.registrations,
+            brief_writer: input.brief_writer,
         }
     }
 }
@@ -598,11 +604,17 @@ pub struct ApiEventPage {
 impl serde::Serialize for ActiveReviewGroup {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut value = serializer.serialize_struct("ActiveReviewGroup", 4)?;
+        let mut value = serializer.serialize_struct(
+            "ActiveReviewGroup",
+            4 + usize::from(self.brief_writer.is_some()),
+        )?;
         value.serialize_field("driver", &self.driver)?;
         value.serialize_field("reviewers", &self.reviewers)?;
         value.serialize_field("registrations", &self.registrations)?;
         value.serialize_field("scope", "pushable_commits")?;
+        if let Some(writer) = &self.brief_writer {
+            value.serialize_field("brief_writer", writer)?;
+        }
         value.end()
     }
 }

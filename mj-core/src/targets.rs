@@ -219,7 +219,7 @@ pub struct CommandSpec {
     /// [`CommandSpec::open_ssh_session`]). The arguments stored here never
     /// contain them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_session: Option<SshTarget>,
+    pub ssh_session: Option<SshSessionRequest>,
     /// The session is a fail-fast probe: it is counted on a shard but never
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -311,9 +311,12 @@ impl CommandSpec {
     /// one session on `ssh`'s shared connection. It also opens a connection
     /// to that destination when sharing is off, so a server's refusal of it
     /// is retried the same way.
-    pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
+    pub fn ssh_session(mut self, ssh: &SshTarget, class: SshTrafficClass) -> Self {
         self.ssh_destination = Some(ssh.destination.clone());
-        self.ssh_session = Some(ssh.clone());
+        self.ssh_session = Some(SshSessionRequest {
+            target: ssh.clone(),
+            class,
+        });
         self
     }
 
@@ -324,7 +327,7 @@ impl CommandSpec {
     /// probe still uses one of the master's sessions while it runs, so the
     /// executor counts it in the session ledger like any other session.
     pub fn ssh_probe_session(mut self, ssh: &SshTarget) -> Self {
-        self = self.ssh_session(ssh);
+        self = self.ssh_session(ssh, SshTrafficClass::Control);
         self.ssh_session_probe = true;
         self
     }
@@ -366,12 +369,13 @@ impl CommandSpec {
         walk: &mut SshWalk,
         marker: bool,
     ) -> Result<SessionCommand<'_>> {
-        let Some(ssh) = &self.ssh_session else {
+        let Some(request) = &self.ssh_session else {
             return Ok(SessionCommand {
                 command: std::borrow::Cow::Borrowed(self),
                 lease: None,
             });
         };
+        let ssh = &request.target;
         let _waiting = BlockingOperation::start(
             &format!(
                 "lease SSH connection to {} for {}",
@@ -382,7 +386,7 @@ impl CommandSpec {
         let lease = if self.ssh_session_probe {
             SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, executor, walk)?
+            SshSessions::lease(ssh, request.class, executor, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
@@ -520,7 +524,8 @@ esac
                 destination: "fake-host".to_owned(),
                 ssh_args: Vec::new(),
             };
-            let mut command = ssh_command(&ssh, remote).purpose("run through the fake ssh");
+            let mut command = ssh_command(SshTrafficClass::Control, &ssh, remote)
+                .purpose("run through the fake ssh");
             let path = std::env::var("PATH").unwrap_or_default();
             command.env.insert(
                 "PATH".to_owned(),
@@ -900,6 +905,128 @@ pub trait CommandExecutor {
     ) -> Result<CommandOutput> {
         bail!("this command executor does not support streamed stdin")
     }
+
+    /// Run `command` with this executor's cancellation but without its
+    /// deadline, for work a timeout named for another step must not cover.
+    /// An executor without a deadline runs it as `execute` does; one with a
+    /// deadline drops it and keeps its cancellation. Required, so every
+    /// executor states which it is.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput>;
+
+    /// [`Self::execute_without_deadline`] for a command that reads `input`.
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput>;
+
+    /// [`Self::cancellation_requested`] as the no-deadline methods see it: a
+    /// deadline that has passed is not a cancellation.
+    fn cancellation_requested_without_deadline(&self) -> bool;
+
+    /// Exclude this scope's wall time from the operation deadline. Required:
+    /// wrappers forward to their owner; executors with per-command deadlines
+    /// or no deadline return an empty guard. Cancellation remains active.
+    fn pause_deadline(&self) -> DeadlinePause;
+}
+
+/// An executor whose commands run without the wrapped executor's deadline but
+/// still stop when its supervisor cancels. Staging work that precedes a
+/// timeout-bound command runs on this, so the timeout covers only the command
+/// it names. Its lifetime also pauses that deadline, including gate waits and
+/// other staging work that runs no command.
+pub struct WithoutDeadline<'a, E: ?Sized> {
+    executor: &'a E,
+    _pause: DeadlinePause,
+}
+
+impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self {
+            executor,
+            _pause: executor.pause_deadline(),
+        }
+    }
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_cleanup(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_cleanup_with_timeout(command, timeout)
+    }
+
+    // The wrapper's whole purpose is to ignore the wrapped deadline, so a
+    // passed deadline must not read as a cancellation here either.
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.executor.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.executor.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.executor.notify_notice(notice);
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.executor.begin_resumable_work()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.executor.end_resumable_work(label)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
+    }
 }
 
 /// A scoped lifecycle-stage report for controller-side work or a sequence of
@@ -1073,6 +1200,29 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
@@ -1280,7 +1430,66 @@ pub struct CancellableProcessExecutor {
     token: Option<tokio_util::sync::CancellationToken>,
     #[cfg(unix)]
     foreground_terminal: bool,
-    deadline: Option<(Instant, Duration)>,
+    deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>,
+}
+
+/// One shared clock owns both deadline checks and nested pause accounting.
+struct ProcessDeadline {
+    expires: Instant,
+    timeout: Duration,
+    paused: Option<(Instant, usize)>,
+}
+
+impl ProcessDeadline {
+    fn new(timeout: Duration) -> Arc<std::sync::Mutex<Self>> {
+        Arc::new(std::sync::Mutex::new(Self {
+            expires: Instant::now() + timeout,
+            timeout,
+            paused: None,
+        }))
+    }
+
+    fn expired(&self) -> bool {
+        self.paused.map_or_else(Instant::now, |(start, _)| start) >= self.expires
+    }
+}
+
+/// Excludes a scope from its owner's deadline, including work between commands.
+/// Nested or overlapping scopes count their union rather than adding time twice.
+#[must_use]
+pub struct DeadlinePause(Option<Arc<std::sync::Mutex<ProcessDeadline>>>);
+
+impl DeadlinePause {
+    /// Executors with no operation-wide deadline have nothing to pause.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    fn new(deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>) -> Self {
+        if let Some(deadline) = &deadline {
+            let mut deadline = deadline.lock().unwrap();
+            match &mut deadline.paused {
+                Some((_, depth)) => *depth += 1,
+                paused @ None => *paused = Some((Instant::now(), 1)),
+            }
+        }
+        Self(deadline)
+    }
+}
+
+impl Drop for DeadlinePause {
+    fn drop(&mut self) {
+        if let Some(deadline) = &self.0 {
+            let mut deadline = deadline.lock().unwrap();
+            let (start, depth) = deadline.paused.as_mut().expect("a held deadline pause");
+            *depth -= 1;
+            if *depth == 0 {
+                let elapsed = start.elapsed();
+                deadline.expires += elapsed;
+                deadline.paused = None;
+            }
+        }
+    }
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1328,7 +1537,16 @@ impl CancellableProcessExecutor {
             || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
-                .is_some_and(|(deadline, _)| Instant::now() >= deadline)
+                .as_ref()
+                .is_some_and(|deadline| deadline.lock().unwrap().expired())
+    }
+
+    /// Whether the supervisor, not the deadline, has asked to stop.
+    pub fn is_cancelled_without_deadline(&self) -> bool {
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
@@ -1337,14 +1555,14 @@ impl CancellableProcessExecutor {
             token: None,
             #[cfg(unix)]
             foreground_terminal: false,
-            deadline: Some((Instant::now() + timeout, timeout)),
+            deadline: Some(ProcessDeadline::new(timeout)),
         }
     }
 
     /// Bounds an existing flag-based executor with a deadline, so a wedged
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
-        self.deadline = Some((Instant::now() + timeout, timeout));
+        self.deadline = Some(ProcessDeadline::new(timeout));
         self
     }
 
@@ -1354,12 +1572,13 @@ impl CancellableProcessExecutor {
                 .token
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled())
-            && let Some((deadline, timeout)) = self.deadline
-            && Instant::now() >= deadline
+            && let Some(deadline) = &self.deadline
+            && let deadline = deadline.lock().unwrap()
+            && deadline.expired()
         {
             return format!(
                 "timed out after {} s while {purpose}",
-                timeout.as_secs_f64()
+                deadline.timeout.as_secs_f64()
             );
         }
         format!("operation cancelled while {purpose}")
@@ -1776,6 +1995,14 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::new(self.deadline.clone())
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.is_cancelled_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.clone()
             .with_deadline(Duration::from_secs(15))
@@ -1792,6 +2019,26 @@ impl CommandExecutor for CancellableProcessExecutor {
 
     fn cancellation_requested(&self) -> bool {
         self.is_cancelled()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute_with_stdin(command, input)
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -1886,6 +2133,31 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        // This executor's only bound is its deadline and it has no
+        // cancellation, so without the deadline it is a plain process.
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
@@ -2607,13 +2879,14 @@ pub fn engine_command(
 
 /// `engine` followed by `args`, run on the SSH host.
 pub fn ssh_engine_command(
+    class: SshTrafficClass,
     ssh: &SshTarget,
     engine: &str,
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> CommandSpec {
     let mut argv = engine_argv(engine);
     argv.extend(args.into_iter().map(Into::into));
-    ssh_command_owned(ssh, argv)
+    ssh_command_owned(class, ssh, argv)
 }
 
 impl ImageHost {
@@ -2652,7 +2925,7 @@ impl ImageHost {
             | Self::SshNitro(ssh) => {
                 let mut argv = engine_argv(&args[0]);
                 argv.extend(args.into_iter().skip(1));
-                ssh_command_owned(ssh, argv)
+                ssh_command_owned(SshTrafficClass::Control, ssh, argv)
             }
         }
         .purpose(purpose)
@@ -3141,6 +3414,7 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
 
 /// Wrap an argv vector for execution at a provisioned session target.
 pub fn command_on_locator(
+    class: SshTrafficClass,
     locator: &TargetLocator,
     session_id: &str,
     args: Vec<String>,
@@ -3150,13 +3424,17 @@ pub fn command_on_locator(
     if args.is_empty() {
         bail!("target command must not be empty");
     }
-    Ok(locator_command(locator, args).purpose(purpose))
+    Ok(locator_command(class, locator, args).purpose(purpose))
 }
 
 /// Wrap a non-empty argv vector for execution at a target, without checking
 /// that the locator belongs to a particular session. Every per-target command
 /// is built here, so each target kind is spelled out once.
-pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpec {
+pub fn locator_command(
+    class: SshTrafficClass,
+    locator: &TargetLocator,
+    args: Vec<String>,
+) -> CommandSpec {
     match locator {
         TargetLocator::LocalBare { .. } => {
             let mut args = args.into_iter();
@@ -3171,7 +3449,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             args,
         ),
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_owned(ssh, args)
+            ssh_command_owned(class, ssh, args)
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
@@ -3192,7 +3470,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             );
             let mut argv = vec![remote.program];
             argv.extend(remote.args);
-            ssh_command_owned(ssh, argv)
+            ssh_command_owned(class, ssh, argv)
         }
     }
 }
@@ -3650,6 +3928,29 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let reply = |status: i32, stderr: &str| CommandOutput {
                 status,
@@ -3709,7 +4010,7 @@ mod executor_tests {
             ssh_args: Vec::new(),
         };
         let executor = MasterKilledOnce::default();
-        let output = executor.execute(&ssh_command(&ssh, ["true"]));
+        let output = executor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
 
         assert_eq!(output.expect("the retry succeeds").status, 0);

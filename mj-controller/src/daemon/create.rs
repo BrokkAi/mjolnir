@@ -408,6 +408,7 @@ impl RuntimeState {
             &config,
             &request.profile_id,
             &policy,
+            &request.target_template_id,
         )
         .await?;
         drop(validation_timing);

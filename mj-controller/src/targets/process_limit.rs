@@ -9,6 +9,7 @@
 //! failed for anything in its task, and its parent can fix it by closing
 //! children it no longer needs (#1161), so the parent is told exactly that.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -78,6 +79,7 @@ pub fn read_pids_usage(
     session_id: &str,
 ) -> Result<PidsUsage> {
     let command = super::command_on_locator(
+        SshTrafficClass::Control,
         locator,
         session_id,
         vec!["sh".into(), "-c".into(), PIDS_USAGE_SCRIPT.into()],

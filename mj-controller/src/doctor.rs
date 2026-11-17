@@ -1,5 +1,6 @@
 //! Actionable host and configuration prerequisite checks.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2804,6 +2805,7 @@ fn ssh_docker_check(
     }
 
     let image_command = ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "docker".to_owned(),
@@ -2944,6 +2946,7 @@ fn ssh_apple_container_check(
     // Apple's `container` CLI has no `--format` on `image inspect`, so the
     // exit status is what says the image is present.
     let image_command = ssh_command(
+        SshTrafficClass::Control,
         ssh,
         ["container", "image", "inspect", image]
             .map(str::to_owned)
@@ -3077,6 +3080,7 @@ fn ssh_nitro_check(
         };
     }
     let image_command = ssh_engine_command(
+        SshTrafficClass::Control,
         ssh,
         MICROVM_ENGINE,
         ["image", "inspect", "--format", "{{.Id}}", image],
