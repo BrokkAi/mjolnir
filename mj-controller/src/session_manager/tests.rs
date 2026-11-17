@@ -5250,6 +5250,7 @@ async fn foreground_move_preempts_delegation_delivery_and_obtains_its_relay_leas
     let mut moving = Box::pin(gate.enter_foreground(
         LEASED_RELAY_SESSION,
         "Move",
+        crate::recovery_gate::LifecycleOrigin::Person,
         &cancelled,
         &crate::targets::ProcessExecutor,
     ));

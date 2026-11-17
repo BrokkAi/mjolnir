@@ -59,11 +59,18 @@ pub struct RecoveryReservation {
     _admission: ForegroundAdmission,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleOrigin {
+    Person,
+    Automatic,
+}
+
 #[derive(Clone)]
 pub struct ForegroundAdmission(Arc<ForegroundHolder>);
 
 struct ForegroundHolder {
     label: &'static str,
+    origin: LifecycleOrigin,
     identity: Arc<()>,
     session_id: String,
     gate: Arc<RecoveryGate>,
@@ -71,7 +78,8 @@ struct ForegroundHolder {
 
 impl Drop for ForegroundHolder {
     fn drop(&mut self) {
-        self.gate.release(&self.session_id, &self.identity);
+        self.gate
+            .release(&self.session_id, &self.identity, self.origin);
     }
 }
 
@@ -163,6 +171,7 @@ pub struct RecoveryGate {
     /// every holder updates it, whatever started the work.
     busy: watch::Sender<BTreeSet<String>>,
     credential_wakes: watch::Sender<BTreeSet<String>>,
+    foreground_releases: watch::Sender<BTreeMap<String, LifecycleOrigin>>,
 }
 
 impl Default for RecoveryGate {
@@ -172,6 +181,7 @@ impl Default for RecoveryGate {
             closed: Notify::new(),
             busy: watch::channel(BTreeSet::new()).0,
             credential_wakes: watch::channel(BTreeSet::new()).0,
+            foreground_releases: watch::channel(BTreeMap::new()).0,
         }
     }
 }
@@ -269,7 +279,13 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.reserve_locked(&mut state, session_id, label, ReservationKind::Foreground)
+        self.reserve_locked(
+            &mut state,
+            session_id,
+            label,
+            ReservationKind::Foreground,
+            LifecycleOrigin::Person,
+        )
     }
 
     fn reserve_locked(
@@ -278,6 +294,7 @@ impl RecoveryGate {
         session_id: &str,
         label: &'static str,
         kind: ReservationKind,
+        origin: LifecycleOrigin,
     ) -> ForegroundAdmission {
         let identity = Arc::new(());
         state
@@ -291,6 +308,7 @@ impl RecoveryGate {
             });
         ForegroundAdmission(Arc::new(ForegroundHolder {
             label,
+            origin,
             identity,
             session_id: session_id.to_owned(),
             gate: self.clone(),
@@ -301,6 +319,7 @@ impl RecoveryGate {
         self: &Arc<Self>,
         session_id: &str,
         label: &'static str,
+        origin: LifecycleOrigin,
         cancelled: &AtomicBool,
         notices: &(impl mj_core::targets::CommandExecutor + Sync),
     ) -> anyhow::Result<ForegroundAdmission> {
@@ -310,6 +329,7 @@ impl RecoveryGate {
             cancelled,
             notices,
             ReservationKind::Foreground,
+            origin,
         )
         .await
     }
@@ -325,6 +345,7 @@ impl RecoveryGate {
                 &AtomicBool::new(false),
                 &mj_core::targets::ProcessExecutor,
                 ReservationKind::Review,
+                LifecycleOrigin::Automatic,
             )
             .await
             .expect("an uncancelled review admission retains its publication");
@@ -340,6 +361,7 @@ impl RecoveryGate {
         cancelled: &AtomicBool,
         notices: &(impl mj_core::targets::CommandExecutor + Sync),
         kind: ReservationKind,
+        origin: LifecycleOrigin,
     ) -> anyhow::Result<ForegroundAdmission> {
         let mut busy = self.subscribe();
         let mut reservation = None;
@@ -366,7 +388,8 @@ impl RecoveryGate {
                         .flatten()
                         .any(|holder| !kind.runs_beside(holder.kind))
                 {
-                    reservation = Some(self.reserve_locked(&mut state, session_id, label, kind));
+                    reservation =
+                        Some(self.reserve_locked(&mut state, session_id, label, kind, origin));
                     if kind == ReservationKind::Foreground
                         && let Some(holders) = state.busy.get(session_id)
                     {
@@ -411,7 +434,7 @@ impl RecoveryGate {
         }
     }
 
-    fn release(&self, session_id: &str, identity: &Arc<()>) {
+    fn release(&self, session_id: &str, identity: &Arc<()>, origin: LifecycleOrigin) {
         let mut state = self
             .state
             .lock()
@@ -422,6 +445,16 @@ impl RecoveryGate {
                 state.reservations.remove(session_id);
             }
             self.publish_busy(&state);
+            self.foreground_releases.send_modify(|released| {
+                released
+                    .entry(session_id.to_owned())
+                    .and_modify(|previous| {
+                        if origin == LifecycleOrigin::Person {
+                            *previous = origin;
+                        }
+                    })
+                    .or_insert(origin);
+            });
         }
     }
 
@@ -863,6 +896,20 @@ impl RecoveryGate {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .deferred_credentials
             .contains(session_id)
+    }
+
+    pub(crate) fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
+        let mut releases = self.foreground_releases.subscribe();
+        releases.mark_changed();
+        releases
+    }
+    pub(crate) fn take_foreground_releases(&self) -> BTreeMap<String, LifecycleOrigin> {
+        let mut ready = BTreeMap::new();
+        self.foreground_releases.send_if_modified(|releases| {
+            ready = std::mem::take(releases);
+            false
+        });
+        ready
     }
 
     pub(crate) fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
@@ -1343,6 +1390,7 @@ mod tests {
             .enter_foreground(
                 "session-1",
                 "Move",
+                crate::recovery_gate::LifecycleOrigin::Person,
                 &AtomicBool::new(false),
                 &mj_core::targets::ProcessExecutor,
             )
@@ -1410,14 +1458,26 @@ mod tests {
             .unwrap();
         let cancelled = AtomicBool::new(true);
         assert!(
-            gate.enter_foreground("session", "Move", &cancelled, &notices)
-                .await
-                .is_err()
+            gate.enter_foreground(
+                "session",
+                "Move",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &cancelled,
+                &notices
+            )
+            .await
+            .is_err()
         );
         assert!(!copy.load(Ordering::Acquire));
         assert!(!sync.load(Ordering::Acquire));
         cancelled.store(false, Ordering::Release);
-        let mut waiting = Box::pin(gate.enter_foreground("session", "Move", &cancelled, &notices));
+        let mut waiting = Box::pin(gate.enter_foreground(
+            "session",
+            "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
         assert!(futures::poll!(&mut waiting).is_pending());
         let refusal = gate
             .try_start("session", BackgroundWork::WorkerReplacement)
@@ -1437,7 +1497,13 @@ mod tests {
         assert!(futures::poll!(&mut waiting).is_pending());
         drop(sync);
         let admission = waiting.await.unwrap();
-        let mut second = Box::pin(gate.enter_foreground("session", "close", &cancelled, &notices));
+        let mut second = Box::pin(gate.enter_foreground(
+            "session",
+            "close",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
         assert!(futures::poll!(&mut second).is_pending());
         drop(admission);
         let second = second.await.unwrap();
@@ -1449,7 +1515,13 @@ mod tests {
         let copy = gate
             .try_start("session", BackgroundWork::RecoveryCopyCapturing)
             .unwrap();
-        let mut waiting = Box::pin(gate.enter_foreground("session", "Move", &cancelled, &notices));
+        let mut waiting = Box::pin(gate.enter_foreground(
+            "session",
+            "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &notices,
+        ));
         assert!(futures::poll!(&mut waiting).is_pending());
         cancelled.store(true, Ordering::Release);
         assert!(waiting.await.is_err());
@@ -1497,6 +1569,7 @@ mod copy_transition_tests {
         let mut foreground = Box::pin(gate.enter_foreground(
             "session",
             "Move",
+            crate::recovery_gate::LifecycleOrigin::Person,
             &cancelled,
             &mj_core::targets::ProcessExecutor,
         ));

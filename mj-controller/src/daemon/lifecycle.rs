@@ -1,11 +1,7 @@
 use super::*;
 use crate::recovery_gate::SessionAdmission;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum LifecycleOrigin {
-    Person,
-    Automatic,
-}
+pub(super) use crate::recovery_gate::LifecycleOrigin;
 
 pub(super) struct LifecycleStart {
     pub(super) origin: LifecycleOrigin,
@@ -681,6 +677,7 @@ impl RuntimeState {
                                 } else {
                                     kind.label()
                                 },
+                                origin,
                                 &cancelled,
                                 &executor,
                             )

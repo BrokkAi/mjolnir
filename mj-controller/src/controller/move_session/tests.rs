@@ -4590,7 +4590,7 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         let admission = crate::recovery_gate::SessionAdmission::Foreground(
             gate.enter_foreground(
                 LATCH_RELAY_SESSION,
-                "Move",
+                "Move", crate::recovery_gate::LifecycleOrigin::Person,
                 &std::sync::atomic::AtomicBool::new(false),
                 &ProcessExecutor,
             )

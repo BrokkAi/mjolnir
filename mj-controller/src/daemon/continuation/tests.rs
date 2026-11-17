@@ -979,6 +979,8 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
         "goal",
         "refused",
         "refused-private",
+        "fallback-admission",
+        "fallback-unknown",
         "five-hour",
         "preparation-private",
         "preparation-marked-private",
@@ -991,7 +993,10 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             case,
             "five-hour" | "preparation-private" | "preparation-marked-private" | "preparation-safe"
         );
-        let rejected = matches!(case, "refused" | "refused-private");
+        let rejected = matches!(
+            case,
+            "refused" | "refused-private" | "fallback-admission" | "fallback-unknown"
+        );
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
             session_id: "one".into(),
@@ -1000,8 +1005,10 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             project_memory: None,
         }]);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session_gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+        let fallback_blocker = Arc::new(std::sync::Mutex::new(None));
         let environment = Environment {
-            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            session_gate: session_gate.clone(),
             schedules: Default::default(),
             log: None,
             control: remote.control,
@@ -1013,6 +1020,8 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
             start_quota_move: {
                 let calls = calls.clone();
+                let session_gate = session_gate.clone();
+                let blocker = fallback_blocker.clone();
                 Arc::new(move |request, reason, continuation| {
                     assert_eq!(
                         request.preparation.selection.profile_id.as_deref(),
@@ -1028,7 +1037,21 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                         }
                     );
                     calls.fetch_add(1, Ordering::SeqCst);
+                    let gate = session_gate.clone();
+                    let blocker = blocker.clone();
                     Box::pin(async move {
+                        if case == "fallback-admission" {
+                            *blocker.lock().unwrap() = Some(
+                                gate.try_start(
+                                    "one",
+                                    crate::recovery_gate::BackgroundWork::WorkerReplacement,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        if matches!(case, "fallback-admission" | "fallback-unknown") {
+                            return Err(anyhow::anyhow!("temporary Move refusal"));
+                        }
                         if case == "refused" {
                             return Err(private_quota_move_error().context(
                                 mj_core::refusal::Refusal::precondition("lifecycle busy"),
@@ -1098,10 +1121,18 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 fallback: fallback.clone(),
             }
         };
-        let task = tokio::spawn(async move {
+        let retry_environment = environment.clone();
+        let mut task = Some(tokio::spawn(async move {
             quota::schedule(&environment, "one", blocked.clone(), plan).await
-        });
-        for step in 0..if rejected { 2 } else { 1 } {
+        }));
+        let mut unknown_fallback = None;
+        for step in 0..if case == "fallback-unknown" {
+            3
+        } else if rejected {
+            2
+        } else {
+            1
+        } {
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
                 .unwrap()
@@ -1109,6 +1140,16 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             let RemoteSessionRequest::Submit { command, reply, .. } = request else {
                 panic!("expected recovery")
             };
+            if case == "fallback-unknown" && step == 1 {
+                unknown_fallback = Some(command.clone());
+            }
+            if case == "fallback-unknown" && step == 2 {
+                assert_eq!(
+                    Some(&command),
+                    unknown_fallback.as_ref(),
+                    "unknown fallback acceptance must retain its exact cursor and notice"
+                );
+            }
             let wire = serde_json::to_string(&command).unwrap();
             for private in ["quota-secret-canary", "/private/profile", "secret-ssh-host"] {
                 assert!(
@@ -1170,6 +1211,23 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 .publish("one".into(), blocked.clone())
                 .await
                 .unwrap();
+            if case == "fallback-unknown" && step == 1 {
+                reply
+                    .send(Err(mj_client::session::SubmitFailure {
+                        message: "lost fallback acknowledgement".into(),
+                        unconfirmed: true,
+                        refused: false,
+                    }))
+                    .unwrap();
+                assert!(task.take().unwrap().await.unwrap().is_err());
+                let env = retry_environment.clone();
+                let view = blocked.clone();
+                let recovery = fallback.clone();
+                task = Some(tokio::spawn(async move {
+                    quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+                }));
+                continue;
+            }
             reply.send(Ok(4 + step)).unwrap();
             let sync = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
@@ -1179,8 +1237,18 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 panic!("expected sync")
             };
             reply.send(Ok(())).unwrap();
+            if case == "fallback-admission" && step == 0 {
+                assert!(task.take().unwrap().await.unwrap().is_err());
+                fallback_blocker.lock().unwrap().take();
+                let env = retry_environment.clone();
+                let view = blocked.clone();
+                let recovery = fallback.clone();
+                task = Some(tokio::spawn(async move {
+                    quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+                }));
+            }
         }
-        task.await.unwrap().unwrap();
+        task.take().unwrap().await.unwrap().unwrap();
         if matches!(case, "late-refused" | "late-private" | "late-outcome") {
             // No Move record exists for preflight errors. The worker must
             // receive the failure after its earlier "Switching" notice.
@@ -1577,6 +1645,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         "ready",
         "assessment-reconnect",
         "waiting-reconnect",
+        "permission-reenabled",
         "failure",
         "identity",
         "input",
@@ -1647,6 +1716,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             project_memory: None,
         }]);
         let (prepared, mut preparations) = mpsc::unbounded_channel();
+        let permitted = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut environment = Environment {
             session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
             schedules: Default::default(),
@@ -1674,7 +1744,10 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             profile: Arc::new(|_| Some("claude".into())),
             log: None,
             control: remote.control.clone(),
-            allowed: Arc::new(|_| true),
+            allowed: {
+                let permitted = permitted.clone();
+                Arc::new(move |_| permitted.load(Ordering::Acquire))
+            },
             claim: Arc::new(|_| Claim::Allowed),
             live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| {}),
@@ -1775,6 +1848,17 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             task.await.unwrap().unwrap();
             remote.shutdown.shutdown().await.unwrap();
             continue;
+        }
+        if case == "permission-reenabled" {
+            permitted.store(false, Ordering::Release);
+            receive(&mut updates).await;
+            assert!(preparations.try_recv().is_err());
+            permitted.store(true, Ordering::Release);
+            assert!(
+                observed(preparations.recv()).await.unwrap(),
+                "restoring permission must reconsider the same completion without a worker publication"
+            );
+            receive(&mut updates).await;
         }
         let reset = mj_core::clock::epoch_seconds() as i64 + 3600;
         let report = ProfileQuota {
@@ -2218,6 +2302,7 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
                     .enter_foreground(
                         ID,
                         "Move",
+                        crate::recovery_gate::LifecycleOrigin::Person,
                         &std::sync::atomic::AtomicBool::new(false),
                         &crate::targets::ProcessExecutor,
                     )
@@ -2266,148 +2351,495 @@ async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
 #[tokio::test]
 async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() {
     use futures::FutureExt;
-    let mut remote = spawn_remote_session_manager().unwrap();
-    remote.targets.send_replace(vec![RelaySessionTarget {
-        session_id: "one".into(),
-        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
-        worker_recovery: None,
-        project_memory: None,
-    }]);
-    let environment = Environment {
-        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
-        schedules: Default::default(),
-        log: None,
-        control: remote.control,
-        allowed: Arc::new(|_| true),
-        claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| live_sessions(&["one"])),
-        review: Arc::new(|_, _| {}),
-        profile: Arc::new(|_| Some("test".into())),
-        quota: Arc::new(|_, _| Box::pin(async { bail!("unused resolver") })),
-        start_quota_move: Arc::new(|_, _, _| Box::pin(async { bail!("unexpected Move") })),
-    };
-    let mut blocked = view("one", true);
-    remote
-        .publisher
-        .publish("one".into(), blocked.clone())
-        .await
-        .unwrap();
-    let first = tokio::spawn({
-        let env = environment.clone();
-        let view = blocked.clone();
-        async move {
-            let recovery = recovery_for(&view, None);
-            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
-        }
-    });
-    let RemoteSessionRequest::Submit {
-        command_id,
-        command,
-        reply,
-        ..
-    } = remote.requests.recv().await.unwrap()
-    else {
-        panic!("first schedule")
-    };
-    reply
-        .send(Err(mj_client::session::SubmitFailure {
-            message: "lost acknowledgement".into(),
-            unconfirmed: true,
-            refused: false,
-        }))
-        .unwrap();
-    assert!(first.await.unwrap().is_err());
-    let snapshot = blocked.snapshot.as_mut().unwrap();
-    snapshot
-        .materialized
-        .last_turn_outcome
-        .as_mut()
-        .unwrap()
-        .completed_ordinal += 1;
-    snapshot
-        .materialized
-        .last_turn_outcome
-        .as_mut()
-        .unwrap()
-        .command_id = "next-request".into();
-    snapshot.operational.continuation.completed_command_id = Some("next-request".into());
+    for phase in ["primary", "fallback"] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
+            live: Arc::new(|| live_sessions(&["one"])),
+            review: Arc::new(|_, _| {}),
+            profile: Arc::new(|_| Some("test".into())),
+            quota: Arc::new(|_, _| Box::pin(async { bail!("unused resolver") })),
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { bail!("Move admission refused") })
+            }),
+        };
+        let mut blocked = view("one", true);
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let first = tokio::spawn({
+            let env = environment.clone();
+            let view = blocked.clone();
+            async move {
+                let recovery = recovery_for(&view, None);
+                let plan = if phase == "primary" {
+                    quota::Plan::Wait(recovery)
+                } else {
+                    let mut abstention = recovery.clone();
+                    abstention.notice =
+                        quota::move_notice("quota exhausted", "destination", &recovery);
+                    quota::Plan::Move {
+                        request: Box::new(quota_move_request()),
+                        destination: "destination".into(),
+                        reason: "quota exhausted".into(),
+                        abstention,
+                        fallback: recovery,
+                    }
+                };
+                quota::schedule(&env, "one", view, plan).await
+            }
+        });
+        let RemoteSessionRequest::Submit {
+            command_id,
+            command,
+            reply,
+            ..
+        } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("first schedule")
+        };
+        let (command_id, command, reply) = if phase == "fallback" {
+            if let RelayCommand::SetQuotaRecovery {
+                recovery: Some(record),
+                ..
+            } = &command
+            {
+                blocked
+                    .snapshot
+                    .as_mut()
+                    .unwrap()
+                    .operational
+                    .continuation
+                    .quota_recovery = Some((**record).clone());
+            }
+            remote
+                .publisher
+                .publish("one".into(), blocked.clone())
+                .await
+                .unwrap();
+            reply.send(Ok(3)).unwrap();
+            let RemoteSessionRequest::Sync { reply, .. } =
+                tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("primary schedule sync")
+            };
+            reply.send(Ok(())).unwrap();
+            let RemoteSessionRequest::Submit {
+                command_id,
+                command,
+                reply,
+                ..
+            } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("fallback to reconcile")
+            };
+            (command_id, command, reply)
+        } else {
+            (command_id, command, reply)
+        };
+        reply
+            .send(Err(mj_client::session::SubmitFailure {
+                message: "lost acknowledgement".into(),
+                unconfirmed: true,
+                refused: false,
+            }))
+            .unwrap();
+        assert!(first.await.unwrap().is_err());
+        let snapshot = blocked.snapshot.as_mut().unwrap();
+        snapshot
+            .materialized
+            .last_turn_outcome
+            .as_mut()
+            .unwrap()
+            .completed_ordinal += 1;
+        snapshot
+            .materialized
+            .last_turn_outcome
+            .as_mut()
+            .unwrap()
+            .command_id = "next-request".into();
+        snapshot.operational.continuation.completed_command_id = Some("next-request".into());
+        snapshot.operational.continuation.quota_recovery = None;
 
-    blocked
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .latest_ordinal += 1;
-    blocked.snapshot.as_mut().unwrap().operational.latest_digest = "new evidence".into();
-    remote
-        .publisher
-        .publish("one".into(), blocked.clone())
-        .await
-        .unwrap();
-    let second = tokio::spawn({
-        let env = environment.clone();
-        let view = blocked.clone();
-        async move {
-            let mut recovery = recovery_for(&view, None);
-            recovery.notice = "new assessment notice".into();
-            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+        blocked
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .latest_ordinal += 1;
+        blocked.snapshot.as_mut().unwrap().operational.latest_digest = "new evidence".into();
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let second = tokio::spawn({
+            let env = environment.clone();
+            let view = blocked.clone();
+            async move {
+                let mut recovery = recovery_for(&view, None);
+                recovery.notice = "new assessment notice".into();
+                quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+            }
+        });
+        let RemoteSessionRequest::Submit {
+            command_id: retried_id,
+            command: retried,
+            reply,
+            ..
+        } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("reconciliation")
+        };
+        assert_eq!(retried_id, command_id);
+        assert_eq!(
+            retried, command,
+            "unknown acceptance must retain the original cursor and notice"
+        );
+        if phase == "fallback" {
+            reply
+                .send(Err(mj_client::session::SubmitFailure {
+                    message: "old fallback evidence is stale".into(),
+                    unconfirmed: false,
+                    refused: true,
+                }))
+                .unwrap();
+        } else {
+            reply.send(Ok(4)).unwrap();
+            let RemoteSessionRequest::Sync { reply, .. } =
+                tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("acceptance sync")
+            };
+            reply.send(Ok(())).unwrap();
         }
-    });
-    let RemoteSessionRequest::Submit {
-        command_id: retried_id,
-        command: retried,
-        reply,
-        ..
-    } = remote.requests.recv().await.unwrap()
-    else {
-        panic!("reconciliation")
-    };
-    assert_eq!(retried_id, command_id);
-    assert_eq!(
-        retried, command,
-        "unknown acceptance must retain the original cursor and notice"
-    );
-    reply.send(Ok(4)).unwrap();
-    let RemoteSessionRequest::Sync { reply, .. } = remote.requests.recv().await.unwrap() else {
-        panic!("acceptance sync")
-    };
-    reply.send(Ok(())).unwrap();
-    assert!(
-        second.await.unwrap().is_err(),
-        "reconciling the earlier completion must leave the newer one retryable"
-    );
-    let third = tokio::spawn({
-        let env = environment.clone();
-        let view = blocked.clone();
-        async move {
-            let recovery = recovery_for(&view, None);
-            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+        assert!(
+            second.await.unwrap().is_err(),
+            "reconciling the earlier completion must leave the newer one retryable"
+        );
+        let third = tokio::spawn({
+            let env = environment.clone();
+            let view = blocked.clone();
+            async move {
+                let recovery = recovery_for(&view, None);
+                quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+            }
+        });
+        let RemoteSessionRequest::Submit {
+            command_id: next_id,
+            command: next,
+            reply,
+            ..
+        } = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("new completion after reconciliation")
+        };
+        assert_ne!(next_id, command_id);
+        assert_ne!(next, command);
+        reply.send(Ok(5)).unwrap();
+        let RemoteSessionRequest::Sync { reply, .. } =
+            tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("new acceptance sync")
+        };
+        reply.send(Ok(())).unwrap();
+        third.await.unwrap().unwrap();
+        let recovery = recovery_for(&blocked, None);
+        quota::schedule(&environment, "one", blocked, quota::Plan::Wait(recovery))
+            .await
+            .unwrap();
+        assert!(
+            remote.requests.recv().now_or_never().is_none(),
+            "an answered completion must not resubmit"
+        );
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
+// Hard-won: f7b3aab75: accepting the worker record discarded the unfinished Move after personal preemption.
+#[tokio::test]
+async fn personal_release_reassesses_quota_without_replaying_the_old_move() {
+    use futures::FutureExt;
+    for case in ["fresh-move", "fresh-wait", "person-move"] {
+        let moved_profile = case == "person-move";
+        let wait_after = case == "fresh-wait";
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let session_gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+        let profile = Arc::new(std::sync::Mutex::new("test".to_owned()));
+        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let moves = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let launched = Arc::new(tokio::sync::Notify::new());
+        let environment = Environment {
+            session_gate: session_gate.clone(),
+            schedules: Default::default(),
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
+            live: Arc::new(|| live_sessions(&["one"])),
+            review: Arc::new(|_, _| {}),
+            profile: {
+                let profile = profile.clone();
+                Arc::new(move |_| Some(profile.lock().unwrap().clone()))
+            },
+            quota: {
+                let preparations = preparations.clone();
+                Arc::new(move |_, view| {
+                    let ordinal = preparations.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        let destination = if ordinal == 0 {
+                            "old-automatic"
+                        } else {
+                            "fresh-automatic"
+                        };
+                        let mut request = quota_move_request();
+                        request.preparation.selection.profile_id = Some(destination.into());
+                        let fallback = recovery_for(
+                            &view,
+                            if ordinal == 0 {
+                                Some(mj_core::clock::epoch_millis() + 3_600_000)
+                            } else {
+                                None
+                            },
+                        );
+                        if ordinal > 0 && wait_after {
+                            return Ok(quota::Plan::Wait(fallback));
+                        }
+                        let mut abstention = fallback.clone();
+                        abstention.notice =
+                            quota::move_notice("quota exhausted", destination, &fallback);
+                        Ok(quota::Plan::Move {
+                            request: Box::new(request),
+                            destination: destination.into(),
+                            reason: "quota exhausted".into(),
+                            abstention,
+                            fallback,
+                        })
+                    })
+                })
+            },
+            start_quota_move: {
+                let moves = moves.clone();
+                let launched = launched.clone();
+                Arc::new(move |request, _, _| {
+                    moves
+                        .lock()
+                        .unwrap()
+                        .push(request.preparation.selection.profile_id.unwrap());
+                    launched.notify_one();
+                    Box::pin(async { Ok(()) })
+                })
+            },
+        };
+        let cancellation = CancellationToken::new();
+        let (_updates, task) = spawn_with_gate(
+            environment.clone(),
+            remote.updates,
+            cancellation.clone(),
+            Arc::new(crate::upgrade::Gate::default()),
+        );
+        let mut blocked = view("one", true);
+        quota_assessed(&mut blocked);
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let RemoteSessionRequest::Submit { command, reply, .. } =
+            tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("initial quota schedule")
+        };
+        let RelayCommand::SetQuotaRecovery { recovery, .. } = command else {
+            panic!("quota record")
+        };
+        blocked
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .continuation
+            .quota_recovery = recovery.map(|r| *r);
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let mut personal = Box::pin(session_gate.enter_foreground(
+            "one",
+            "checkpoint",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &cancelled,
+            &crate::targets::ProcessExecutor,
+        ));
+        assert!(futures::poll!(&mut personal).is_pending());
+        reply.send(Ok(4)).unwrap();
+        let RemoteSessionRequest::Sync { reply, .. } =
+            tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("accepted quota sync")
+        };
+        reply.send(Ok(())).unwrap();
+        let personal = tokio::time::timeout(Duration::from_secs(3), personal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            moves.lock().unwrap().is_empty(),
+            "the preempted plan cannot launch"
+        );
+        if moved_profile {
+            *profile.lock().unwrap() = "person-destination".into();
+            let snapshot = blocked.snapshot.as_mut().unwrap();
+            snapshot.operational.continuation.quota_recovery = None;
+            let assessment = Arc::make_mut(snapshot.operational.assessment.as_mut().unwrap());
+            assessment.action = Some(mj_core::assessment::Action::Finished);
+            assessment.status = mj_core::assessment::Status::Assessed;
+            remote
+                .publisher
+                .publish("one".into(), blocked.clone())
+                .await
+                .unwrap();
         }
-    });
-    let RemoteSessionRequest::Submit {
-        command_id: next_id,
-        command: next,
-        reply,
-        ..
-    } = remote.requests.recv().await.unwrap()
-    else {
-        panic!("new completion after reconciliation")
-    };
-    assert_ne!(next_id, command_id);
-    assert_ne!(next, command);
-    reply.send(Ok(5)).unwrap();
-    let RemoteSessionRequest::Sync { reply, .. } = remote.requests.recv().await.unwrap() else {
-        panic!("new acceptance sync")
-    };
-    reply.send(Ok(())).unwrap();
-    third.await.unwrap().unwrap();
-    let recovery = recovery_for(&blocked, None);
-    quota::schedule(&environment, "one", blocked, quota::Plan::Wait(recovery))
-        .await
-        .unwrap();
-    assert!(
-        remote.requests.recv().now_or_never().is_none(),
-        "an answered completion must not resubmit"
-    );
-    remote.shutdown.shutdown().await.unwrap();
+        drop(personal);
+        if !moved_profile {
+            let RemoteSessionRequest::Sync { reply, .. } =
+                tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("accepted record stands; only daemon intent is reassessed")
+            };
+            reply.send(Ok(())).unwrap();
+            if wait_after {
+                let RemoteSessionRequest::Submit { command, reply, .. } =
+                    tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                else {
+                    panic!("stale Move notice needs its fallback decision")
+                };
+                let RelayCommand::SetQuotaRecovery {
+                    recovery: Some(record),
+                    ..
+                } = command
+                else {
+                    panic!("fresh wait fallback")
+                };
+                assert!(!record.notice.contains("Switching"));
+                assert!(
+                    record.retry_at_ms.is_some(),
+                    "the accepted source continuation survives a daemon-only reassessment"
+                );
+                reply.send(Ok(5)).unwrap();
+                let RemoteSessionRequest::Sync { reply, .. } =
+                    tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                else {
+                    panic!("fallback sync")
+                };
+                reply.send(Ok(())).unwrap();
+            } else {
+                tokio::time::timeout(Duration::from_secs(3), launched.notified())
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while quota::unfinished(&environment, "one", &blocked) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                *moves.lock().unwrap(),
+                if wait_after {
+                    Vec::<String>::new()
+                } else {
+                    vec!["fresh-automatic".into()]
+                }
+            );
+            assert_eq!(preparations.load(Ordering::SeqCst), 2);
+            let automatic = session_gate
+                .enter_foreground(
+                    "one",
+                    "automatic Move",
+                    crate::recovery_gate::LifecycleOrigin::Automatic,
+                    &cancelled,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .unwrap();
+            drop(automatic);
+        }
+        for _ in 0..128 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            preparations.load(Ordering::SeqCst),
+            if moved_profile { 1 } else { 2 }
+        );
+        assert!(
+            !moved_profile || moves.lock().unwrap().is_empty(),
+            "a person's destination must never be overridden"
+        );
+        assert!(
+            remote.requests.recv().now_or_never().is_none(),
+            "automatic release must not replan a failed automatic Move"
+        );
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
 }
