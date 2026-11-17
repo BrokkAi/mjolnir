@@ -817,7 +817,10 @@ pub(super) async fn run_session_actor(
                                 "rejecting sync while session is leased"
                             );
                             if reply
-                                .send(Err("session is reserved for a lifecycle operation".into()))
+                                .send(Err(RelayJobDeferred(
+                                    "session is reserved for a lifecycle operation",
+                                )
+                                .into()))
                                 .is_err()
                             {
                                 tracing::debug!(
@@ -857,10 +860,7 @@ pub(super) async fn run_session_actor(
                                 "explicit relay synchronization failed"
                             );
                         }
-                        if reply
-                            .send(result.map_err(|error| format!("{error:#}")))
-                            .is_err()
-                        {
+                        if reply.send(result).is_err() {
                             tracing::debug!(
                                 session_id = %target.session_id,
                                 operation = "sync",

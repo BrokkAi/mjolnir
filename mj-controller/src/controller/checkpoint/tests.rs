@@ -1554,16 +1554,25 @@ fn hold_named_relay_command(request: &mj_core::relay::RelayRequest) {
     }
 }
 
-fn record_test_subagent_admission(relay_root: &Path, open: bool) {
-    let queue_path = relay_root
+fn test_subagent_queue_path(relay_root: &Path) -> PathBuf {
+    relay_root
         .parent()
         .expect("relay root parent")
         .join(LATCH_RELAY_SESSION)
-        .join("subagents.json");
-    let mut queue: serde_json::Value = std::fs::read(&queue_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+        .join("subagents.json")
+}
+fn read_test_subagent_queue(path: &Path) -> serde_json::Value {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).expect("parse fixture sub-agent queue"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({"requests": {}, "results": {}})
+        }
+        Err(error) => panic!("read fixture sub-agent queue: {error}"),
+    }
+}
+fn record_test_subagent_admission(relay_root: &Path, open: bool) {
+    let queue_path = test_subagent_queue_path(relay_root);
+    let mut queue = read_test_subagent_queue(&queue_path);
     let transitions = queue["admission_transitions"].as_array_mut().map(|items| {
         items.push(serde_json::Value::Bool(open));
     });
@@ -1571,27 +1580,87 @@ fn record_test_subagent_admission(relay_root: &Path, open: bool) {
         queue["admission_transitions"] = serde_json::json!([open]);
     }
     queue["mutating_admission_open"] = serde_json::Value::Bool(open);
-    std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
 }
 fn subagent_connection_response(
     request: &mj_core::relay::RelayRequestEnvelope,
 ) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    let queue_path =
+        std::env::var_os(LATCH_RELAY_ROOT).map(|root| test_subagent_queue_path(Path::new(&root)));
+    let mut queue = queue_path
+        .as_ref()
+        .map(|path| read_test_subagent_queue(path))
+        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    let requests = || {
+        queue["requests"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolRequest>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let results = || {
+        queue["results"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolResult>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
     let payload = match &request.request {
         mj_core::relay::RelayRequest::PollSubagentQueue { acknowledged } => {
             mj_core::relay::RelayResponsePayload::SubagentQueue {
                 page: mj_core::subagent::SubagentQueuePage {
                     sequence: acknowledged.unwrap_or(0) + 1,
-                    changes: Vec::new(),
+                    changes: requests()
+                        .into_iter()
+                        .map(mj_core::subagent::SubagentQueueChange::Request)
+                        .chain(results().iter().map(|result| {
+                            mj_core::subagent::SubagentQueueChange::Completed(
+                                mj_core::subagent::SubagentCompletion::from(result),
+                            )
+                        }))
+                        .collect(),
                     has_more: false,
                 },
             }
         }
         mj_core::relay::RelayRequest::SubagentRequests => {
             mj_core::relay::RelayResponsePayload::SubagentRequests {
-                requests: Vec::new(),
-                results: Vec::new(),
+                requests: requests(),
+                results: results(),
             }
+        }
+        mj_core::relay::RelayRequest::CompleteSubagentRequest { result } => {
+            let path = queue_path.as_ref().expect("fixture queue root");
+            queue["requests"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&result.request_id);
+            queue["results"].as_object_mut().unwrap().insert(
+                result.request_id.clone(),
+                serde_json::to_value(result).unwrap(),
+            );
+            mj_core::config::atomic_write(path, &serde_json::to_vec(&queue).unwrap()).unwrap();
+            use std::io::Write as _;
+            writeln!(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.with_extension("deliveries"))
+                    .unwrap(),
+                "{}",
+                result.request_id
+            )
+            .unwrap();
+            mj_core::relay::RelayResponsePayload::SubagentRequestCompleted
         }
         mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
             mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
@@ -1606,7 +1675,7 @@ fn subagent_connection_response(
             mj_core::relay::RelayResponsePayload::ChangeObserved {
                 latest_ordinal: *after_ordinal,
                 state_digest: state_digest.clone().unwrap_or_default(),
-                subagent_queue_changed: false,
+                subagent_queue_changed: !requests().is_empty() || !results().is_empty(),
             }
         }
         _ => return None,

@@ -721,6 +721,11 @@ impl MoveSourceRelay {
             return Err(error);
         }
         self.release_managed_connection();
+        let delivery_drain = self
+            .2
+            .as_ref()
+            .context("Move source admission missing")?
+            .drain_delegation()?;
 
         let drain = async {
             loop {
@@ -728,9 +733,23 @@ impl MoveSourceRelay {
                     !executor.cancellation_requested(),
                     "Move cancelled while waiting for sub-agent requests"
                 );
-                let snapshot = self.sync(id).await?.context(
-                    "source worker became unavailable while draining sub-agent requests",
-                )?;
+                let snapshot = match self.sync(id).await {
+                    Err(error) if crate::session_manager::RelayJobDeferred::marks(&error) => {
+                        executor.notify_notice("Waiting for subagent requests to finish");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    result => result?.context(
+                        "source worker became unavailable while draining sub-agent requests",
+                    )?,
+                };
+                if let Some(error) = &snapshot.subagent_queue_error {
+                    executor.notify_notice(&format!(
+                        "Waiting for subagent requests to synchronize: {error}"
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
                 let parent = id.to_owned();
                 let effects_pending = tokio::task::spawn_blocking(move || {
                     crate::database::has_pending_mutating_delegations(&parent)
@@ -746,6 +765,7 @@ impl MoveSourceRelay {
         }
         .await;
 
+        drop(delivery_drain);
         if let Err(error) = drain {
             if let Err(reopen) = self.reopen_subagent_mutations_with_retry(id).await {
                 return Err(error.context(format!(

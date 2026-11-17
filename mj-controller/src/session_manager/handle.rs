@@ -412,14 +412,11 @@ impl PendingRelaySubmit {
 }
 
 pub struct PendingRelaySync {
-    pub(super) response: oneshot::Receiver<std::result::Result<(), String>>,
+    pub(super) response: oneshot::Receiver<Result<()>>,
 }
 
 impl PendingRelaySync {
     pub async fn wait(self) -> Result<()> {
-        self.response
-            .await
-            .context("session manager stopped")?
-            .map_err(anyhow::Error::msg)
+        self.response.await.context("session manager stopped")?
     }
 }

@@ -185,6 +185,7 @@ struct RecoveryGateState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReservationKind {
     Foreground,
+    ForegroundDelegationDrain,
     Review,
 }
 impl ReservationKind {
@@ -438,9 +439,24 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A review reservation is compatible with the foreground operation.
+        // It cannot block the completion work that foreground explicitly yields
+        // to during its drain; other background exclusions remain unchanged.
+        let delegation_drain = kind == BackgroundWork::DelegationDelivery
+            && state
+                .reservations
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| holder.kind == ReservationKind::ForegroundDelegationDrain);
         if state.closed
             || (kind.needs_lease() && state.leases.contains_key(session_id))
-            || state.reservations.contains_key(session_id)
+            || state
+                .reservations
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| !delegation_drain || holder.kind == ReservationKind::Foreground)
             || state
                 .busy
                 .get(session_id)
@@ -650,6 +666,32 @@ impl SessionAdmission {
             Self::Background(a) => (&a.0.gate, &a.0.session_id),
         }
     }
+    pub(crate) fn drain_delegation(&self) -> anyhow::Result<ForegroundDelegationDrain> {
+        let Self::Foreground(admission) = self else {
+            anyhow::bail!("delegation drain requires foreground ownership");
+        };
+        let mut state = admission
+            .0
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let holder = state
+            .reservations
+            .get_mut(&admission.0.session_id)
+            .into_iter()
+            .flatten()
+            .find(|holder| Arc::ptr_eq(&holder.identity, &admission.0.identity))
+            .ok_or_else(|| anyhow::anyhow!("foreground admission has ended"))?;
+        anyhow::ensure!(
+            holder.kind == ReservationKind::Foreground,
+            "foreground is already draining delegation"
+        );
+        holder.kind = ReservationKind::ForegroundDelegationDrain;
+        admission.0.gate.publish_busy(&state);
+        Ok(ForegroundDelegationDrain(admission.clone()))
+    }
+
     pub fn narrow_copy(&self) -> anyhow::Result<()> {
         if let Self::Background(a) = self {
             a.narrow(BackgroundWork::RecoveryCopyTransferring)?;
@@ -695,7 +737,20 @@ impl SessionAdmission {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let label = match self {
-                    Self::Foreground(a) => a.0.label,
+                    Self::Foreground(a) => {
+                        let holder = state
+                            .reservations
+                            .get(session_id)
+                            .into_iter()
+                            .flatten()
+                            .find(|holder| Arc::ptr_eq(&holder.identity, &a.0.identity))
+                            .ok_or_else(|| anyhow::anyhow!("foreground admission has ended"))?;
+                        anyhow::ensure!(
+                            holder.kind == ReservationKind::Foreground,
+                            "foreground relay ownership is yielded to delegation drain"
+                        );
+                        a.0.label
+                    }
                     Self::Background(a) => {
                         let holder = state
                             .busy
@@ -718,7 +773,10 @@ impl SessionAdmission {
                         holder.work.label()
                     }
                 };
-                if !state.leases.contains_key(session_id) {
+                if !state.leases.contains_key(session_id)
+                    && (!matches!(self, Self::Foreground(_))
+                        || !state.busy.contains_key(session_id))
+                {
                     state.leases.insert(session_id.to_owned(), label);
                     return Ok(RelayLeaseAdmission {
                         admission: self.clone(),
@@ -728,6 +786,34 @@ impl SessionAdmission {
             }
             changed.changed().await?;
         }
+    }
+}
+
+/// A temporary phase of the same foreground identity. Closing it refuses new
+/// delivery and preempts admitted delivery; source reacquisition waits for its
+/// holders and leases to return. Drop also closes it on cancellation or unwind.
+pub(crate) struct ForegroundDelegationDrain(ForegroundAdmission);
+impl Drop for ForegroundDelegationDrain {
+    fn drop(&mut self) {
+        let admission = &self.0.0;
+        let mut state = admission
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holder) = state
+            .reservations
+            .get_mut(&admission.session_id)
+            .into_iter()
+            .flatten()
+            .find(|holder| Arc::ptr_eq(&holder.identity, &admission.identity))
+        {
+            holder.kind = ReservationKind::Foreground;
+        }
+        for holder in state.busy.get(&admission.session_id).into_iter().flatten() {
+            holder.cancelled.store(true, Ordering::Release);
+        }
+        admission.gate.publish_busy(&state);
     }
 }
 

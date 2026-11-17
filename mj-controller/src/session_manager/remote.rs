@@ -182,8 +182,12 @@ pub(super) async fn run_remote_session_actor(
                 RemoteSessionRequest::Submit { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
-                RemoteSessionRequest::Sync { reply, .. }
-                | RemoteSessionRequest::RespondElicitation { reply, .. }
+                RemoteSessionRequest::Sync { reply, .. } => {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "controller daemon request bridge stopped"
+                    )));
+                }
+                RemoteSessionRequest::RespondElicitation { reply, .. }
                 | RemoteSessionRequest::StopBackgroundTask { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }

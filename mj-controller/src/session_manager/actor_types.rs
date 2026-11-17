@@ -16,7 +16,7 @@ pub(super) enum ActorCommand {
         reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
     },
     Sync {
-        reply: oneshot::Sender<std::result::Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
     RespondElicitation {
         elicitation_id: String,
@@ -49,7 +49,9 @@ pub(super) enum ActorCommand {
         returns: mpsc::UnboundedSender<ReturnedConnection>,
     },
     /// Periodic work on the actor's own connection. See [`RelayConnectionJob`].
-    RelayJob { job: Box<dyn RelayConnectionJob> },
+    RelayJob {
+        job: Box<dyn RelayConnectionJob>,
+    },
 }
 
 /// Work run on a session actor's own relay connection, in turn with the
@@ -108,7 +110,10 @@ impl ActorCommand {
                 }
             }
             Self::Sync { reply } => {
-                if reply.send(Err(message.to_owned())).is_err() {
+                if reply
+                    .send(Err(anyhow::anyhow!(message.to_owned())))
+                    .is_err()
+                {
                     tracing::debug!(
                         %session_id,
                         operation = "sync",
