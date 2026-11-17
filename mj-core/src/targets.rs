@@ -1427,7 +1427,7 @@ fn stream_command_with_stdin(
     gate: Option<&Arc<StartGate>>,
     observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
-    let _progress = command.observer.as_ref().map(|observer| {
+    let progress = command.observer.as_ref().map(|observer| {
         observer.report(CommandActivity::StdinStarted);
         ObservedStdin(observer)
     });
@@ -1465,6 +1465,13 @@ fn stream_command_with_stdin(
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
         let input_writer = scope.spawn(move || -> Result<bool> {
+            // Close stdin before ending its progress report. The child can
+            // keep working after EOF, under the surrounding command stage.
+            let _progress = progress;
+            let mut stdin = ProgressWriter {
+                stdin,
+                observer: command.observer.as_ref(),
+            };
             if let Some(gate) = gate {
                 match gate.wait_blocking(is_cancelled) {
                     StartWait::Started => {}
@@ -1478,10 +1485,6 @@ fn stream_command_with_stdin(
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
             // copy of the write end is still open.
-            let mut stdin = ProgressWriter {
-                stdin,
-                observer: command.observer.as_ref(),
-            };
             let mut buffer = [0_u8; 64 * 1024];
             loop {
                 // Checking before each chunk makes large checkpoint copies
@@ -4428,6 +4431,34 @@ mod executor_tests {
             assert_eq!(bytes, payload.len());
         }
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1583: a command still running after EOF was reported as a stalled stdin stream.
+    #[test]
+    fn streamed_stdin_finishes_before_the_command_exits() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        let (finished, watch) = std::sync::mpsc::channel();
+        let command =
+            CommandSpec::new("sh", ["-c", "cat >/dev/null; sleep 600"]).observe(move |event| {
+                if matches!(event, CommandActivity::StdinFinished)
+                    && let Err(error) = finished.send(())
+                {
+                    tracing::debug!(%error, "test stopped waiting for stdin completion");
+                }
+            });
+        let child = std::thread::spawn(move || {
+            let mut input = std::io::Cursor::new(vec![b'x'; 128 * 1024]);
+            executor.execute_with_stdin(&command, &mut input)
+        });
+        let ended = watch.recv_timeout(Duration::from_secs(10));
+        let pending = !child.is_finished();
+        cancelled.store(true, Ordering::Release);
+        let outcome = child.join().unwrap();
+        ended.expect("stdin completion should arrive while the command is still running");
+        assert!(pending);
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("cancelled"), "{error}");
     }
 
     #[test]
