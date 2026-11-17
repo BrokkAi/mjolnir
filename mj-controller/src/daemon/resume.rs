@@ -665,7 +665,7 @@ impl RuntimeState {
                 branch,
                 LifecycleKind::ForceDestroy,
                 true,
-                super::lifecycle::LifecycleOrigin::Person,
+                DestroyRequest::Accepted,
             )
             .await?;
         Self::wait_lifecycle_result(started.result).await?;
@@ -679,7 +679,7 @@ impl RuntimeState {
                 BranchDisposition::Keep,
                 LifecycleKind::ForceDestroy,
                 true,
-                super::lifecycle::LifecycleOrigin::Automatic,
+                DestroyRequest::Recovery,
             )
             .await?;
         Self::wait_lifecycle_result(started.result).await?;
@@ -692,7 +692,7 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
         index: bool,
-        origin: super::lifecycle::LifecycleOrigin,
+        request: DestroyRequest,
     ) -> Result<StartedLifecycle> {
         let requested_session_id = session_id.clone();
         self.start_destroy_indexed_tree(
@@ -701,7 +701,7 @@ impl RuntimeState {
             kind,
             requested_session_id,
             index,
-            origin,
+            request,
         )
         .await
     }
@@ -772,7 +772,7 @@ impl RuntimeState {
                     false,
                     // This teardown continues its already accepted parent
                     // close/review; it is not a new automatic policy attempt.
-                    super::lifecycle::LifecycleOrigin::Person,
+                    DestroyRequest::Accepted,
                 )
                 .await?;
             Self::wait_lifecycle_result(started.result).await?;
@@ -787,7 +787,7 @@ impl RuntimeState {
         kind: LifecycleKind,
         requested_session_id: String,
         index: bool,
-        origin: super::lifecycle::LifecycleOrigin,
+        request: DestroyRequest,
     ) -> Result<StartedLifecycle> {
         let key =
             serde_json::to_string(&(kind.label(), matches!(branch, BranchDisposition::Delete)))?;
@@ -800,10 +800,7 @@ impl RuntimeState {
             .admit_prepared_lifecycle(
                 session_id,
                 kind,
-                super::lifecycle::LifecycleStart {
-                    origin,
-                    ..super::lifecycle::LifecycleStart::request(key, None, None)
-                },
+                request.lifecycle_start(key),
                 Some(acceptance),
                 move |state, session_id, cancelled| async move {
                     let _upgrade_work = _upgrade_work;
@@ -859,6 +856,32 @@ impl RuntimeState {
             )
             .await?;
         Ok(started)
+    }
+}
+
+/// How a destroy reached the daemon, which decides what a draining daemon may
+/// still do with it.
+#[derive(Clone, Copy)]
+pub(super) enum DestroyRequest {
+    /// Its requester was answered "accepted" before it ran, or it tears down
+    /// part of a tree under such a request. Nothing about it is durable, so a
+    /// stop or handoff waits for it instead of refusing it (#1191).
+    Accepted,
+    /// A client still waits for the receipt, and retries a refusal.
+    AwaitingReceipt,
+    /// Startup recovery of a destroy an earlier daemon began. The next daemon
+    /// starts it again.
+    Recovery,
+}
+
+impl DestroyRequest {
+    fn lifecycle_start(self, key: String) -> super::lifecycle::LifecycleStart {
+        let start = super::lifecycle::LifecycleStart::request(key, None, None);
+        match self {
+            Self::Accepted => start.holding_through_drain(),
+            Self::AwaitingReceipt => start,
+            Self::Recovery => start.automatic(),
+        }
     }
 }
 

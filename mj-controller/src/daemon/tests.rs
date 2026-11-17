@@ -4796,6 +4796,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
                 phase: LifecyclePhase::RetiringContainer,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             |state, id, _| async move {
                 state.bind_restart_intent(&id, "upgrade-test")?;
@@ -11359,6 +11360,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
                     phase: LifecyclePhase::Executing,
                     move_operation_id: Some(id.into()),
                     deferrable_admission: None,
+                    holds_through_drain: false,
                 },
                 move |_, _, _| async move {
                     released.notified().await;
@@ -13059,6 +13061,7 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some("pre-reservation-origin".into()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             {
                 let entered_source = entered_source.clone();
@@ -13434,6 +13437,7 @@ async fn startup_without_move_origin_ignores_historical_failed_move_after_resume
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(historical.operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             move |_, _, _| async move {
                 entered.notify_one();

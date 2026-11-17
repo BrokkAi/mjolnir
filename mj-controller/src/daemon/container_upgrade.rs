@@ -80,6 +80,7 @@ impl RuntimeState {
                 phase,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             move |state, session_id, cancelled| async move {
                 let admitted = blocking({

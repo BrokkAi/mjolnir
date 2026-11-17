@@ -363,6 +363,7 @@ impl RuntimeState {
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             Some(acceptance),
             move |state, session_id, cancelled| async move {
@@ -497,6 +498,7 @@ impl RuntimeState {
                         phase,
                         move_operation_id: Some(operation.operation_id.clone()),
                         deferrable_admission: None,
+                        holds_through_drain: false,
                     },
                     move |state, session_id, cancelled| async move {
                         state

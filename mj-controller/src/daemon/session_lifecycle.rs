@@ -87,7 +87,7 @@ impl RuntimeState {
                     },
                     LifecycleKind::ForceDestroy,
                     true,
-                    super::lifecycle::LifecycleOrigin::Person,
+                    super::resume::DestroyRequest::AwaitingReceipt,
                 )
                 .await?
             }
