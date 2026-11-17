@@ -951,6 +951,7 @@ mod tests {
                     projection_digest: String::new(),
                     pending_input: false,
                     pending_input_message: None,
+                    pending_input_request_id: None,
                 },
             )
         };
@@ -1161,6 +1162,7 @@ mod tests {
             projection_digest: String::new(),
             pending_input: false,
             pending_input_message: None,
+            pending_input_request_id: None,
         };
         full.native_agents.insert(view_id.clone(), summary.clone());
         let mut native_owners = NativeOwners::new();

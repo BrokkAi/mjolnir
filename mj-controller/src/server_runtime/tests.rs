@@ -105,6 +105,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
                 projection_digest: String::new(),
                 pending_input: false,
                 pending_input_message: None,
+                pending_input_request_id: None,
             },
         );
         runtime.metadata.session_attention.insert(

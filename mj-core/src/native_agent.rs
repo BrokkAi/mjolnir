@@ -198,21 +198,21 @@ pub struct NativeAgentSummary {
     pub pending_input: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_input_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_request_id: Option<String>,
 }
 
 impl NativeAgentSummary {
     pub fn of(view: &NativeAgentView) -> Self {
+        let pending_input = view.projection.pending_elicitations.last();
         Self {
             generation_ordinal: view.generation_ordinal,
             agent: view.agent.clone(),
             projection_ordinal: view.projection.applied_event_ordinal,
             projection_digest: view.projection.applied_event_digest.clone(),
-            pending_input: !view.projection.pending_elicitations.is_empty(),
-            pending_input_message: view
-                .projection
-                .pending_elicitations
-                .last()
-                .map(|request| request.message.clone()),
+            pending_input: pending_input.is_some(),
+            pending_input_message: pending_input.map(|request| request.message.clone()),
+            pending_input_request_id: pending_input.map(|request| request.id.clone()),
         }
     }
 
