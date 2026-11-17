@@ -21,7 +21,8 @@ set, parents choose a task type each time they delegate work. With only
 Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
-**Oracle** is also optional, and independent of the other two. Set a strong
+**Oracle** is also optional, and independent of the other two: a read-only
+advisor the agent can ask. Set a strong
 model for read-only questions that the primary agent isn't sure about; sessions
 then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
@@ -36,7 +37,7 @@ the box later to restore the same choices. Container targets are unconstrained
 inside their isolation boundary but have no YOLO permission setting, so they
 use the shared choices.
 
-**Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
+**Create** and **Move…** offer **Native** (the agent's own sub-agents) or **Mjolnir** (children Mjolnir starts and tracks) delegation. Mjolnir
 requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
 in the set the destination target uses.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
@@ -1195,6 +1196,8 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
+
+`mj quota` prints the same readings in the shell (`--refresh` probes again; `--json` for scripts). When a session stops because its profile ran out, Mjolnir works out the reset time and resumes the session then, unless Jev is off ([Sessions](/sessions/)). You can also move the session to another profile with quota left.
 
 A Codex profile on a provider that publishes no quota endpoint, and a DSH
 profile, show `API` instead of a window, because they are usage-priced. An

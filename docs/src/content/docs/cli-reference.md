@@ -523,6 +523,12 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
+- `mj hosts [--host <name>] [--json]` prints the daemon's latest reading of each
+  host's CPU, memory, and disk: one row per physical host or EC2 fleet, with the
+  targets that share it. Run it before creating a session on a busy machine, or
+  from a script that picks a target. `--host` takes a host or one of its target
+  names. It reads the daemon's last sample and does not contact the host itself,
+  so the dashboard's numbers can differ by one refresh.
 - `mj quota` prints the daemon's latest quota reading for every enabled profile,
   or one with `--profile`: billing mode, each reported window with what remains
   and its reset, and how long ago the value was fetched. A profile whose quota
