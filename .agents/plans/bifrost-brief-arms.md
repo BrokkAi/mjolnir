@@ -12,8 +12,8 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] (2026-11-17) Review cutoff correction committed c0fe5f378 before any brief or review: explicit strict UTC boundary, same-seed control redraw, all30 bug/census records unchanged, original mjolnir corpus audited only.
 - [x] Existing production-wrapper and stage B/round J mechanisms mapped; stage usage estimated from490 historical sessions and7 round J usage reports. Full-plan quota fit cannot be certified.
 - [x] Registered Sol leak/judge amendment and relation-first details before any brief; job-order seed20261119 recorded before34job shuffle.
-- [ ] Import coherent production harness sources and parameterize shared repository/corpus/sets and Terra-only judging while preserving defaults.
-- [ ] Validate changed harness interfaces offline and verify a dedicated production workspace and source clone.
+- [x] Shared harness source/scoring/leak integration reviewed;6runtime and13scoring/default offline tests pass. Real frozen-input import check confirms70records,17/13sets and3Terra/highA/BT cells.
+- [x] Changed harness interfaces validated offline; owned production workspace35b2367fbd89852d91b79743c552c3e1 and verifier workspace7dbd0e675f40b2d0792dec118a7ffba4 prepared against the owned full-history Bifrost clone.
 - [ ] Freeze relation stage jobs, input/code hashes, launch quota and estimate; write17 blind Sol briefs, check leakage, run A/BT with3 Terra/high each, judge twice and hand-check required rows.
 - [ ] Report the relation reading, cost/coverage/limitations and stage commit; suspend own carriers/writers/judges. Reestimate remaining13+40 and wait for lead direction before continuing if full plan remains below-floor risk.
 

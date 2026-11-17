@@ -25,6 +25,8 @@ import random
 import re
 import secrets
 
+from driver import CORPUS
+
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 p = argparse.ArgumentParser()
 p.add_argument("out")
@@ -102,8 +104,7 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
                         "slot": r["slot"], "index": n}
             by_diff.setdefault(done["bug"], []).append({"id": fid, "text": f})
 
-corpus = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
-          for c in map(json.loads, (pathlib.Path(__file__).resolve().parent / "corpus" / name).read_text().splitlines())}
+corpus = CORPUS
 rng = random.Random(20261114)
 diffs = sorted(by_diff)
 rng.shuffle(diffs)
