@@ -25,7 +25,7 @@ To see it working, in an isolated instance: create a session for a repository th
 - [ ] Milestone 4: mjolnir's own `mise.toml` (the `mj-dev` recipe), built and pushed with `mj image build`.
 - [x] (2026-11-17) Milestone 5: session/release constants split; default session image is Noble; daemon-container and quota containers keep the release image; docs updated (project environment/custom-image docs and skill owned by parent). All eight real harnesses passed on the implicit default; workspace clippy and focused quota tests passed. Full edited-crate suites completed with the baseline failures described below.
 - [ ] Full validation, review, commit, push.
-- [ ] Milestone 6: project tools install in the background while the agent starts; the agent is told what is being installed and when it finishes.
+- [x] (2026-11-17) Milestone 6: project tools install in the background while the agent starts; the agent is told what is being installed and when it finishes. Real Podman e2e (`mise-bg`) passed; see Surprises and Decision Log.
 
 ## Surprises & Discoveries
 
@@ -72,6 +72,13 @@ To see it working, in an isolated instance: create a session for a repository th
 - Validation note (Milestone 1): complete worker suites passed (862 unit tests plus 33 integration cases; 11 unit tests ignored). The core suite had 661 passes, four ignores and an `ETXTBSY` launching the existing cached-Node repair fixture; that one test passed alone. The controller run completed 2,675 passes and 28 ignores, with three existing API selection failures and one review-host hang. Per parent direction the whole controller suite was not repeated: all three API failures reproduced alone on this worktree and unchanged base `30d5959ec`; the review-host test also hung alone here and on that same unchanged base, where it was stopped after the parent-approved 300s execution limit. The temporary baseline worktree was removed after comparison. The affected Nitro replacement retry regression passed after updating its handwritten fake for the new HOME transaction.
 
 ## Decision Log
+
+- Decision (Milestone 6): the worker queues its two messages with `DurableRelay::deliver_agent_message`, which submits the existing `DeliverMailboxEvent` relay command to the worker's own relay (`PlainText`, source `project-tools`, `wake: false`). No daemon round trip, no new relay command or protocol number: the plain-text body is the protocol-33 shape, and `describe_mailbox_event` renders it as Mjolnir's text (like review progress). The first message is queued before the harness starts, so the agent's first turn or tool boundary carries it; the second is queued after the install, preceded by the failure notices. Keys carry the worker start time so a resumed session's messages are not deduplicated against an earlier launch's.
+  Rationale: one channel for everything Mjolnir tells an agent, delivered at tool boundary or turn start for every harness that has a mailbox transport; `wake: false` never starts a turn only to report an install.
+  Date/Author: 2026-11-17, Milestone 6 implementer, as assigned.
+- Decision (Milestone 6): "what is missing" comes from `mise install --dry-run` (fails for an unresolvable tool), `mise ls --missing --json` (tool names and requested versions) and `mise bootstrap packages status --json` (entries whose state is `missing`; a version mismatch for a `*` request is left to `apply`, a quick no-op). If any status command fails, the message names the recipe files present in the checkout instead of tool names, and the installation runs anyway so a broken recipe is reported by the failing command. When nothing is missing nothing runs and nothing is said.
+  Rationale: mise's own commands, no guessing; `ls --missing` silently omits requests mise cannot resolve, which the dry run catches.
+  Date/Author: 2026-11-17, Milestone 6 implementer.
 
 - Decision (Milestone 5): `RELEASE_CONTAINER_IMAGE` remains the build-selected agent-dev image for daemon-container mode, quota containers, and baked-worker exemptions. `DEFAULT_SESSION_IMAGE` is `docker.io/library/buildpack-deps:noble` for sessions, setup, and EC2 targets. Quota engine selection and pull policy still follow enabled runtimes, but quota images never follow their project images.
   Rationale: quota containers run harness CLIs and need the release's installed harnesses; the session base deliberately has none. There is no separate quota image setting. Parent approved removing the old custom-target image behavior.
