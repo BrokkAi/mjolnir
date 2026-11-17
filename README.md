@@ -41,6 +41,11 @@ without you.
 
 - **Sessions outlive your terminal.** Detach, close the window, or restart the
   daemon; the agent keeps working and you reattach where you left off.
+- **Know which agent needs you.** Mjolnir tells waiting from finished from
+  still working, notifies you, and keeps agents moving while you are away.
+- **Delegation across agents.** A session can hand slices of its work to
+  sub-agent sessions on a cheaper or stronger model, on any target, and
+  collect their reports.
 - **Isolation by default.** Each session can work in its own checkout, so
   agents do not trip over each other or over your working tree.
 - **Run anywhere.** Use a local directory, a Docker, Podman, or Apple
