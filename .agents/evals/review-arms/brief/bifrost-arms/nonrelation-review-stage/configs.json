@@ -1,0 +1,24 @@
+{
+  "ROOT": "/mnt/optane/review-arms-bifrost-20261116",
+  "INSTANCE": "/mnt/optane/review-arms-bifrost-20261116/default-instance",
+  "workspace": "35b2367fbd89852d91b79743c552c3e1",
+  "REPO": "/mnt/optane/tmp/d2fa-bifrost/bifrost-dev",
+  "BUNDLE": "bifrost-dev",
+  "REPO_DIR": "bifrost-dev",
+  "source_pin": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "rosters": {
+    "A": [
+      "gpt-6.1-terra:high",
+      "gpt-6.1-terra:high",
+      "gpt-6.1-terra:high"
+    ],
+    "BT": [
+      "gpt-6.1-terra:high",
+      "gpt-6.1-terra:high",
+      "gpt-6.1-terra:high"
+    ]
+  },
+  "reviewer_profiles": "normal native selection; codex4 expected",
+  "carrier_profile": "carrier",
+  "quota_floor": "codex4=25"
+}

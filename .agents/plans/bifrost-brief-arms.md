@@ -19,7 +19,8 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Register and complete one blinded contains diagnostic; read all four negative diffs and 12 brief-arm handbacks, and tabulate size/length from artifacts. Freeze these exploratory diagnostics separately; primary labels and reading remain unchanged.
 - [x] Complete and freeze all 13 non-relation writers; every session is suspended, final lint/inventory/hash checks pass, one historical-path scanner hit is classified from its captured own-workspace git diff.
 - [x] Complete paired non-relation leak checks: all 13 briefs missed by both judges, 26 hash-bound verdicts, no flags or wording edits; both Sol/high judges suspended.
-- [ ] Run the 26 registered non-relation A/BT jobs with three Terra/high reviewers each, then paired catch judging and required parent handchecks.
+- [x] Run and freeze the 26 registered non-relation A/BT jobs: 78 unique actual Terra/high outputs, clean inventories, all 26 own carriers API-confirmed suspended.
+- [ ] Complete paired non-relation catch judging, the blinded handcheck proposal, parent decisions before arm attribution, and the secondary reading.
 - [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
 
 ## Surprises & Discoveries
@@ -44,7 +45,7 @@ Decision: writers/leak checks/both catch judges use codex4 Sol/high; every revie
 
 ## Outcomes & Retrospective
 
-M1 and the primary relation stage are complete. Blind Sol briefs reduced the observed catch share from 17.6% to 7.8%, failing the registered uplift bar. The primary result is frozen in e03007684; its known recorded API-equivalent cost is $11.692545648, incomplete because carrier usage coverage is partial. The exploratory contains diagnostic found three yes, four partial and ten no labels among 17 briefs. Four negative diffs have three no labels and one partial; artifact reads do not establish reviewer attention, deference or stopping. The lead authorized continuing the 13 non-relation diffs and 40 controls without waiting after the primary report. All 13 non-relation writers are complete and suspended, with $3.237596 estimated API-equivalent cost and complete coverage. Their untouched texts are frozen before semantic leak checks; no non-relation reviewer or control role has launched.
+M1 and the primary relation stage are complete. Blind Sol briefs reduced the observed catch share from 17.6% to 7.8%, failing the registered uplift bar. The primary result is frozen in e03007684; its known recorded API-equivalent cost is $11.692545648, incomplete because carrier usage coverage is partial. The exploratory contains diagnostic found three yes, four partial and ten no labels among 17 briefs. Four negative diffs have three no labels and one partial; artifact reads do not establish reviewer attention, deference or stopping. The lead authorized continuing the 13 non-relation diffs and 40 controls without waiting after the primary report. The 13 non-relation writers and clean paired leak checks are complete. All 26 paired review jobs completed, with 78 unique Terra/high outputs and every carrier suspended. Their known recorded review-stage subtotal is $4.019188128, incomplete because carrier usage is partial. Paired catch judging and blinded handchecks are next; ordinary controls remain after that secondary reading.
 
 ## Context and Orientation
 
