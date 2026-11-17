@@ -13,7 +13,11 @@ After this work, the controller sends a body only when the receiving host cannot
 
 ## Progress
 
-- [ ] Milestone 1: per-object negotiation for every non-secret profile file; secrets in a small private bundle; project memory sent once; Move helper uses the worker store; byte accounting in logs.
+- [x] 2026-11-17 19:15Z: Implemented Milestone 1 profile negotiation, credential bundle, manifest materialization, launch accounting, and Move helper reuse.
+- [x] 2026-11-17 19:15Z: Dev-profile receiver tests passed with overlapping offers, a killed receiver, a stream wider than a pipe buffer, identical baseline/replica bytes, and private credentials. The Move helper reuse test passed against a prepublished worker.
+- [x] 2026-11-17 19:25Z: Two isolated SSH Podman launches reached idle. The cold launch sent 1,051,436 bytes and two objects. The warm launch sent 1,645 bytes and one new digest, and reused the 1 MiB fixture object.
+- [x] 2026-11-17 19:27Z: Exposed the manifest-only prewarm interface through the same receiver.
+- [ ] Milestone 1: repeat targeted checks after the prewarm interface, review the commit, and push.
 - [ ] Milestone 2: recovery copies transfer only missing payload parts against the controller's retained object set; legacy ZIP assembled on demand.
 - [ ] Milestone 3: Move negotiates Git objects with the destination and sends only missing workspace files.
 - [ ] Milestone 4: one receiver-owned content store per host storage and account, with garbage collection from durable roots, replacing the ad hoc profile and worker paths.
@@ -25,6 +29,10 @@ After this work, the controller sends a body only when the receiving host cannot
   Evidence: daemon log `logs/mj-daemon-20261117T161634.022Z-2513220.log`, `send profile content archive_bytes=15891162 shared_content_files=0`; the 18:31Z daemon log shows 15,916,921 and 15,920,437 bytes.
 - Observation: Move's helper installation bypasses the worker executable store and can stream a full executable (about 61 MiB for x86_64 Linux musl) per session or build helper, even when that build already exists on the host.
   Evidence: `transfer.rs:install_helper` versus `store.rs:store_key,store_gate`.
+
+- Observation: Codex profile configuration can carry an actual bearer token inline. The existing regression for a custom provider named by `experimental_bearer_token` confirms this, in addition to native login files and generated AWS credentials. The manifest handles ordinary settings, and inline credentials stay in the private bundle.
+- Observation: the old store uses a separate `.x` entry for owner-executable content. The receiver can pin either existing entry by SHA-256 and size, then applies the placement’s mode to a private copy. Identical bytes with different modes therefore transfer once.
+- Observation: the shared executor already drains stdout and stderr concurrently, but previously returned stdout only after stdin finished. The negotiated command observes stdout after stripping the SSH start marker and closes that reply stream on accepted command failure, including cancellation.
 
 
 ## Decision Log
@@ -42,10 +50,25 @@ After this work, the controller sends a body only when the receiving host cannot
   Rationale: one owner per fact; the two changes touch the same staging code and must not both decide profile contents.
   Date/Author: 2026-11-17, coordinator session 5992a212.
 
+- Decision: tie each profile object claim to the receiver process that will verify and publish it. The controller ships a Perl receiver using standard modules in the SSH command and feature-detects its runtime. A short filesystem metadata lock serializes pinning, claim creation, and collection. The receiver holds each digest lock through its upload and publication. A busy reply can include independent claims, which finish before the sender releases the SSH stream and polls again. Older hosts without the receiver runtime use their existing archive path.
+  Rationale: closing the channel or killing the receiver releases the locks without a guessed timeout, PID reuse, cross-controller registry, or gap between negotiation and ownership. Bundling the receiver preserves compatibility with every currently installed worker and lets the progress watchdog count pipe writes through the same executor.
+  Date/Author: 2026-11-17, Milestone 1 implementer.
+- Decision: Move adopts the existing executable store and its publication/collection ownership. Milestone 4 owns revising the worker store’s lifetime and lock scope.
+  Rationale: a cache hit needs zero upload immediately. Changing worker collection and its protected staging together is a separate implementation, as confirmed by the coordinator.
+  Date/Author: 2026-11-17, coordinator session 5992a212.
+
+- Decision: Nitro sends its profile with the existing archive path and no shared objects. Milestone 4 owns a store in the guest's trust boundary, along with its durable roots and cleanup.
+  Rationale: profile staging reaches Nitro's SSH hypervisor account before engine copy. Reusing that account's store would mix objects from distinct guests.
+  Date/Author: 2026-11-17, coordinator session 5992a212.
+
+- Decision: reviewer prewarming will use `ProfileContentManifest::try_transfer` without a staging-home destination. Only missing non-secret objects travel, using the exact negotiation, claims, and verification used by launch. Session-start prewarm scheduling belongs to #1580 worker 20760f13 after Milestone 1.
+  Rationale: prewarm should prepare receiver-owned objects before the parent requests a review, while keeping the credentials and materialized reviewer home scoped to that future session.
+  Date/Author: 2026-11-17, coordinator session 5992a212.
+
 
 ## Outcomes & Retrospective
 
-Not started.
+The new receiver pins existing blobs and publishes verified new ones to the established profile store. The scope is the receiving SSH account and storage. A manifest maps private materialized copies into the staged profile, and credential files are transferred in a separately encoded bundle that stays in private staging. The Move helper is linked from the same verified worker store as a session worker. The isolated loopback SSH Podman test reduced compressed profile bytes sent from 1,051,436 on the first launch to 1,645 on the second, a 99.84% reduction. The 1 MiB object was unchanged and stayed cached. Receiver measurements exclude the SSH framing and the manifest offer; the compressed transfer includes the manifest and credential bundle. The test accounts for small generated entries that vary by session.
 
 
 ## Context and Orientation
@@ -82,12 +105,11 @@ Milestone 4 generalizes the profile and worker stores into one receiver-owned co
 
 Work from a detached worktree, for example `~/Projects/mjolnir-wt/send-only-missing`, created from `origin/master`. Build and test on the dev profile.
 
-For Milestone 1, read `install.rs` around the profile functions named above and `shared_profile_paths`, then write the manifest and negotiation types beside them. Run the affected tests with `cargo test -p mj-controller <filter>` and `cargo clippy -p mj-controller --all-targets -- -D warnings`. Then, in an isolated instance, start a daemon and launch two sessions in a row on a Podman target over SSH (an EC2 host created for the test, or a local SSH Podman target), and compare the per-transfer log lines:
+For Milestone 1, read `install.rs` around the profile functions named above and `shared_profile_paths`, then write the manifest and negotiation types beside them. Run the affected tests with `cargo test -p brokk-mj-controller <filter>` and `cargo clippy -p brokk-mj-controller -p brokk-mj-core --all-targets -- -D warnings`. Then, in an isolated instance, start a daemon and launch two sessions in a row on a Podman target over SSH (an EC2 host created for the test, or a local SSH Podman target), and compare the per-transfer log lines:
 
-    mj --instance send-only-missing daemon status
-    grep 'send profile content' <instance log dir>/mj-daemon-*.log
+    python3 tests/e2e/profile_transfer.py --mj target/debug/mj --worker target/debug/mj-worker
 
-The first launch should send roughly today's bytes; the second should send only the private bundle and changed files. Stop the test daemon afterwards with `mj --instance send-only-missing daemon stop`.
+The fixture starts a loopback SSH server with a private home and builds a disposable target image from a preloaded agent-dev image. It drives an isolated `--instance send-only-missing` and stops that daemon during cleanup. The first launch sends the manifest, private bundle, and missing content. The second launch sends the manifest, private bundle, and any changed content. Its log lines give compressed profile-archive bytes sent and unique uncompressed object bytes offered, excluding SSH framing.
 
 
 ## Validation and Acceptance

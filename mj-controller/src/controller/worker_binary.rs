@@ -76,6 +76,7 @@ pub(super) use image_worker::*;
 mod install;
 pub(super) use install::*;
 mod store;
+pub(in crate::controller) use store::install_worker_binary;
 use store::*;
 mod microvm;
 pub(crate) use microvm::ensure_microvm_engine;

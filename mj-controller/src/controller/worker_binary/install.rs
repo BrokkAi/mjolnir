@@ -1,6 +1,10 @@
 use super::*;
+
+#[path = "profile_transfer.rs"]
+mod profile_transfer;
 use crate::targets::CommandOutput;
 use mj_core::targets::SshTrafficClass;
+pub(in crate::controller) use profile_transfer::ProfileContentManifest;
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub(super) fn append_hel_target_environment(
@@ -951,13 +955,27 @@ pub(super) fn install_worker_profile_files(
                         .purpose("upload remote container worker file"),
                 )?;
             }
-            upload_profile_archive(
-                executor,
-                ssh,
-                profile_stage,
-                &format!("{upload}/profile"),
-                shared_paths,
-            )?;
+            let staged_profile = format!("{upload}/profile");
+            match locator {
+                // A Nitro guest does not share its profile objects with the
+                // hypervisor account or another guest.
+                targets::TargetLocator::SshNitro { .. } => {
+                    upload_legacy_profile_archive(
+                        executor,
+                        ssh,
+                        profile_stage,
+                        &staged_profile,
+                        &[],
+                    )?;
+                }
+                _ => upload_profile_archive(
+                    executor,
+                    ssh,
+                    profile_stage,
+                    &staged_profile,
+                    shared_paths,
+                )?,
+            }
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
             let owned = [
@@ -1322,6 +1340,7 @@ mj_profile_restore() {
 }
 for work in "$store"/.stage-* "$store"/.retired-*; do
     [ -d "$work" ] || continue
+    [ "${work##*/}" != .stage-negotiated ] || continue
     name=$(cat -- "$work/.token" 2>/dev/null) || name=
     case $name in .stage-*) ;; *)
         mj_profile_warn_unknown "$work"; continue ;;
@@ -1582,10 +1601,6 @@ fn build_profile_archive(
     Ok(file)
 }
 
-/// One transfer per shared content set; unrelated profiles transfer together.
-/// Only querying/collecting and publishing/pinning share the store-wide gate.
-/// The destination is staging only: callers copy it into a private profile,
-/// then remove it.
 fn upload_profile_archive(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
@@ -1593,7 +1608,33 @@ fn upload_profile_archive(
     destination: &str,
     shared_paths: &[&str],
 ) -> Result<()> {
-    let entries = profile_archive_entries(source, shared_paths)?;
+    let manifest = ProfileContentManifest::from_staged(source)?;
+    if manifest.try_transfer(executor, ssh, Some(destination))? {
+        Ok(())
+    } else {
+        upload_legacy_profile_archive(executor, ssh, source, destination, shared_paths)
+    }
+}
+
+/// One transfer per shared content set; unrelated profiles transfer together.
+/// Only querying/collecting and publishing/pinning share the store-wide gate.
+/// The destination is staging only: callers copy it into a private profile,
+/// then remove it.
+fn upload_legacy_profile_archive(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+    shared_paths: &[&str],
+) -> Result<()> {
+    let mut entries = profile_archive_entries(source, shared_paths)?;
+    for entry in &mut entries {
+        if entry.key.is_some()
+            && profile_transfer::private_profile_file(&entry.path, &source.join(&entry.path))?
+        {
+            entry.key = None;
+        }
+    }
     let keys: HashSet<_> = entries
         .iter()
         .filter_map(|entry| entry.key.clone())
@@ -1662,8 +1703,9 @@ fn upload_profile_archive(
     for attempt in 0..2 {
         let mut file = build_profile_archive(source, &entries, &missing)?;
         tracing::info!(
-            archive_bytes = file.metadata()?.len(),
-            shared_content_files = missing.len(),
+            bytes_sent = file.metadata()?.len(),
+            objects_sent = missing.len(),
+            legacy = true,
             destination,
             "send profile content"
         );
@@ -2131,7 +2173,7 @@ mod profile_archive_tests {
     }
 
     fn upload(executor: &SystemTar, source: &Path, destination: &Path) -> Result<()> {
-        upload_profile_archive(
+        upload_legacy_profile_archive(
             executor,
             &SshTarget {
                 destination: "unused".into(),
@@ -2216,7 +2258,7 @@ mod profile_archive_tests {
                     reached: reached_tx,
                     release: release_rx,
                 };
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &held,
                     ssh_ref,
                     first_ref,
@@ -2230,7 +2272,7 @@ mod profile_archive_tests {
             let (done_tx, done_rx) = mpsc::channel();
             let independent = scope.spawn(move || {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     ssh_ref,
                     &second,
@@ -2242,7 +2284,7 @@ mod profile_archive_tests {
             });
             let same = scope.spawn(|| {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     &ssh,
                     &first,
@@ -2285,7 +2327,7 @@ mod profile_archive_tests {
                     reached: reached_tx,
                     release: release_rx,
                 };
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &held,
                     ssh_ref,
                     first_ref,
@@ -2298,7 +2340,7 @@ mod profile_archive_tests {
             let (done_tx, done_rx) = mpsc::channel();
             let cached = scope.spawn(move || {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     ssh_ref,
                     first_ref,

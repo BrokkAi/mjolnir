@@ -347,7 +347,7 @@ fn collect_reporting(
     }
 }
 
-pub(super) fn install_worker_binary(
+pub(in crate::controller) fn install_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,

@@ -153,6 +153,28 @@ impl std::fmt::Debug for SensitiveCommandInput {
     }
 }
 
+type StreamReplyObserver = dyn Fn(Option<&[u8]>) + Send + Sync;
+
+/// A streamed command's stdout replies, after SSH framing has been removed.
+/// End of an accepted stream is reported as `None` so input awaiting a reply
+/// can finish even when the remote command exits early.
+#[derive(Clone)]
+struct StreamReply(Arc<StreamReplyObserver>);
+
+impl PartialEq for StreamReply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StreamReply {}
+
+impl std::fmt::Debug for StreamReply {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<stream reply observer>")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub program: String,
@@ -234,6 +256,8 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
+    #[serde(skip)]
+    stream_reply: Option<StreamReply>,
 }
 
 impl CommandSpec {
@@ -263,6 +287,7 @@ impl CommandSpec {
             ssh_session_probe: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
+            stream_reply: None,
         }
     }
 
@@ -274,6 +299,14 @@ impl CommandSpec {
     #[cfg(unix)]
     pub fn arg0(mut self, arg0: impl Into<String>) -> Self {
         self.arg0 = Some(arg0.into());
+        self
+    }
+
+    pub fn with_stream_reply(
+        mut self,
+        observer: impl Fn(Option<&[u8]>) + Send + Sync + 'static,
+    ) -> Self {
+        self.stream_reply = Some(StreamReply(Arc::new(observer)));
         self
     }
 
@@ -1320,8 +1353,34 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let mut stdout_reader =
-        PipeCollector::spawn_observed(stdout, gate.cloned(), None, observer.clone());
+    let reply = command.stream_reply.as_ref();
+    let reply_observer = reply.cloned().map(|reply| {
+        let observer = observer.clone();
+        Arc::new(move |bytes: &[u8]| {
+            if !bytes.is_empty() {
+                (reply.0)(Some(bytes));
+            }
+            if let Some(observer) = &observer {
+                observer(bytes);
+            }
+        }) as CommandOutputObserver
+    });
+    let mut reply_ended = false;
+    let mut end_reply = || {
+        if !reply_ended
+            && let Some(reply) = reply
+            && gate.is_none_or(|gate| gate.phase() == crate::targets::ssh::StartPhase::Started)
+        {
+            reply_ended = true;
+            (reply.0)(None);
+        }
+    };
+    let mut stdout_reader = PipeCollector::spawn_observed(
+        stdout,
+        gate.cloned(),
+        None,
+        reply_observer.or_else(|| observer.clone()),
+    );
     let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
@@ -1373,6 +1432,7 @@ fn stream_command_with_stdin(
             }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
+                end_reply();
                 if let Err(error) = input_writer.join() {
                     tracing::warn!(
                         purpose = command.purpose.as_str(),
@@ -1380,6 +1440,9 @@ fn stream_command_with_stdin(
                     );
                 }
                 bail!("operation cancelled while {}", command.purpose);
+            }
+            if stdout_reader.is_finished() {
+                end_reply();
             }
             match if status.is_some() {
                 Ok(status)
@@ -1389,6 +1452,7 @@ fn stream_command_with_stdin(
                 Ok(observed) => status = observed,
                 Err(error) => {
                     terminate_cancellable_child(&mut child, false);
+                    end_reply();
                     if let Err(join_error) = input_writer.join() {
                         tracing::warn!(
                             purpose = command.purpose.as_str(),
@@ -1407,6 +1471,7 @@ fn stream_command_with_stdin(
                 let drained = (stdout_reader.is_finished() && stderr_reader.is_finished())
                     || exited_at.elapsed() >= IO_DRAIN_TIMEOUT;
                 if drained && !input_writer.is_finished() && !group_killed {
+                    end_reply();
                     group_killed = true;
                     if let Some(group) = &group {
                         group.kill();
