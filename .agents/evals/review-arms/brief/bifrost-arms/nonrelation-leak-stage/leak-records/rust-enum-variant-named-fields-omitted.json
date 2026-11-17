@@ -1,0 +1,28 @@
+{
+  "id": "rust-enum-variant-named-fields-omitted",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "08f91672bc0d6e8e710e0b86e91130800a27cc844d86676a0fd708e10ff0c8df",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust declarations and shared indexing, but does not identify missing traversal of named fields inside enum struct variants or the resulting absent field declarations.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes Rust declaration indexing and parent-child storage but never identifies missing descent into named fields of enum struct variants.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

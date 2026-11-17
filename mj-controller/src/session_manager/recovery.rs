@@ -20,6 +20,7 @@ pub(crate) enum WorkerRecoveryOutcome {
     Starting,
     TargetMissing,
     Suppressed,
+    AdmissionRefused(crate::recovery_gate::Refusal),
     WorkspaceMissing(PathBuf),
     /// The target's disk is full. Nothing was restarted: a restart writes to
     /// the target, and a worker started there would stop again at once.
@@ -130,36 +131,60 @@ pub(super) async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
 ) -> Result<WorkerRecoveryOutcome> {
-    recover_worker_for_session(plan, restart_unresponsive, None).await
+    recover_worker_for_session(Arc::default(), plan, restart_unresponsive, None).await
 }
 
 pub(super) async fn recover_worker_for_session(
+    gate: Arc<crate::recovery_gate::RecoveryGate>,
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<String>,
 ) -> Result<WorkerRecoveryOutcome> {
+    let admission = if let Some(id) = &session_id {
+        match gate.try_start(id, crate::recovery_gate::BackgroundWork::RelayRecovery) {
+            Ok(admission) => Some(admission),
+            Err(refusal) => {
+                tracing::debug!(session_id = id, holders = ?refusal.holders, "relay recovery deferred");
+                return Ok(WorkerRecoveryOutcome::AdmissionRefused(refusal));
+            }
+        }
+    } else {
+        None
+    };
     tokio::task::spawn_blocking(move || {
-        let executor = CancellableProcessExecutor::with_timeout(WORKER_RESTART_TIMEOUT);
-        recover_worker_controlled(plan, restart_unresponsive, session_id.as_deref(), &executor)
+        let cancelled = admission
+            .as_ref()
+            .map(crate::recovery_gate::RecoveryAttempt::cancellation)
+            .unwrap_or_default();
+        let executor =
+            CancellableProcessExecutor::new(cancelled).with_deadline(WORKER_RESTART_TIMEOUT);
+        recover_worker_admitted(
+            plan,
+            restart_unresponsive,
+            session_id.as_deref(),
+            admission
+                .as_ref()
+                .map(crate::recovery_gate::HoldsSession::admission)
+                .as_ref(),
+            &executor,
+        )
     })
     .await
     .context("worker recovery task failed")?
 }
 
-pub(crate) fn recover_worker_controlled(
+pub(crate) fn recover_worker_admitted(
     mut plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,
+    admission: Option<&crate::recovery_gate::SessionAdmission>,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
-    // Background recovery never waits while its actor's control mailbox is
-    // needed by the current lifecycle owner.
     let owner = match session_id {
-        Some(id) => match crate::worker_lifecycle::WorkerPermit::try_acquire(id, "relay recovery")?
-        {
-            Some(owner) => Some(owner),
-            None => return Ok(WorkerRecoveryOutcome::Suppressed),
-        },
+        Some(id) => Some(crate::worker_lifecycle::WorkerPermit::acquire(
+            id,
+            admission.context("relay recovery has no session admission")?,
+        )?),
         None => {
             #[cfg(not(test))]
             bail!("worker recovery requires a session identity");
@@ -200,17 +225,13 @@ pub(crate) fn recover_worker_controlled(
         {
             return Ok(WorkerRecoveryOutcome::TargetMissing);
         }
-        let output = executor
-            .execute(&plan.liveness_probe)
-            .context("probe relay worker liveness")?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                plan.liveness_probe.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        // The probe plan stages the current worker, then runs it.
+        let output = plan
+            .liveness_probe
+            .execute(executor)
+            .context("probe relay worker liveness")?
+            .pop()
+            .context("the liveness probe produced no output")?;
         // A replacement may still be replaying its journal after the daemon
         // that launched it has exited. A lost handshake is not permission to kill
         // that live process; only a liveness probe proving death permits restart.
@@ -339,4 +360,29 @@ fn restart_owned_worker(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn recover_worker_controlled(
+    plan: WorkerRecoveryPlan,
+    restart_unresponsive: bool,
+    session_id: Option<&str>,
+    executor: &impl CommandExecutor,
+) -> Result<WorkerRecoveryOutcome> {
+    let admission = match session_id {
+        Some(id) => match crate::controller::test_support::worker_test_gate()
+            .try_start(id, crate::recovery_gate::BackgroundWork::RelayRecovery)
+        {
+            Ok(a) => Some(crate::recovery_gate::SessionAdmission::Background(a)),
+            Err(_) => return Ok(WorkerRecoveryOutcome::Suppressed),
+        },
+        None => None,
+    };
+    recover_worker_admitted(
+        plan,
+        restart_unresponsive,
+        session_id,
+        admission.as_ref(),
+        executor,
+    )
 }

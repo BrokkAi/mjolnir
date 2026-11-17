@@ -1,0 +1,114 @@
+{
+  "attention": "inactive",
+  "background_tasks": [],
+  "subagents": {
+    "mode": "none"
+  },
+  "at": "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+  "base": "d112084d980f1401cf511b551c71ae5c41d76f5a",
+  "no_later_history": true,
+  "id": "0f23bb69a200485d9306560e463ae6a7",
+  "workspace_id": "35b2367fbd89852d91b79743c552c3e1",
+  "title": "review-arms 28221751",
+  "harness_kind": "dsh",
+  "profile_id": "carrier",
+  "target_id": "podman",
+  "bundle_id": "bifrost-dev",
+  "state": "suspended",
+  "lifecycle": "suspended",
+  "chat_phase": "closed",
+  "is_idle": false,
+  "activity_state": {
+    "state": "closed"
+  },
+  "has_error": false,
+  "created_at": "2026-11-17T10:05:03Z",
+  "updated_at": "2026-11-17T10:15:25Z",
+  "last_turn_outcome": {
+    "command_id": "mailbox-wake-e37a77b4523870a3b28f37c453a1297f",
+    "accepted_ordinal": 1591,
+    "turn_start_position": 1592,
+    "completed_ordinal": 1599,
+    "completed_at_ms": 1794910107848,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "config_options": [
+    {
+      "key": "model",
+      "label": "Model",
+      "current": "deepseek-v4-pro",
+      "choices": [
+        {
+          "value": "deepseek-v4-pro",
+          "name": "deepseek-v4-pro"
+        }
+      ]
+    },
+    {
+      "key": "effort",
+      "label": "Thinking effort",
+      "current": "high",
+      "choices": [
+        {
+          "value": "none",
+          "name": "None",
+          "description": "Answer without thinking; cheapest and fastest."
+        },
+        {
+          "value": "low",
+          "name": "Low",
+          "description": "Brief thinking before answering."
+        },
+        {
+          "value": "high",
+          "name": "High",
+          "description": "DeepSeek's default thinking effort."
+        },
+        {
+          "value": "max",
+          "name": "Max",
+          "description": "Longest thinking, for hard problems."
+        }
+      ]
+    },
+    {
+      "key": "mode",
+      "label": "Session mode",
+      "current": "plan",
+      "choices": [
+        {
+          "value": "agent",
+          "name": "Agent"
+        },
+        {
+          "value": "plan",
+          "name": "Plan"
+        }
+      ]
+    },
+    {
+      "key": "web_fetch",
+      "label": "web_fetch access",
+      "current": "disabled",
+      "choices": [
+        {
+          "value": "enabled",
+          "name": "Enabled"
+        },
+        {
+          "value": "disabled",
+          "name": "Disabled"
+        }
+      ]
+    }
+  ],
+  "turn_controls": {
+    "status": "unavailable",
+    "primary": null,
+    "interrupt": null,
+    "message": null
+  }
+}

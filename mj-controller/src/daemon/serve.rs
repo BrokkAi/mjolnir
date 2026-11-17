@@ -128,7 +128,7 @@ pub(super) async fn forward_in_process_session_request(
         RemoteSessionRequest::Sync { session_id, reply } => {
             let result = async { manager.session(session_id).await?.sync_now().await }
                 .await
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
             let _ = reply.send(result);
         }
         RemoteSessionRequest::RespondElicitation {
@@ -702,9 +702,13 @@ pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let activity = crate::upgrade::activity("database operation")?;
+    let owner = crate::worker_lifecycle::capture();
     tokio::task::spawn_blocking(move || {
         let _activity = activity;
-        work()
+        match owner {
+            Some(owner) => owner.scope_blocking(work),
+            None => work(),
+        }
     })
     .await
     .context("daemon background database task panicked")?

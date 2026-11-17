@@ -15,18 +15,31 @@ available choices can come from the provider's current catalog.
 Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
 when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
-cannot be set without Straightforward. These choices apply globally. With both
+cannot be set without Straightforward. These choices apply to every target
+unless you split YOLO targets below. With both
 set, parents choose a task type each time they delegate work. With only
 Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
 
-**Oracle** is also optional, and independent of the other two. Set a strong
+**Oracle** is also optional, and independent of the other two: a read-only
+advisor the agent can ask. Set a strong
 model for read-only questions that the primary agent isn't sure about; sessions
 then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
-**Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task.
+**Use the same subagents on all targets** is checked by default. Uncheck it to
+give SSH bare targets with `permissions = "yolo"` their own Straightforward,
+Subtle, and Oracle choices under **YOLO Target Subagents**. The maximum
+concurrent children limit stays shared. The YOLO group starts empty; an empty
+group means no Mjolnir sub-agents or oracle on YOLO targets. Checking the box
+again hides the group and makes its values do nothing, but keeps them: uncheck
+the box later to restore the same choices. Container targets are unconstrained
+inside their isolation boundary but have no YOLO permission setting, so they
+use the shared choices.
+
+**Create** and **Move…** offer **Native** (the agent's own sub-agents) or **Mjolnir** (children Mjolnir starts and tracks) delegation. Mjolnir
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
+in the set the destination target uses.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
@@ -893,6 +906,7 @@ from the profile home:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 | OpenCode | `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `skills/`, and the logins from `opencode.db`, as `.data/opencode/mjolnir-credentials.json` |
+| Antigravity | `antigravity-cli/antigravity-oauth-token`, `AGENTS.md`, `skills/` |
 | DSH | `AGENTS.md`, `skills/` (staged, but DSH does not read skills) |
 
 Staging follows symbolic links: a linked file or directory is copied with the
@@ -925,10 +939,21 @@ Mjolnir then adds its own files to the staged home:
   that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
   ordinary tools named `mj-agents_spawn` and so on instead of reachable only
   through scripts, and, unless the session uses OpenCode's own delegation
-  (Native), its own `subagent` tool. OpenCode names a tool
+  (Native), its own `subagent` tool, and that carry the GitHub CLI approval
+  under configured approvals. OpenCode names a tool
   `<server>_<tool>`, so another server can carry the same name as a Mjolnir
   tool; the worker therefore never answers OpenCode's permission requests,
   and under configured approvals the person approves Mjolnir's tools too;
+- the GitHub CLI approval in the harness's own configuration, under configured
+  approvals: `rules/mj-gh.rules` for Codex, `config.toml` for Kimi Code and
+  Grok Build, muse-acp's command prefixes for Muse Code, and agy's project
+  grants for Antigravity. Claude Code takes `Bash(gh:*)` in the `allowedTools`
+  of each session-open request, so the grant is scoped to the session and no
+  settings file is edited. OpenCode reads its configuration documents in order
+  and takes the last matching rule, so its approval goes in
+  `OPENCODE_CONFIG_CONTENT`, the document Mjolnir supplies last, where a
+  project's or profile's later rule cannot shadow it. DSH has no configuration
+  file, so its `gh` permission requests are answered by the worker;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an
@@ -1171,6 +1196,8 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Muse Code | Native subscription usage windows and reset times, when reported. The daemon refreshes the Muse login itself, so the reading does not depend on Muse having run. |
 | OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
 | DSH | No quota endpoint; DeepSeek bills by usage, so the profile shows `API`. |
+
+`mj quota` prints the same readings in the shell (`--refresh` probes again; `--json` for scripts). When a session stops because its profile ran out, Mjolnir works out the reset time and resumes the session then, unless Jev is off ([Sessions](/sessions/)). You can also move the session to another profile with quota left.
 
 A Codex profile on a provider that publishes no quota endpoint, and a DSH
 profile, show `API` instead of a window, because they are usage-priced. An

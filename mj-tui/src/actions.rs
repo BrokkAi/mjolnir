@@ -22,6 +22,15 @@ use crate::{DashboardAction, DashboardState, Focus};
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
+    NotificationOpen,
+    NotificationSend,
+    NotificationRestore,
+    NotificationDefault,
+    NotificationClear,
+    NotificationSkip,
+    NotificationClearImportant,
+    NotificationScrollUp,
+    NotificationScrollDown,
     GoAfk,
     OpenSession,
     PinSession,
@@ -110,6 +119,7 @@ pub enum CommandId {
 /// path that only exists while the configuration is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
+    Notifications,
     Global,
     Settings,
     Pane,
@@ -124,6 +134,7 @@ impl Scope {
     /// The heading the command palette prints above this scope.
     pub(crate) const fn heading(self) -> &'static str {
         match self {
+            Self::Notifications => "Notifications pane",
             Self::Global => "Anywhere",
             Self::Settings => "Settings",
             Self::Pane => "Panes",
@@ -150,24 +161,62 @@ pub(crate) enum Availability {
 
 /// One plain key a focused pane answers, with the text used to name it.
 ///
-/// Pane keys are never configurable: they are the bare letters, Enter, Tab,
-/// Space, and `?` that only reach a pane, because the composer is a separate
-/// focus and reads those characters as text. Everything a user can rebind is
-/// a [`KeyAction`] on the spec instead.
+/// Pane keys are fixed in the registry. Text-bearing panes use modifiers so
+/// bare characters remain editor input. Configurable global bindings are
+/// [`KeyAction`] entries on the spec instead.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyHint {
     pub(crate) code: KeyCode,
     pub(crate) label: &'static str,
+    modifiers: KeyModifiers,
+    exact: bool,
 }
 
 impl KeyHint {
     const fn plain(code: KeyCode, label: &'static str) -> Self {
-        Self { code, label }
+        Self {
+            code,
+            label,
+            modifiers: KeyModifiers::NONE,
+            exact: false,
+        }
+    }
+
+    const fn alt(code: KeyCode, label: &'static str) -> Self {
+        Self {
+            code,
+            label,
+            modifiers: KeyModifiers::ALT,
+            exact: true,
+        }
+    }
+
+    const fn enter() -> Self {
+        Self {
+            code: KeyCode::Enter,
+            label: "Enter",
+            modifiers: KeyModifiers::NONE,
+            exact: true,
+        }
+    }
+
+    pub(crate) fn accepts_focus(self, focus: Focus) -> bool {
+        if !matches!(self.code, KeyCode::Char(_)) {
+            return true;
+        }
+        match focus {
+            Focus::Prompt => false,
+            Focus::Notifications => !self.modifiers.is_empty(),
+            _ => true,
+        }
     }
 
     /// Whether a pressed key is this hint. `plain` is the caller's reading of
     /// "no accelerator and no Alt", computed once per key press.
     fn matches(self, key: KeyEvent, plain: bool) -> bool {
+        if self.exact {
+            return self.code == key.code && key.modifiers == self.modifiers;
+        }
         if self.code != key.code {
             return false;
         }
@@ -201,7 +250,7 @@ pub(crate) struct CommandSpec {
     pub(crate) label: &'static str,
     pub(crate) description: &'static str,
     pub(crate) scope: Scope,
-    /// Plain keys a focused pane answers. Not configurable.
+    /// Keys a focused pane answers. Not configurable.
     pub(crate) pane_keys: &'static [KeyHint],
     /// The configurable action that also runs this command, if any.
     pub(crate) action: Option<KeyAction>,
@@ -553,6 +602,119 @@ fn operation_in_flight(dashboard: &DashboardState) -> Availability {
 /// Every command the surface has. The order here is the order the footer
 /// prints its hints and the command palette groups its entries.
 pub(crate) static COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::NotificationOpen,
+        label: "Go to Session",
+        description: "Open the notification session.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt+g")],
+        action: None,
+        footer: footer_word!("session"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationSend,
+        label: "Send",
+        description: "Send the quick reply to its session.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint {
+            code: KeyCode::Enter,
+            label: "Ctrl+Enter",
+            modifiers: KeyModifiers::CONTROL,
+            exact: true,
+        }],
+        action: None,
+        footer: footer_word!("send"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationRestore,
+        label: "Restore unsent",
+        description: "Restore a retained unsent reply without submitting it.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Enter, "Alt+Enter")],
+        action: None,
+        footer: footer_word!("restore"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_restore_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationDefault,
+        label: "Reply or open session",
+        description: "Send a nonempty quick reply, otherwise open the session.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::enter()],
+        action: None,
+        footer: footer_word!("send/session"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 1,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationClear,
+        label: "Clear & Next",
+        description: "Clear & Next in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Char('n'), "Alt+n")],
+        action: None,
+        footer: footer_word!("next"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_clear_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationSkip,
+        label: "Skip",
+        description: "Skip in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Char('s'), "Alt+s")],
+        action: None,
+        footer: footer_word!("skip"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationClearImportant,
+        label: "Clear all !",
+        description: "Clear all ! in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Char('c'), "Alt+c")],
+        action: None,
+        footer: footer_word!("all !"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_important_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationScrollUp,
+        label: "Scroll notification up",
+        description: "Scroll notification up in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Up, "Alt+↑")],
+        action: None,
+        footer: footer_word!("scroll"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationScrollDown,
+        label: "Scroll notification down",
+        description: "Scroll notification down in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::Down, "Alt+↓")],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
     CommandSpec {
         id: CommandId::ChangeGoSetup,
         label: "Change fast-start setup",
@@ -1562,12 +1724,46 @@ pub(crate) fn spec(id: CommandId) -> &'static CommandSpec {
 /// [`pane_command_for_key`]);
 /// it is listed here so the footer can offer it while the configuration is
 /// still empty.
+fn notification_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_entries().is_empty() {
+        Availability::Hidden
+    } else {
+        Availability::Ready
+    }
+}
+fn notification_restore_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_has_recoverable_reply() {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
+fn notification_clear_available(dashboard: &DashboardState) -> Availability {
+    match dashboard.notification_entries().first() {
+        Some(entry) if entry.target.is_some() => Availability::Ready,
+        Some(_) => Availability::Blocked("Answer this request in the session."),
+        None => Availability::Hidden,
+    }
+}
+fn notification_important_available(dashboard: &DashboardState) -> Availability {
+    if dashboard
+        .notification_entries()
+        .iter()
+        .any(|entry| entry.level == crate::AttentionLevel::Important && entry.target.is_some())
+    {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
+
 fn scope_applies(scope: Scope, focus: Focus) -> bool {
     match scope {
         Scope::Global | Scope::Settings | Scope::Pane | Scope::Setup => true,
         Scope::Sessions | Scope::Session => focus == Focus::Sessions,
         Scope::Targets => focus == Focus::Targets,
         Scope::Quota => focus == Focus::Quota,
+        Scope::Notifications => focus == Focus::Notifications,
     }
 }
 
@@ -1592,9 +1788,7 @@ pub(crate) fn pane_command_for_key(key: KeyEvent, focus: Focus) -> Option<Comman
             spec.scope != Scope::Setup
                 && scope_applies(spec.scope, focus)
                 && spec.pane_keys.iter().any(|hint| {
-                    // At the composer a bare letter is text, so no pane
-                    // character key reaches the panes from there.
-                    if focus == Focus::Prompt && matches!(hint.code, KeyCode::Char(_)) {
+                    if !hint.accepts_focus(focus) {
                         return false;
                     }
                     hint.matches(key, plain)
@@ -1891,6 +2085,21 @@ impl DashboardState {
                     }
                     None => DashboardAction::None,
                 }
+            }
+            CommandId::NotificationOpen
+            | CommandId::NotificationSend
+            | CommandId::NotificationRestore
+            | CommandId::NotificationDefault => self.notification_action(id),
+            CommandId::NotificationClear => self.notification_clear(),
+            CommandId::NotificationSkip => self.notification_skip(),
+            CommandId::NotificationClearImportant => self.notification_clear_important(),
+            CommandId::NotificationScrollUp => {
+                self.scroll_notification(-1);
+                DashboardAction::None
+            }
+            CommandId::NotificationScrollDown => {
+                self.scroll_notification(1);
+                DashboardAction::None
             }
             CommandId::IgnoreNotifications => self
                 .command_session()
@@ -2439,19 +2648,24 @@ mod tests {
     /// registry order, rather than the user's intent, decide what happens.
     #[test]
     fn no_two_commands_claim_the_same_key_in_one_pane() {
-        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
-            let mut seen: Vec<KeyCode> = Vec::new();
+        for focus in [
+            Focus::Sessions,
+            Focus::Targets,
+            Focus::Quota,
+            Focus::Notifications,
+        ] {
+            let mut seen = Vec::new();
             for entry in COMMANDS {
                 if entry.scope == Scope::Setup || !scope_applies(entry.scope, focus) {
                     continue;
                 }
                 for hint in entry.pane_keys {
                     assert!(
-                        !seen.contains(&hint.code),
+                        !seen.contains(&(hint.code, hint.modifiers)),
                         "{:?} is claimed twice at {focus:?}",
                         hint.code
                     );
-                    seen.push(hint.code);
+                    seen.push((hint.code, hint.modifiers));
                 }
             }
         }

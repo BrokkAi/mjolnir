@@ -21,7 +21,7 @@ pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
         if result.deferred {
             tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
         } else if result.cancelled {
-            tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
+            tracing::info!(session_id = %result.session_id, %error, reason = "cancelled by a session operation (close, suspend, destroy, move or upgrade)", "daemon recovery checkpoint cancelled");
         } else {
             tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
         }
@@ -94,7 +94,78 @@ impl<E> DaemonStageReportingExecutor<E> {
     }
 }
 
+impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
+    fn staged_stream(
+        &self,
+        command: &CommandSpec,
+        run: impl FnOnce(&CommandSpec) -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        self.staged(command, "session streaming command stage finished", || {
+            let Some(operation_id) = &self.operation_id else {
+                return run(command);
+            };
+            let Some(stream_id) = self
+                .state
+                .allocate_lifecycle_stream_id(&self.session_id, operation_id)
+            else {
+                return run(command);
+            };
+            let state = self.state.clone();
+            let session_id = self.session_id.clone();
+            let operation_id = operation_id.clone();
+            let purpose = command.purpose.clone();
+            let observed = command.clone().observe(move |activity| {
+                state.record_lifecycle_command_activity(
+                    &session_id,
+                    &operation_id,
+                    stream_id,
+                    &purpose,
+                    activity,
+                );
+            });
+            run(&observed)
+        })
+    }
+
+    /// Hold the command's lifecycle stage while `run` executes it, and log the
+    /// outcome.
+    fn staged(
+        &self,
+        command: &CommandSpec,
+        finished: &'static str,
+        run: impl FnOnce() -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        let _stage = command
+            .stage
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
+        let started = std::time::Instant::now();
+        let result = run();
+        tracing::info!(
+            session_id = %self.session_id,
+            stage = command
+                .stage
+                .as_ref()
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
+            purpose = %command.purpose,
+            duration_ms = started.elapsed().as_millis(),
+            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
+            "{finished}"
+        );
+        result
+    }
+}
+
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
@@ -116,25 +187,9 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute(command);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session command stage finished"
-        );
-        result
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute(command)
+        })
     }
 
     fn execute_with_stdin(
@@ -142,25 +197,28 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         command: &CommandSpec,
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute_with_stdin(command, input);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session streaming command stage finished"
-        );
-        result
+        self.staged_stream(command, |command| {
+            self.inner.execute_with_stdin(command, input)
+        })
+    }
+
+    // Staging that precedes a timeout-bound command is still session work, so
+    // it shows in the lifecycle stage and the log like any other command.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute_without_deadline(command)
+        })
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.staged_stream(command, |command| {
+            self.inner
+                .execute_with_stdin_without_deadline(command, input)
+        })
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -210,8 +268,46 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         Ok(())
     }
 
+    fn yield_admission_if_resumable(&self) -> bool {
+        let owner = self.state.owner();
+        let Some(active) = owner.lifecycle.get(&self.session_id) else {
+            return false;
+        };
+        // A sub-agent close is replayed from its durable request by the next
+        // daemon; other stops have no such record before they commit.
+        if self.operation_id.as_ref() != Some(&active.operation_id)
+            || active.kind != LifecycleKind::Suspend
+            || !owner
+                .controller()
+                .state
+                .subagents
+                .contains_key(&self.session_id)
+        {
+            return false;
+        }
+        active
+            .upgrade_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some()
+    }
+
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
-        let work = crate::upgrade::activity_unless_draining(label)?;
+        // Synchronous callers include workspace copies. Hand the wait off
+        // async workers, and let the gate wake it on closure or drain lapse.
+        let admitted = mj_core::runtime::off_async_worker(|| {
+            crate::upgrade::gate().enter_after_draining(label)
+        });
+        if admitted.is_err() {
+            let mut owner = self.state.owner();
+            if let Some(active) = owner.lifecycle.get_mut(&self.session_id)
+                && self.operation_id.as_ref() == Some(&active.operation_id)
+            {
+                active.interrupt_for_shutdown();
+            }
+        }
+        let work = admitted?;
         let owner = self.state.owner();
         let active = owner
             .lifecycle

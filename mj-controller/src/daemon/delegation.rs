@@ -30,6 +30,11 @@ enum ChildCompletion {
     Held {
         give_up_at_ms: i64,
     },
+    /// The reviewer's turn ended while its worker still holds a handback the
+    /// daemon has not executed. The worker's queue owns that request, so the
+    /// child is not yet missing a handback. Judged again when the handback
+    /// executes or the child's next observation retires the request.
+    AwaitingHandback,
     /// A hold follow-up was sent or is queued. Judged again at the child's
     /// next observation, which is how a follow-up the queue dropped is seen.
     FollowUpSent,
@@ -133,8 +138,16 @@ impl CompletionRetry {
 }
 
 enum Completed {
-    Executed(StoredDelegationResult, bool),
+    /// The durable result, and how its first delivery attempt ended (a
+    /// real failure carries its cause).
+    Executed(
+        StoredDelegationResult,
+        std::result::Result<Delivery, String>,
+    ),
     Delivered,
+    /// The owner closed during a deferral; the entry stays with the daemon
+    /// that is exiting.
+    Stopped,
     Unaccepted,
     QuotaSources(Vec<crate::quota::QuotaRefreshRequest>),
 }
@@ -200,6 +213,10 @@ async fn run(
     let mut identities = BTreeMap::<tokio::task::Id, Identity>::new();
     let mut observations = BTreeMap::<String, DelegationObservation>::new();
     let mut completions = tokio::task::JoinSet::new();
+    // A request's durable execution, told before its delivery starts: a
+    // reviewer's ended turn waits for the execution of its handback, never for
+    // the delivery of the result.
+    let (executed_tx, mut executed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     // Each completion carries the observation versions it judged, so a change
     // that arrives while it runs is never lost behind the wait it ends in.
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64, ObservationVersions)>::new();
@@ -231,6 +248,8 @@ async fn run(
                 let backend = backend.clone();
                 let runtime = state.clone();
                 let parent = id.0.clone();
+                let executed_tx = executed_tx.clone();
+                let deferral = dispatch.deferral(&id);
                 tracing::debug!(parent_session_id = %parent, request_id = %id.1, "delegation dispatch");
                 let task = jobs.spawn(async move {
                     match job {
@@ -259,18 +278,25 @@ async fn run(
                                 };
                                 Some(work)
                             };
-                            let result = backend.execute_subagent_tool_durable(parent.clone(), request).await?;
+                            let result = backend
+                                .execute_subagent_tool_durable(parent.clone(), request)
+                                .await?;
+                            // The requester is the session whose ended turn may
+                            // be waiting on this request.
+                            let _ = executed_tx.send(parent.clone());
                             // Durable results can wait for the replacement daemon.
                             drop(_admission);
-                            let delivered = deliver(&runtime, &parent, result.clone()).await;
-                            if let Err(error) = &delivered {
-                                tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
-                            }
-                            Ok(Completed::Executed(result, delivered.is_ok()))
+                            let delivered =
+                                deliver_background(&runtime, &parent, result.clone(), &deferral)
+                                    .await
+                                    .map_err(|error| format!("{error:#}"));
+                            Ok(Completed::Executed(result, delivered))
                         }
                         Job::Deliver(result) => {
-                            deliver(&runtime, &parent, result).await?;
-                            Ok(Completed::Delivered)
+                            match deliver_background(&runtime, &parent, result, &deferral).await? {
+                                Delivery::Delivered => Ok(Completed::Delivered),
+                                Delivery::Stopped => Ok(Completed::Stopped),
+                            }
                         }
                     }
                 });
@@ -341,6 +367,13 @@ async fn run(
                     }
                 }
             }
+            Some(requester) = executed_rx.recv() => {
+                // The execution is a version of what the requester's pending
+                // completion judges: one still running sees it changed and
+                // judges again, and one already waiting is woken.
+                versions.bump(&requester);
+                retry.remove(&requester);
+            }
             completed = jobs.join_next_with_id(), if !jobs.is_empty() => {
                 let Some(completed) = completed else { continue };
                 let (task_id, result) = match completed {
@@ -365,22 +398,42 @@ async fn run(
                 if let Some(id) = identities.remove(&task_id) {
                     match result {
                         Ok(Completed::Executed(result, delivered)) => {
-                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1, delivered,
+                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1,
+                                delivered = matches!(delivered, Ok(Delivery::Delivered)),
                                 is_error = result.result.is_error, "delegation execution completed");
                             dispatch.executed(&id, result);
-                            dispatch.delivered(&id, delivered);
+                            match delivered {
+                                Ok(Delivery::Delivered) => {
+                                    dispatch.delivered(&id, true, None);
+                                }
+                                // The exiting daemon keeps the durable result for the next one.
+                                Ok(Delivery::Stopped) => {}
+                                Err(error) => {
+                                    if dispatch.delivered(&id, false, Some(error.clone())) {
+                                        tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation delivery failed; retaining result for retry");
+                                    } else {
+                                        tracing::debug!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation delivery failed; retaining result for retry");
+                                    }
+                                }
+                            }
                         },
                         Ok(Completed::Delivered) => {
                             tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation result delivered");
-                            dispatch.delivered(&id, true);
+                            dispatch.delivered(&id, true, None);
+                        }
+                        Ok(Completed::Stopped) => {
+                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation delivery stopped by shutdown");
                         }
                         Ok(Completed::Unaccepted) => dispatch.unaccepted(&id),
                         Ok(Completed::QuotaSources(_)) => {
                             tracing::error!("untracked quota source scan completion");
                         }
                         Err(error) => {
-                            tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
-                            dispatch.failed_task(&id);
+                            if dispatch.failed_task(&id, error.to_string()) {
+                                tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
+                            } else {
+                                tracing::debug!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
+                            }
                         }
                     }
                 }
@@ -402,9 +455,9 @@ async fn run(
                         // A wait ends at the next observation. One that arrived
                         // while this completion ran has already been seen, so
                         // the child is judged again at once instead of waiting.
-                        Ok(ChildCompletion::FollowUpSent | ChildCompletion::Held { .. }) if versions.changed_since(&judged, &id, None) => {}
+                        Ok(ChildCompletion::AwaitingHandback | ChildCompletion::FollowUpSent | ChildCompletion::Held { .. }) if versions.changed_since(&judged, &id, None) => {}
                         Ok(ChildCompletion::ParkAfterParentTurn { ref parent }) if versions.changed_since(&judged, &id, Some(parent)) => {}
-                        Ok(ChildCompletion::FollowUpSent) => {
+                        Ok(ChildCompletion::AwaitingHandback | ChildCompletion::FollowUpSent) => {
                             retry.insert(id, CompletionRetry::waiting(ordinal, None));
                         }
                         Ok(ChildCompletion::Held { give_up_at_ms }) => {
@@ -495,6 +548,23 @@ async fn complete_child(
     // handoff admission: during startup the host defers the answer until its
     // interrupted-review sweep ends, and a handoff must not wait on reviews.
     let review_open = state.child_awaits_review(&child_id).await;
+    // A handback the daemon already executed is no longer the queue's: its
+    // durable result says what happened (a rejected one recorded no report),
+    // even while the worker still lists it until the result is delivered.
+    let handback_queued = {
+        let child = child_id.clone();
+        let queued = observation.queued_handbacks();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            for request in queued {
+                match crate::database::load_delegation(&child, &request)? {
+                    Some((_, Some(_))) => {}
+                    _ => return Ok(true),
+                }
+            }
+            Ok(false)
+        })
+        .await??
+    };
     let Ok(work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
         return Ok(ChildCompletion::Draining);
     };
@@ -504,6 +574,7 @@ async fn complete_child(
         work,
         relation,
         ChildSeen {
+            handback_queued,
             in_flight: observation.in_flight,
             liveness: observation.work_liveness,
         },
@@ -515,6 +586,9 @@ async fn complete_child(
 
 /// What the worker published beside a child's ended turn.
 struct ChildSeen {
+    /// The worker's queue still holds a handback request from this child that
+    /// has no completion yet: the request, not the turn, decides its report.
+    handback_queued: bool,
     /// Commands queued or running on the child.
     in_flight: Vec<String>,
     /// Whether the processes the turn left running are still alive.
@@ -531,6 +605,7 @@ async fn settle_child(
     review_open: bool,
 ) -> Result<ChildCompletion> {
     let ChildSeen {
+        handback_queued,
         in_flight,
         liveness,
     } = seen;
@@ -544,11 +619,35 @@ async fn settle_child(
                 .handback
                 .filter(|handback| handback.answers(&command_id))
                 .map(|handback| handback.message);
-        state
-            .review_host()
-            .reviewer_finished(relation.parent_session_id, child_id.clone(), answer)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        // The worker's queue owns a handback until the daemon has executed
+        // it. A turn can end first, when the worker answered its caller after
+        // its reply budget with the request still unexecuted (#1580), so a
+        // turn end alone never decides that a reviewer did not hand back.
+        if answer.is_none() && handback_queued {
+            return Ok(ChildCompletion::AwaitingHandback);
+        }
+        match answer {
+            Some(answer) => {
+                state
+                    .review_host()
+                    .reviewer_finished(relation.parent_session_id, child_id.clone(), Some(answer))
+                    .await
+            }
+            None => {
+                state
+                    .review_host()
+                    .reviewer_ended_without_handback(
+                        relation.parent_session_id,
+                        child_id.clone(),
+                        format!(
+                            "the reviewer's turn ended ({}) without a handback",
+                            outcome.outcome
+                        ),
+                    )
+                    .await
+            }
+        }
+        .map_err(anyhow::Error::msg)?;
         // The review host owns reviewer closes and retries a failing one with
         // backoff; closing here as well resubmitted it every second (#1456).
         state.review_host().close_child(child_id);
@@ -665,45 +764,116 @@ async fn settle_child(
     }
 }
 
-async fn deliver(
-    runtime: &RuntimeState,
-    parent: &str,
-    result: StoredDelegationResult,
-) -> Result<()> {
-    let _work = crate::upgrade::activity_unless_draining("delegation result delivery")?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        deliver_result(runtime, parent, result),
-    )
-    .await
-    .context("delegation result delivery timed out; durable result retained")?
-}
-
-async fn deliver_result(
+// Results are durable and request-ID keyed. The dispatch phase owns one attempt
+// until it settles, with backoff on failure. Handoff must not wait for actor
+// queues or relay traffic: coordinator cancellation aborts these jobs and the
+// next daemon rebuilds them from the worker queue and stored results.
+async fn deliver_background(
     runtime: &RuntimeState,
     parent: &str,
     stored_result: StoredDelegationResult,
-) -> Result<()> {
+    deferral: &std::sync::atomic::AtomicBool,
+) -> Result<Delivery> {
+    let Some(admission) = admit_delivery(&runtime.recovery_observer.gate, parent, deferral).await
+    else {
+        return Ok(Delivery::Stopped);
+    };
     let handle = runtime.workspace_session_handle(parent).await?;
-    let mut lease = handle.lease_connection().await?;
+    deliver(&handle, &admission, stored_result, async {
+        if let Err(error) = runtime.reconcile_parent_reports(parent).await {
+            tracing::warn!(
+                parent_session_id = parent,
+                error = format!("{error:#}"),
+                "could not enqueue the parent's finished child reports after result delivery"
+            );
+        }
+    })
+    .await?;
+    Ok(Delivery::Delivered)
+}
+
+/// How a delivery attempt ended when it did not fail.
+enum Delivery {
+    Delivered,
+    /// The gate or the daemon closed while the delivery waited. The next
+    /// daemon rebuilds the delivery from the durable result.
+    Stopped,
+}
+
+/// A refusal is a deferral, not a failure: the delivery waits on the gate's
+/// own publications for the holder to release the session (or for a drain to
+/// lapse) and tries again. It holds no admission while it waits and blocks no
+/// other session's delivery, which runs in its own task. `None` means the
+/// owner closed. Failures are not handled here, so they keep their WARN and
+/// backoff.
+async fn admit_delivery(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
+    parent: &str,
+    deferral: &std::sync::atomic::AtomicBool,
+) -> Option<crate::recovery_gate::RecoveryAttempt> {
+    use crate::recovery_gate::{BackgroundWork, RefusalCause};
+    let kind = BackgroundWork::DelegationDelivery;
+    let mut changed = gate.subscribe();
+    let mut deferred_by = None;
+    loop {
+        let refusal = match gate.try_start(parent, kind) {
+            Ok(admission) => {
+                deferral.store(false, std::sync::atomic::Ordering::Release);
+                return Some(admission);
+            }
+            Err(refusal) => refusal,
+        };
+        // While deferred, the attempt gives its dispatch slot to other sessions.
+        deferral.store(true, std::sync::atomic::Ordering::Release);
+        if deferred_by.as_ref() != Some(&refusal.holders) {
+            tracing::debug!(parent_session_id = parent, holders = %refusal.holders.join(" and "), "delegation delivery deferred");
+            deferred_by = Some(refusal.holders.clone());
+        }
+        let proceed = match refusal.cause {
+            RefusalCause::Closed => false,
+            RefusalCause::DaemonDraining => crate::upgrade::gate().wait_after_draining().await,
+            RefusalCause::SessionHeld => {
+                gate.wait_for_background_release(parent, kind, &mut changed)
+                    .await
+            }
+        };
+        if !proceed {
+            return None;
+        }
+    }
+}
+
+/// Dispatch keeps per-request ownership while foreground Move yields to the
+/// delivery it needs. Check the durable completion under that admission so
+/// a cached retry after acknowledgement sends no duplicate completion RPC.
+pub(crate) async fn deliver(
+    handle: &crate::session_manager::ManagedSessionHandle,
+    admission: &crate::recovery_gate::RecoveryAttempt,
+    stored_result: StoredDelegationResult,
+    reconcile_reports: impl std::future::Future<Output = ()> + Send,
+) -> Result<()> {
+    let parent = handle.session_id().to_owned();
     let request_id = stored_result.result.request_id.clone();
-    let delivered = lease
-        .connection_mut()
-        .complete_subagent_request(stored_result.result.clone())
-        .await;
+    let current = tokio::task::spawn_blocking({
+        let parent = parent.clone();
+        let request_id = request_id.clone();
+        move || crate::database::load_delegation(&parent, &request_id)
+    })
+    .await??;
+    let Some((_, result)) = current else {
+        return Ok(());
+    };
+    let result = result.context("delegation delivery has no durable result")?;
+    let mut lease = handle.lease_connection(admission).await?;
+    let delivered = tokio::select! {
+        result = lease.connection_mut().complete_subagent_request(result.result) => result,
+        () = crate::recovery_gate::wait_until_cancelled(admission) => return Err(anyhow::anyhow!("delegation delivery preempted")),
+    };
     lease.release();
     delivered?;
-    if let Err(error) = runtime.reconcile_parent_reports(parent).await {
-        tracing::warn!(
-            parent_session_id = parent,
-            error = format!("{error:#}"),
-            "could not enqueue the parent's finished child reports after result delivery"
-        );
-    }
-    let parent = parent.to_owned();
-    let acknowledged_parent = parent.clone();
+    reconcile_reports.await;
     tokio::task::spawn_blocking(move || {
-        crate::database::acknowledge_delegation(acknowledged_parent, request_id)
+        crate::database::acknowledge_delegation(parent, request_id)
     })
     .await??;
     Ok(())
@@ -1016,6 +1186,72 @@ mod tests {
         );
     }
 
+    // Hard-won: #1580: a reviewer's turn ended while its worker still held the unexecuted handback, and the missing row failed the whole review group.
+    #[tokio::test]
+    async fn a_reviewer_whose_handback_is_still_queued_is_not_scored_as_missing_one() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_QUEUED_HANDBACK";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_reviewer_whose_handback_is_still_queued_is_not_scored_as_missing_one",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-queued-handback")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("queued handback").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
+        relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+        relation.handback_tool = true;
+        crate::database::save_subagent_session(&child, &relation).unwrap();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            Arc::new(BusyThenParked(AtomicUsize::new(0))),
+        ));
+        state.install_report_backend(&backend);
+        let outcome = store_finished_turn("child", "turn", 10);
+        let stored = crate::database::load_subagent("child").unwrap().unwrap();
+        // The turn ended, the worker answered its caller after its reply
+        // budget, and the daemon has not executed the handback it holds. The
+        // review host is never asked: nothing says the reviewer failed.
+        assert!(matches!(
+            settle_child(
+                &state,
+                &backend,
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                stored,
+                ChildSeen {
+                    handback_queued: true,
+                    in_flight: Vec::new(),
+                    liveness: None,
+                },
+                outcome,
+                false,
+            )
+            .await
+            .unwrap(),
+            ChildCompletion::AwaitingHandback
+        ));
+    }
+
     // A child that asked for review and ended its turn is waiting for the
     // verdict. The completion loop must not treat that as a missing handback:
     // no reminder, no notice, no park, until the review is gone.
@@ -1069,6 +1305,7 @@ mod tests {
                 crate::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 ChildSeen {
+                    handback_queued: false,
                     in_flight: Vec::new(),
                     liveness: None,
                 },
@@ -1531,6 +1768,7 @@ mod tests {
                     crate::upgrade::activity_unless_draining("test completion").unwrap(),
                     stored,
                     ChildSeen {
+                        handback_queued: false,
                         in_flight: Vec::new(),
                         liveness,
                     },
@@ -1769,6 +2007,7 @@ mod tests {
                 ChildCompletion::FollowUpSent => "FollowUpSent",
                 ChildCompletion::ParkAfterParentTurn { .. } => "ParkAfterParentTurn",
                 ChildCompletion::AwaitingReview => "AwaitingReview",
+                ChildCompletion::AwaitingHandback => "AwaitingHandback",
                 ChildCompletion::Draining => "Draining",
                 ChildCompletion::Settled => "Settled",
             }
@@ -2119,5 +2358,35 @@ mod tests {
             held.state.park_subagent("child".into()).await.unwrap(),
             ParkOutcome::Busy
         );
+    }
+
+    // Hard-won: #1574: a delivery refused by a holder re-polled every second and
+    // warned each time instead of waiting for the holder's release.
+    #[tokio::test(start_paused = true)]
+    async fn a_delivery_refused_by_a_held_session_waits_for_its_release() {
+        use crate::recovery_gate::{BackgroundWork, RecoveryGate};
+        let gate = Arc::new(RecoveryGate::default());
+        let copy = gate
+            .try_start("parent", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let other = gate
+            .try_start("other", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let deferral = std::sync::atomic::AtomicBool::new(false);
+        let mut waiting = Box::pin(admit_delivery(&gate, "parent", &deferral));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(
+            deferral.load(Ordering::Acquire),
+            "a deferred wait frees its dispatch slot"
+        );
+        // Paused time: a retry timer would fire, a publication-driven wait does not.
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // Another session's release is not this session's.
+        drop(other);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(copy);
+        assert!(futures::poll!(&mut waiting).is_ready());
+        assert!(!deferral.load(Ordering::Acquire));
     }
 }

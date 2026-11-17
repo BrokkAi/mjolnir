@@ -1,0 +1,221 @@
+{
+  "source_path": "/mnt/optane/tmp/bf13143-prompts/mvp/h6-results/h6/SYNTHESIS.md",
+  "source_sha256": "706ef2a2d77704b0f204f04141b32c14c91862f15754c14e7e230f2e4ad7b439",
+  "source_bytes": 16117,
+  "source_newline_handling": "source UTF8 physical line numbers; artifact uses LF; extracted content unchanged",
+  "artifact_path": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/definition-source.md",
+  "artifact_sha256": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa",
+  "metric": "template applicability (reach unmeasured)",
+  "allowed_template_ids": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T8a",
+    "T8b"
+  ],
+  "allowed_no_match_label": "none",
+  "disallowed_standalone_ids": {
+    "T7": "folded into T2/T3 by source56 first sentence",
+    "T8": "split into T8a/T8b; use only separately defined IDs"
+  },
+  "extraction_ranges": [
+    {
+      "lines": [
+        41,
+        41
+      ],
+      "part": "template shape heading, literal"
+    },
+    {
+      "lines": [
+        45,
+        54
+      ],
+      "part": "table columns1\u20134 only; delete last status column without rewriting preceding cells"
+    },
+    {
+      "lines": [
+        56,
+        56
+      ],
+      "part": "first sentence through artifact seed.; exclude subsequent named-fact example"
+    },
+    {
+      "lines": [
+        10,
+        10
+      ],
+      "part": "original reach rule only, explicitly context/not executed Bifrost metric"
+    }
+  ],
+  "literal_segments": [
+    {
+      "source_lines": [
+        41,
+        41
+      ],
+      "selection": "full line",
+      "source_byte_start": 4677,
+      "source_byte_end_exclusive": 4794,
+      "literal_content_sha256": "39611c9993d4e7195e8971d17061003e7de2bc0a417d6ef95827c7990f2a9ba2",
+      "artifact_byte_start": 280,
+      "artifact_byte_end_exclusive": 398
+    },
+    {
+      "source_lines": [
+        45,
+        45
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 4900,
+      "source_byte_end_exclusive": 4936,
+      "literal_content_sha256": "eca8c3250546729f886f070cde8d62bab9239031d4a6189f72d93c97fcc00693",
+      "artifact_byte_start": 399,
+      "artifact_byte_end_exclusive": 436
+    },
+    {
+      "source_lines": [
+        46,
+        46
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 4952,
+      "source_byte_end_exclusive": 4969,
+      "literal_content_sha256": "4da1ec6f47782090102dc16bda978efb5655fbf2ddce0f84ecf1faf79a930f2d",
+      "artifact_byte_start": 436,
+      "artifact_byte_end_exclusive": 454
+    },
+    {
+      "source_lines": [
+        47,
+        47
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 4974,
+      "source_byte_end_exclusive": 5108,
+      "literal_content_sha256": "e5741907b8a4cb6d325a7cd752d9ae8d0c0fcd26f9d00257efeb3226ce9f26e7",
+      "artifact_byte_start": 454,
+      "artifact_byte_end_exclusive": 589
+    },
+    {
+      "source_lines": [
+        48,
+        48
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 5144,
+      "source_byte_end_exclusive": 5451,
+      "literal_content_sha256": "526cf1c033b3d05e21a7568cedc4072b4ff70afb9e41983f688d7ba453bdb937",
+      "artifact_byte_start": 589,
+      "artifact_byte_end_exclusive": 897
+    },
+    {
+      "source_lines": [
+        49,
+        49
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 5537,
+      "source_byte_end_exclusive": 5714,
+      "literal_content_sha256": "c508541d224c754b907d910070bd2d5b587e36879d8780d6e9e71061df9ee5c3",
+      "artifact_byte_start": 897,
+      "artifact_byte_end_exclusive": 1075
+    },
+    {
+      "source_lines": [
+        50,
+        50
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 5742,
+      "source_byte_end_exclusive": 5850,
+      "literal_content_sha256": "f0e3b7537adf1c313c0a60c05539b42aa5ddb12a25cdd0a57c6222952a5e4d52",
+      "artifact_byte_start": 1075,
+      "artifact_byte_end_exclusive": 1184
+    },
+    {
+      "source_lines": [
+        51,
+        51
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 5860,
+      "source_byte_end_exclusive": 5968,
+      "literal_content_sha256": "aab288635f59f5521117526cf53ca38b25d62fc51eb644b9e61589365cac3d12",
+      "artifact_byte_start": 1184,
+      "artifact_byte_end_exclusive": 1293
+    },
+    {
+      "source_lines": [
+        52,
+        52
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 6031,
+      "source_byte_end_exclusive": 6154,
+      "literal_content_sha256": "1abf1d00225d9b1f6a101758c85a8f20529d6cb85fbbffa6c8d838c946451303",
+      "artifact_byte_start": 1293,
+      "artifact_byte_end_exclusive": 1417
+    },
+    {
+      "source_lines": [
+        53,
+        53
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 6240,
+      "source_byte_end_exclusive": 6413,
+      "literal_content_sha256": "728e1916875248945e780b65f4b48c076e39cb4699da1a6f91f2a94595bac0c4",
+      "artifact_byte_start": 1417,
+      "artifact_byte_end_exclusive": 1591
+    },
+    {
+      "source_lines": [
+        54,
+        54
+      ],
+      "selection": "literal contiguous prefix: table columns1\u20134; status-today column5 omitted",
+      "source_byte_start": 6481,
+      "source_byte_end_exclusive": 6704,
+      "literal_content_sha256": "dedb4a18e4100489011784533f0d373ccdd304636a56ea90d6f080f361b55aa8",
+      "artifact_byte_start": 1591,
+      "artifact_byte_end_exclusive": 1815
+    },
+    {
+      "source_lines": [
+        56,
+        56
+      ],
+      "selection": "first sentence only; named-fact example in remaining sentence excluded",
+      "source_byte_start": 6721,
+      "source_byte_end_exclusive": 6837,
+      "literal_content_sha256": "796eb418715a4775422736aa2a8641d568d86548d1c342c750f182f16cf5f2de",
+      "artifact_byte_start": 1847,
+      "artifact_byte_end_exclusive": 1964
+    },
+    {
+      "source_lines": [
+        10,
+        10
+      ],
+      "selection": "full line",
+      "source_byte_start": 827,
+      "source_byte_end_exclusive": 977,
+      "literal_content_sha256": "8a824bb0eda002c7d548f12484b922ab022fc01738db3221e34d640d32f9d29f",
+      "artifact_byte_start": 2152,
+      "artifact_byte_end_exclusive": 2303
+    }
+  ],
+  "generated_text": "Artifact title, purpose/exclusion note, section labels and not-executed disclaimer are generated scaffolding, not source quotes. All template cells/rules are literal source substrings.",
+  "excluded": "All original per-fact outcomes, coverage/result tables, named-fact examples, counts, result classifications, runtime/latency measurements, rechecks, rankings/tickets and status-today column. No Bifrost labels/facts/queries read or assessed during extraction.",
+  "ambiguities": [
+    "No standalone T7 definition: folded into T2/T3. T8a/T8b are separate allowed IDs; T8 is not a final ID.",
+    "T3 refers to T2; retain both definitions. Source step text contains historical alternatives such as references_of as master stand-in and slice A Known(Str); retained literally as definition wording, not verified current engine support.",
+    "Definition shape says<=3steps/onerelation/diffseed. Labels alone may not prove every proposed seed is visible in actualdiff; future applicability judgment is not executed reach.",
+    "Original Y/P/N rule retained only to distinguish decisive fact from anchor/half-fact; assay result should be templateID ornone, never an engine success claim."
+  ],
+  "assessment_output_schema": "Not established here: parent owns instruction/schema preparation. Only allowed template IDs plus none are supplied; no labels or scoring performed."
+}

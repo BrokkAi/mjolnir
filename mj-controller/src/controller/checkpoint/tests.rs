@@ -502,6 +502,29 @@ impl ExportExecutor {
     }
 }
 impl CommandExecutor for ExportExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.borrow_mut().push(command.purpose.clone());
         Ok(CommandOutput {
@@ -640,7 +663,7 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         let worker_binary = directory.path().join("hel-test-worker");
         std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test legacy export",
         )
@@ -1210,7 +1233,9 @@ fn latch_relay_child_serves_stdio() {
             })).unwrap()).unwrap();
             }
             #[cfg(unix)]
-            if running && relay.operational_state().active_prompt.is_none() {
+            if running && relay.operational_state().active_prompt.is_none()
+                && !Path::new(&root).join("cancellation-accepted").exists()
+            {
                 let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
                     request_id: "seed-running-request".into(),
                     protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
@@ -1469,6 +1494,11 @@ fn latch_relay_child_serves_stdio() {
                             RelayCommandOutcome::Cancelled,
                         )
                         .expect("complete the cancellation");
+                    if Path::new(&root).join("unsettled-cancellation").exists() {
+                        std::fs::write(Path::new(&root).join("cancellation-accepted"), b"accepted")
+                            .unwrap();
+                        continue;
+                    }
                     relay
                         .record_command_completed(
                             &prompt_id,
@@ -1524,16 +1554,25 @@ fn hold_named_relay_command(request: &mj_core::relay::RelayRequest) {
     }
 }
 
-fn record_test_subagent_admission(relay_root: &Path, open: bool) {
-    let queue_path = relay_root
+fn test_subagent_queue_path(relay_root: &Path) -> PathBuf {
+    relay_root
         .parent()
         .expect("relay root parent")
         .join(LATCH_RELAY_SESSION)
-        .join("subagents.json");
-    let mut queue: serde_json::Value = std::fs::read(&queue_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+        .join("subagents.json")
+}
+fn read_test_subagent_queue(path: &Path) -> serde_json::Value {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).expect("parse fixture sub-agent queue"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::json!({"requests": {}, "results": {}})
+        }
+        Err(error) => panic!("read fixture sub-agent queue: {error}"),
+    }
+}
+fn record_test_subagent_admission(relay_root: &Path, open: bool) {
+    let queue_path = test_subagent_queue_path(relay_root);
+    let mut queue = read_test_subagent_queue(&queue_path);
     let transitions = queue["admission_transitions"].as_array_mut().map(|items| {
         items.push(serde_json::Value::Bool(open));
     });
@@ -1541,27 +1580,87 @@ fn record_test_subagent_admission(relay_root: &Path, open: bool) {
         queue["admission_transitions"] = serde_json::json!([open]);
     }
     queue["mutating_admission_open"] = serde_json::Value::Bool(open);
-    std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
+    mj_core::config::atomic_write(&queue_path, &serde_json::to_vec(&queue).unwrap())
         .expect("persist fake worker sub-agent admission");
 }
 fn subagent_connection_response(
     request: &mj_core::relay::RelayRequestEnvelope,
 ) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    let queue_path =
+        std::env::var_os(LATCH_RELAY_ROOT).map(|root| test_subagent_queue_path(Path::new(&root)));
+    let mut queue = queue_path
+        .as_ref()
+        .map(|path| read_test_subagent_queue(path))
+        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    let requests = || {
+        queue["requests"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolRequest>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let results = || {
+        queue["results"]
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.values())
+            .map(|value| {
+                serde_json::from_value::<mj_core::subagent::SubagentToolResult>(value.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
     let payload = match &request.request {
         mj_core::relay::RelayRequest::PollSubagentQueue { acknowledged } => {
             mj_core::relay::RelayResponsePayload::SubagentQueue {
                 page: mj_core::subagent::SubagentQueuePage {
                     sequence: acknowledged.unwrap_or(0) + 1,
-                    changes: Vec::new(),
+                    changes: requests()
+                        .into_iter()
+                        .map(mj_core::subagent::SubagentQueueChange::Request)
+                        .chain(results().iter().map(|result| {
+                            mj_core::subagent::SubagentQueueChange::Completed(
+                                mj_core::subagent::SubagentCompletion::from(result),
+                            )
+                        }))
+                        .collect(),
                     has_more: false,
                 },
             }
         }
         mj_core::relay::RelayRequest::SubagentRequests => {
             mj_core::relay::RelayResponsePayload::SubagentRequests {
-                requests: Vec::new(),
-                results: Vec::new(),
+                requests: requests(),
+                results: results(),
             }
+        }
+        mj_core::relay::RelayRequest::CompleteSubagentRequest { result } => {
+            let path = queue_path.as_ref().expect("fixture queue root");
+            queue["requests"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&result.request_id);
+            queue["results"].as_object_mut().unwrap().insert(
+                result.request_id.clone(),
+                serde_json::to_value(result).unwrap(),
+            );
+            mj_core::config::atomic_write(path, &serde_json::to_vec(&queue).unwrap()).unwrap();
+            use std::io::Write as _;
+            writeln!(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.with_extension("deliveries"))
+                    .unwrap(),
+                "{}",
+                result.request_id
+            )
+            .unwrap();
+            mj_core::relay::RelayResponsePayload::SubagentRequestCompleted
         }
         mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
             mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
@@ -1576,7 +1675,7 @@ fn subagent_connection_response(
             mj_core::relay::RelayResponsePayload::ChangeObserved {
                 latest_ordinal: *after_ordinal,
                 state_digest: state_digest.clone().unwrap_or_default(),
-                subagent_queue_changed: false,
+                subagent_queue_changed: !requests().is_empty() || !results().is_empty(),
             }
         }
         _ => return None,
@@ -1717,7 +1816,12 @@ async fn latch_a_live_checkpoint(
         .await
         .unwrap();
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let mut relay = ControllerRelayLease::Managed {
         handle: handle.clone(),
         lease: Some(lease),
@@ -1786,10 +1890,14 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         .await
         .unwrap();
     assert!(
-        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-            .await
-            .unwrap()
-            .is_none()
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     handle
         .submit(
@@ -1865,7 +1973,7 @@ async fn live_resume_discards_queue_before_native_readiness() {
     let backend = targets::TargetLocator::LocalBare {
         worker_root: root.to_string_lossy().into_owned(),
     };
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+    let owner = crate::controller::test_support::worker_test_permit(
         LATCH_RELAY_SESSION,
         "test discard readiness",
     )
@@ -1932,7 +2040,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: targets::CommandPlan {
@@ -1941,7 +2049,8 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
                 "touch",
                 [restarted.to_string_lossy().into_owned()],
             )],
-        },
+        }
+        .into(),
     });
     let channels = crate::session_manager::spawn_session_manager().unwrap();
     channels.targets.send(vec![target]).unwrap();
@@ -1952,10 +2061,17 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         .unwrap();
     handle.sync_now().await.unwrap();
     let ordinal = handle.view().snapshot.unwrap().operational.latest_ordinal;
+    let admission = channels
+        .control
+        .session_gate
+        .try_start(
+            LATCH_RELAY_SESSION,
+            crate::recovery_gate::BackgroundWork::WorkerReplacement,
+        )
+        .unwrap();
     let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test swap")
-            .unwrap()
-            .unwrap();
+        crate::worker_lifecycle::WorkerPermit::acquire(LATCH_RELAY_SESSION, &admission).unwrap();
+    drop(admission);
     owner
         .scope_blocking(|| {
             owner.begin_restart(&durable_target, String::new())?;
@@ -2064,10 +2180,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     let reviewer = root.path().join("upgrade-held-reviewer");
     std::fs::write(&reviewer, b"review capture still running").unwrap();
     assert!(
-        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-            .await
-            .unwrap()
-            .is_none()
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert!(
         reviewer.exists(),
@@ -2080,10 +2200,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     );
     std::fs::remove_file(reviewer).unwrap();
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-        .await
-        .unwrap()
-        .expect("idle worker");
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("idle worker");
     assert_eq!(lease.protocol_version(), protocol);
     assert!(lease.verify_for_upgrade().await.unwrap());
     assert_eq!(
@@ -2101,10 +2225,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     assert_eq!(operational.goal, preserved_goal);
     drop(lease);
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-        .await
-        .unwrap()
-        .expect("abandoned barrier recovered");
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("abandoned barrier recovered");
     assert!(lease.verify_for_upgrade().await.unwrap());
     assert_eq!(
         lease.lease.connection_mut().operational().goal,
@@ -2674,6 +2802,29 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.refused(command)
         }
@@ -2810,6 +2961,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let executor = RecordingExecutor::default();
     let latched = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2864,12 +3016,18 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         )
         .await
         .unwrap();
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let before = connection.connection_mut().sync().await.unwrap();
     assert_eq!(before.operational.execution, RelayExecutionState::Running);
     connection.release();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2883,7 +3041,12 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         matches!(deferred, Err(ref error) if error.downcast_ref::<CheckpointDeferred>().is_some())
     );
     wait_until_the_actor_serves_again(&handle).await;
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let after = connection.connection_mut().sync().await.unwrap();
     assert_eq!(after.operational.execution, RelayExecutionState::Running);
     assert!(after.operational.checkpoint_barrier.is_none());
@@ -2941,6 +3104,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 
     let changed = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -3033,6 +3197,29 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     }
 
     impl CommandExecutor for StagingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -3138,6 +3325,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let executor = StagingExecutor::default();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -3185,7 +3373,8 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
-        _worker_owner: crate::worker_lifecycle::WorkerPermit::try_acquire(
+        admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+        _worker_owner: crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test checkpoint",
         )
@@ -3400,9 +3589,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
         .unwrap()
         .operational
         .recovery_floor_ordinal;
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     workspace.verify().await.unwrap();
     drop(workspace);
     wait_until_the_actor_serves_again(&handle).await;
@@ -3415,9 +3608,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
             .checkpoint_barrier
             .is_none()
     );
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     let submitting = handle.clone();
     let mut prompt = tokio::spawn(async move {
         submitting
@@ -3447,9 +3644,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     assert!(after.operational.checkpoint_barrier.is_none());
     assert_eq!(after.operational.recovery_floor_ordinal, before);
     assert!(
-        IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-            .await
-            .is_err(),
+        IdleWorkspaceLease::acquire(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .is_err(),
         "a queued or running prompt must prevent file injection"
     );
 }
@@ -3618,6 +3819,29 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         purposes: std::sync::Mutex<Vec<String>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             ProcessExecutor.execute(command)
@@ -3654,6 +3878,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let executor = RecordingExecutor::default();
     let deferred = controller
         .suspend_session_for_move(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -3730,6 +3955,29 @@ struct SucceedingExecutor;
 
 #[cfg(unix)]
 impl CommandExecutor for SucceedingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         Ok(CommandOutput {
             status: 0,
@@ -3762,6 +4010,29 @@ impl RestartCheckpointExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RestartCheckpointExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.purposes.lock().unwrap().push(command.purpose.clone());
         targets::ProcessExecutor.execute(command)
@@ -3829,7 +4100,7 @@ pub(crate) async fn close_cut_controller(
 /// [`close_cut_controller`], with the stand-in worker holding a running turn
 /// when `running`.
 #[cfg(unix)]
-async fn close_cut_controller_with(
+pub(crate) async fn close_cut_controller_with(
     state: SessionState,
     running: bool,
 ) -> (
@@ -3957,6 +4228,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     let (mut controller, channels, _handle) = close_cut_controller(SessionState::Running).await;
     let suspended = controller
         .suspend_session_managed_controlled(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -3993,6 +4265,29 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     #[derive(Default)]
     struct RefuseExport(std::sync::Mutex<Option<bool>>);
     impl CommandExecutor for RefuseExport {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             SucceedingExecutor.execute(command)
         }
@@ -4014,6 +4309,7 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     let executor = RefuseExport::default();
     let error = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4055,6 +4351,7 @@ async fn an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn()
     wait_until_the_actor_serves_again(&handle).await;
     let error = controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4135,6 +4432,29 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         name: String,
     }
     impl CommandExecutor for BusyEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let stdout = match command.purpose.as_str() {
@@ -4192,6 +4512,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
     };
     let error = controller
         .upgrade_container_worker(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &mut plan,
             false,
@@ -4320,6 +4641,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     };
     controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4399,6 +4721,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     let (mut controller, channels, handle) = close_cut_controller(SessionState::Closing).await;
     let suspended = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4434,7 +4757,12 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     // The barrier is gone and the relay was never sealed, so the session can
     // take work again.
     wait_until_the_actor_serves_again(&handle).await;
-    let mut lease = handle.lease_connection().await.unwrap();
+    let mut lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let snapshot = lease.connection_mut().sync().await.unwrap();
     lease.release();
     assert_eq!(snapshot.operational.checkpoint_barrier, None);
@@ -4467,11 +4795,13 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         config: Default::default(),
         state: State::default(),
     };
-    let entry = controller.checkpoint_session("session-1");
+    let admission = crate::controller::test_support::session_admission("session-1");
+    let entry = controller.checkpoint_session(&admission, "session-1");
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
+        &admission,
         "session-1",
         &executor,
         None,
@@ -4568,7 +4898,12 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
         "the job must use the actor's connection, not open another"
     );
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let deferred = run_status(&handle).await.unwrap_err();
     assert!(
         crate::session_manager::RelayJobDeferred::marks(&deferred),

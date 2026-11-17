@@ -576,12 +576,22 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
 /// A session is an overlay on the account's login environment. Reconstruct that
 /// base instead of maintaining a second list of target, profile, harness and
 /// shell overrides here. The existing identity also covers older workers.
-fn configure_host_daemon_environment(command: &mut std::process::Command) -> Result<()> {
+fn host_daemon_login_environment() -> Result<Option<mj_core::login_environment::Environment>> {
     if std::env::var_os("MJ_SESSION_ID").is_some()
         || std::env::var_os("MJ_SESSION_BASH_ENV").is_some()
     {
-        let mut environment = mj_core::login_environment::discover()
-            .context("restore account login environment for the daemon")?;
+        return mj_core::login_environment::discover()
+            .map(Some)
+            .context("restore account login environment for the daemon");
+    }
+    Ok(None)
+}
+
+fn configure_host_daemon_environment(
+    command: &mut std::process::Command,
+    login_environment: Option<mj_core::login_environment::Environment>,
+) -> Result<()> {
+    if let Some(mut environment) = login_environment {
         for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
             // Absence is significant too: a login script must not redirect the
             // instance selected by this client.
@@ -645,11 +655,8 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             let log_offset = fs::metadata(&log_path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let executable = daemon_launch_executable()?;
-            let mut command = std::process::Command::new(executable);
-            configure_host_daemon_environment(&mut command)?;
+            let mut command = host_daemon_command()?;
             command
-                .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
@@ -659,13 +666,6 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             // launcher chooses them.
             command.env_remove("MJ_DAEMON_LISTEN");
             command.env_remove("MJ_DAEMON_TOKEN");
-            // The program runs through `/proc/self/exe` on Linux, which `ps`
-            // would otherwise show as the daemon's name. `mj daemon-run` is
-            // what a person looks for (launch finding R13-9); nothing reads
-            // the daemon's argv[0], and the checks that recognize a daemon
-            // read argv[1].
-            #[cfg(unix)]
-            std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
             Ok(LaunchedDaemon {
                 pid,
@@ -676,6 +676,87 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
     })
     .await
     .context("spawn daemon task failed")?
+}
+
+fn host_daemon_command() -> Result<std::process::Command> {
+    use std::process::Command;
+
+    let login_environment = host_daemon_login_environment()?;
+    #[cfg(target_os = "linux")]
+    if let Some((systemd_run, runtime_dir)) = daemon_scope_launcher(login_environment.as_ref()) {
+        // Resolve PATH before the launcher changes into the daemon data directory.
+        let mut command = Command::new(std::path::absolute(systemd_run)?);
+        let instance = mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned());
+        let client = std::process::id();
+        // systemd-run execs the daemon itself. Refer to the live client inode
+        // explicitly because /proc/self/exe would point to systemd-run there.
+        command
+            .args(["--user", "--scope", "--quiet", "--collect"])
+            .arg(format!("--description=Mjolnir daemon ({instance})"))
+            .args(["--", &format!("/proc/{client}/exe"), "daemon-run"]);
+        configure_host_daemon_environment(&mut command, login_environment)?;
+        command.env("XDG_RUNTIME_DIR", runtime_dir);
+        return Ok(command);
+    }
+
+    let mut command = Command::new(daemon_launch_executable()?);
+    command.arg("daemon-run");
+    // Keep the direct launch recognizable in ps as mj daemon-run (R13-9).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::arg0(&mut command, "mj");
+    configure_host_daemon_environment(&mut command, login_environment)?;
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_scope_launcher(
+    login_environment: Option<&mj_core::login_environment::Environment>,
+) -> Option<(PathBuf, PathBuf)> {
+    // Check the environment systemd-run will receive, including when a session
+    // client restores the account's login environment.
+    let variable = |name| match login_environment {
+        Some(environment) => environment.get(name).map(std::ffi::OsString::from),
+        None => std::env::var_os(name),
+    };
+    // SAFETY: geteuid only reads the caller's effective user ID.
+    let uid = unsafe { libc::geteuid() };
+    // A restored login environment can omit the runtime directory PAM assigns.
+    let runtime_dir = variable("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
+    if !runtime_dir.join("systemd/private").exists() {
+        return None;
+    }
+    let user_service = format!("user@{uid}.service");
+    let cgroups = fs::read_to_string("/proc/self/cgroup").ok()?;
+    if cgroups
+        .lines()
+        .filter_map(|line| line.splitn(3, ':').nth(2))
+        .any(|path| {
+            Path::new(path)
+                .iter()
+                .any(|component| component == user_service.as_str())
+        })
+    {
+        return None;
+    }
+    // #1584: cgroup v2 checks write access at the common ancestor, so
+    // rootless Podman execs need to start inside the delegated user subtree.
+    let systemd_run =
+        mj_core::program_path::find_executable_on_path("systemd-run", variable("PATH").as_deref())?;
+    // logind stops the user manager at logout without lingering. Keep the
+    // detached daemon and its bare workers in their original cgroup then.
+    let user = mj_core::login_environment::account_name().ok()?;
+    // logind C-escapes account names for linger filenames. Check names that
+    // appear verbatim there so an escaped filename cannot match another user.
+    if !user
+        .bytes()
+        .all(|byte| (b' '..=b'~').contains(&byte) && !matches!(byte, b'/' | b'\\' | b'\'' | b'"'))
+        || !Path::new("/var/lib/systemd/linger").join(user).is_file()
+    {
+        return None;
+    }
+    Some((systemd_run, runtime_dir))
 }
 
 /// Releases 2.66.0 through 2.70.x started an `mj node` beside every host
@@ -836,8 +917,13 @@ fn kept_daemon_notice(message: String) {
 
 /// What the running daemon, if any, is to this client.
 enum ExistingDaemon {
-    /// None answers, so one has to be started.
+    /// None runs, so one has to be started.
     Absent,
+    /// One is recorded and may still run, but it did not answer. A busy
+    /// daemon answers late, and a container daemon's store lock is not on
+    /// this host, so only [`recorded_daemon_is_gone`] may turn this into
+    /// [`ExistingDaemon::Absent`].
+    Unanswered(DaemonMetadata),
     /// It answers and this client may use it.
     Use(DaemonClient),
     /// It answers but has to be replaced first. `notice` is what to tell the
@@ -935,6 +1021,16 @@ async fn ensure_supported_or_gone(metadata: &DaemonMetadata) -> Result<bool> {
     }
 }
 
+/// A recorded daemon that did not answer is absent only once it has provably
+/// exited.
+async fn unanswered(metadata: DaemonMetadata) -> Result<ExistingDaemon> {
+    Ok(if recorded_daemon_is_gone(&metadata).await? {
+        ExistingDaemon::Absent
+    } else {
+        ExistingDaemon::Unanswered(metadata)
+    })
+}
+
 async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let metadata = tokio::task::spawn_blocking(read_metadata_any)
         .await
@@ -945,10 +1041,7 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     if !ensure_supported_or_gone(&metadata).await? {
         return Ok(ExistingDaemon::Absent);
     }
-    let daemon =
-        BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
-    let release = daemon.version().cmp_precedence(this_build().version());
-    if metadata.protocol_version < PROTOCOL_VERSION || release.is_lt() {
+    if metadata.protocol_version < PROTOCOL_VERSION {
         // The same-protocol path below treats an unreachable daemon as absent.
         // This path replaces a daemon it cannot ask, so it first has to know
         // that one still owns the store: a record left by a daemon that died
@@ -973,35 +1066,17 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
         });
     }
     let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     };
     if ping_daemon(&mut client).await.is_err() {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     }
-    let identity = match tokio::time::timeout(Duration::from_secs(2), client.identity()).await {
-        Ok(Ok(identity)) => identity,
-        Ok(Err(error)) => {
-            // A daemon of this protocol must answer. If it did not, keep the
-            // old answer for this decision only; nothing below trusts it.
-            tracing::debug!(
-                error = format!("{error:#}"),
-                "the daemon did not report its identity"
-            );
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-        Err(_) => {
-            tracing::debug!("the daemon did not report its identity before the deadline");
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-    };
+    // This protocol reports its own placement. A failed discovery cannot safely
+    // decide whether to use or replace it, and may have interrupted the connection.
+    let identity = client
+        .identity()
+        .await
+        .context("read the running daemon's identity")?;
     let build = daemon_build(&metadata, &identity.placement)?;
     // A container daemon's store is in its volume; the host store says
     // nothing about it. The daemon reports its own migration failure.
@@ -1091,23 +1166,47 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
 
 /// Act on [`decide_existing_daemon`] while holding the startup lock
 /// exclusively: use the running daemon, or replace it and report that none is
-/// running yet.
+/// running yet. A recorded daemon that does not answer is waited for until it
+/// answers or provably exits; starting another beside it could leave two
+/// daemons serving one instance.
 async fn prepare_existing_daemon(_startup: &DaemonStartGuard) -> Result<Option<DaemonClient>> {
-    match decide_existing_daemon().await? {
-        ExistingDaemon::Absent => Ok(None),
-        ExistingDaemon::Use(client) => Ok(Some(client)),
-        ExistingDaemon::Replace { metadata, notice } => {
-            match notice {
-                Some(notice) => startup_notice(notice),
-                None => tracing::info!(
-                    daemon_protocol = metadata.protocol_version,
-                    client_protocol = PROTOCOL_VERSION,
-                    daemon_build = %metadata.build_version,
-                    "the daemon is an older protocol or release, or its store needs a migration; replacing it"
-                ),
+    let asked = Instant::now();
+    let mut notice_at = asked + START_NOTICE_DELAY;
+    loop {
+        match decide_existing_daemon().await? {
+            ExistingDaemon::Absent => return Ok(None),
+            ExistingDaemon::Use(client) => return Ok(Some(client)),
+            ExistingDaemon::Replace { metadata, notice } => {
+                match notice {
+                    Some(notice) => startup_notice(notice),
+                    None => tracing::info!(
+                        daemon_protocol = metadata.protocol_version,
+                        client_protocol = PROTOCOL_VERSION,
+                        daemon_build = %metadata.build_version,
+                        "the daemon is an older protocol or release, or its store needs a migration; replacing it"
+                    ),
+                }
+                replace_daemon(&metadata).await?;
+                return Ok(None);
             }
-            replace_daemon(&metadata).await?;
-            Ok(None)
+            ExistingDaemon::Unanswered(metadata) => {
+                if Instant::now() >= notice_at {
+                    let waited = asked.elapsed().as_secs();
+                    tracing::info!(
+                        pid = metadata.pid,
+                        address = %metadata.address,
+                        waited_s = waited,
+                        "the recorded daemon has not answered and has not exited"
+                    );
+                    startup_notice(format!(
+                        "The Mjolnir daemon at {} has not answered for {waited}s and is still \
+                         running; waiting for it to answer or exit.",
+                        metadata.address
+                    ));
+                    notice_at = Instant::now() + startup_notice_interval();
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
     }
 }
@@ -2026,6 +2125,154 @@ mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
 
+    // Hard-won: #1566: startup guessed a legacy identity after abandoning a supported daemon's request.
+    #[tokio::test]
+    async fn startup_propagates_identity_failure_instead_of_guessing_placement() {
+        const CHILD: &str = "MJ_TEST_STARTUP_IDENTITY_FAILURE";
+        const TEST: &str =
+            "daemon::tests::startup_propagates_identity_failure_instead_of_guessing_placement";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        for build_version in [env!("CARGO_PKG_VERSION"), "0.0.1"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = DaemonMetadata {
+                protocol_version: PROTOCOL_VERSION,
+                pid: std::process::id(),
+                address: listener.local_addr().unwrap(),
+                token: "isolated-identity-failure".into(),
+                started_at: "test".into(),
+                build_version: build_version.into(),
+                instance_id: String::new(),
+                placement: DaemonPlacement::Host,
+            };
+            fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(ping.action, DaemonAction::Ping));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: ping.protocol_version,
+                        request_id: ping.request_id,
+                        result: Ok(DaemonReply::Pong),
+                    },
+                )
+                .await
+                .unwrap();
+                let identity: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(identity.action, DaemonAction::Identity));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: identity.protocol_version,
+                        request_id: identity.request_id,
+                        result: Err("identity unavailable".into()),
+                    },
+                )
+                .await
+                .unwrap();
+                use tokio::io::AsyncReadExt;
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            });
+            let error = match decide_existing_daemon().await {
+                Err(error) => error,
+                Ok(_) => panic!("startup used a daemon without its identity"),
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains("identity unavailable"), "{message}");
+            server.await.unwrap();
+        }
+    }
+
+    // Hard-won: #1566: guessed RPC deadlines blocked startup and same-protocol upgrades under load.
+    #[tokio::test]
+    async fn startup_waits_for_slow_identity_before_replacing_an_older_release() {
+        const CHILD: &str = "MJ_TEST_SLOW_STARTUP_IDENTITY";
+        const TEST: &str =
+            "daemon::tests::startup_waits_for_slow_identity_before_replacing_an_older_release";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "isolated-slow-identity".into(),
+            started_at: "test".into(),
+            build_version: "0.0.1".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let (received, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for is_identity in [false, true] {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(if is_identity {
+                    matches!(request.action, DaemonAction::Identity)
+                } else {
+                    matches!(request.action, DaemonAction::Ping)
+                });
+                if is_identity {
+                    let (release, released) = tokio::sync::oneshot::channel();
+                    received.send(release).unwrap();
+                    released.await.unwrap();
+                }
+                let reply = if is_identity {
+                    DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "isolated-slow-identity".into(),
+                        build_version: "0.0.1".into(),
+                        // Avoid a host store check: this peer represents a
+                        // container daemon with its own volume and store.
+                        placement: DaemonPlacement::Container {
+                            name: "isolated-slow-identity".into(),
+                            runtime: None,
+                        },
+                    })
+                } else {
+                    DaemonReply::Pong
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let decision = decide_existing_daemon();
+        tokio::pin!(decision);
+        let release = tokio::select! {
+            result = &mut decision => panic!("startup finished before Identity replied: {}", result.is_ok()),
+            release = waiting.recv() => release.unwrap(),
+        };
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        // Poll after the old deadline, before releasing Identity's reply.
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(decision.as_mut().poll(cx).is_pending())
+            })
+            .await,
+            "startup abandoned its pending Identity request"
+        );
+        release.send(()).unwrap();
+        assert!(matches!(
+            decision.await.unwrap(),
+            ExistingDaemon::Replace { .. }
+        ));
+        server.await.unwrap();
+    }
+
     // Hard-won: 413864386: the startup splash displayed frozen blocker ages for thirty seconds.
     #[tokio::test]
     async fn splash_refreshes_blockers_each_second_for_replacing_and_queued_clients() {
@@ -2226,7 +2473,11 @@ mod tests {
             "daemon::tests::host_daemon_environment_restores_login_and_preserves_instance";
         if let Ok(mode) = std::env::var(CHILD) {
             let mut command = std::process::Command::new("/usr/bin/env");
-            configure_host_daemon_environment(&mut command).unwrap();
+            configure_host_daemon_environment(
+                &mut command,
+                host_daemon_login_environment().unwrap(),
+            )
+            .unwrap();
             let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
             assert!(output.status.success());
             let output = String::from_utf8(output.stdout).unwrap();

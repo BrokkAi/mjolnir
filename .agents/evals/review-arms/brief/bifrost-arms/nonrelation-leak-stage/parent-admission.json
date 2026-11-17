@@ -1,0 +1,27 @@
+{
+  "accepted_at": "2026-11-17T06:44:36.706064+00:00",
+  "exact_scope": [
+    "model-overload-unknown-competitor-discarded",
+    "rust-while-let-binder-body-field",
+    "javascript-object-method-indexed-as-field",
+    "matching-analyzer-epoch-needs-writer-slot",
+    "maintainability-file-cap-missing-truncated",
+    "rust-enum-variant-named-fields-omitted",
+    "rust-importer-planning-widens-to-code-mentions",
+    "rust-item-macro-evades-plain-struct-drop-proof",
+    "mcp-timed-out-progress-survives-response",
+    "csharp-single-file-namespace-prunes-usages",
+    "rust-bare-value-admits-associated-constant",
+    "ruby-constant-navigation-climbs-to-terminal",
+    "rust-option-return-implicitly-unwrapped"
+  ],
+  "briefs": 13,
+  "paired_verdicts": 26,
+  "all_labels": "missed",
+  "rewrites": 0,
+  "all_original_brief_hashes_preserved": true,
+  "protected_files_rechecked": 149,
+  "runtime_and_input_hashes_rechecked": true,
+  "both_judges_suspended": true,
+  "admission": "26 frozen A/BT review jobs, three Terra/high reviewers each via normal mj review selection; concurrency three jobs; codex4 per-launch floor25; no further roles admitted by this record"
+}

@@ -276,6 +276,26 @@ impl DurableRelay {
         Ok(())
     }
 
+    /// Queue a message from Mjolnir for this worker's own agent through the
+    /// same mailbox that carries peer and sub-agent messages: it arrives at the
+    /// agent's next tool boundary or turn start and never starts a turn.
+    /// `key` must be unique among this session's messages.
+    pub fn deliver_agent_message(&mut self, source: &str, key: &str, text: String) -> Result<()> {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.to_owned(),
+            source: source.to_owned(),
+            wake: false,
+            created_at_ms: u64::try_from(epoch_millis()).unwrap_or_default(),
+            body: mj_core::mailbox::MailboxEventBody::PlainText { text },
+        };
+        self.submit_command(
+            &format!("mailbox-{key}"),
+            RelayCommand::DeliverMailboxEvent { event },
+        )?
+        .map(|_| ())
+        .map_err(|error| anyhow!("queue agent message {key}: {error:?}"))
+    }
+
     pub(super) fn submit_command(
         &mut self,
         command_id: &str,
@@ -721,6 +741,7 @@ impl DurableRelay {
                         }
                 });
             if !valid {
+                tracing::info!(command_id, expected_ordinal = expected.ordinal, expected_digest = %expected.digest, actual_ordinal = self.snapshot.latest_ordinal, actual_digest = %self.snapshot.latest_digest, "quota recovery evidence is stale");
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
                     "quota recovery evidence is stale",

@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::LifecycleKind;
 
 pub(super) const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
@@ -289,18 +290,21 @@ pub(super) fn apply_read_receipt(state: &mut State, session_id: &str, receipt: u
 pub(super) struct PhoneActionControl {
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) lifecycle: Option<LifecycleControl>,
+    /// The lifecycle kind the action starts, which decides how a server
+    /// shutdown stops it.
+    pub(super) kind: Option<LifecycleKind>,
 }
 
 impl PhoneActionControl {
     pub(super) fn for_action(action: &ControllerAction) -> Self {
-        let lifecycle = matches!(
-            action,
-            ControllerAction::New { .. }
-                | ControllerAction::Suspend { .. }
-                | ControllerAction::Restart { .. }
-                | ControllerAction::Move { .. }
-        )
-        .then(LifecycleControl::default);
+        let kind = match action {
+            ControllerAction::New { .. } => Some(LifecycleKind::Create),
+            ControllerAction::Suspend { .. } => Some(LifecycleKind::Suspend),
+            ControllerAction::Restart { .. } => Some(LifecycleKind::Restart),
+            ControllerAction::Move { .. } => Some(LifecycleKind::Move),
+            _ => None,
+        };
+        let lifecycle = kind.map(|_| LifecycleControl::default());
         let cancelled = lifecycle.as_ref().map_or_else(
             || Arc::new(AtomicBool::new(false)),
             |control| control.cancelled.clone(),
@@ -308,6 +312,20 @@ impl PhoneActionControl {
         Self {
             cancelled,
             lifecycle,
+            kind,
+        }
+    }
+
+    /// The server is exiting: a create is stopped without rollback for the next
+    /// daemon to finish, everything else is cancelled.
+    pub(super) fn stop_for_server_shutdown(&self) {
+        match (&self.lifecycle, self.kind) {
+            (Some(control), Some(LifecycleKind::Create)) => {
+                control.cancel_for_shutdown();
+            }
+            _ => {
+                self.request_cancel("server shutdown");
+            }
         }
     }
 

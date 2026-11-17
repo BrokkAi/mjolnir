@@ -103,6 +103,12 @@ pub(crate) enum DashboardIoUpdate {
     TranscriptTailSeed {
         materialized: Box<MaterializedSession>,
     },
+    StoredTranscriptItem {
+        session_id: String,
+        stable_id: String,
+        generation: u64,
+        result: std::result::Result<mj_client::daemon::StoredTranscriptItem, String>,
+    },
     StoredSessionSummary {
         session_id: String,
         generation: u64,
@@ -851,6 +857,15 @@ impl DashboardContext {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
+            DashboardIoUpdate::StoredTranscriptItem { session_id, stable_id, generation, result } => {
+                if !self.summary_reads.finish_item(&session_id, &stable_id, generation) { return; }
+                let item = match result {
+                    Ok(mj_client::daemon::StoredTranscriptItem::Found(item)) => Some(item),
+                    Ok(mj_client::daemon::StoredTranscriptItem::Missing | mj_client::daemon::StoredTranscriptItem::Unsupported) => None,
+                    Err(error) => { self.dashboard.set_notice(format!("Could not read notification message: {error}")); None }
+                };
+                self.dashboard.notification_message_read_finished(&session_id, &stable_id, item);
+            }
             DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
                 if !self.summary_reads.finish(&session_id, generation) {
                     return;
@@ -1083,11 +1098,13 @@ impl DashboardContext {
                 if self.startup_prompts.is_settled(&session_id, &prompt.command_id) {return;}
                 if let Err(error) = result {
                     if !self.startup_prompts.admission_failed(&session_id, &prompt.command_id, &error, definitely_unaccepted) {
+                        if self.dashboard.notification_reply_unconfirmed(&session_id, &prompt.command_id, &error) { return; }
                         self.dashboard.set_failure_notice(if definitely_unaccepted {
                             format!("The prompt was not queued: {error}; the recalled draft is kept.")
                         } else {format!("Could not confirm whether the prompt was queued: {error}; checking its status.")});
                         return;
                     }
+                    if super::startup_prompts::finish_notification_reply(&mut self.dashboard, &mut self.chats, &session_id, &prompt, Err(error.clone())) { return; }
                     let restored = if let Some(chat) = self.chats.get_mut(&session_id).filter(|_| !self.dashboard.has_standby_composer(&session_id)) {
                         chat.restore_startup_prompt(prompt)
                     } else { self.dashboard.restore_startup_prompt(&session_id, prompt) };

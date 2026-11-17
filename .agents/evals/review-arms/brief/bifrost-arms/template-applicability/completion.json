@@ -1,0 +1,159 @@
+{
+  "metric": "template applicability (reach unmeasured)",
+  "reach_measured": false,
+  "schema_exact17_ids": "pass",
+  "assignments": 17,
+  "template_counts": {
+    "T8a": 13,
+    "none": 2,
+    "T2": 1,
+    "T3": 1
+  },
+  "confidence_counts": {
+    "medium": 15,
+    "high": 1,
+    "low": 1
+  },
+  "assigned_existing_template_count": 15,
+  "assigned_existing_template_fraction": 0.8823529411764706,
+  "none_ids": [
+    "fact-003",
+    "fact-012"
+  ],
+  "low_confidence_ids": [
+    "fact-004"
+  ],
+  "sid": "1d0c72a0ee4c1144529fd8ac8db62b26",
+  "profile": "codex4",
+  "actual_config": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "lifecycle": "suspended",
+  "last_turn_outcome": {
+    "command_id": "review-arms-template-applicability-batch-assessment-1d0c72a0ee4c",
+    "accepted_ordinal": 44,
+    "turn_start_position": 45,
+    "completed_ordinal": 212,
+    "completed_at_ms": 1794893038515,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "operator_added_prompts": 0,
+  "extra_sessions_or_judges": 0,
+  "audit": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/operator/audit.json",
+    "result": "pass within recorded tool-request evidence",
+    "requests": 5,
+    "forbidden_observed": 0,
+    "capture_limit": "Four bridge call records omit rawInput/content; complete represented request source is retained in full titles/locations/presentation. Failed python cause not supplied. Audit reviewed every represented request and complete heredocs; does not claim OS-level isolation."
+  },
+  "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/assessment/applicability.json",
+  "raw_output_sha256": "1ab5ef30b7549e48dc6d2693d408f1090ace480e49172f19ccb8559e1f5c581d",
+  "raw_output_copy": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/operator/applicability-raw.json",
+  "unchanged_input_hashes": {
+    "INSTRUCTIONS.md": "17f792bbbe9da3b9d01b53962441ce4d37d80364fc9fffba5dcbd9fa267d1431",
+    "facts.json": "ae777f507e37feef1148984f614975443590895027d28c4a6db7102a50c20add",
+    "templates.md": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa"
+  },
+  "code_hashes_unchanged": true,
+  "usage_totals": {
+    "cached_read_tokens": {
+      "tokens": 135040,
+      "reported_turns": 1
+    },
+    "cached_write_tokens": {
+      "tokens": 0,
+      "reported_turns": 1
+    },
+    "input_tokens": {
+      "tokens": 14427,
+      "reported_turns": 1
+    },
+    "output_tokens": {
+      "tokens": 4471,
+      "reported_turns": 1
+    },
+    "thought_tokens": {
+      "tokens": 912,
+      "reported_turns": 1
+    },
+    "total_tokens": {
+      "tokens": 153938,
+      "reported_turns": 1
+    }
+  },
+  "usage_coverage": {
+    "recorded_turns": 1,
+    "full_turn_reports": 1,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 1,
+    "missing_cost_turns": 0
+  },
+  "usage_by_model": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": null,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 135040,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 14427,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 4471,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 912,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 153938,
+          "reported_turns": 1
+        }
+      }
+    }
+  ],
+  "root_cost_usd_ticks": 870680000,
+  "estimated_api_cost_usd": 0.087068,
+  "usage_accounting": "One global root once for one SID; complete page/fullturn; no root/page sum. API estimate, not subscription charge.",
+  "quota_before": {
+    "remaining_percent": [
+      95
+    ],
+    "refreshed_epoch": 1794892372,
+    "age_at_read_seconds": 508.51491928100586
+  },
+  "quota_after": {
+    "remaining_percent": [
+      93
+    ],
+    "refreshed_epoch": 1794892972,
+    "age_seconds": 206.98068690299988,
+    "refresh_after_completion": false
+  },
+  "limitations": [
+    "One authorized Sol/high qualitative applicability assessment, no independent judge or replication.",
+    "Descriptions-only: actual diff-seed legality and engine capability/results/completeness not measured.",
+    "Assumptions and confidence belong to model output; operator validated schema/audited requests but did not relabel facts.",
+    "15assigned-template count includes a low-confidenceT2; two none labels are judgments, not engine failures.",
+    "No result delivered to active writers/reviewers/catch judges."
+  ],
+  "recorded_epoch": 1794893178.9807146
+}

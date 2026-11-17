@@ -271,6 +271,25 @@ async fn selection_backend(
     selection_backend_refusing(offers, parent_view, Default::default()).await
 }
 
+/// The profiles [`selection_backend`] enables.
+fn selection_config() -> mj_core::config::Config {
+    test_config(&[
+        ("parent", HarnessKind::Codex),
+        ("codex-high", HarnessKind::Codex),
+        ("deepseek", HarnessKind::Codex),
+    ])
+}
+
+/// Give `parent` quota again, so load balancing may offer it once
+/// `codex-high` is unavailable.
+fn refill_parent(backend: &ApiBackend) {
+    let mut reports = backend.quota_reports.lock().unwrap();
+    let report = reports.get_mut("parent").unwrap().report.as_mut().unwrap();
+    for window in &mut report.windows {
+        window.remaining_percent = Some(50);
+    }
+}
+
 /// [`selection_backend`], with logins the credential sync found refused.
 async fn selection_backend_refusing(
     offers: &[(&str, &[&str])],
@@ -278,13 +297,7 @@ async fn selection_backend_refusing(
     rejected_logins: mj_core::credentials::RejectedLogins,
 ) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
     let catalog = ProfileCatalog::with_probe(models_probe(offers));
-    catalog
-        .sync_now(&test_config(&[
-            ("parent", HarnessKind::Codex),
-            ("codex-high", HarnessKind::Codex),
-            ("deepseek", HarnessKind::Codex),
-        ]))
-        .await;
+    catalog.sync_now(&selection_config()).await;
     // Spawns draw profiles weighted by quota left, so any quota at all would
     // let `parent` win some draws; with none it always ranks behind `codex-high`.
     let quotas: crate::quota::QuotaReportMap = BTreeMap::from([
@@ -468,6 +481,14 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
             .unwrap()
             .paid_credits = mj_client::quota::PaidCredits::limited(12.75);
     }
+    // Spending a subscription's paid credits is the profile's own opt-in.
+    let mut config = selection_config();
+    config
+        .profiles
+        .get_mut("codex-high")
+        .unwrap()
+        .load_balancing_may_consume_credits = true;
+    backend.profile_catalog.sync_now(&config).await;
     let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
@@ -571,6 +592,7 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(candidates.unavailable[0].0, "codex-high");
     assert_eq!(candidates.offered.len(), 2);
 
+    refill_parent(&backend);
     backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
@@ -2284,7 +2306,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     );
 }
 
+/// The renewed login here is the profile's `.credentials.json`. On a Mac the
+/// Keychain is the only Claude login (#1491), so the file renews nothing there,
+/// and running this would read the real Keychain.
 // Hard-won: #1547: a sub-agent whose turn failed on a renewed login was reported failed and parked before the pushed login could reach it.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_child_failed_on_a_renewed_login_is_held_only_while_its_worker_waits_for_the_new_login() {
     let home = tempfile::tempdir().unwrap();
@@ -2432,6 +2458,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             .contains("mj login --profile codex-high")
     );
 
+    refill_parent(&backend);
     backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
@@ -2543,6 +2570,34 @@ impl ExportRuntime for ParkingExports {
     }
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
+    }
+
+    fn startup_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<(Option<String>, Option<StartStatus>)>> {
+        Box::pin(load_startup_context(session_id))
+    }
+
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        session_id: String,
+        message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let (command_id, step) =
+                crate::daemon::startup_followup::session_message_startup_step(&message);
+            crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+                session_id,
+                command_id,
+                step_json: serde_json::to_string(&step)?,
+                phase: "pending".into(),
+                group_id: None,
+                accepted_ordinal: None,
+                error: None,
+            }])?;
+            Ok(())
+        })
     }
 
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
@@ -3188,6 +3243,184 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
     assert!(rendered.contains("session_id parent-1"));
     assert!(rendered.contains("Please check the retry path."));
+}
+
+/// A message to a session that is still starting is accepted once and held
+/// with the startup work. It is not mailed or submitted until that work ends,
+/// and a retry keeps the first copy (#1553).
+#[tokio::test]
+async fn send_message_while_starting_is_queued_once() {
+    if !isolated_parked_test("send_message_while_starting_is_queued_once") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let mut pending_peer = parent_record("peer-1", "peer");
+    pending_peer.no_github_events = true;
+    crate::database::save_session(&pending_peer).unwrap();
+    let mut provisioning_peer = parent_record("peer-2", "peer");
+    provisioning_peer.state = SessionState::Provisioning;
+    provisioning_peer.no_github_events = true;
+    crate::database::save_session(&provisioning_peer).unwrap();
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "peer-1".into(),
+        command_id: "api-startup-peer-1-prompt".into(),
+        step_json: serde_json::to_string(&crate::daemon::StartupStep::ApiPrompt {
+            text: "boot".into(),
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: Some("api-startup-peer-1".into()),
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
+    let (backend, mut delivered) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+
+    let send = |request_id: &'static str, target: &'static str, text: &'static str, at: i64| {
+        let backend = backend.clone();
+        async move {
+            backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
+                        request_id: request_id.into(),
+                        created_at_ms: at,
+                        action: mj_core::subagent::SubagentToolAction::SendMessage {
+                            child_session_id: target.into(),
+                            message: text.into(),
+                        },
+                    },
+                )
+                .await
+        }
+    };
+
+    let first = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        10,
+    )
+    .await;
+    assert!(!first.is_error, "{}", first.message);
+    let result: serde_json::Value = serde_json::from_str(&first.message).unwrap();
+    assert_eq!(result["via"], "queued");
+    assert_eq!(result["status"], "queued");
+    assert_eq!(
+        result["note"],
+        super::subagent_input::QUEUED_UNTIL_STARTUP_NOTE
+    );
+    assert!(result["turn_id"].is_null(), "{result}");
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "a starting session must not be mailed before its startup prompt"
+    );
+    assert!(delivered_prompts(&mut delivered).is_empty());
+
+    let retry = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        99,
+    )
+    .await;
+    assert!(!retry.is_error, "{}", retry.message);
+    let retry: serde_json::Value = serde_json::from_str(&retry.message).unwrap();
+    assert_eq!(retry["via"], "queued");
+    let held = startup_session_messages("peer-1");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].1, "context for the first turn");
+    assert_eq!(held[0].2, 10, "the first request's timestamp wins");
+    assert_eq!(held[0].3.as_deref(), Some("api-startup-peer-1"));
+
+    let conflict = send("while-starting-1", "peer-1", "a different message", 100).await;
+    assert!(conflict.is_error, "{}", conflict.message);
+    let conflict: serde_json::Value = serde_json::from_str(&conflict.message).unwrap();
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("different payload"),
+        "{conflict}"
+    );
+    assert_eq!(startup_session_messages("peer-1").len(), 1);
+
+    let failed_at = crate::database::load_startup_delivery(&held[0].0)
+        .unwrap()
+        .unwrap();
+    crate::database::fail_retained_startup_step(
+        &failed_at.command_id,
+        "the message was not delivered: the session is Error",
+    )
+    .unwrap();
+    let refused = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        101,
+    )
+    .await;
+    assert!(refused.is_error, "{}", refused.message);
+    let refused: serde_json::Value = serde_json::from_str(&refused.message).unwrap();
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("was not delivered"),
+        "{refused}"
+    );
+
+    let provisioning = send(
+        "while-provisioning-1",
+        "peer-2",
+        "before the actor exists",
+        11,
+    )
+    .await;
+    assert!(!provisioning.is_error, "{}", provisioning.message);
+    let provisioning: serde_json::Value = serde_json::from_str(&provisioning.message).unwrap();
+    assert_eq!(provisioning["via"], "queued");
+    assert_eq!(provisioning["session_id"], "peer-2");
+    let provisioning_held = startup_session_messages("peer-2");
+    assert_eq!(provisioning_held.len(), 1);
+    assert_eq!(provisioning_held[0].1, "before the actor exists");
+    assert!(provisioning_held[0].3.is_none());
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn startup_session_messages(session_id: &str) -> Vec<(String, String, u64, Option<String>)> {
+    crate::database::load_startup_deliveries()
+        .unwrap()
+        .into_iter()
+        .filter(|step| step.session_id == session_id)
+        .filter_map(|step| {
+            let crate::daemon::StartupStep::SessionMessage {
+                text,
+                created_at_ms,
+                waited_on_group,
+                ..
+            } = serde_json::from_str(&step.step_json).unwrap()
+            else {
+                return None;
+            };
+            Some((step.command_id, text, created_at_ms, waited_on_group))
+        })
+        .collect()
 }
 
 /// The sender of a peer message is named as the session list names it: a name
@@ -4353,10 +4586,14 @@ fn pending_child_inputs_hide_old_reports_and_a_failed_delivery_leaves_the_child_
         failed.status("child", Some(&record), old_report()),
         old_report()
     );
-    assert_eq!(
-        failed.last_failed_delivery("child"),
-        Some(("input", "login refused"))
-    );
+    let failures = |progress: &InputProgress| {
+        progress
+            .failed_deliveries("child")
+            .map(|failed| (failed.request_id.to_owned(), failed.error.to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let login_refused = vec![("input".to_owned(), "login refused".to_owned())];
+    assert_eq!(failures(&failed), login_refused);
     failed.annotate("child", &mut entry);
     assert_eq!(entry["message_deliveries"][0]["error"], "login refused");
     assert_eq!(entry["message_deliveries"][0]["via"], "turn");
@@ -4370,7 +4607,9 @@ fn pending_child_inputs_hide_old_reports_and_a_failed_delivery_leaves_the_child_
         recovered.status("child", Some(&record), old_report()),
         old_report()
     );
-    assert_eq!(recovered.last_failed_delivery("child"), None);
+    // A later delivery does not undo the failed one: its work is still lost
+    // (#1459).
+    assert_eq!(failures(&recovered), login_refused);
 }
 
 #[tokio::test]
@@ -5218,6 +5457,204 @@ async fn an_expired_delivery_leaves_a_busy_child_running_and_is_reported_beside_
     assert_eq!(delivered_prompts(&mut delivered), ["also run X"]);
 }
 
+/// A parent snapshot whose queue completed these message deliveries to
+/// `child-1`: request id, creation and completion stamps, and the delivery.
+fn parent_with_deliveries(
+    deliveries: &[(&str, i64, i64, serde_json::Value)],
+) -> ManagedSessionView {
+    let mut parent = ready_view("model");
+    let completions = &mut parent.snapshot.as_mut().unwrap().subagent_completions;
+    for (request_id, created_at_ms, completed_at_ms, delivery) in deliveries {
+        let mut message = delivery.clone();
+        message["child_session_id"] = "child-1".into();
+        message["created_at_ms"] = (*created_at_ms).into();
+        completions.push(mj_core::subagent::SubagentCompletion::from(
+            &mj_core::subagent::SubagentToolResult {
+                request_id: (*request_id).into(),
+                completed_at_ms: *completed_at_ms,
+                is_error: message["status"] == "failed",
+                message: message.to_string(),
+            },
+        ));
+    }
+    parent
+}
+
+// Hard-won: #1459: a failed message was never reported once a newer message to the same child had been delivered.
+#[tokio::test]
+async fn an_older_message_that_fails_after_a_newer_one_was_delivered_is_reported_once() {
+    if !isolated_parked_test(
+        "an_older_message_that_fails_after_a_newer_one_was_delivered_is_reported_once",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    // The child is busy with the newer message.
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    crate::database::save_materialized_session(&conversation).unwrap();
+    let not_ready = "child was not ready for queued message within 30 minutes";
+    // Both were queued. The newer one was delivered first; the older one
+    // failed at its deadline afterwards.
+    let parent = parent_with_deliveries(&[
+        (
+            "newer",
+            2,
+            3,
+            serde_json::json!({"status":"submitted","turn_id":12}),
+        ),
+        (
+            "older",
+            1,
+            4,
+            serde_json::json!({"status":"failed","error":not_ready}),
+        ),
+    ]);
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "parent-1".into(),
+            accepted_ordinal: 1,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(parent),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    for _ in 0..2 {
+        backend.reconcile_parent_reports("parent-1").await.unwrap();
+    }
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1, "one notice for the failed message, once");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    assert_eq!((report.state.as_str(), report.finished), ("running", false));
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(
+        rendered.contains(&format!("Message older failed: {not_ready}")),
+        "{rendered}"
+    );
+}
+
+// Hard-won: #1459: a reconcile that could not read the parent's queue told again a finish and failures reported before the upgrade.
+#[tokio::test]
+async fn told_finishes_and_failures_are_not_told_again_whatever_the_parent_queue_shows() {
+    if !isolated_parked_test(
+        "told_finishes_and_failures_are_not_told_again_whatever_the_parent_queue_shows",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let failed_turn = |ordinal: u64| {
+        let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+        conversation.applied_event_ordinal = ordinal;
+        conversation.applied_event_digest = format!("{ordinal:064x}");
+        let mut turn = finished_turn("task");
+        turn.completed_ordinal = ordinal;
+        turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+            message: "ACP prompt returned no session updates".into(),
+            reason: None,
+        };
+        conversation.last_turn_outcome = Some(turn);
+        crate::database::save_materialized_session(&conversation).unwrap();
+    };
+    failed_turn(9);
+    let earlier = serde_json::json!({"status":"failed","error":"restart refused"});
+    let newest = serde_json::json!({"status":"failed","error":"login refused"});
+    let with_failures = || {
+        parent_with_deliveries(&[
+            ("earlier", 1, 2, earlier.clone()),
+            ("newest", 3, 4, newest.clone()),
+        ])
+    };
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let backend = |view: Option<ManagedSessionView>| {
+        Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 30,
+                submitted: mpsc::unbounded_channel().0,
+                view,
+            })),
+            running_states(),
+            exports.clone(),
+        ))
+    };
+    // What the earlier daemon stored when it told the parent of the failed
+    // child and its newest failed delivery in one report, listing both
+    // failures.
+    let marker: mj_core::subagent::SubagentFinishIdentity =
+        serde_json::from_value(serde_json::json!({
+            "kind":"terminal", "state":"failed",
+            "detail":"Message newest: login refused", "last_completed_ordinal":9
+        }))
+        .unwrap();
+    let listed = |request_id: &str, delivery: &serde_json::Value| {
+        let mut delivery = delivery.clone();
+        delivery["request_id"] = request_id.into();
+        delivery
+    };
+    let report: mj_core::mailbox::SubagentFinishedReport =
+        serde_json::from_value(serde_json::json!({
+            "child_session_id":"child-1", "task_name":"audit deps", "state":"failed",
+            "finished":true, "output":null, "report_dir":null,
+            "message_deliveries":[listed("earlier", &earlier), listed("newest", &newest)]
+        }))
+        .unwrap();
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(marker, report)],
+        Vec::new(),
+    )
+    .unwrap();
+    let told = || crate::database::pending_mailbox_events(10).unwrap().len();
+
+    // The parent's queue cannot be read yet, as after a restart. The finish is
+    // still decided, from the marker's own report, and was told; no failure
+    // is decided from a queue that was not read.
+    let unknown = backend(None);
+    unknown.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(matches!(
+        unknown
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    assert_eq!(
+        told(),
+        1,
+        "nothing is told again from a queue that was not read"
+    );
+    // Read, the queue shows the failures the report listed beside the finish
+    // it told.
+    backend(Some(with_failures()))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 1, "the finish and both failures were told");
+    // A later finish is reported while the queue shows no failures, so its
+    // report lists none. When the failures show again, the earlier report
+    // still says they were told.
+    failed_turn(10);
+    backend(Some(ready_view("model")))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 2, "the later finish is news");
+    backend(Some(with_failures()))
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap();
+    assert_eq!(told(), 2, "the failures were told by the earlier report");
+}
+
 // Hard-won: #1378: a failed turn of a child that can still be prompted was indistinguishable from an unrecoverable child.
 #[tokio::test]
 async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_not() {
@@ -5501,11 +5938,10 @@ async fn an_ending_that_was_not_a_completed_prompt_took_no_observation() {
     );
 }
 
-/// Whether to use a finish's recorded facts follows from its completed turn,
-/// not from the kind of finish identity. A finished child whose last message
-/// delivery failed has a terminal identity, and its report still carries the
-/// facts recorded for its completed turn instead of saying its worker was not
-/// asked.
+/// A finished child whose last message delivery failed is reported like any
+/// other finish, with the facts recorded for its completed turn instead of
+/// saying its worker was not asked. The failed delivery is a notice of its
+/// own and leaves the finish its own identity (#1459).
 #[tokio::test]
 async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts() {
     if !isolated_parked_test(
@@ -5551,18 +5987,47 @@ async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_record
     assert!(
         matches!(
             relation.reported_finish,
-            Some(mj_core::subagent::SubagentFinishIdentity::Terminal { .. })
+            Some(mj_core::subagent::SubagentFinishIdentity::Turn {
+                completed_ordinal: 9,
+                ..
+            })
         ),
-        "the failed delivery gave the finish a terminal identity: {:?}",
+        "the failed delivery changed the finish's identity: {:?}",
         relation.reported_finish
     );
     let events = crate::database::pending_mailbox_events(10).unwrap();
-    assert_eq!(events.len(), 1, "{events:?}");
-    let event: mj_core::mailbox::MailboxEvent =
-        serde_json::from_str(&events[0].event_json).unwrap();
-    let text = mj_core::mailbox::render_mailbox_event(&event);
-    assert!(text.contains("pid 41301"), "{text}");
-    assert!(!text.contains("without a completed turn"), "{text}");
+    assert_eq!(
+        events.len(),
+        2,
+        "the finish and the failed delivery: {events:?}"
+    );
+    let (finishes, notices): (Vec<_>, Vec<_>) = events
+        .iter()
+        .map(|row| {
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body
+            else {
+                panic!("wrong event: {event:?}");
+            };
+            (
+                report.finished,
+                mj_core::mailbox::render_mailbox_event(&event),
+            )
+        })
+        .partition(|(finished, _)| *finished);
+    let [(_, finish)] = finishes.as_slice() else {
+        panic!("one finish report: {finishes:?}");
+    };
+    assert!(finish.contains("pid 41301"), "{finish}");
+    assert!(!finish.contains("without a completed turn"), "{finish}");
+    let [(_, notice)] = notices.as_slice() else {
+        panic!("one failed-delivery notice: {notices:?}");
+    };
+    assert!(
+        notice.contains("Message m1 failed: the child's session was gone"),
+        "{notice}"
+    );
 }
 
 /// A restart that fails leaves the child parked, so the parent can try
@@ -5721,10 +6186,15 @@ async fn legacy_worker_wait_requests_answer_immediately_without_marking_reports(
             .unwrap();
         let recovered: serde_json::Value = serde_json::from_str(&recovered.result.message).unwrap();
         assert_eq!(recovered, payload);
-        assert!(
-            crate::database::load_delegation("parent-1", &recovered_id)
-                .unwrap()
-                .is_none()
+        let retained = crate::database::load_delegation("parent-1", &recovered_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&retained.result.message).unwrap(),
+            payload,
+            "compatibility answers must remain durable through relay delivery"
         );
     }
     backend.reconcile_parent_reports("parent-1").await.unwrap();

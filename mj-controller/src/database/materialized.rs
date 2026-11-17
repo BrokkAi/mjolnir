@@ -302,7 +302,7 @@ pub(super) fn last_materialized_agent_message(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<(u64, String)>> {
-    last_materialized_agent_message_in(connection, session_id, 0, None)
+    last_materialized_agent_message_in(connection, session_id, 0, None, None)
 }
 
 /// The newest nonempty agent message inside one turn, flattened to text.
@@ -322,6 +322,7 @@ pub(super) fn last_materialized_agent_message_within(
         session_id,
         after_position,
         Some(through_position),
+        None,
     )?
     .map(|(_, text)| text))
 }
@@ -331,6 +332,7 @@ pub(super) fn last_materialized_agent_message_in(
     session_id: &str,
     after_position: u64,
     through_position: Option<u64>,
+    through_ordinal: Option<u64>,
 ) -> Result<Option<(u64, String)>> {
     let row = connection
         .query_row(
@@ -339,6 +341,7 @@ pub(super) fn last_materialized_agent_message_in(
              WHERE session_id = ?1
                AND position > ?2
                AND (?3 IS NULL OR position <= ?3)
+               AND (?4 IS NULL OR latest_content_event_ordinal <= ?4)
                AND latest_content_event_ordinal IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM json_each(
@@ -358,7 +361,12 @@ pub(super) fn last_materialized_agent_message_in(
                )
              ORDER BY position DESC, stable_id DESC
              LIMIT 1",
-            params![session_id, after_position, through_position],
+            params![
+                session_id,
+                after_position,
+                through_position,
+                through_ordinal
+            ],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
@@ -433,9 +441,51 @@ pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Opti
     Ok(None)
 }
 
+/// The newest agent message whose content was complete at event ordinal
+/// `through`: what a ReadThrough notification dismissal names. One query, so
+/// the bound and the read are one decision and a newer reply cannot answer for
+/// an older card.
+pub fn load_materialized_agent_message_through(
+    session_id: &str,
+    through: u64,
+) -> Result<Option<String>> {
+    let connection = open_reader(&database_path())?;
+    Ok(
+        last_materialized_agent_message_in(&connection, session_id, 0, None, Some(through))?
+            .map(|(_, text)| text),
+    )
+}
+
 /// Whether the stored projection holds a transcript item with this stable id.
 /// A prompt's item appears when the prompt starts, so this tells a started
 /// prompt from one that was only queued.
+/// Exact primary-key lookup; the runtime tail need not contain this message.
+pub fn load_materialized_transcript_item(
+    session_id: &str,
+    stable_id: &str,
+) -> Result<Option<TranscriptItem>> {
+    let connection = open_reader(&database_path())?;
+    let row = connection.query_row(
+        "SELECT position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms, body_json
+         FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2",
+        params![session_id, stable_id],
+        |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)),
+    ).optional()?;
+    row.map(
+        |(position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms, body)| {
+            Ok(TranscriptItem {
+                stable_id: stable_id.to_owned(),
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body: decode_transcript_body(&body, session_id)?,
+            })
+        },
+    )
+    .transpose()
+}
+
 pub fn materialized_transcript_item_exists(session_id: &str, stable_id: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
     Ok(connection.query_row(

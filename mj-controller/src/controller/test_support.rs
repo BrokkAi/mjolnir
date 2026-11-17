@@ -417,6 +417,29 @@ pub(super) struct FixtureRemoteExecutor {
 }
 
 impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -462,6 +485,29 @@ impl Git231Executor {
 }
 
 impl crate::targets::CommandExecutor for Git231Executor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -539,6 +585,29 @@ fn managed_checkout_session(
 pub(crate) struct RefusingExecutor(pub(crate) &'static str);
 
 impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(
         &self,
         command: &crate::targets::CommandSpec,
@@ -595,6 +664,14 @@ impl IsolatedTest {
             // output the child's goldens pin. A test that needs an instance
             // sets it with `env`.
             .env_remove("MJ_INSTANCE");
+        // Control commands run a staged current worker, so a child that
+        // exercises them needs a worker source. A test names its own with
+        // `env`, which replaces this one.
+        #[cfg(unix)]
+        command.env(
+            "MJ_WORKER_BINARY",
+            mj_core::test_hooks::fake_worker_dispatcher(),
+        );
         Self { name, command }
     }
 
@@ -606,6 +683,12 @@ impl IsolatedTest {
         value: impl AsRef<std::ffi::OsStr>,
     ) -> Self {
         self.command.env(key, value);
+        self
+    }
+
+    /// Remove a variable from the child, such as the default worker source.
+    pub(crate) fn env_remove(mut self, key: impl AsRef<std::ffi::OsStr>) -> Self {
+        self.command.env_remove(key);
         self
     }
 
@@ -641,4 +724,124 @@ impl IsolatedTest {
         );
         output
     }
+}
+
+/// Explicit owner capability for controller fixtures that run without a daemon.
+pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::SessionAdmission {
+    let gate = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+    crate::recovery_gate::SessionAdmission::Foreground(
+        futures::executor::block_on(gate.enter_foreground(
+            session_id,
+            "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        ))
+        .unwrap(),
+    )
+}
+pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLeaseAdmission {
+    futures::executor::block_on(session_admission(session_id).lease(session_id)).unwrap()
+}
+
+/// Shared owner for fixtures exercising process mutation without a daemon.
+pub(crate) fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GATES: OnceLock<
+        Mutex<
+            std::collections::BTreeMap<std::path::PathBuf, Arc<crate::recovery_gate::RecoveryGate>>,
+        >,
+    > = OnceLock::new();
+    GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(mj_core::config::data_dir())
+        .or_default()
+        .clone()
+}
+pub(crate) fn worker_test_permit(
+    id: &str,
+    _reason: &'static str,
+) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return Ok(Some(owner));
+    }
+    let Ok(admission) =
+        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerReplacement)
+    else {
+        return Ok(None);
+    };
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
+}
+pub(crate) fn worker_test_observation(
+    id: &str,
+) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
+    let Ok(admission) =
+        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerObservation)
+    else {
+        return Ok(None);
+    };
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
+}
+
+/// Enter a fixture's operation exactly as the daemon registry does.
+pub(crate) fn worker_test_scope<T>(id: &str, work: impl FnOnce() -> T) -> T {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return owner.scope_blocking(work);
+    }
+    let gate = worker_test_gate();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let enter = gate.enter_foreground(
+        id,
+        "test lifecycle",
+        crate::recovery_gate::LifecycleOrigin::Person,
+        &cancelled,
+        &crate::targets::ProcessExecutor,
+    );
+    let admission = if tokio::runtime::Handle::try_current().is_ok() {
+        futures::executor::block_on(enter)
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(enter)
+    }
+    .unwrap();
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission)
+        .unwrap()
+        .scope_blocking(work)
+}
+pub(crate) async fn worker_test_scope_async<T>(
+    id: &str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return owner.scope(work).await;
+    }
+    let admission = worker_test_gate()
+        .enter_foreground(
+            id,
+            "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        )
+        .await
+        .unwrap();
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission)
+        .unwrap()
+        .scope(work)
+        .await
+}
+pub(crate) fn worker_test_run_blocking<T>(
+    id: &str,
+    reason: &'static str,
+    executor: &impl crate::targets::CommandExecutor,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    worker_test_scope(id, || {
+        crate::worker_lifecycle::run_blocking(id, reason, executor, work)
+    })
 }

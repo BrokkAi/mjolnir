@@ -351,7 +351,7 @@ macro_rules! key_actions {
 
         /// The `[keys]` section of `config.toml`.
         #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-        #[serde(default, deny_unknown_fields)]
+        #[serde(default)]
         pub struct KeysConfig {
             pub prefix: String,
             $(pub $field: BindingConfig),*

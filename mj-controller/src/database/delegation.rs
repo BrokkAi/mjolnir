@@ -158,17 +158,227 @@ pub(crate) fn record_stored_delegation_result(
     })
 }
 
-/// The outbox row and report marker have one serialized database owner.
+/// A notice that one message a parent sent its child was not delivered. The
+/// notice is not a finish: it never moves the child's `reported_finish`.
+pub(crate) struct FailedDeliveryNotice {
+    pub request_id: String,
+    pub report: mj_core::mailbox::SubagentFinishedReport,
+}
+
+/// The notices among `notices` whose failure the parent has not been told of.
+/// This read only spares the writer a transaction when nothing is new;
+/// [`enqueue_subagent_reports`] asks the same question again where it decides.
+pub(crate) fn untold_failed_deliveries(
+    parent: &str,
+    notices: Vec<FailedDeliveryNotice>,
+) -> Result<Vec<FailedDeliveryNotice>> {
+    let connection = open_reader(&database_path())?;
+    untold_failed_deliveries_with(&connection, parent, notices)
+}
+
+/// The notices whose failure the parent has not been told of. A parent has
+/// nothing to be told of a child that is not its own, or of a reviewer, which
+/// its review reports.
+///
+/// A failure was told when its notice's outbox row exists, and report rows are
+/// never pruned while the parent exists. Reports before #1459 told failures
+/// only inside report rows: they folded the child's newest failure into its
+/// finish marker and listed all of the child's deliveries, so a failure that
+/// any of the child's reports listed as failed was told too. Every such row is
+/// read, not only the latest: the deliveries a reader sees can shrink and grow
+/// back (a parent queue that could not be read, a bounded window that pruning
+/// lets older messages back into), so the latest report need not list a
+/// failure that an earlier one did. The oracle's report path never showed
+/// delivery lines, so an oracle report told no failure.
+fn untold_failed_deliveries_with(
+    connection: &Connection,
+    parent: &str,
+    notices: Vec<FailedDeliveryNotice>,
+) -> Result<Vec<FailedDeliveryNotice>> {
+    let mut reported = std::collections::BTreeMap::new();
+    let mut untold = Vec::with_capacity(notices.len());
+    for notice in notices {
+        let child = &notice.report.child_session_id;
+        let key = failed_delivery_key(parent, child, &notice.request_id)?;
+        if connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+            [&key],
+            |row| row.get(0),
+        )? {
+            continue;
+        }
+        if !reported.contains_key(child) {
+            let listed = failures_listed_in_reports(connection, parent, child)?;
+            reported.insert(child.clone(), listed);
+        }
+        if reported[child]
+            .as_ref()
+            .is_none_or(|listed| listed.contains(&notice.request_id))
+        {
+            continue;
+        }
+        untold.push(notice);
+    }
+    Ok(untold)
+}
+
+/// The failed requests that `child`'s reports to `parent` listed as failed,
+/// or `None` when the parent has nothing to be told of its messages to `child`.
+fn failures_listed_in_reports(
+    connection: &Connection,
+    parent: &str,
+    child: &str,
+) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let Some(stored) = connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
+            params![child, parent],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+    if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT json_extract(delivery.value, '$.request_id')
+         FROM mailbox_outbox AS report,
+              json_each(report.event_json, '$.body.report.message_deliveries') AS delivery
+         WHERE report.target_session_id = ?1
+           AND report.event_key LIKE 'subagent-finished-%'
+           AND json_extract(report.event_json, '$.body.report.child_session_id') = ?2
+           AND IFNULL(json_extract(report.event_json, '$.body.report.oracle'), 0) = 0
+           AND json_extract(delivery.value, '$.status') = 'failed'",
+    )?;
+    let listed = statement
+        .query_map(params![parent, child], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(listed.into_iter().flatten().collect()))
+}
+
+/// The children among `candidates` (a child, its stored report marker and its
+/// finish now) whose finish a report before #1459 already told. This read only
+/// spares the writer a transaction; [`enqueue_subagent_reports`] asks the same
+/// question again where it decides.
+pub(crate) fn finishes_told_by_folded_markers(
+    parent: &str,
+    candidates: Vec<(
+        String,
+        mj_core::subagent::SubagentFinishIdentity,
+        mj_core::subagent::SubagentFinishIdentity,
+    )>,
+) -> Result<std::collections::BTreeSet<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut told = std::collections::BTreeSet::new();
+    for (child, reported, finish) in candidates {
+        if told_by_folded_marker(&connection, parent, &child, &reported, &finish)? {
+            told.insert(child);
+        }
+    }
+    Ok(told)
+}
+
+/// Whether `reported`, a child's stored report marker, is the one a report
+/// before #1459 wrote for `finish`. Those reports folded the child's newest
+/// failed delivery into the marker of the finish they told: a `Terminal` with
+/// the finish's state and last completed turn, whose detail is
+/// `Message <id>: <error>`. The marker's own report row, which listed that
+/// delivery as failed, says so; what the parent's queue shows now does not.
+fn told_by_folded_marker(
+    connection: &Connection,
+    parent: &str,
+    child: &str,
+    reported: &mj_core::subagent::SubagentFinishIdentity,
+    finish: &mj_core::subagent::SubagentFinishIdentity,
+) -> Result<bool> {
+    use mj_core::subagent::SubagentFinishIdentity;
+    let SubagentFinishIdentity::Terminal {
+        state,
+        detail: Some(detail),
+        last_completed_ordinal,
+    } = reported
+    else {
+        return Ok(false);
+    };
+    let (SubagentFinishIdentity::Turn {
+        state: finish_state,
+        ..
+    }
+    | SubagentFinishIdentity::Terminal {
+        state: finish_state,
+        ..
+    }) = finish;
+    if state != finish_state || *last_completed_ordinal != finish.completed_ordinal() {
+        return Ok(false);
+    }
+    let Some(stored) = connection
+        .query_row(
+            "SELECT event_json FROM mailbox_outbox WHERE event_key=?1",
+            [subagent_report_key(parent, child, reported)?],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&stored)?;
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+        return Ok(false);
+    };
+    Ok(report.message_deliveries.iter().any(|delivery| {
+        delivery["status"] == "failed"
+            && *detail
+                == format!(
+                    "Message {}: {}",
+                    delivery["request_id"].as_str().unwrap_or_default(),
+                    delivery["error"].as_str().unwrap_or("delivery failed")
+                )
+    }))
+}
+
+/// The outbox rows and the report marker have one serialized database owner.
+/// A failed delivery is told once by its own notice, keyed by its request, so
+/// a later delivery cannot hide it and a stale or concurrent reconcile cannot
+/// tell it twice. Notices go first: a finish enqueued here lists the same
+/// failures, and the notice's key, not that listing, is what records them.
 pub(crate) fn enqueue_subagent_reports(
     parent: String,
     reports: Vec<(
         mj_core::subagent::SubagentFinishIdentity,
         mj_core::mailbox::SubagentFinishedReport,
     )>,
+    failures: Vec<FailedDeliveryNotice>,
 ) -> Result<()> {
     let inserted = submit_database_write("enqueue finished child reports", move |connection| {
         let transaction = connection.transaction()?;
         let mut inserted = false;
+        for notice in untold_failed_deliveries_with(&transaction, &parent, failures)? {
+            let child = &notice.report.child_session_id;
+            let key = failed_delivery_key(&parent, child, &notice.request_id)?;
+            let event = mj_core::mailbox::MailboxEvent {
+                key: key.clone(),
+                source: "mjolnir".into(),
+                wake: true,
+                created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                    report: Box::new(notice.report),
+                },
+            };
+            inserted |= super::mailbox::enqueue_mailbox_event_with(
+                &transaction,
+                &key,
+                &parent,
+                &serde_json::to_string(&event)?,
+                true,
+                false,
+            )?
+            .inserted();
+        }
         for (identity, report) in reports {
             let child_id = &report.child_session_id;
             let stored: String = transaction.query_row(
@@ -180,6 +390,11 @@ pub(crate) fn enqueue_subagent_reports(
                 continue;
             }
             if relation.reported_finish.as_ref() == Some(&identity) {
+                continue;
+            }
+            if let Some(reported) = &relation.reported_finish
+                && told_by_folded_marker(&transaction, &parent, child_id, reported, &identity)?
+            {
                 continue;
             }
             let key = subagent_report_key(&parent, child_id, &identity)?;
@@ -283,8 +498,24 @@ fn subagent_report_key(
     ))
 }
 
-/// Move reports owned by an old wait result into the mailbox before retiring it.
-pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool> {
+/// One key per failed request. It must not start with `subagent-message-`,
+/// which names a parent's message to its child.
+fn failed_delivery_key(parent: &str, child: &str, request_id: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "subagent-delivery-failed-{}",
+        mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
+            parent, child, request_id
+        ))?))
+    ))
+}
+
+/// Move old wait-owned reports to the mailbox and durably replace its answer.
+/// The compatibility result remains replayable until worker acknowledgement.
+pub(crate) fn retire_legacy_wait(
+    parent: String,
+    request: String,
+) -> Result<Option<StoredDelegationResult>> {
     let retired = submit_database_write("retire legacy wait", move |connection| {
         let transaction = connection.transaction()?;
         let row: Option<(String, Option<String>)> = transaction.query_row(
@@ -292,7 +523,7 @@ pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool
             params![parent, request], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         let Some((prepared, result)) = row else {
-            return Ok(false);
+            return Ok(None);
         };
         let prepared: PreparedDelegation = serde_json::from_str(&prepared)?;
         if !matches!(
@@ -300,101 +531,107 @@ pub(crate) fn retire_legacy_wait(parent: String, request: String) -> Result<bool
             mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                 | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
         ) {
-            return Ok(false);
+            return Ok(None);
         }
-        if let Some(result) = result {
-            let stored = decode_stored_result(&result)?;
-            if !stored.reported_finishes.is_empty() {
-                let payload: serde_json::Value = serde_json::from_str(&stored.result.message)?;
-                for (child, identity) in stored.reported_finishes {
-                    let relation: Option<String> = transaction.query_row(
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let mut stored = decode_stored_result(&result)?;
+        if !stored.reported_finishes.is_empty() {
+            let payload: serde_json::Value = serde_json::from_str(&stored.result.message)?;
+            for (child, identity) in std::mem::take(&mut stored.reported_finishes) {
+                let relation: Option<String> = transaction.query_row(
                         "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
                         params![child, parent], |row| row.get(0),
                     ).optional()?;
-                    let Some(relation) = relation else {
-                        continue;
-                    };
-                    let relation: mj_core::subagent::SubagentRecord =
-                        serde_json::from_str(&relation)?;
-                    if relation.reported_finish.as_ref() != Some(&identity) {
-                        continue;
-                    }
-                    let mut entry = payload["agents"]
-                        .as_array()
-                        .and_then(|agents| {
-                            agents
-                                .iter()
-                                .find(|entry| entry["child_session_id"] == child)
-                        })
-                        .cloned()
-                        .context("legacy wait is missing its marked child report")?;
-                    // Name the child as the session list does now; a child whose
-                    // record is gone keeps the task name.
-                    let live_name: Option<String> = transaction
-                        .query_row(
-                            "SELECT title, session_title_override, acp_session_title
-                             FROM sessions WHERE session_id=?1",
-                            [&child],
-                            |row| {
-                                let title: String = row.get(0)?;
-                                let title_override: Option<String> = row.get(1)?;
-                                let acp_title: Option<String> = row.get(2)?;
-                                Ok(mj_core::state::bounded_one_line(
-                                    mj_core::state::listed_session_title(
-                                        &child,
-                                        &title,
-                                        title_override.as_deref(),
-                                        acp_title.as_deref(),
-                                    ),
-                                    mj_core::state::MESSAGE_NAME_CHARS,
-                                ))
-                            },
-                        )
-                        .optional()?;
-                    if let Some(name) = live_name {
-                        entry["child_name"] = name.into();
-                    }
-                    entry["task_name"] = relation.task_name.into();
-                    let report = serde_json::from_value(entry)?;
-                    let key = subagent_report_key(&parent, &child, &identity)?;
-                    let exists: bool = transaction.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
-                        [&key],
-                        |row| row.get(0),
-                    )?;
-                    if exists {
-                        continue;
-                    }
-                    // The old model may have seen this report before an acknowledgement
-                    // was lost. Deliver it again rather than risk losing it on upgrade.
-                    let event = mj_core::mailbox::MailboxEvent {
-                        key: key.clone(),
-                        source: "mjolnir".into(),
-                        wake: true,
-                        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
-                        body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
-                            report: Box::new(report),
-                        },
-                    };
-                    super::mailbox::enqueue_mailbox_event_with(
-                        &transaction,
-                        &key,
-                        &parent,
-                        &serde_json::to_string(&event)?,
-                        true,
-                        false,
-                    )?;
+                let Some(relation) = relation else {
+                    continue;
+                };
+                let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&relation)?;
+                if relation.reported_finish.as_ref() != Some(&identity) {
+                    continue;
                 }
+                let mut entry = payload["agents"]
+                    .as_array()
+                    .and_then(|agents| {
+                        agents
+                            .iter()
+                            .find(|entry| entry["child_session_id"] == child)
+                    })
+                    .cloned()
+                    .context("legacy wait is missing its marked child report")?;
+                // Name the child as the session list does now; a child whose
+                // record is gone keeps the task name.
+                let live_name: Option<String> = transaction
+                    .query_row(
+                        "SELECT title, session_title_override, acp_session_title
+                             FROM sessions WHERE session_id=?1",
+                        [&child],
+                        |row| {
+                            let title: String = row.get(0)?;
+                            let title_override: Option<String> = row.get(1)?;
+                            let acp_title: Option<String> = row.get(2)?;
+                            Ok(mj_core::state::bounded_one_line(
+                                mj_core::state::listed_session_title(
+                                    &child,
+                                    &title,
+                                    title_override.as_deref(),
+                                    acp_title.as_deref(),
+                                ),
+                                mj_core::state::MESSAGE_NAME_CHARS,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some(name) = live_name {
+                    entry["child_name"] = name.into();
+                }
+                entry["task_name"] = relation.task_name.into();
+                let report = serde_json::from_value(entry)?;
+                let key = subagent_report_key(&parent, &child, &identity)?;
+                let exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+                    [&key],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    continue;
+                }
+                // The old model may have seen this report before an acknowledgement
+                // was lost. Deliver it again rather than risk losing it on upgrade.
+                let event = mj_core::mailbox::MailboxEvent {
+                    key: key.clone(),
+                    source: "mjolnir".into(),
+                    wake: true,
+                    created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                    body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                        report: Box::new(report),
+                    },
+                };
+                super::mailbox::enqueue_mailbox_event_with(
+                    &transaction,
+                    &key,
+                    &parent,
+                    &serde_json::to_string(&event)?,
+                    true,
+                    false,
+                )?;
             }
         }
+        stored.result.is_error = false;
+        stored.result.message = serde_json::json!({
+            "status": "reports_arrive_as_messages",
+            "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION,
+        })
+        .to_string();
         transaction.execute(
-            "DELETE FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2",
-            params![parent, request],
+            "UPDATE delegation_effects SET phase='result', result_json=?3 WHERE parent_session_id=?1 AND request_id=?2",
+            params![parent, request, serde_json::to_string(&stored)?],
         )?;
         transaction.commit()?;
-        Ok(true)
+        Ok(Some(stored))
     })?;
-    if retired {
+    if retired.is_some() {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(retired)
@@ -538,8 +775,12 @@ mod tests {
             Ok(())
         }).unwrap();
         assert!(
-            enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-                .is_err()
+            enqueue_subagent_reports(
+                "parent".into(),
+                vec![(identity.clone(), report.clone())],
+                Vec::new()
+            )
+            .is_err()
         );
         assert!(pending_mailbox_events(10).unwrap().is_empty());
         assert!(
@@ -554,10 +795,18 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-            .unwrap();
-        enqueue_subagent_reports("parent".into(), vec![(identity.clone(), report.clone())])
-            .unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(identity.clone(), report.clone())],
+            Vec::new(),
+        )
+        .unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(identity.clone(), report.clone())],
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(pending_mailbox_events(10).unwrap().len(), 1);
         assert_eq!(
             load_subagent("child").unwrap().unwrap().reported_finish,
@@ -568,10 +817,15 @@ mod tests {
         })).unwrap();
         let mut newer_report = report.clone();
         newer_report.output = Some("new report".into());
-        enqueue_subagent_reports("parent".into(), vec![(newer.clone(), newer_report)]).unwrap();
+        enqueue_subagent_reports(
+            "parent".into(),
+            vec![(newer.clone(), newer_report)],
+            Vec::new(),
+        )
+        .unwrap();
         let mut stale = report;
         stale.parked = Some(true);
-        enqueue_subagent_reports("parent".into(), vec![(identity, stale)]).unwrap();
+        enqueue_subagent_reports("parent".into(), vec![(identity, stale)], Vec::new()).unwrap();
         assert_eq!(pending_mailbox_events(10).unwrap().len(), 2);
         assert_eq!(
             load_subagent("child").unwrap().unwrap().reported_finish,
@@ -624,7 +878,7 @@ mod tests {
         .to_string();
         submit_database_write("seed old result", move |connection| {
             connection.execute("UPDATE delegation_effects SET result_json=?1, phase='result'", [stored])?;
-            connection.execute_batch("CREATE TEMP TRIGGER reject_retirement BEFORE DELETE ON delegation_effects BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;")?;
+            connection.execute_batch("CREATE TEMP TRIGGER reject_retirement BEFORE UPDATE OF result_json ON delegation_effects BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;")?;
             Ok(())
         }).unwrap();
         assert!(retire_legacy_wait("parent".into(), "old-wait".into()).is_err());
@@ -635,8 +889,33 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert!(retire_legacy_wait("parent".into(), "old-wait".into()).unwrap());
-        assert!(!retire_legacy_wait("parent".into(), "old-wait".into()).unwrap());
+        let replaced = retire_legacy_wait("parent".into(), "old-wait".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retire_legacy_wait("parent".into(), "old-wait".into())
+                .unwrap()
+                .unwrap(),
+            replaced
+        );
+        assert_eq!(
+            load_delegation("parent", "old-wait")
+                .unwrap()
+                .unwrap()
+                .1
+                .unwrap(),
+            replaced
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replaced.result.message).unwrap()["status"],
+            "reports_arrive_as_messages"
+        );
+        acknowledge_delegation("parent".into(), "old-wait".into()).unwrap();
+        assert!(
+            retire_legacy_wait("parent".into(), "old-wait".into())
+                .unwrap()
+                .is_none()
+        );
         assert!(load_delegation("parent", "old-wait").unwrap().is_none());
         let rows = pending_mailbox_events(10).unwrap();
         assert_eq!(rows.len(), 1);

@@ -34,7 +34,82 @@ pub(super) fn capture_editor_draft(
     }
 }
 
+/// Keep ordering within a session while independent sessions dispatch
+/// concurrently. Attached and detached producers use this same bridge owner.
+pub(super) fn chat_daemon_requests(
+    bridges: &mut BTreeMap<String, mj_chat::chat::ChatDaemonSender>,
+    session_id: &str,
+    updates: tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
+    notices: mj_chat::chat::Notices,
+) -> mj_chat::chat::ChatDaemonSender {
+    if let Some(sender) = bridges.get(session_id) {
+        return sender.clone();
+    }
+    let (persistence_tx, mut persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<mj_chat::chat::ChatDaemonRequest>();
+    let refusals = updates;
+    tokio::spawn(async move {
+        while let Some(request) = persistence_rx.recv().await {
+            // A review action's refusal is a sentence for the person who
+            // pressed the key, so it comes back to the chat rather than
+            // only into the log.
+            let refusal_session = match &request {
+                mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
+                    Some(session_id.clone())
+                }
+                mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt { .. } => None,
+            };
+            let result = async {
+                let mut daemon = crate::daemon::connect_or_start().await?;
+                match request {
+                    mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt {
+                        session_id,
+                        bundle_id,
+                        text,
+                    } => {
+                        daemon
+                            .record_abandoned_prompt(session_id, bundle_id, text)
+                            .await
+                    }
+                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
+                        daemon.start_turn_review(session_id).await
+                    }
+                }
+            }
+            .await;
+            if let (Err(error), Some(session_id)) = (&result, refusal_session) {
+                report(
+                    "persisting chat state",
+                    &refusals,
+                    DashboardIoUpdate::ReviewRefused {
+                        session_id,
+                        message: format!("{error:#}"),
+                    },
+                );
+            }
+            if let Err(error) = result {
+                tracing::warn!(%error, "could not persist chat state through the daemon");
+                notices.set_failure(format!("Could not persist Prompt state: {error:#}"));
+            }
+        }
+    });
+    bridges.insert(session_id.to_owned(), persistence_tx.clone());
+    persistence_tx
+}
+
 impl DashboardContext {
+    pub(crate) fn chat_daemon_requests(
+        &mut self,
+        session_id: &str,
+    ) -> mj_chat::chat::ChatDaemonSender {
+        chat_daemon_requests(
+            &mut self.composer_daemon_requests,
+            session_id,
+            self.dashboard_io_tx.clone(),
+            self.notices.clone(),
+        )
+    }
+
     /// Opens the conversation for `session_id` without waiting on the session
     /// manager. Attaching can involve worker/relay I/O, so the result comes
     /// back through the dashboard I/O channel and the surface stays responsive
@@ -256,53 +331,7 @@ impl DashboardContext {
             config: self.controller.config.clone(),
             session: session_record,
         };
-        let (persistence_tx, mut persistence_rx) =
-            tokio::sync::mpsc::unbounded_channel::<mj_chat::chat::ChatDaemonRequest>();
-        let refusals = self.dashboard_io_tx.clone();
-        tokio::spawn(async move {
-            while let Some(request) = persistence_rx.recv().await {
-                // A review action's refusal is a sentence for the person who
-                // pressed the key, so it comes back to the chat rather than
-                // only into the log.
-                let refusal_session = match &request {
-                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
-                        Some(session_id.clone())
-                    }
-                    _ => None,
-                };
-                let result = async {
-                    let mut daemon = crate::daemon::connect_or_start().await?;
-                    match request {
-                        mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt {
-                            session_id,
-                            bundle_id,
-                            text,
-                        } => {
-                            daemon
-                                .record_abandoned_prompt(session_id, bundle_id, text)
-                                .await
-                        }
-                        mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
-                            daemon.start_turn_review(session_id).await
-                        }
-                    }
-                }
-                .await;
-                if let (Err(error), Some(session_id)) = (&result, refusal_session) {
-                    report(
-                        "persisting chat state",
-                        &refusals,
-                        DashboardIoUpdate::ReviewRefused {
-                            session_id,
-                            message: format!("{error:#}"),
-                        },
-                    );
-                }
-                if let Err(error) = result {
-                    tracing::warn!(%error, "could not persist chat state through the daemon");
-                }
-            }
-        });
+        let persistence_tx = self.chat_daemon_requests(&session_id);
         self.opening_chat_sessions.insert(pane, session_id.clone());
         self.sync_opening_session();
         let detach = self

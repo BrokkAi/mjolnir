@@ -1,5 +1,10 @@
 use super::*;
 
+/// What the requester is told when the reviewers run without a brief.
+pub(super) fn brief_skipped_notice(reason: &str) -> String {
+    format!("Review started without a relation brief: {reason}")
+}
+
 impl HostState {
     pub(super) fn prepared(
         &mut self,
@@ -70,7 +75,7 @@ impl HostState {
             if mj_review::delta::trees_unchanged(&deltas) {
                 driver.empty_push_delta_captured(deltas)
             } else {
-                driver.delta_captured(deltas)
+                driver.delta_captured_with_writer(deltas, prepared.brief_writer.is_some())
             }
         };
         {
@@ -95,10 +100,31 @@ impl HostState {
                     child_session_id: None,
                 });
             }
+            if prepared.brief_writer.is_some() {
+                let request_key = match new_command_id("reviewer-child") {
+                    Ok(id) => id,
+                    Err(error) => {
+                        self.preparing.remove(&session_id);
+                        answer(
+                            reply,
+                            Err(StartRefusal(format!(
+                                "could not allocate brief writer request: {error:#}"
+                            ))),
+                        );
+                        return;
+                    }
+                };
+                registrations.push(mj_core::storage::ReviewerRegistration {
+                    role: mj_core::review::driver::BRIEF_WRITER_ROLE.to_owned(),
+                    request_key,
+                    child_session_id: None,
+                });
+            }
             prepared.state.active_group = Some(mj_core::storage::ActiveReviewGroup {
                 driver: driver.snapshot(),
                 reviewers: prepared.reviewers.clone(),
                 registrations,
+                brief_writer: prepared.brief_writer.clone(),
             });
         }
         prepared.state.active = Some(review_id);
@@ -191,6 +217,7 @@ impl HostState {
                     );
                     return;
                 }
+                let brief_skipped = pending.prepared.brief_skipped;
                 self.reviews.insert(
                     session_id.clone(),
                     ReviewSlot {
@@ -213,9 +240,12 @@ impl HostState {
                 {
                     answer(slot.start_reply.take(), Ok(()));
                 }
+                if let Some(reason) = brief_skipped {
+                    self.record_notice(&session_id, brief_skipped_notice(&reason));
+                }
                 self.run(&session_id, pending.requests);
             }
-            PersistenceCompletion::Close => {
+            PersistenceCompletion::Close(_resolution) => {
                 self.closing.remove(&session_id);
                 if let Err(error) = result {
                     tracing::warn!(

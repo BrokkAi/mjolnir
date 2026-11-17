@@ -84,14 +84,26 @@ const MAX_CODE_FAILURES: u32 = 5;
 const CODE_LOCKOUT_BASE: Duration = Duration::from_secs(30);
 const CODE_LOCKOUT_CAP: Duration = Duration::from_secs(60 * 60);
 const MAX_TITLE_CHARS: usize = 120;
-const MAX_PROMPT_CHARS: usize = 64 * 1024;
+/// The largest body of an API request that carries prompt or message text:
+/// the ordinary allowance plus the largest prompt the worker's relay accepts
+/// ([`mj_core::relay::RELAY_COMMAND_BYTE_BUDGET`], measured as serde_json
+/// writes it). JSON lets a client spell any character as a `\u` escape, six
+/// bytes for a one-byte ASCII character, so a client's body can be six times
+/// what serde_json writes. Any prompt the worker could take therefore reaches
+/// the validator, and one it could not is refused with the validator's
+/// reason rather than a bare 413 (#1556).
+const MAX_PROMPT_TEXT_BODY_BYTES: usize =
+    MAX_BODY_BYTES + 6 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
 /// How many repositories one dirty-worktree acknowledgement may name. A bundle
 /// with more repositories than this than has bigger problems than the phone.
 const MAX_DIRTY_ACKNOWLEDGEMENTS: usize = 32;
-/// The largest draft a phone may store. A composer is for a prompt, and a
-/// prompt this size has other problems; the bound exists so one viewer cannot
-/// fill the daemon's database with text it never sent.
-const MAX_DRAFT_BYTES: usize = 64 * 1024;
+/// The largest draft a phone may store: as large as the largest prompt the
+/// worker's relay takes, so any prompt being composed can be saved (#1556).
+/// The bound exists so one viewer cannot fill the daemon's database with text
+/// it never sent.
+const MAX_DRAFT_BYTES: usize = mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
+/// The longest shell command a phone may run, unchanged by #1556.
+const MAX_SHELL_COMMAND_CHARS: usize = 64 * 1024;
 /// How many prompt-history matches one search returns. Public because the
 /// controller loop performs the search and must use the same bound the phone
 /// was promised.
@@ -214,6 +226,7 @@ pub struct ServerOptions {
     /// task does not occupy the controller's action admission slot.
     background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
+    pub(crate) image_builds: crate::session_images::ImageBuilds,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
     /// disabled only for an explicitly trusted HTTP development endpoint.
@@ -250,7 +263,7 @@ pub const UPGRADE_HEADER: &str = "x-mj-upgrade";
 /// Answers, for a target id, why no worker binary could serve a session there.
 /// It blocks (a bare SSH host is asked its platform), so callers run it off
 /// the async runtime.
-pub type WorkerSourceCheck = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type WorkerSourceCheck = Arc<dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync>;
 
 /// Typed request channels served by the authenticated HTTP surface.
 pub struct ServerRequests {
@@ -285,6 +298,7 @@ impl ServerOptions {
             client_state_tx: requests.client_state_tx,
             background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
+            image_builds: crate::session_images::ImageBuilds::default(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
             tls_config: None,
@@ -421,6 +435,7 @@ pub async fn run_server_on_listener(
     let shutdown = options.shutdown.clone();
     let viewer_code = options.viewer_code.clone();
     let tls_config = options.tls_config.take();
+    let image_builds = options.image_builds.clone();
     let app = router(options);
     mj_core::diagnostic_stdout!("Mjolnir viewer code: {viewer_code}");
     let listener = listener.into_std().context("prepare web viewer listener")?;
@@ -440,14 +455,16 @@ pub async fn run_server_on_listener(
         }
     };
     tokio::pin!(serve);
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut serve => result,
         _ = shutdown.cancelled() => {
             shutdown_handle.graceful_shutdown(Some(Duration::from_secs(2)));
             serve.await
         }
     }
-    .with_context(|| format!("serve web viewer on {bind}"))
+    .with_context(|| format!("serve web viewer on {bind}"));
+    image_builds.finish().await;
+    result
 }
 
 mod viewer_feed;

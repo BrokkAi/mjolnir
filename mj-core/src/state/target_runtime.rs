@@ -25,6 +25,16 @@ pub struct TargetRuntimeSettings {
     pub container_settings: Option<ContainerSettings>,
 }
 
+impl TargetRuntimeSettings {
+    /// Whether this recorded runtime is an SSH bare target with
+    /// `permissions = "yolo"`. The recorded kind and policy are used instead
+    /// of the template so a session keeps the mode it was launched with.
+    /// Containers are unconstrained too, but their kind is never `ssh-bare`.
+    pub fn is_yolo(&self) -> bool {
+        self.kind == "ssh-bare" && self.execution_policy == ExecutionPolicy::Unconstrained
+    }
+}
+
 /// Desired settings and the applied creation snapshot share one representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerSettings {
@@ -33,8 +43,8 @@ pub struct ContainerSettings {
     /// Which image the container was created from, as far as upgrades care:
     /// `Some(Some(image))` for the default image of the Mjolnir that created
     /// it, `Some(None)` for a configured image, and `None` for a container
-    /// recorded before Mjolnir tracked this. A release's default is its own
-    /// version's image, so a newer default may be offered as an explicit upgrade.
+    /// recorded before Mjolnir tracked this. Old release-image strings remain
+    /// readable; an explicit upgrade follows the current session default.
     /// This snapshot never authorizes container replacement.
     #[serde(
         default,
@@ -76,8 +86,9 @@ impl ContainerSettings {
                 .and_then(|applied| applied.default_image.as_ref())
                 .map(|image| {
                     image
-                        .as_ref()
-                        .map(|_| crate::config::DEFAULT_CONTAINER_IMAGE.to_owned())
+                        .as_deref()
+                        .map(default_family_image)
+                        .map(str::to_owned)
                 }),
         }
     }
@@ -85,10 +96,33 @@ impl ContainerSettings {
     /// The snapshot to record for a container just created from `image`.
     pub fn applied(session: &SessionRecord, image: &str) -> Self {
         Self {
-            default_image: Some(
-                (image == crate::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()),
-            ),
+            default_image: Some(Self::default_marker(image)),
             ..Self::requested(session)
+        }
+    }
+
+    /// The `default_image` marker for a container running `image`: the image
+    /// when it is one of Mjolnir's own defaults, `None` for a configured one.
+    pub fn default_marker(image: &str) -> Option<String> {
+        (image == crate::config::DEFAULT_SESSION_IMAGE
+            || image == crate::config::RELEASE_CONTAINER_IMAGE)
+            .then(|| image.to_owned())
+    }
+
+    /// The image an explicit upgrade replaces this session's container with,
+    /// given the image its target resolves to now. A container created on the
+    /// old default, the release image, upgrades to the current release image
+    /// rather than to the new session default: the replacement keeps the
+    /// source's user, home and tools, which the release image provides.
+    pub fn upgrade_image<'a>(session: &SessionRecord, resolved: &'a str) -> &'a str {
+        let recorded = Self::applied_to(session)
+            .and_then(|applied| applied.default_image.as_ref())
+            .and_then(Option::as_deref);
+        match recorded {
+            Some(recorded) if resolved == crate::config::DEFAULT_SESSION_IMAGE => {
+                default_family_image(recorded)
+            }
+            _ => resolved,
         }
     }
 
@@ -244,5 +278,15 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
 impl From<&TargetTemplate> for std::sync::Arc<TargetRuntimeSettings> {
     fn from(template: &TargetTemplate) -> Self {
         Self::new(TargetRuntimeSettings::from(template))
+    }
+}
+
+/// Which of today's defaults a recorded default image corresponds to: the
+/// session default stays itself; any earlier default was a release image.
+fn default_family_image(recorded: &str) -> &'static str {
+    if recorded == crate::config::DEFAULT_SESSION_IMAGE {
+        crate::config::DEFAULT_SESSION_IMAGE
+    } else {
+        crate::config::RELEASE_CONTAINER_IMAGE
     }
 }

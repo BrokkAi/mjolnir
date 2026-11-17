@@ -661,12 +661,51 @@ pub fn unattended_git_environment(command: &mut CommandSpec) {
     command
         .env
         .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env.insert(
-            "GIT_SSH_COMMAND".to_owned(),
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-                .to_owned(),
-        );
+    if let Some(default) = local_git_ssh_command() {
+        command
+            .env
+            .insert("GIT_SSH_COMMAND".to_owned(), default.to_owned());
+    }
+}
+
+/// SSH asks about an unknown host key itself, which `GIT_TERMINAL_PROMPT` does
+/// not reach, so Git that no one is watching gets a batch-mode command.
+pub const NON_INTERACTIVE_GIT_SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
+
+/// How Git that Mjolnir starts on this machine reaches an SSH remote: the
+/// operator's `GIT_SSH_COMMAND` when it is set, otherwise
+/// [`NON_INTERACTIVE_GIT_SSH_COMMAND`]. `None` means the operator's command
+/// applies and the child inherits it byte for byte; `Some` is the default to
+/// set. [`remote_git_ssh_command`] is the same decision for Git Mjolnir runs
+/// on another machine, and these two are the only places it is made (#1466).
+pub fn local_git_ssh_command() -> Option<&'static str> {
+    std::env::var_os("GIT_SSH_COMMAND")
+        .is_none()
+        .then_some(NON_INTERACTIVE_GIT_SSH_COMMAND)
+}
+
+/// [`local_git_ssh_command`]'s decision as text, for Git that runs on another
+/// machine, such as a clone-cache host or a session's target, where the
+/// command must travel in an argument. An operator command that is not UTF-8
+/// cannot travel as text and is refused rather than altered; Git on this
+/// computer uses [`local_git_ssh_command`] and inherits it instead.
+pub fn remote_git_ssh_command() -> anyhow::Result<String> {
+    match std::env::var_os("GIT_SSH_COMMAND") {
+        None => Ok(NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()),
+        // Git on this computer fails trying to run an empty command. Sent
+        // elsewhere, an empty value would read as "use that machine's own",
+        // so it is refused here to fail the same way.
+        Some(command) if command.is_empty() => Err(anyhow::anyhow!(
+            "GIT_SSH_COMMAND is set but empty, and Git cannot run an empty command; \
+             unset it or set it to an SSH command"
+        )),
+        Some(command) => command.into_string().map_err(|_| {
+            anyhow::anyhow!(
+                "GIT_SSH_COMMAND is not valid UTF-8, so Mjolnir cannot send it to the machine \
+                 that runs this Git command; set it to a UTF-8 command"
+            )
+        }),
     }
 }
 

@@ -6,6 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -237,6 +238,7 @@ impl Controller {
     /// working between an observation and this call.
     pub async fn upgrade_session_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -274,11 +276,7 @@ impl Controller {
             .context("prepare the current managed harness before replacing the worker")?;
         let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &worker)
             .context("stage the current worker while the old worker remains available")?;
-        let Some(owner) =
-            crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "worker upgrade")?
-        else {
-            return Ok(WorkerUpgradeOutcome::Deferred);
-        };
+        let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
         owner
             .scope(async {
                 let target = self.state.sessions[session_id]
@@ -310,7 +308,7 @@ impl Controller {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
                 let Some(mut lease) =
-                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                    super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
@@ -422,11 +420,12 @@ impl Controller {
                 if let Some(target) = target {
                     owner.verify_target(target)?;
                     if crate::database::load_worker_restart(session_id)?.is_some() {
-                        let output =
-                            executor.execute(&super::worker_binary::worker_liveness_command(
-                                restart.backend,
-                                restart.worker_root,
-                            ))?;
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            restart.backend,
+                            session_id,
+                            restart.worker_root,
+                        )?;
                         anyhow::ensure!(
                             output.status == 0
                                 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
@@ -497,8 +496,11 @@ impl Controller {
                         || crate::database::worker_restart_phase(session_id)?
                             == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
                     {
-                        let output = executor.execute(
-                            &super::worker_binary::worker_liveness_command(backend, worker_root),
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            backend,
+                            session_id,
+                            worker_root,
                         )?;
                         anyhow::ensure!(
                             output.status == 0
@@ -546,6 +548,7 @@ impl Controller {
                     super::execute_checked(
                         executor,
                         targets::command_on_locator(
+                            SshTrafficClass::Control,
                             backend,
                             session_id,
                             vec![
@@ -760,6 +763,29 @@ mod tests {
             yielded: AtomicBool,
         }
         impl CommandExecutor for LaunchThenHandoff {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 if !self.yielded.load(Ordering::SeqCst) {
                     assert!(
@@ -834,22 +860,27 @@ mod tests {
             yielded: AtomicBool::new(false),
         };
         let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
-        let error = match controller
-            .restart_worker_with_installed_binary(
-                ID,
-                &executor,
-                InstalledWorkerRestart {
-                    backend: &backend,
-                    worker_root: &root,
-                    reconnect: &reconnect,
-                    launch: None,
-                    prepared: true,
-                    discard_queued_prompts: Some("discard-before-boot".into()),
-                    swap_admission: Some(crate::upgrade::activity_unless_draining(LABEL).unwrap()),
-                    messages: &RESTART_FOR_UPGRADE,
-                },
-            )
-            .await
+        let error = match crate::controller::test_support::worker_test_scope_async(ID, async {
+            controller
+                .restart_worker_with_installed_binary(
+                    ID,
+                    &executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &root,
+                        reconnect: &reconnect,
+                        launch: None,
+                        prepared: true,
+                        discard_queued_prompts: Some("discard-before-boot".into()),
+                        swap_admission: Some(
+                            crate::upgrade::activity_unless_draining(LABEL).unwrap(),
+                        ),
+                        messages: &RESTART_FOR_UPGRADE,
+                    },
+                )
+                .await
+        })
+        .await
         {
             Ok(_) => panic!("handoff must cancel observation"),
             Err(error) => error,
@@ -862,7 +893,7 @@ mod tests {
         );
     }
 
-    /// Fails every command after the first, so a restart gets past its stop and
+    /// Fails every command after the first two (the control-worker check and the stop), so a restart gets past its stop and
     /// then loses the worker it was replacing.
     #[cfg(unix)]
     struct StopSucceedsThenFails {
@@ -871,10 +902,34 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
             executed.push(command.program.clone());
-            if executed.len() == 1 {
+            // The first two commands are the control-worker check and the stop.
+            if executed.len() <= 2 {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: Vec::new(),
@@ -894,6 +949,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FailingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 1,
@@ -921,8 +999,10 @@ mod tests {
             worker_root: worker_root.clone(),
         };
         let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
-        let result = bare_restart_controller()
-            .restart_worker_with_installed_binary(
+        let controller = bare_restart_controller();
+        let result = crate::controller::test_support::worker_test_scope_async(
+            session_id,
+            controller.restart_worker_with_installed_binary(
                 session_id,
                 executor,
                 InstalledWorkerRestart {
@@ -935,8 +1015,9 @@ mod tests {
                     swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
-            )
-            .await;
+            ),
+        )
+        .await;
         match result {
             Ok(_) => panic!("a failing executor unexpectedly restarted the worker"),
             Err(error) => error,
@@ -980,6 +1061,29 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct FailingCommands(AtomicUsize);
         impl CommandExecutor for FailingCommands {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandOutput {
@@ -990,7 +1094,7 @@ mod tests {
             }
         }
         let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let upgrading = crate::worker_lifecycle::WorkerPermit::try_acquire(id, "worker upgrade")
+        let upgrading = crate::controller::test_support::worker_test_permit(id, "worker upgrade")
             .unwrap()
             .unwrap();
         let executor = FailingCommands(AtomicUsize::new(0));
@@ -1008,13 +1112,14 @@ mod tests {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         };
         assert_eq!(
             crate::session_manager::recover_worker_controlled(recovery, true, Some(id), &executor)

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 pub(crate) fn container_temporary_volume_name(container: &str) -> String {
     format!("{container}-tmp")
@@ -98,7 +99,7 @@ pub(crate) fn inspect_container_storage(
     )
     .purpose("inspect session container storage");
     let command = match ssh {
-        Some(ssh) => command_over_ssh(command, ssh),
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
         None => command,
     };
     let output = executor.execute(&command)?;
@@ -411,7 +412,7 @@ pub(super) fn podman_container_run(
         }
     };
     let command = match ssh {
-        Some(ssh) => ssh_command_owned(ssh, wrapped),
+        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, wrapped),
         None => {
             let program = wrapped.remove(0);
             CommandSpec::new(program, wrapped)
@@ -827,11 +828,15 @@ pub(super) fn apple_image_prepare_commands(template: &ContainerTemplate) -> Vec<
 }
 
 /// Move a command to the remote host without losing its input or lifecycle metadata.
-pub(super) fn command_over_ssh(mut command: CommandSpec, ssh: &SshTarget) -> CommandSpec {
+pub(super) fn command_over_ssh(
+    class: SshTrafficClass,
+    mut command: CommandSpec,
+    ssh: &SshTarget,
+) -> CommandSpec {
     let remote = std::iter::once(command.program)
         .chain(command.args)
         .collect();
-    let wrapped = ssh_command_owned(ssh, remote);
+    let wrapped = ssh_command_owned(class, ssh, remote);
     command.program = wrapped.program;
     command.args = wrapped.args;
     // The wrapped command now opens an SSH session, so it is admitted and
@@ -841,14 +846,18 @@ pub(super) fn command_over_ssh(mut command: CommandSpec, ssh: &SshTarget) -> Com
     command
 }
 
-pub(super) fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) -> CommandSpec {
+pub(super) fn at_boundary(
+    class: SshTrafficClass,
+    boundary: ExecutionBoundary<'_>,
+    args: Vec<String>,
+) -> CommandSpec {
     match boundary {
         ExecutionBoundary::Direct => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         ExecutionBoundary::Container {
             engine,
             container_id,
         } => container_exec(engine, container_id, args),
-        ExecutionBoundary::Ssh(ssh) => ssh_command_owned(ssh, args),
+        ExecutionBoundary::Ssh(ssh) => ssh_command_owned(class, ssh, args),
         ExecutionBoundary::SshContainer {
             engine,
             ssh,
@@ -857,7 +866,7 @@ pub(super) fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) ->
             let mut remote = engine_argv(engine);
             remote.extend(["exec".to_owned(), "-i".to_owned(), container_id.to_owned()]);
             remote.extend(args);
-            ssh_command_owned(ssh, remote)
+            ssh_command_owned(class, ssh, remote)
         }
     }
 }

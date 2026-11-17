@@ -20,9 +20,9 @@ mod history;
 mod input;
 mod pasted_paths;
 mod remote;
-mod rendering;
+pub(crate) mod rendering;
 mod submissions;
-mod transcript;
+pub(crate) mod transcript;
 mod turn_review;
 
 #[cfg(test)]
@@ -78,7 +78,7 @@ use autocomplete::{
 use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
 pub use elicitation::ElicitationDraft;
-use history::{HistorySearch, HistorySearchRequest};
+use history::HistorySearch;
 #[cfg(test)]
 use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
@@ -111,6 +111,9 @@ fn voice_form() -> Form<VoiceControl> {
     form.end_frame(VoiceControl::Microphone);
     form
 }
+
+/// Nonblocking host bridge shared by all Prompt editor requests.
+pub type ChatDaemonSender = tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>;
 
 pub use active::{ActiveChat, ChatDaemonRequest, ChatInstance, PreparedChat};
 pub use transcript::{
@@ -492,6 +495,7 @@ pub struct ChatState {
     /// a large session opens on its tail and converts the rest off the event
     /// loop. Zero whenever the projection is complete.
     unconverted_prefix: usize,
+    /// Explicitly loaded history stays available when the live tail slides.
     /// The last unconverted transcript item: the projection item a pending
     /// prefix has to end at to be spliced in front of the tail. `None`
     /// whenever the projection is complete.
@@ -529,9 +533,6 @@ pub struct ChatState {
     /// The latest session-history listing requested; an older answer that
     /// arrives after a newer request is dropped.
     session_history_generation: u64,
-    /// A listing to request, set when the chat opens and after each turn so
-    /// prompts sent to this session from elsewhere reach Up and Ctrl-P.
-    pending_session_history: Option<u64>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -543,8 +544,7 @@ pub struct ChatState {
     preferred_column: Option<usize>,
     history_search: Option<HistorySearch>,
     next_history_search_generation: u64,
-    pending_history_search: Option<HistorySearchRequest>,
-    pending_abandoned_prompt: Option<ChatDaemonRequest>,
+    composer_requests: VecDeque<history::ComposerRequest>,
     queued_prompts: VecDeque<QueuedPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
     submission_renders: Vec<(String, std::time::Instant)>,
@@ -738,7 +738,6 @@ impl ChatState {
             session_history: Vec::new(),
             session_history_error: None,
             session_history_generation: 0,
-            pending_session_history: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -749,8 +748,7 @@ impl ChatState {
             preferred_column: None,
             history_search: None,
             next_history_search_generation: 0,
-            pending_history_search: None,
-            pending_abandoned_prompt: None,
+            composer_requests: VecDeque::new(),
             queued_prompts: VecDeque::new(),
             pending_submissions: Vec::new(),
             submission_renders: Vec::new(),

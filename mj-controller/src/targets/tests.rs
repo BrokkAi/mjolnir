@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::path_completion::{CompletionKind, ssh_completions};
+use mj_core::targets::SshTrafficClass;
 use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -118,6 +119,29 @@ impl PodmanPreflightExecutor {
 }
 
 impl CommandExecutor for PodmanPreflightExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.borrow_mut().push(command.clone());
         Ok(self.outputs.borrow_mut().remove(0))
@@ -141,6 +165,29 @@ fn a_waiter_for_the_apple_container_gate_stops_when_cancelled() {
         first_check: Mutex<Option<mpsc::Sender<()>>>,
     }
     impl CommandExecutor for WaitingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             panic!("a cancelled waiter must not run the Apple container CLI")
         }
@@ -259,6 +306,29 @@ fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOu
 fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
     struct NoPodman;
     impl CommandExecutor for NoPodman {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             Err(anyhow::Error::new(std::io::Error::from(
                 std::io::ErrorKind::NotFound,
@@ -389,6 +459,29 @@ fn podman_preflight_reports_unparsable_info() {
 fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
     struct NoDocker;
     impl CommandExecutor for NoDocker {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             Err(anyhow::Error::new(std::io::Error::from(
                 std::io::ErrorKind::NotFound,
@@ -2675,7 +2768,7 @@ fn legacy_ec2_close_uses_recorded_id() {
     )
     .unwrap();
     assert_eq!(
-        close.commands[0].args.last().unwrap(),
+        close.scripts()[0].args.last().unwrap(),
         "i-0123456789abcdef0"
     );
 }
@@ -2904,7 +2997,11 @@ fn tilde_workspace_prefix_becomes_home_relative() {
 #[test]
 fn shell_arguments_are_single_quoted_at_ssh_boundary() {
     let hostile = "repo'; touch /tmp/pwned; echo '";
-    let command = ssh_command(&ssh(), ["git", "clone", "--", hostile]);
+    let command = ssh_command(
+        SshTrafficClass::Control,
+        &ssh(),
+        ["git", "clone", "--", hostile],
+    );
     assert_eq!(
         unwrapped_remote_line(command.args.last().unwrap()),
         "'git' 'clone' '--' 'repo'\\''; touch /tmp/pwned; echo '\\'''"
@@ -2941,7 +3038,7 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     };
     let close = close_plan(&locator, SESSION).unwrap();
     assert!(
-        !close.commands[0]
+        !close.scripts()[0]
             .args
             .last()
             .unwrap()
@@ -2973,13 +3070,13 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     .unwrap();
 
     assert_eq!(
-        remote.commands[0].purpose,
+        remote.scripts()[0].purpose,
         "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state"
     );
 
     for script in [
-        local.commands[0].args[1].clone(),
-        remote.commands[0].args.last().unwrap().clone(),
+        local.scripts()[0].args[1].clone(),
+        remote.scripts()[0].args.last().unwrap().clone(),
     ] {
         let stop = script
             .find("worker stop --kill --root")
@@ -2990,7 +3087,7 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
         assert!(!script.contains("pkill"));
     }
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
@@ -3010,7 +3107,9 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("raw localhost reuses its worker root");
+    .expect("raw localhost reuses its worker root")
+    .scripts()[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "stop a leaked local Mjolnir worker and clear its relay state"
@@ -3031,7 +3130,9 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
         SESSION,
     )
     .unwrap()
-    .expect("an SSH host reuses its worker root");
+    .expect("an SSH host reuses its worker root")
+    .scripts()[0]
+        .clone();
     assert_eq!(
         remote.purpose,
         "stop a leaked remote Mjolnir worker and clear its relay state"
@@ -3088,7 +3189,9 @@ fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
             SESSION,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .scripts()[0]
+            .clone();
         let output = ProcessExecutor.execute(&cleanup).unwrap();
 
         assert_eq!(
@@ -3120,7 +3223,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("{local_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(
         local.purpose,
         "reset the worker root for an in-place harness replacement"
@@ -3157,7 +3262,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!(".local/share/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(remote.program, "ssh");
     let remote_script = remote.args.last().unwrap();
     assert!(
@@ -3183,7 +3290,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         SESSION,
         &format!("/var/lib/hel/profiles/{SESSION}"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     assert_eq!(container.program, "podman");
     assert_eq!(
         container.args[..4],
@@ -3223,7 +3332,9 @@ fn in_place_reset_unlinks_a_linked_profile_home_without_following_it() {
         SESSION,
         &format!("{worker_root}/profile"),
     )
-    .unwrap();
+    .unwrap()
+    .scripts()[0]
+        .clone();
     let output = ProcessExecutor.execute(&reset).unwrap();
 
     assert_eq!(
@@ -3376,15 +3487,18 @@ fn podman_cleanup_ignores_an_already_absent_container() {
         SESSION,
     )
     .unwrap();
-    assert_eq!(local.commands[0].program, "sh");
-    let local_script = &local.commands[0].args[1];
+    assert_eq!(local.scripts()[0].program, "sh");
+    let local_script = &local.scripts()[0].args[1];
     assert!(local_script.contains("podman rm --force --ignore"));
-    assert_eq!(local.commands[0].args.last().unwrap(), SESSION);
+    assert_eq!(local.scripts()[0].args.last().unwrap(), SESSION);
     assert_eq!(
-        local.commands[2].purpose,
+        local.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert_eq!(local.commands[2].stage, Some(ProvisionStage::CleaningCache));
+    assert_eq!(
+        local.scripts()[2].stage,
+        Some(ProvisionStage::CleaningCache)
+    );
 
     let remote = close_plan(
         &TargetLocator::SshPodman {
@@ -3397,17 +3511,17 @@ fn podman_cleanup_ignores_an_already_absent_container() {
     )
     .unwrap();
     assert!(
-        remote.commands[0]
+        remote.scripts()[0]
             .args
             .last()
             .unwrap()
             .contains("podman rm --force --ignore")
     );
     assert_eq!(
-        remote.commands[2].purpose,
+        remote.scripts()[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert!(remote.commands[2].args.last().unwrap().contains(SESSION));
+    assert!(remote.scripts()[2].args.last().unwrap().contains(SESSION));
 }
 
 #[test]
@@ -3426,22 +3540,22 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
     )
     .unwrap();
 
-    assert_eq!(plan.commands.len(), 4);
+    assert_eq!(plan.scripts().len(), 4);
     assert_eq!(
-        plan.commands[0].stage,
+        plan.scripts()[0].stage,
         Some(ProvisionStage::RemovingContainer)
     );
     assert_eq!(
-        plan.commands[1].stage,
+        plan.scripts()[1].stage,
         Some(ProvisionStage::RemovingStorage)
     );
     assert_eq!(
-        plan.commands[2].stage,
+        plan.scripts()[2].stage,
         Some(ProvisionStage::RemovingStorage)
     );
-    assert_eq!(plan.commands[3].stage, Some(ProvisionStage::CleaningCache));
-    assert!(plan.commands[1].args.contains(&volume));
-    assert!(plan.commands[1].args[1].contains("dev.mj.session"));
+    assert_eq!(plan.scripts()[3].stage, Some(ProvisionStage::CleaningCache));
+    assert!(plan.scripts()[1].args.contains(&volume));
+    assert!(plan.scripts()[1].args[1].contains("dev.mj.session"));
 }
 
 #[test]
@@ -3564,7 +3678,7 @@ fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
         SESSION,
     )
     .unwrap();
-    let command = &close.commands[0];
+    let command = &close.scripts()[0];
     assert_eq!(command.program, "sh");
     let script = &command.args[1];
     let remove_container = script.find("docker rm --force").unwrap();
@@ -3808,7 +3922,7 @@ fn native_temporary_storage_is_initialized_and_cleanup_is_repeatable() {
 
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         for _ in 0..2 {
-            for command in &close.commands {
+            for command in close.scripts() {
                 let output = execute_with_fake_docker(&environment, command, &env);
                 assert_eq!(
                     output.status,
@@ -3956,7 +4070,7 @@ fn temporary_storage_refuses_foreign_volumes_during_launch_and_cleanup() {
         );
         let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
         let failure = close
-            .commands
+            .scripts()
             .iter()
             .map(|command| execute_with_fake_docker(&environment, command, &env))
             .find(|output| output.status != 0)
@@ -4018,7 +4132,7 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
     std::fs::write(state.join("volumes"), volumes).unwrap();
     let close =
         retire_move_target_plan(&temporary_storage_locator("podman", &name), SESSION).unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         let output = execute_with_fake_docker(&environment, command, &env);
         assert_eq!(
             output.status,
@@ -4083,12 +4197,16 @@ test -s /tmp/mj-perf.txt
 "#;
         execute_checked(
             &ProcessExecutor,
-            &locator_command(&locator, vec!["sh".into(), "-c".into(), script.into()]),
+            &locator_command(
+                SshTrafficClass::Control,
+                &locator,
+                vec!["sh".into(), "-c".into(), script.into()],
+            ),
         )?;
         Ok(())
     })();
-    for command in close_plan(&locator, &session).unwrap().commands {
-        execute_checked(&ProcessExecutor, &command).unwrap();
+    for command in close_plan(&locator, &session).unwrap().scripts() {
+        execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
 }
@@ -4169,7 +4287,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
             Ok(())
         })();
         let cleanup = close_plan(&locator, &session).unwrap();
-        for command in &cleanup.commands {
+        for command in cleanup.scripts() {
             execute_checked(&ProcessExecutor, &with_runtime(command.clone())).unwrap();
         }
         result.unwrap();
@@ -4235,7 +4353,7 @@ fn podman_session_container_survives_signals_sent_to_pid_1() {
         Ok(())
     })();
     let cleanup = close_plan(&locator, &session).unwrap();
-    for command in &cleanup.commands {
+    for command in cleanup.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -4284,7 +4402,7 @@ fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
 
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_RM", "1")],
     );
     assert_ne!(output.status, 0);
@@ -4406,6 +4524,29 @@ struct StageRecordingExecutor {
 }
 
 impl CommandExecutor for StageRecordingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         assert!(
             self.active.borrow().contains(&ProvisionStage::RecoveryCopy),
@@ -4487,6 +4628,29 @@ fn scoped_stage_reports_completion_after_controlled_error() {
 }
 
 impl CommandExecutor for FakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let index = self.seen.borrow().len();
         self.seen.borrow_mut().push(command.clone());
@@ -4524,6 +4688,29 @@ struct SyncFakeExecutor {
 }
 
 impl CommandExecutor for SyncFakeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let mut seen = self.seen.lock().unwrap();
         let index = seen.len();
@@ -4545,6 +4732,29 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.clone());
         self.barrier.wait();
@@ -4590,6 +4800,29 @@ struct OrderSensitiveFailureExecutor {
 }
 
 impl CommandExecutor for OrderSensitiveFailureExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.clone());
         match command.purpose.as_str() {
@@ -4894,7 +5127,7 @@ fn ssh_apple_container_closes_the_container_and_snapshot_over_ssh() {
         container_id: resource_name(SESSION).unwrap(),
     };
     let plan = close_plan(&locator, SESSION).unwrap();
-    let command = &plan.commands[0];
+    let command = &plan.scripts()[0];
     assert_eq!(command.program, "ssh");
     let remote = command.args.last().unwrap();
     assert!(remote.contains("container rm --force"), "{remote}");
@@ -5131,7 +5364,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
         &session,
     )
     .unwrap();
-    for command in &close.commands {
+    for command in close.scripts() {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
     result.unwrap();
@@ -5186,7 +5419,7 @@ fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
     .unwrap();
     let output = execute_with_fake_docker(
         &environment,
-        &close.commands[0],
+        &close.scripts()[0],
         &[("FAKE_DOCKER_FAIL_VOLUME_RM", "1")],
     );
     assert_eq!(output.status, 43);
@@ -5242,8 +5475,8 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
     reconnect_plan(&locator, BORROWED_CHILD).expect("a child reconnects through its parent");
 
     let cleanup = borrowed_worker_cleanup_plan(&locator, BORROWED_CHILD).unwrap();
-    assert_eq!(cleanup.commands.len(), 1);
-    let script = cleanup.commands[0]
+    assert_eq!(cleanup.scripts().len(), 1);
+    let script = cleanup.scripts()[0]
         .args
         .iter()
         .find(|argument| argument.contains("rm -rf"))
@@ -5298,12 +5531,12 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     let cleanup = retire_move_target_plan(&locator, SESSION).unwrap();
     assert!(
         cleanup
-            .commands
+            .scripts()
             .iter()
             .all(|command| command.stage != Some(ProvisionStage::CleaningCache))
     );
-    assert!(cleanup.commands[0].args.contains(&destination_name));
-    assert!(!cleanup.commands[0].args.contains(&source_name));
+    assert!(cleanup.scripts()[0].args.contains(&destination_name));
+    assert!(!cleanup.scripts()[0].args.contains(&source_name));
 }
 
 /// The command an SSH remote line runs, without the macOS system PATH prefix
@@ -5320,22 +5553,41 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
 #[test]
 fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let hel = root.path().join("hel");
+    let workers = tempfile::tempdir().unwrap();
+    let root = workers.path().join("0123456789abcdef");
+    std::fs::create_dir(&root).unwrap();
+    // The root has a `hel`, so a worker could have run there.
+    std::fs::write(root.join("hel"), "").unwrap();
+    // The staged control worker is what answers: it proves it serves the
+    // subcommand (`--help`), then its probe fails.
+    let control = std::path::PathBuf::from(control_worker_path(root.to_str().unwrap()));
+    std::fs::create_dir_all(control.parent().unwrap()).unwrap();
     std::fs::write(
-        &hel,
-        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
+        &control,
+        "#!/bin/sh\ncase \"$*\" in *--help*) exit 0 ;; esac\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
     )
     .unwrap();
-    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = std::process::Command::new("sh")
         .args([
             "-c",
-            &worker_daemon_liveness_script(root.path().to_str().unwrap()),
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
         ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(71));
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    // A control worker that was never staged is reported, never read as death.
+    std::fs::remove_file(&control).unwrap();
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(WORKER_CONTROL_UNSTAGED_STATUS));
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 

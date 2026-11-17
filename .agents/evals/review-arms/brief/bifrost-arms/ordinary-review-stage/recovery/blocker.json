@@ -1,0 +1,29 @@
+{
+  "job": {
+    "bug": "diff-bb39a5fd49",
+    "arm": "BT"
+  },
+  "carrier_sid": "0f23bb69a200485d9306560e463ae6a7",
+  "error": {
+    "error": "mj usage --session: Error: daemon crossed request IDs\n",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/driver.py\", line 545, in one\n    state, error = run_job(job, gate), None\n                   ~~~~~~~^^^^^^^^^^^\n  File \"/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/driver.py\", line 407, in run_job\n    return collect(d, bug, identity, sid, place, before)\n  File \"/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/driver.py\", line 461, in collect\n    usage = mj(\"usage\", \"--session\", child)\n  File \"/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/driver.py\", line 110, in mj\n    raise RuntimeError(f\"mj {' '.join(map(str, args[:2]))}: {result.stderr.decode()[-1500:]}\")\nRuntimeError: mj usage --session: Error: daemon crossed request IDs\n\n",
+    "time_ns": 1794910121665647406
+  },
+  "reviewer_partial_files": [
+    {
+      "dir": "/mnt/optane/review-arms-bifrost-20261116/runs/diff-bb39a5fd49/BT/reviewers/c8757173aac6",
+      "files": [
+        "stored.json"
+      ],
+      "stored": {
+        "model": "gpt-6.1-terra",
+        "effort": null,
+        "profile": "codex4"
+      }
+    }
+  ],
+  "reviewer_capture_exists": false,
+  "inventory_check_exists": false,
+  "suspend_exists": false,
+  "done_exists": false
+}

@@ -29,9 +29,12 @@ impl TurnReview {
     pub(super) fn pending_elicitations(
         &self,
     ) -> Vec<(String, mj_core::elicitation::ElicitationRequest)> {
-        let TurnReviewPhase::Running { .. } = &self.view.phase else {
+        if !matches!(
+            self.view.phase,
+            TurnReviewPhase::WritingBrief | TurnReviewPhase::Running { .. }
+        ) {
             return Vec::new();
-        };
+        }
         self.view
             .questions
             .iter()
@@ -70,5 +73,41 @@ impl super::ChatState {
             (Some(view), None) => self.turn_review = Some(Box::new(TurnReview::new(view))),
             (None, _) => self.turn_review = None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: 5fc728617: a writer permission form was hidden until reviewers started.
+    #[test]
+    fn turn_review_surfaces_writer_questions_and_permissions_while_writing() {
+        let mut review = TurnReview::new(serde_json::from_value(serde_json::json!({
+            "session_id":"parent",
+            "phase":{"phase":"writing_brief"},
+            "roles":[{"role":"brief-writer","label":"Brief writer","state":"running","child_session_id":"writer-child"}],
+            "status":"writing a relation brief",
+            "verdict":null,
+            "questions":[
+                {"role":"writer-child","request":{"id":"permission","message":"Allow reading the repository?","fields":[],"tool_permission":{"skip":true}}},
+                {"role":"writer-child","request":{"id":"question","message":"Which entry point?","fields":[]}},
+                {"role":"unrelated-child","request":{"id":"stale","message":"Stale question","fields":[]}}
+            ]
+        })).unwrap());
+        let pending = review.pending_elicitations();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|(child, request)| (child.as_str(), request.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("writer-child", "permission"), ("writer-child", "question")]
+        );
+        assert!(pending[0].1.tool_permission.is_some());
+        review.view.phase = TurnReviewPhase::Running { roles: Vec::new() };
+        assert_eq!(review.pending_elicitations(), pending);
+        review.view.phase =
+            TurnReviewPhase::Resolved(mj_core::review::driver::Resolution::Cancelled);
+        assert!(review.pending_elicitations().is_empty());
     }
 }

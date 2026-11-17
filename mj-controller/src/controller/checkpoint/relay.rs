@@ -5,6 +5,7 @@ impl Controller {
     /// holds none yet, this leases one and keeps it for the caller.
     pub(in crate::controller) async fn prepare_move_source_checkpoint(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -13,6 +14,7 @@ impl Controller {
     ) -> Result<()> {
         let retained = source_relay.owner();
         crate::worker_lifecycle::run_with_owner(
+            admission,
             session_id,
             "prepare move source checkpoint",
             executor,
@@ -22,7 +24,7 @@ impl Controller {
                     source_relay.sync(session_id).await?
                 } else {
                     *source_relay = crate::controller::move_session::MoveSourceRelay::lease(
-                        manager, session_id,
+                        admission, manager, session_id,
                     )
                     .await?;
                     source_relay.snapshot()
@@ -83,9 +85,14 @@ impl Controller {
                 if source_relay.is_held() {
                     source_relay.replace_connection(connection);
                 } else {
-                    adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
-                        .await?
-                        .release();
+                    adopt_restarted_checkpoint_relay(
+                        admission,
+                        session_id,
+                        Some(manager),
+                        connection,
+                    )
+                    .await?
+                    .release();
                 }
                 Ok(())
             },
@@ -96,8 +103,10 @@ impl Controller {
     /// Reach the session worker for a checkpoint, restarting it when the proxy
     /// cannot complete hello. A previous Stop can leave the daemon dead; failing
     /// that first connect without a bounce never gets to the barrier retry.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(super) async fn open_checkpoint_relay(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -133,6 +142,7 @@ impl Controller {
             }
             None => {
                 connect_checkpoint_relay(
+                    admission,
                     session_id,
                     manager,
                     target.reconnect,
@@ -159,7 +169,8 @@ impl Controller {
                     .await?;
                 connection.set_project_memory_target(project_memory);
                 let relay =
-                    adopt_restarted_checkpoint_relay(session_id, manager, connection).await?;
+                    adopt_restarted_checkpoint_relay(admission, session_id, manager, connection)
+                        .await?;
                 Ok((relay, true))
             }
             Err(error) if worker_connect_needs_restart(&error) => {

@@ -423,6 +423,15 @@ pub struct ContextHistory {
     pub open_assistant_id: Option<String>,
     #[serde(default)]
     pub final_reply_omitted: bool,
+    /// How many leading stored entries the person set aside without a
+    /// message of their own (a dismissed `?` or an answered elicitation): an
+    /// exclusive end position in `messages`. Every method that removes
+    /// stored entries moves it with them. It is never cleared at write time:
+    /// a genuine person message after it ends its effect, and whether a
+    /// delivered prompt is genuine is decided at read time by today's rules
+    /// (see [`ContextHistory::reader_view`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_aside_through: Option<usize>,
 }
 
 impl Default for ContextHistory {
@@ -433,6 +442,7 @@ impl Default for ContextHistory {
             assistant_history_omitted: false,
             open_assistant_id: None,
             final_reply_omitted: false,
+            set_aside_through: None,
         }
     }
 }
@@ -497,9 +507,38 @@ impl ContextHistory {
         if i + 1 == self.messages.len() {
             self.final_reply_omitted = true;
         }
-        self.messages.remove(i);
+        self.remove_entry(i);
         self.assistant_history_omitted = true;
         true
+    }
+
+    /// Remove one stored entry. All removals go through here or
+    /// [`Self::drain_front`] so `set_aside_through` keeps naming the same
+    /// entries.
+    fn remove_entry(&mut self, i: usize) {
+        self.messages.remove(i);
+        if let Some(fence) = &mut self.set_aside_through
+            && i < *fence
+        {
+            *fence -= 1;
+        }
+        self.check_fence();
+    }
+
+    fn drain_front(&mut self, end: usize) {
+        self.messages.drain(..end);
+        if let Some(fence) = &mut self.set_aside_through {
+            *fence = fence.saturating_sub(end);
+        }
+        self.check_fence();
+    }
+
+    fn check_fence(&self) {
+        debug_assert!(
+            self.set_aside_through
+                .is_none_or(|fence| fence <= self.messages.len()),
+            "set_aside_through points past the stored entries"
+        );
     }
 
     /// Drop the oldest user message together with any assistant entries
@@ -520,7 +559,7 @@ impl ContextHistory {
         if self.messages[..end].iter().any(|m| m.role == "assistant") {
             self.assistant_history_omitted = true;
         }
-        self.messages.drain(..end);
+        self.drain_front(end);
         true
     }
 
@@ -586,21 +625,81 @@ impl ContextHistory {
         });
     }
 
+    /// The person set aside every stored entry. A dismissal belongs to a
+    /// completed turn, so an open assistant message at the end
+    /// (`through_open` false) is a later turn's text and stays visible. An
+    /// answered elicitation arrives mid-turn and ends the current reply
+    /// (`through_open` true): the open message is set aside too, and the
+    /// next chunk starts a new entry. `open_assistant_id` is unchanged, so
+    /// the reply keeps one identity for the question message.
+    pub fn set_aside_replies(&mut self, through_open: bool) {
+        let open_at_end = self.messages.last().is_some_and(|m| {
+            m.role == "assistant" && Some(&m.id) == self.open_assistant_id.as_ref()
+        });
+        let len = self.messages.len();
+        self.set_aside_through = Some(if open_at_end && !through_open {
+            len - 1
+        } else {
+            len
+        });
+    }
+
+    /// The history as readers must see it. It is stored as written (journal
+    /// digests cover it), so this is the one place that interprets it:
+    /// - user messages that today's rules attribute to Mjolnir are dropped;
+    /// - assistant entries inside the set-aside fence and after the latest
+    ///   genuine person message are dropped; a fence older than that message
+    ///   drops nothing.
+    ///
+    /// Both positions are stored indices. The result carries no fence.
+    #[must_use]
+    pub fn reader_view(&self) -> Self {
+        let genuine = |m: &EvidenceMessage| {
+            m.role != "user" || crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
+        };
+        let fence = self.set_aside_through.unwrap_or(0);
+        let after_user = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == "user" && genuine(m))
+            .map_or(0, |i| i + 1);
+        let messages = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| {
+                genuine(m) && !(m.role == "assistant" && *i >= after_user && *i < fence)
+            })
+            .map(|(_, m)| m.clone())
+            .collect();
+        Self {
+            messages,
+            set_aside_through: None,
+            ..self.clone()
+        }
+    }
+
     pub fn assistant(&mut self, id: Option<&str>, ordinal: u64, text: &str) {
         let id = id
             .map(str::to_owned)
             .or_else(|| self.open_assistant_id.clone())
             .unwrap_or_else(|| format!("agent:{ordinal}"));
-        if self.open_assistant_id.as_deref() == Some(&id) {
-            if let Some(last) = self
+        // Text continues the open message only while that message is the
+        // last entry and outside the fence; after an answered elicitation it
+        // starts a new entry that shares the reply's id.
+        let fence = self.set_aside_through.unwrap_or(0);
+        let last_index = self.messages.len().wrapping_sub(1);
+        if self.open_assistant_id.as_deref() == Some(&id)
+            && last_index >= fence
+            && self
                 .messages
-                .last_mut()
-                .filter(|m| m.role == "assistant" && m.id == id)
-            {
-                last.text.push_str(text);
-                if last.text.len() > MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
-                    last.text = trim_middle(&last.text);
-                }
+                .last()
+                .is_some_and(|m| m.role == "assistant" && m.id == id)
+        {
+            let last = self.messages.last_mut().expect("checked above");
+            last.text.push_str(text);
+            if last.text.len() > MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
+                last.text = trim_middle(&last.text);
             }
         } else {
             self.final_reply_omitted = false;
@@ -634,7 +733,7 @@ impl ContextHistory {
             else {
                 return false;
             };
-            self.messages.remove(i);
+            self.remove_entry(i);
             self.assistant_history_omitted = true;
         }
         true
@@ -648,16 +747,6 @@ impl ContextHistory {
         self.messages.iter().any(|m| {
             m.role == "user" && !crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
         })
-    }
-
-    /// This history without the user messages that today's rules attribute
-    /// to Mjolnir: what readers hand to Jev and the question locator.
-    pub fn without_generated_prompts(&self) -> Self {
-        let mut history = self.clone();
-        history.messages.retain(|m| {
-            m.role != "user" || crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
-        });
-        history
     }
 
     pub fn evidence(&self) -> crate::continuation::ContinuationEvidence {
@@ -881,7 +970,7 @@ mod tests {
         // Journal digests cover the stored form, so reading it must not change it.
         assert_eq!(serde_json::to_value(&stored).unwrap(), written);
         assert!(stored.has_generated_prompts());
-        let read = stored.without_generated_prompts();
+        let read = stored.reader_view();
         let ids: Vec<_> = read.messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["user:prompt-1", "agent:2", "agent:4"]);
         assert!(!read.has_generated_prompts());

@@ -1,21 +1,28 @@
 //! Immutable target binaries. Session installation only creates new directory
 //! entries; it never writes executable bytes through an existing inode.
 use super::*;
+use mj_core::targets::SshTrafficClass;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// Beside the session roots, in their target filesystem (inside containers).
 pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
-    let root = PathBuf::from(targets::worker_root(locator, session_id)?);
-    Ok(mj_core::target_path::join(
-        root.parent().context("worker root has no parent")?,
+    store_directory(Path::new(&targets::worker_root(locator, session_id)?))
+        .context("worker root has no parent")
+}
+
+/// The worker store beside a worker root; the only place that interprets where
+/// a store is.
+fn store_directory(worker_root: &Path) -> Option<PathBuf> {
+    Some(mj_core::target_path::join(
+        worker_root.parent()?,
         Path::new("worker-binaries"),
     ))
 }
 
 /// Key of one target store: this daemon's data directory, the target's command
 /// prefix and the store path.
-fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
-    let command = targets::locator_command(locator, vec!["true".into()]);
+pub(super) fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
+    let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
         data_dir(),
@@ -148,6 +155,10 @@ pub(super) fn lock_gate<'a>(
     session_id: &str,
     purpose: &'static str,
 ) -> Result<GateGuard<'a>> {
+    // Queuing is not work performed by this operation. Preserve its command
+    // budget while continuing to observe explicit supervisor cancellation.
+    let untimed = targets::WithoutDeadline::new(executor);
+    let executor = &untimed;
     let mut waiting = None::<(mj_core::lock_wait::LockWait, ProvisionStageGuard<'_, _>)>;
     loop {
         if let Some(guard) = gate.try_lock(session_id, purpose) {
@@ -159,13 +170,16 @@ pub(super) fn lock_gate<'a>(
         if executor.cancellation_requested() {
             executor.execute(
                 &CommandSpec::new("true", Vec::<String>::new())
-                    .purpose("wait for the shared Mjolnir worker binary"),
+                    .purpose(format!("wait to {purpose} in {}", gate.label)),
             )?;
-            bail!("worker binary store wait cancelled");
+            bail!(
+                "shared target content wait cancelled: {} ({purpose})",
+                gate.label
+            );
         }
         let (wait, _queued) = waiting.get_or_insert_with(|| {
             (
-                mj_core::lock_wait::LockWait::new("the worker binary store"),
+                mj_core::lock_wait::LockWait::new("the shared target content store"),
                 ProvisionStageGuard::new(executor, ProvisionStage::WaitingForWorkerStore),
             )
         });
@@ -177,12 +191,13 @@ pub(super) fn lock_gate<'a>(
 }
 
 fn script(
+    class: targets::SshTrafficClass,
     locator: &targets::TargetLocator,
     body: &str,
     args: &[&str],
     purpose: &str,
 ) -> CommandSpec {
-    targets::locator_command(locator, script_argv(body, args)).purpose(purpose)
+    targets::locator_command(class, locator, script_argv(body, args)).purpose(purpose)
 }
 
 fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
@@ -245,6 +260,7 @@ fn collect(
     execute_checked(
         executor,
         script(
+            targets::SshTrafficClass::Control,
             locator,
             COLLECT,
             &[root, keep.unwrap_or("")],
@@ -331,7 +347,7 @@ fn collect_reporting(
     }
 }
 
-pub(super) fn install_worker_binary(
+pub(in crate::controller) fn install_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -419,6 +435,7 @@ pub(super) fn install_worker_binary_at(
         }
         let command = |mode| {
             script(
+                targets::SshTrafficClass::Bulk,
                 locator,
                 r#"set -eu
 source=$1; temporary=$2; destination=$3
@@ -440,6 +457,9 @@ fi
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$temporary");; *) actual=$(sha256sum -- "$temporary");; esac
 [ "${actual%% *}" = "$4" ] || { echo 'shared worker digest mismatch' >&2; exit 77; }
 promote_worker_binary "$temporary" "$destination"
+# This build serves every control subcommand, so a staged control worker has
+# nothing left to do; its link would only pin a store entry.
+case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
 "#,
                 &[&cached, &temporary, destination, &digest, mode],
                 "link shared Mjolnir worker into session",
@@ -527,8 +547,12 @@ fn ensure_published(
     let transfer = (|| -> Result<()> {
         execute_checked(
             executor,
-            targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), upload.clone()])
-                .purpose("create private worker store upload"),
+            targets::locator_command(
+                SshTrafficClass::Control,
+                locator,
+                vec!["mkdir".into(), "-p".into(), upload.clone()],
+            )
+            .purpose("create private worker store upload"),
         )?;
         transfer_binary(executor, locator, session_id, worker, &temporary)?;
         let steps = [
@@ -571,8 +595,9 @@ fi
             )
             .best_effort_cleanup(),
         ];
-        let command = targets::locator_command(locator, targets::step_script(steps))
-            .purpose("publish shared Mjolnir worker");
+        let command =
+            targets::locator_command(SshTrafficClass::Bulk, locator, targets::step_script(steps))
+                .purpose("publish shared Mjolnir worker");
         // A failed or disconnected batch may not have reached its EXIT trap.
         // Retry its idempotent discard through the executor's cleanup path.
         let output = executor.execute(&command)?;
@@ -586,6 +611,7 @@ fi
     if !batch_completed {
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
+                SshTrafficClass::Control,
                 locator,
                 vec!["rm".into(), "-rf".into(), "--".into(), upload],
             )
@@ -608,6 +634,26 @@ fn transfer_binary(
     worker: &WorkerInstall,
     destination: &str,
 ) -> Result<()> {
+    if let targets::TargetLocator::AwsEc2 { ssh, .. } | targets::TargetLocator::SshBare { ssh, .. } =
+        locator
+        && let WorkerInstall::Host(source) = worker
+    {
+        // This path already belongs to the private store upload. Stream the
+        // worker without the deadline reserved for the surrounding commands.
+        super::install::upload_worker_file(
+            &targets::WithoutDeadline::new(executor),
+            ssh,
+            source,
+            destination,
+            "stage replacement Mjolnir worker",
+        )?;
+        execute_checked(
+            executor,
+            targets::ssh_command(SshTrafficClass::Control, ssh, ["chmod", "700", destination])
+                .purpose("make replaced Mjolnir worker executable"),
+        )?;
+        return Ok(());
+    }
     let remote = match locator {
         targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
@@ -636,6 +682,7 @@ fn transfer_binary(
             execute_checked(
                 executor,
                 targets::locator_command(
+                    SshTrafficClass::Control,
                     &host,
                     vec!["mkdir".into(), "-p".into(), transport.clone()],
                 )
@@ -649,11 +696,12 @@ fn transfer_binary(
                 destination,
                 Some(&pin),
             )?
-            .execute(executor)
-            .map(|_| ())
+            .execute(executor)?;
+            Ok(())
         })();
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
+                SshTrafficClass::Control,
                 &host,
                 vec!["rm".into(), "-rf".into(), "--".into(), transport],
             )
@@ -666,8 +714,8 @@ fn transfer_binary(
         result
     } else {
         super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
-            .execute(executor)
-            .map(|_| ())
+            .execute(executor)?;
+        Ok(())
     }
 }
 

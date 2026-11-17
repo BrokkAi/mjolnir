@@ -20,6 +20,10 @@ fn a_final_rejection_tells_the_submitter_only_the_relays_reason() {
     .context("relay 2.20.0 could not perform submit");
     let failure = actor::submit_failure(&rejected);
     assert!(!failure.unconfirmed);
+    assert_eq!(
+        failure.code,
+        Some(mj_core::relay::RelayErrorCode::InvalidState)
+    );
     assert_eq!(failure.message, "/clear requires an idle session");
 
     let lost = anyhow::anyhow!("connection reset").context("relay 2.20.0 could not perform submit");
@@ -45,7 +49,8 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
         workspace: None,
         exit_record: None,
         liveness_probe: CommandSpec::new("sh", ["-c", "sleep 31; printf dead"])
-            .purpose("probe slowly staged recovery"),
+            .purpose("probe slowly staged recovery")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -58,7 +63,8 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
                     .to_string_lossy()
                     .into_owned()],
             )],
-        },
+        }
+        .into(),
     };
     assert_eq!(
         recover_worker(plan, false).await.unwrap(),
@@ -71,6 +77,7 @@ async fn recovery_allows_preparation_longer_than_the_previous_thirty_second_dead
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
     let control = SessionManagerControl {
+        session_gate: Arc::default(),
         harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
@@ -328,6 +335,8 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
     let (reply, response) = oneshot::channel();
     commands_tx
         .send(ActorCommand::Lease {
+            returns: _releases_tx.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -359,7 +368,8 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
         }),
         exit_record: None,
         liveness_probe: CommandSpec::new("printf", [format!("{liveness}\n")])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -368,7 +378,8 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     assert_eq!(
@@ -421,7 +432,8 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
         }),
         exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["dead\n"])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -430,7 +442,8 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     assert_eq!(
@@ -477,7 +490,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
                 directory: missing.clone(),
             }),
             exit_record: None,
-            liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+            liveness_probe: CommandSpec::new("printf", ["dead\n"]).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
@@ -486,7 +499,8 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
                     "touch",
                     [restarted.to_string_lossy().into_owned()],
                 )],
-            },
+            }
+            .into(),
         }),
         project_memory: None,
     };
@@ -573,7 +587,8 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
                 .purpose("read test worker exit record"),
         ),
         liveness_probe: CommandSpec::new("printf", ["dead\n"])
-            .purpose("probe test worker liveness"),
+            .purpose("probe test worker liveness")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -582,7 +597,8 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test worker"),
             ],
-        },
+        }
+        .into(),
     };
 
     let outcome = recover_worker(plan.clone(), false).await.unwrap();
@@ -673,7 +689,8 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
-                .purpose("probe test worker liveness"),
+                .purpose("probe test worker liveness")
+                .into(),
             binary_refresh: Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
                 source: source.clone(),
                 installed_digest: CommandSpec::new(
@@ -693,7 +710,8 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
             restart: CommandPlan {
                 description: "restart test worker".into(),
                 commands: vec![restart],
-            },
+            }
+            .into(),
         }
     };
 
@@ -749,7 +767,8 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
-                .purpose("probe test worker liveness"),
+                .purpose("probe test worker liveness")
+                .into(),
             binary_refresh: None,
             launch_refresh: Some(WorkerLaunchRefreshPlan {
                 expected_sha256: "a".repeat(64),
@@ -769,7 +788,8 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
             restart: CommandPlan {
                 description: "restart test worker".into(),
                 commands: vec![restart],
-            },
+            }
+            .into(),
         },
         false,
     )
@@ -852,7 +872,7 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
             }),
             workspace: None,
             exit_record: None,
-            liveness_probe: liveness,
+            liveness_probe: liveness.into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
@@ -861,7 +881,8 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
                     CommandSpec::new("touch", [worker_restarted.to_string_lossy().into_owned()])
                         .purpose("restart test worker"),
                 ],
-            },
+            }
+            .into(),
         },
         false,
     )
@@ -891,13 +912,14 @@ async fn recovery_reports_a_missing_target_without_running_worker_commands() {
             }),
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
                 description: "must not restart".into(),
                 commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
-            },
+            }
+            .into(),
         },
         true,
     )
@@ -1107,7 +1129,10 @@ fn leased_actor_defers_replacement_and_uses_latest_queued_target() {
     let intermediate = target("relay-v2");
     let latest = target("relay-v3");
     let mut lifecycle = ActorLifecycle::default();
-    lifecycle.activate_lease(7);
+    lifecycle.activate_lease(
+        7,
+        crate::controller::test_support::relay_admission("session-1"),
+    );
 
     assert_eq!(
         reconcile_action(Some(&original), Some(&intermediate)),
@@ -1134,7 +1159,10 @@ fn leased_actor_defers_replacement_and_uses_latest_queued_target() {
 fn leased_actor_defers_removal_until_its_connection_returns() {
     let original = target("relay-v1");
     let mut lifecycle = ActorLifecycle::default();
-    lifecycle.activate_lease(11);
+    lifecycle.activate_lease(
+        11,
+        crate::controller::test_support::relay_admission("session-1"),
+    );
 
     assert_eq!(
         reconcile_action(Some(&original), None),
@@ -1154,7 +1182,10 @@ fn queued_change_back_to_current_target_cancels_retirement() {
     let original = target("relay-v1");
     let replacement = target("relay-v2");
     let mut lifecycle = ActorLifecycle::default();
-    lifecycle.activate_lease(3);
+    lifecycle.activate_lease(
+        3,
+        crate::controller::test_support::relay_admission("session-1"),
+    );
 
     assert_eq!(
         reconcile_action(Some(&original), Some(&replacement)),
@@ -1346,7 +1377,7 @@ const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
 const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
 #[cfg(unix)]
 const FULL_DISK_RECOVERY_TEST_CHILD: &str = "MJ_TEST_FULL_DISK_RECOVERY_CHILD";
-const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+pub(crate) const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 /// File in the relay root where the stdio relay child logs each request.
 const RELAY_REQUEST_LOG: &str = "requests.log";
 /// Makes the stdio relay child report an open harness session.
@@ -1402,6 +1433,28 @@ fn leased_relay_child_serves_stdio() {
                     .unwrap();
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
+            if PathBuf::from(&root).join("worker-unreachable").exists() {
+                return;
+            }
+            if matches!(
+                &request.request,
+                RelayRequest::Submit {
+                    command: RelayCommand::SetQuotaRecovery { .. },
+                    ..
+                }
+            ) {
+                let blocked = PathBuf::from(&root).join("block-quota-submit");
+                if blocked.exists() {
+                    std::fs::write(
+                        PathBuf::from(&root).join("quota-submit-waiting"),
+                        b"waiting",
+                    )
+                    .unwrap();
+                    while blocked.exists() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
             let preparation: Option<mj_core::relay::HarnessPreparation> =
                 std::fs::read(PathBuf::from(&root).join("preparation.json"))
                     .ok()
@@ -1442,6 +1495,9 @@ fn leased_relay_child_serves_stdio() {
                 };
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
                 let queue_changed = loop {
+                    if PathBuf::from(&root).join("worker-unreachable").exists() {
+                        return;
+                    }
                     let queue = queue_files();
                     if reported_queue.as_ref() != Some(&queue) {
                         reported_queue = Some(queue);
@@ -1531,6 +1587,12 @@ fn leased_relay_child_serves_stdio() {
                     }
                 }
                 RelayRequest::CompleteSubagentRequest { result } => {
+                    if PathBuf::from(&root)
+                        .join("slow-delegation-delivery")
+                        .exists()
+                    {
+                        std::thread::sleep(Duration::from_secs(6));
+                    }
                     std::fs::write(
                         PathBuf::from(&root).join("subagent-result.json"),
                         serde_json::to_vec(result).unwrap(),
@@ -2192,17 +2254,41 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
             description: "restart".into(),
             commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
-        },
+        }
+        .into(),
     };
     #[derive(Default)]
     struct RecordingExecutor(Mutex<Vec<String>>);
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.0.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {
@@ -2271,7 +2357,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
 
     // A plan queued while Closing must read Destroying only after cleanup
     // releases ownership, rather than use the actor's old observation.
-    let guard = crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "test destruction")
+    let guard = crate::controller::test_support::worker_test_permit(&record.id, "test destruction")
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2345,7 +2431,9 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]).purpose("probe test relay worker"),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"])
+            .purpose("probe test relay worker")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -2354,7 +2442,8 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test relay worker"),
             ],
-        },
+        }
+        .into(),
     };
     let target = RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
@@ -2367,6 +2456,17 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
     let (_retirement_tx, retirement_rx) = watch::channel(false);
     let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, _updates_rx) = coalesced_update_channel();
+    let gate = updates_tx.session_gate.clone();
+    let foreground = gate
+        .enter_foreground(
+            LEASED_RELAY_SESSION,
+            "test reconnect lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::targets::ProcessExecutor,
+        )
+        .await
+        .unwrap();
     tokio::spawn(run_session_actor(
         target,
         commands_rx,
@@ -2376,6 +2476,18 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         updates_tx,
     ));
 
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            view_rx.changed().await.unwrap();
+            let view = view_rx.borrow_and_update().clone();
+            if matches!(view.error, Some(ViewError::Unreachable(ref detail)) if detail.contains("waiting for test reconnect lifecycle before worker recovery")) { break; }
+        }
+    }).await.expect("actor recovery defers to its lifecycle owner without blocking the mailbox");
+    assert!(
+        !restarted.exists(),
+        "no worker restart while foreground owns the session"
+    );
+    drop(foreground);
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             view_rx.changed().await.unwrap();
@@ -2458,7 +2570,9 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
             CommandSpec::new("printf", ["%s", exit_record.as_str()])
                 .purpose("read test worker exit record"),
         ),
-        liveness_probe: CommandSpec::new("printf", ["dead\n"]).purpose("probe test relay worker"),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"])
+            .purpose("probe test relay worker")
+            .into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
@@ -2467,7 +2581,8 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
                 CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
                     .purpose("restart test relay worker"),
             ],
-        },
+        }
+        .into(),
     };
     let target = RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
@@ -2554,7 +2669,7 @@ fn fail_if_the_actor_stalls(reason: &'static str) {
 
 /// A relay target served by this test binary over stdio.
 #[cfg(unix)]
-fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
+pub(crate) fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
     // `RelayClient` parses every stdout line as JSON, so libtest's own
     // progress lines are dropped before they reach the protocol reader.
     let script = format!(
@@ -2696,6 +2811,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     let mut connection = None;
     assert!(
         submit_actor_command(
+            &crate::controller::test_support::worker_test_gate(),
             &target,
             &mut connection,
             &crate::mailbox_outbox::mailbox_command_id(&before.key),
@@ -2706,6 +2822,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     );
     assert_eq!(
         submit_actor_command(
+            &crate::controller::test_support::worker_test_gate(),
             &target,
             &mut connection,
             &crate::mailbox_outbox::mailbox_command_id(&after.key),
@@ -2752,6 +2869,7 @@ async fn broken_delegation_transport_preserves_worker_control_and_idle_reservati
         .env
         .insert(RELAY_SESSION_CONFIGURED.into(), "1".into());
     let mut connection = StandaloneSession::connect(&target).await.unwrap();
+    connection.start_observing(&target).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let snapshot = connection.sync().await.unwrap();
@@ -2831,15 +2949,16 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "failed preparation is not a dead transport".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     });
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+    let owner = crate::controller::test_support::worker_test_permit(
         LEASED_RELAY_SESSION,
         "test failed replacement",
     )
@@ -2861,7 +2980,20 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         })
         .unwrap();
     let mut connection = None;
-    let snapshot = sync_actor_connection(&target, &mut connection)
+    let gate = crate::controller::test_support::worker_test_gate();
+    // Hard-won: 583e6ea48: an actor reported ordinary unpark startup as a vanished running worker.
+    std::fs::write(
+        relay_root.join("worker-unreachable"),
+        b"boot has not bound control yet",
+    )
+    .unwrap();
+    let error = sync_actor_connection(&gate, &target, &mut connection)
+        .await
+        .unwrap_err();
+    assert!(error.is::<RelayJobDeferred>(), "{error:#}");
+    assert!(connection.is_none());
+    std::fs::remove_file(relay_root.join("worker-unreachable")).unwrap();
+    let snapshot = sync_actor_connection(&gate, &target, &mut connection)
         .await
         .expect("failed startup must remain observable for automatic replacement")
         .unwrap();
@@ -2877,9 +3009,34 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         "an active replacement owner retains its intent"
     );
     drop(owner);
-    sync_actor_connection(&target, &mut connection)
-        .await
+    // Hard-won: 8443db6c9: a recovery copy holding the session deferred an unreachable worker's failure as if it owned the boot.
+    {
+        let copy = gate
+            .try_start(
+                LEASED_RELAY_SESSION,
+                crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            )
+            .unwrap();
+        std::fs::write(
+            relay_root.join("worker-unreachable"),
+            b"worker vanished during the copy",
+        )
         .unwrap();
+        let mut fresh = None;
+        let error = sync_actor_connection(&gate, &target, &mut fresh)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<RelayJobDeferred>(), "{error:#}");
+        std::fs::remove_file(relay_root.join("worker-unreachable")).unwrap();
+        drop(copy);
+    }
+    sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await
+    .unwrap();
     assert!(
         crate::database::load_worker_restart(LEASED_RELAY_SESSION)
             .unwrap()
@@ -2933,6 +3090,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     handle.sync_now().await.unwrap();
     assert!(
         crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
             &handle,
             mj_core::config::HarnessKind::Claude,
         )
@@ -2943,6 +3101,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     );
     std::fs::remove_file(shell_path).unwrap();
     let mut lease = crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
         &handle,
         mj_core::config::HarnessKind::Claude,
     )
@@ -2980,6 +3139,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
     handle.sync_now().await.unwrap();
     assert!(
         crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
             &handle,
             mj_core::config::HarnessKind::Claude,
         )
@@ -3022,7 +3182,12 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     let target = leased_relay_target(relay_root.path());
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     let mut connection = None;
-    let first = sync_actor_connection(&target, &mut connection).await;
+    let first = sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await;
     assert!(first.is_err(), "the first worker lost the open reply");
     assert!(
         connection.is_none(),
@@ -3039,15 +3204,23 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     // the last availability value it received was already true.
     crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
-    sync_actor_connection(&target, &mut connection)
-        .await
-        .expect("the next relay connection repairs the gate");
+    sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await
+    .expect("the next relay connection repairs the gate");
     // A still-connected actor must also send a new revision with the same bool.
     crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
     crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
-    sync_actor_connection(&target, &mut connection)
-        .await
-        .unwrap();
+    sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(relay_root.path().join("operator-presence.log")).unwrap(),
         "1 true\n3 true\n5 true\n"
@@ -3093,7 +3266,12 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
     let relay_root = tempfile::tempdir().unwrap();
     let target = leased_relay_target(relay_root.path());
     let mut connection = None;
-    let first = sync_actor_connection(&target, &mut connection).await;
+    let first = sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await;
     assert!(first.is_err(), "the first worker lost the open reply");
     assert!(
         connection.is_none(),
@@ -3106,9 +3284,13 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
             .exists()
     );
 
-    sync_actor_connection(&target, &mut connection)
-        .await
-        .expect("the next relay connection repairs the message-only gate");
+    sync_actor_connection(
+        &crate::controller::test_support::worker_test_gate(),
+        &target,
+        &mut connection,
+    )
+    .await
+    .expect("the next relay connection repairs the message-only gate");
     assert!(connection.is_some());
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),
@@ -3121,7 +3303,7 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
 /// Register the session the projection writes to. `apply_projection_event`
 /// rejects events for sessions the controller database does not know.
 #[cfg(unix)]
-fn register_leased_relay_session() {
+pub(crate) fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
@@ -3202,15 +3384,19 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
     let (reply, response) = oneshot::channel();
     commands_tx
         .send(ActorCommand::Lease {
+            returns: releases_tx.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
         .await
         .unwrap();
-    let (lease_id, connection) = response
+    let mut granted = response
         .await
         .expect("actor answered the lease request")
         .expect("actor leased its relay connection");
+    let lease_id = granted.lease_id.take().unwrap();
+    let connection = granted.connection.take().unwrap();
     (
         LeasedActor {
             commands: commands_tx,
@@ -3242,6 +3428,8 @@ async fn released_connection_can_be_leased_again_immediately() {
     actor
         .commands
         .try_send(ActorCommand::Lease {
+            returns: actor.releases.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
             reply,
             idle_harness: None,
         })
@@ -3264,14 +3452,18 @@ async fn released_connection_can_be_leased_again_immediately() {
         actor
             .commands
             .try_send(ActorCommand::Lease {
+                returns: actor.releases.clone(),
+                admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
                 reply,
                 idle_harness: None,
             })
             .unwrap();
-        (lease_id, connection) = response
+        let mut granted = response
             .await
             .unwrap()
             .expect("a returned lease must not reject the next lifecycle operation");
+        lease_id = granted.lease_id.take().unwrap();
+        connection = granted.connection.take().unwrap();
     }
     actor.retirement.send_replace(true);
     actor
@@ -3281,6 +3473,96 @@ async fn released_connection_can_be_leased_again_immediately() {
             connection: Some(Box::new(connection)),
         })
         .unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: ec2-m8id16-b move stall: abandoned lease requests must not add relay syncs.
+#[tokio::test]
+async fn cancelled_lease_request_is_skipped_before_sync() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "cancelled_lease_request_is_skipped_before_sync",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("cancelled lease blocked the actor");
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let log = actor._relay_root.path().join(RELAY_REQUEST_LOG);
+    let syncs = || {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "attach")
+            .count()
+    };
+    let before = syncs();
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(Box::new(connection)),
+        })
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    actor
+        .commands
+        .try_send(ActorCommand::Lease {
+            returns: actor.releases.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            reply,
+            idle_harness: None,
+        })
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    actor
+        .commands
+        .try_send(ActorCommand::Sync { reply })
+        .unwrap();
+    response.await.unwrap().unwrap();
+    assert_eq!(
+        syncs(),
+        before + 1,
+        "only the explicit Sync may contact the worker"
+    );
+    // Also cancel after the actor has sent a successful grant but before the
+    // receiver consumes it. The queued reply must return its own lease.
+    let (reply, granted) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Lease {
+            returns: actor.releases.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            idle_harness: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    let (reply, synced) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Sync { reply })
+        .await
+        .unwrap();
+    assert!(
+        synced.await.unwrap().is_err(),
+        "the grant must be active before its receiver is dropped"
+    );
+    drop(granted);
+    let (reply, synced) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Sync { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), synced)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    actor.retirement.send_replace(true);
 }
 
 #[cfg(unix)]
@@ -3339,7 +3621,7 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
 #[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
-) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {
+) -> oneshot::Receiver<std::result::Result<u64, SubmitFailure>> {
     let (reply, mut response) = oneshot::channel();
     actor
         .commands
@@ -3954,6 +4236,7 @@ async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
 }
 
 #[cfg(unix)]
+// Hard-won: ec2-m8id16-b move stall: slow durable replies must finish once without a delivery deadline.
 #[tokio::test]
 async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     const CHILD: &str = "MJ_TEST_DELEGATION_NO_DASHBOARD";
@@ -3981,7 +4264,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     }));
     crate::database::save_session(&parent).unwrap();
     let (feed, observations) = delegation_channel();
-    let manager = spawn_session_manager_observed(Some(feed)).unwrap();
+    let mut manager = spawn_session_manager_observed(Some(feed)).unwrap();
     manager
         .targets
         .send_replace(vec![leased_relay_target(relay_root.path())]);
@@ -4002,7 +4285,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     ));
     let stop = tokio_util::sync::CancellationToken::new();
     let (_services, task) = crate::daemon::delegation::spawn(
-        state,
+        state.clone(),
         manager.control.clone(),
         observations,
         stop.clone(),
@@ -4025,6 +4308,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
         .unwrap()
         .materialized
         .applied_event_ordinal;
+    std::fs::write(relay_root.path().join("slow-delegation-delivery"), "").unwrap();
     // The worker's request changes without a transcript event. No reader ever
     // consumes manager.updates and no web server or remote facade exists.
     let request = mj_core::subagent::SubagentToolRequest {
@@ -4059,8 +4343,83 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
             .applied_event_ordinal,
         before
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
+            .unwrap()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("delivery must acknowledge the durable result");
+    let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| *line == "complete_subagent_request")
+            .count(),
+        1,
+        "a slow result must have only one delivery attempt"
+    );
+    // A second slow reply is safe to cancel during handoff: the result is
+    // persisted before delivery, and must remain available to the next daemon.
+    let request = mj_core::subagent::SubagentToolRequest {
+        request_id: "slow-reply-at-handoff".into(),
+        ..request
+    };
+    std::fs::write(
+        relay_root.path().join("subagent-request.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let log = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+            if log
+                .lines()
+                .filter(|line| *line == "complete_subagent_request")
+                .count()
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the second reply reaches the slow exchange");
+    // The original check deliberately left dashboard updates unconsumed.
+    // For handoff, consume them as the daemon does: each queued update holds
+    // admission until its reader advances. Delivery itself must hold none.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while manager.updates.try_recv().is_ok() {}
+            if crate::upgrade::gate().try_close() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "durable delivery blocked handoff: {:?}",
+            crate::upgrade::active_labels()
+        )
+    });
     stop.cancel();
-    task.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("handoff cancels delivery without waiting for the slow relay")
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::database::load_delegation(LEASED_RELAY_SESSION, &request.request_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .is_some()
+    );
     manager.shutdown.shutdown().await.unwrap();
 }
 
@@ -4133,19 +4492,43 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: None,
         workspace: None,
         exit_record: None,
-        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
         binary_refresh: None,
         launch_refresh: None,
         restart: CommandPlan {
             description: "restart".into(),
             commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
-        },
+        }
+        .into(),
     };
     struct ProbeExecutor {
         live: bool,
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for ProbeExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
             self.commands.lock().unwrap().push(command.program.clone());
             Ok(crate::targets::CommandOutput {
@@ -4164,7 +4547,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: recovery_source_target(),
         desired_build: "new-build".into(),
     };
-    crate::worker_lifecycle::run_blocking(
+    crate::controller::test_support::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -4177,7 +4560,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         Some(crate::database::WorkerRestartPhase::AwaitingReadiness),
     ] {
         if let Some(phase) = phase {
-            crate::worker_lifecycle::run_blocking(
+            crate::controller::test_support::worker_test_run_blocking(
                 &record.id,
                 "test intent",
                 &crate::targets::ProcessExecutor,
@@ -4196,7 +4579,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         assert_eq!(*executor.commands.lock().unwrap(), vec!["probe"]);
     }
     // An old attempt cannot erase a newer replacement's ownership.
-    crate::worker_lifecycle::run_blocking(
+    crate::controller::test_support::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -4221,7 +4604,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         worker_root: PathBuf::from("/another-worker"),
     };
     assert!(
-        crate::worker_lifecycle::run_blocking(
+        crate::controller::test_support::worker_test_run_blocking(
             &record.id,
             "test intent",
             &crate::targets::ProcessExecutor,
@@ -4229,7 +4612,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         )
         .is_err()
     );
-    crate::worker_lifecycle::run_blocking(
+    crate::controller::test_support::worker_test_run_blocking(
         &record.id,
         "test intent",
         &crate::targets::ProcessExecutor,
@@ -4246,7 +4629,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     );
     // Conditional claim cannot overwrite this boot, even on the same target.
     assert!(
-        crate::worker_lifecycle::run_blocking(
+        crate::controller::test_support::worker_test_run_blocking(
             &record.id,
             "test intent",
             &crate::targets::ProcessExecutor,
@@ -4260,7 +4643,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     );
     // A first hello without native readiness cannot complete the handoff.
     let mut snapshot = view_at_ordinal(0).snapshot.unwrap();
-    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+    let observer = crate::controller::test_support::worker_test_observation(&record.id)
         .unwrap()
         .unwrap();
     crate::worker_lifecycle::observe_worker_restart_outcome(
@@ -4277,13 +4660,13 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     drop(observer);
     snapshot.operational.checkpoint_only = true;
     let checkpoint_owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "checkpoint")
+        crate::controller::test_support::worker_test_permit(&record.id, "checkpoint")
             .unwrap()
             .unwrap();
     // Even a nested observation cannot acquire an active owner's swap.
     checkpoint_owner.scope_blocking(|| {
         assert!(
-            crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+            crate::controller::test_support::worker_test_observation(&record.id)
                 .unwrap()
                 .is_none()
         )
@@ -4294,7 +4677,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
             .is_some()
     );
     drop(checkpoint_owner);
-    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+    let observer = crate::controller::test_support::worker_test_observation(&record.id)
         .unwrap()
         .unwrap();
     crate::worker_lifecycle::observe_worker_restart_outcome(
@@ -4648,13 +5031,14 @@ async fn suppressed_recovery_preserves_hello_backoff() {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: probe,
+            liveness_probe: probe.into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
                 description: "unused restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         }),
         project_memory: None,
     };
@@ -4921,4 +5305,242 @@ async fn harness_failures_persist_legacy_expiry_and_worker_reports() {
             "only the accepted write completes this wait"
         );
     }
+}
+
+/// The owner must drain delivery before giving a person's Move the relay.
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_move_preempts_delegation_delivery_and_obtains_its_relay_lease() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "foreground_move_preempts_delegation_delivery_and_obtains_its_relay_lease",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let channels = spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![leased_relay_target(root.path())])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let delivery = gate
+        .try_start(
+            LEASED_RELAY_SESSION,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
+        )
+        .unwrap();
+    let lease = handle.lease_connection(&delivery).await.unwrap();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let mut moving = Box::pin(gate.enter_foreground(
+        LEASED_RELAY_SESSION,
+        "Move",
+        crate::recovery_gate::LifecycleOrigin::Person,
+        &cancelled,
+        &crate::targets::ProcessExecutor,
+    ));
+    assert!(futures::poll!(&mut moving).is_pending());
+    assert!(delivery.load(std::sync::atomic::Ordering::Acquire));
+    drop(delivery);
+    assert!(
+        futures::poll!(&mut moving).is_pending(),
+        "admission must survive until the actor applies the return"
+    );
+    lease.release();
+    let moving = tokio::time::timeout(Duration::from_secs(5), moving)
+        .await
+        .unwrap()
+        .unwrap();
+    let moved = handle
+        .lease_connection(&moving)
+        .await
+        .expect("Move must never meet a duplicate actor lease");
+    moved.release();
+    drop(moving);
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: 583e6ea48: delegation replication redialed workers deliberately stopped under a lifecycle lease.
+#[tokio::test]
+async fn lifecycle_lease_stops_delegation_dials_until_control_returns() {
+    const CHILD: &str = "MJ_TEST_LEASE_STOPS_DELEGATION";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "lifecycle_lease_stops_delegation_dials_until_control_returns",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, mut connection) = lease_a_live_actor().await;
+    let root = actor._relay_root.path();
+    let requests = || std::fs::read_to_string(root.join(RELAY_REQUEST_LOG)).unwrap();
+    let before = requests();
+    // Model the stopped worker while its lifecycle owner still holds control.
+    std::fs::write(root.join("worker-unreachable"), b"stopped for park or swap").unwrap();
+    connection.sync().await.unwrap_err();
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.state = mj_core::state::SessionState::Parked;
+    crate::database::save_session(&record).unwrap();
+    let after_stop = requests();
+    assert!(after_stop.len() > before.len());
+    tokio::time::sleep(RECONNECT_INTERVAL * 3).await;
+    assert_eq!(
+        requests(),
+        after_stop,
+        "the leased session must have no background dialer"
+    );
+
+    // The same lease can replace a worker. Returning it resumes replication,
+    // whereas a park retires the actor while still holding its lease.
+    std::fs::remove_file(root.join("worker-unreachable")).unwrap();
+    record.state = mj_core::state::SessionState::Running;
+    crate::database::save_session(&record).unwrap();
+    connection = StandaloneSession::connect(&leased_relay_target(root))
+        .await
+        .unwrap();
+    assert!(
+        !connection.waits_for_changes(),
+        "lifecycle connections do not start observers"
+    );
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(Box::new(connection)),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !requests()[after_stop.len()..].contains("poll_subagent_queue") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("returning control must resume queue observation");
+
+    let (reply, response) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Lease {
+            returns: actor.releases.clone(),
+            admission: crate::controller::test_support::relay_admission(LEASED_RELAY_SESSION),
+            idle_harness: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    let mut lease = response.await.unwrap().unwrap();
+    // Hard-won: 583e6ea48: close returned its sealed connection before target teardown, restarting background polls.
+    let mut closed = (*lease.connection_mut().operational).clone();
+    closed.execution = mj_core::relay::RelayExecutionState::Closed;
+    lease.connection_mut().operational = closed.into();
+    lease.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while actor
+            ._views
+            .borrow()
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| {
+                snapshot.operational.execution != mj_core::relay::RelayExecutionState::Closed
+            })
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let after_close = requests();
+    tokio::time::sleep(RECONNECT_INTERVAL * 3).await;
+    assert_eq!(
+        requests(),
+        after_close,
+        "a sealed relay must not be followed into target teardown"
+    );
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
+// Hard-won: 583e6ea48: every transport retry and proxy exit repeated the same worker-loss warning.
+#[tokio::test]
+async fn worker_loss_warns_once_until_reachable_and_warns_on_the_next_loss() {
+    const CHILD: &str = "MJ_TEST_WORKER_LOSS_TRANSITIONS";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "worker_loss_warns_once_until_reachable_and_warns_on_the_next_loss",
+        );
+        return;
+    }
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).unwrap();
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let root = actor._relay_root.path();
+    let marker = root.join("worker-unreachable");
+    std::fs::write(&marker, b"unexpected worker loss").unwrap();
+    drop(connection);
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: None,
+        })
+        .unwrap();
+    let warnings = || {
+        log.at(tracing::Level::WARN)
+            .into_iter()
+            .filter(|event| event.contains("session worker is "))
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while warnings().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(RECONNECT_INTERVAL * 4).await;
+    assert_eq!(warnings().len(), 1, "{:?}", warnings());
+    assert!(warnings()[0].contains("unreachable"));
+    std::fs::remove_file(&marker).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while warnings().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(warnings()[1].contains("reachable again"));
+    std::fs::write(marker, b"second worker loss").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while warnings().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(warnings().len(), 3, "{:?}", warnings());
+    assert!(warnings()[2].contains("unreachable"));
+    assert!(
+        log.at(tracing::Level::WARN)
+            .iter()
+            .all(|event| !event.contains("relay request failed")
+                && !event.contains("dropped relay proxy")
+                && !event.contains("delegation is unavailable")),
+        "{:?}",
+        log.events()
+    );
+    actor.retirement.send_replace(true);
 }

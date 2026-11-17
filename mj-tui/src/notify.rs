@@ -200,38 +200,105 @@ impl DashboardState {
         due
     }
 
+    pub(crate) fn notification_content_session(
+        &self,
+        session_id: &str,
+        level: AttentionLevel,
+    ) -> String {
+        if level == AttentionLevel::Waiting {
+            self.waiting_child_of(session_id)
+                .unwrap_or_else(|| session_id.to_owned())
+        } else {
+            session_id.to_owned()
+        }
+    }
+
+    pub(crate) fn notification_card_text(&self, session_id: &str, level: AttentionLevel) -> String {
+        let holder = self.notification_content_session(session_id, level);
+        let detail = self.session_details.get(&holder);
+        let loading = detail.is_some_and(|detail| {
+            detail.transcript_hydration == crate::ingest::TranscriptHydration::Loading
+        });
+        let missing_content = detail.is_none_or(|detail| {
+            detail.last_agent_message.is_none()
+                && detail.pending_elicitations.is_empty()
+                && detail.question_message.is_none()
+        });
+        if loading && missing_content {
+            "loading…".to_owned()
+        } else {
+            self.notification_message(session_id, level)
+        }
+    }
+
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
-    fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
+    pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
+        let holder = self.notification_content_session(session_id, level);
+        let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
-        let text = match level {
-            AttentionLevel::Waiting => detail
-                .and_then(|detail| detail.pending_elicitations.last())
-                .map(|request| request.message.clone())
-                .or_else(|| {
-                    self.session_review(session_id)
-                        .and_then(|review| review.activity_label())
-                        .map(str::to_owned)
+        let located_read = self.notifications.message_read.as_ref().filter(|read| {
+            read.session_id == holder
+                && detail.is_some_and(|detail| {
+                    detail.question_message.as_deref() == Some(read.stable_id.as_str())
                 })
-                .or_else(|| {
-                    let detail = detail?;
-                    let target = detail.question_message.as_deref()?;
-                    mj_core::transcript::materialized_agent_message_text(
-                        detail.projection.transcript.iter().map(AsRef::as_ref),
-                        target,
-                    )
-                })
-                .or_else(|| {
-                    let detail = detail?;
-                    (!detail.supports_open_request)
-                        .then(|| detail.last_agent_message.as_deref().map(str::to_owned))
-                        .flatten()
-                })
-                .unwrap_or_else(|| "Waiting for your input".to_owned()),
-            AttentionLevel::Important => detail
-                .and_then(|detail| detail.last_agent_message.as_deref())
-                .map(str::to_owned)
-                .unwrap_or_else(|| "Important update".to_owned()),
+        });
+        match level {
+            AttentionLevel::Waiting | AttentionLevel::Important => {
+                use mj_core::notification_message::{
+                    NotificationKind, NotificationMessageFacts, NotificationMessageSource,
+                    notification_message_placeholder, notification_message_sources,
+                };
+                let kind = if level == AttentionLevel::Waiting {
+                    NotificationKind::NeedsInput
+                } else {
+                    NotificationKind::Important
+                };
+                let review_activity = self
+                    .session_review(session_id)
+                    .and_then(|review| review.activity_label());
+                let facts = NotificationMessageFacts {
+                    pending_request: detail
+                        .and_then(|detail| detail.pending_elicitations.last())
+                        .map(|request| request.message.as_str()),
+                    review_activity,
+                    question_message: detail.and_then(|detail| detail.question_message.as_deref()),
+                    supports_open_request: detail.is_none_or(|detail| detail.supports_open_request),
+                };
+                notification_message_sources(kind, &facts)
+                    .into_iter()
+                    .find_map(|source| match source {
+                        NotificationMessageSource::PendingRequest(text)
+                        | NotificationMessageSource::ReviewActivity(text) => Some(text.to_owned()),
+                        NotificationMessageSource::QuestionMessage(target) => {
+                            let detail = detail?;
+                            mj_core::transcript::materialized_agent_message_text(
+                                detail.projection.transcript.iter().map(AsRef::as_ref),
+                                target,
+                            )
+                            .or_else(|| {
+                                located_read.map(|read| {
+                                    if read.status == crate::ingest::TranscriptHydration::Loading {
+                                        return "loading…".to_owned();
+                                    }
+                                    read.item
+                                        .as_deref()
+                                        .and_then(|item| {
+                                            mj_core::transcript::materialized_agent_message_text(
+                                                std::iter::once(item),
+                                                target,
+                                            )
+                                        })
+                                        .unwrap_or_else(|| "message not available".to_owned())
+                                })
+                            })
+                        }
+                        NotificationMessageSource::LastAgentMessage => {
+                            detail?.last_agent_message.as_deref().map(str::to_owned)
+                        }
+                    })
+                    .unwrap_or_else(|| notification_message_placeholder(kind).to_owned())
+            }
             AttentionLevel::Failed => self
                 .state
                 .sessions
@@ -247,7 +314,11 @@ impl DashboardState {
                 .and_then(|detail| detail.last_agent_message.as_deref())
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Finished".to_owned()),
-        };
+        }
+    }
+
+    fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
+        let text = self.notification_message(session_id, level);
         let line = text.lines().next().unwrap_or_default().trim();
         let mut body = line.chars().take(120).collect::<String>();
         if line.chars().count() > 120 {

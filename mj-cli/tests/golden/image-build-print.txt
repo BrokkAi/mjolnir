@@ -1,0 +1,19 @@
+FROM docker.io/library/buildpack-deps:noble@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+USER root
+ADD --checksum=sha256:e55de2c37a08a9dfdb3ca95490f90f914b5ef362b62761f1bb2110e5d57210f7 https://github.com/jdx/mise/releases/download/v2026.11.9/mise-v2026.11.9-linux-x64-musl /usr/local/bin/mise
+RUN chmod 0755 /usr/local/bin/mise
+ENV MISE_DATA_DIR=/opt/mise \
+    RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    MISE_TRUSTED_CONFIG_PATHS=/opt/mj-image/recipe \
+    MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=rust,node,python,ruby,go \
+    PATH=/opt/mise/shims:$PATH
+WORKDIR /opt/mj-image/recipe
+RUN mkdir -p '.' && printf '%s' 'MjQK' | base64 -d > '.nvmrc' && chmod 0644 '.nvmrc'
+RUN mkdir -p '.' && printf '%s' 'W3Rvb2xzXQpweXRob24gPSAiMy4xNSIK' | base64 -d > 'mise.toml' && chmod 0644 'mise.toml'
+RUN mise bootstrap packages apply --yes && mise install && mkdir -p /opt/mise /opt/rustup /opt/cargo && chown -R hel /opt/mise /opt/rustup /opt/cargo
+LABEL dev.mj.image.recipe="3034e48e2589d2e18248de896fce6ae6787d0c89ae9cd1f760cb6cb9dd5080b4" \
+    dev.mj.image.mise="2026.11.9" \
+    dev.mj.image.platform="linux/amd64"
+USER hel
+WORKDIR "/workspace"

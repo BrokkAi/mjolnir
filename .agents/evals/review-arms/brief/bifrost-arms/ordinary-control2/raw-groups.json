@@ -1,0 +1,953 @@
+[
+  {
+    "intro": "d3b55980518b2602e43e61e32226c940b9b69593",
+    "group": "g1",
+    "findings": [
+      "f-1bb25f8d",
+      "f-dd58098c",
+      "f-f8a8d6ce",
+      "f-9f5e43ac"
+    ],
+    "summary": "Persisted Rust import routes can suppress unresolved aliases in an edited mounted blob through coinciding blob-local import identities.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "confidence": "high",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/rust_selected_module_placements.sql:81-107 deliberately aligns mounted module scopes with persisted summary placements: blob_id is the mounted blob, but placement_blob and member_ordinal describe the saved blob. Rust import IDs are assigned from the per-source import vector in crates/bifrost-rust/src/declarations.rs:751-754, so changing the first import can reuse its ID. rust_reverse_gap_candidates.sql:43-73 (same resolution_operation directory) joins the mounted import to summary routes only by summary/member/module/import_id/route_ordinal, omitting the old bound.blob_id=imported.blob_id check. A saved resolved use of a decoy and an edited unresolved use with the same import ID/ordinal therefore satisfy NOT EXISTS incorrectly and remove the edited alias from the closure; candidate sites and their gaps are then sought through that closure at :225-259 and :311-323. The same collision is possible in the non-null-ID unresolved-source arm at :104-127. The two legacy arms require source_import_id IS NULL, so their equality checks cannot match; the findings overgeneralize those arms, but the primary defect is real."
+  },
+  {
+    "intro": "62d65b4fabf50487cdb2ab5a403ed61b4fec3506",
+    "group": "g1",
+    "findings": [
+      "f-455b7e4c",
+      "f-40248ab6",
+      "f-d310de63"
+    ],
+    "summary": "Earlier Scala imports in enclosing lexical scopes are not composed into nested import routes.",
+    "verdict": "rejected",
+    "severity": null,
+    "confidence": "high",
+    "evidence": "The limitation exists at intro: crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:559-565 reads only (source_scope_head, name), and :883-884 stores only that exact scope. However, the reported nested XMLUtils import already fails in base f0df9221613f3c6c07d86a9adaa6e40f61e7ec01: the same file at base :520-561 only searches authored alias-owner routes and :575-759 searches package prefixes of the written route; there is no earlier-import composition at all. With no root package named XMLUtils, neither base path can resolve XMLUtils.Escapes through the enclosing import. This diff adds same-scope composition and leaves the existing nested-scope limitation; the described failure is not introduced by this diff."
+  },
+  {
+    "intro": "62d65b4fabf50487cdb2ab5a403ed61b4fec3506",
+    "group": "g2",
+    "findings": [
+      "f-f3cc4cdc",
+      "f-65156025",
+      "f-37220f1b"
+    ],
+    "summary": "Scala relative import resolution can skip unresolved owner segments and bind an unrelated package member.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "confidence": "high",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:2683-2696 prepends the caller package before trying the written route. For package app and import io.k.Widget, :631-648 tries app.io.k, app.io, then app. At :669-699 it asks each discovered package for Widget without consuming the remaining owner segments. If app.Widget exists, :814-816 installs that bridge, :822 prevents owner continuation, and :865-867 stops before trying the correct io.k route. The base did not prepend app, so this concrete wrong-target case is newly exposed. Later 97f6f022cd345f5a4a497069c12774445c1add1c partially restricts shorter prefixes; 85014d56b71098528d84608cf9716407d4ba2af2 removes the remaining Scala enclosing-prefix exception, addressing the app-level case as well."
+  },
+  {
+    "intro": "62d65b4fabf50487cdb2ab5a403ed61b4fec3506",
+    "group": "g3",
+    "findings": [
+      "f-8c99907e"
+    ],
+    "summary": "A successful package-relative Scala import retains an erroneous owner-open completeness gap.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "confidence": "high",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:537 initializes package_prefix_found=false. For package app, import sub.Foo, and a declaration in app.sub, :2683-2694 creates lookup route app.sub and :583 marks it relative. Finding that exact package at :652-653 leaves package_prefix_found false. A direct package bridge is appended at :814-816, skipping member continuation at :822 (the only relative-success update is :861-862), and :865-867 exits before the written route. Consequently :906-925 emits jvm-import-owner-open despite the successful binding. The gap survives :1003-1006 because suppress_if_same_package_candidate is false (:1075-1078). In demanded non-caller file contexts, jvm_demand.rs:352-387 registers it and combines it into matching lookup completion, producing false incompleteness. Relative package bridging is new in this diff."
+  },
+  {
+    "intro": "62d65b4fabf50487cdb2ab5a403ed61b4fec3506",
+    "group": "g4",
+    "findings": [
+      "f-9dcabcc3",
+      "f-09b4c460"
+    ],
+    "summary": "The new earlier-import composition consumes Scala imports in candidate order instead of source order.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "confidence": "high",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/model.rs:130-138 defines token.ordinal() as the mount ordinal. jvm_context.rs:403-418 reads only the caller mount and sorts by that ordinal, so all imports tie. Their incoming order is candidate identity order, explicitly imposed by resolution_lexical.rs:3007-3010 and resolution_stage/lexical_readers.rs:512, and preserved during hydration by resolution/selected_context.rs:500-525. No source-position ordering is applied. The new earlier_scala_imports map is read at jvm_context.rs:559-565 and updated during the same loop at :870-884; thus candidate order can expose a textually later import to an earlier dependent import, or miss the textually preceding import. This order dependence is introduced with that map. Later fix a226968326f2d482f4f9534f8e266f121f1a782e carries the producer activation position through persisted paths and sorts by (mount, activation)."
+  },
+  {
+    "intro": "695a400f18549624bbcc23f51e65b987160b6f28",
+    "group": "g1",
+    "findings": [
+      "f-0703aa39",
+      "f-6faa9d18",
+      "f-5521d498",
+      "f-8b56d0c6"
+    ],
+    "summary": "Explicitly anchored paths lose the type continuation needed for enum variants and associated items.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-rust/src/resolution.rs:973-981 makes bare_qualified_route false for crate/self/super anchors. The new guard at 1114 excludes crate::State::Unit from prefix selection, so 1130-1165 no longer publishes its type-identity receiver transfer; 1173-1208 emits the complete crate/State module route without a prefix reference instead. Enum variants are constructor members in the enum scope (2064-2100), with no root export emitted there. State cannot supply the module export route to Unit. Ordinary lexical resolution is also explicitly skipped for root references (crates/bifrost-analysis/src/analyzer/resolution/fact_lowering.rs:1136-1140). The base selected the final prefix for anchored paths of more than two segments. Later fix 87ac74ee51b6a7ba3dbe561c6254a91665a6f35d restores an anchored type receiver alongside the full module route and adds associated-item regressions. Earlier 66dbb04f894c71fd88b05ab275a6069dda0f4b4c restored only macro callable prefixes.",
+    "confidence": "high"
+  },
+  {
+    "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+    "group": "g1",
+    "findings": [
+      "f-e155b123",
+      "f-f0ed883d"
+    ],
+    "summary": "Generated-accessor source lookup accepts static fields for class-level Lombok getter annotations.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/searchtools.rs:2392-2425 introduces generated-accessor source lookup, reached on lookup failure at 2689-2694 and on anchored failure at 2585-2593. For @Data class Example { static String name; }, Example.getName selects the field through src/analyzer/usages/get_definition/java.rs:1584-1596, which filters only field kind and boolean compatibility. The class annotation returns all fields immediately at 1601-1605, without checking static modifiers, and the new source surface reports Found although Lombok generates no getter for the static field. This exposes an existing helper defect through a newly supported product lookup. Qualification: the final-field setter example is incorrect: java.rs:1775-1779 recognizes Data only for Getter, so @Data alone does not invent setId. The static getter failure is sufficient to confirm the modifier-filtering problem.",
+    "confidence": "high"
+  },
+  {
+    "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+    "group": "g2",
+    "findings": [
+      "f-bc0c1ecc",
+      "f-6f17034e",
+      "f-34fe4ce8",
+      "f-9e09ed68",
+      "f-50ddb406",
+      "f-0487ab34"
+    ],
+    "summary": "C# metadata selectors discard generic arity and can resolve declarations with a different arity.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/analyzer/symbol_lookup.rs:397-409 adds query interpretations with numeric metadata arities stripped; 423-439 accepts any digit suffix without retaining its value. collect_fuzzy_matches compares only the resulting name paths (290-307), and resolution_from_matches returns matching FQN definitions without checking type parameters (326-348). Thus N.Widget`2 resolves the source declaration for class Widget<T>, or even nongeneric Widget, through the fuzzy source-lookup path. This normalization was absent in the base. The positive new test at tests/searchtools_definition_selectors.rs:976-1013 exercises this route for correct arities but does not constrain mismatched ones.",
+    "confidence": "high"
+  },
+  {
+    "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+    "group": "g3",
+    "findings": [
+      "f-d1d7a9a0"
+    ],
+    "summary": "Lombok source lookup applies one owner annotation to same-FQN fields from other files.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/searchtools.rs:2392-2425 permits multiple owners when their FQN is identical (2403-2406), then invokes the accessor helper for each. src/analyzer/usages/get_definition/java.rs:1587-1591 retrieves fields solely by owner FQN; DefinitionLookupIndex stores and returns all same-FQN declarations (src/analyzer/definition_lookup_index.rs:71,107-108). A class annotation on one owner returns those cross-file fields wholesale (java.rs:1601-1605). With two source roots containing pkg.Widget, only one annotated, an anchor to the unannotated file retains its field in the later source-path filter (searchtools.rs:2421) and reports Found (2589-2592). Without an anchor both fields survive deduplication because their source identities differ. The new source fallback exposes this helper defect in get_symbol_sources.",
+    "confidence": "high"
+  },
+  {
+    "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+    "group": "g4",
+    "findings": [
+      "f-b3f81311"
+    ],
+    "summary": "An anchored Lombok lookup rejects globally ambiguous owner names before applying its file anchor.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/analyzer/symbol_lookup.rs:19-68 resolves enclosing owners by suffix and returns both resolved and ambiguous candidate lists. With a.Widget and b.Widget, Widget.getName supplies both classes. The new src/searchtools.rs:2404-2406 tests distinct owner FQNs before consulting the anchor, returns empty, and never reaches its only anchor filter at 2421. Therefore a/Widget.java#Widget.getName fails even if that file contains an annotated Widget with a name field. Anchored fallback call sites at 2508-2515 and 2585-2593 pass the anchor but cannot overcome this early return. No generated method declaration exists for ordinary lookup to find. This differs from same-FQN cross-file field contamination.",
+    "confidence": "high"
+  },
+  {
+    "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+    "group": "g5",
+    "findings": [
+      "f-b5a0a39f"
+    ],
+    "summary": "Java parent lookup now scans workspace-wide child collections for each uncached usage context.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/analyzer/java/mod.rs:272-274 adds parent_of delegating to structural_parent_of. The helper scans self.state.children and visited child vectors (src/analyzer/tree_sitter_analyzer.rs:803-815), then can scan module_children and all file declarations (818-834). Previously Java used the default FQN-prefix/indexed-definition lookup in src/analyzer/i_analyzer.rs:455-469. Java usage enclosing_context invokes parent_of for each distinct reference range, possibly repeatedly through enclosing functions (src/analyzer/usages/java_graph/hits.rs:76-99); its cache uses node byte ranges rather than enclosing declaration identity. Thus distinct references repeatedly pay a workspace-sized parent scan, producing multiplicative reference/declaration work. This deterministic extra work confirms the regression; its precise latency impact was not measured, so medium severity reflects the narrower performance failure.",
+    "confidence": "high"
+  },
+  {
+    "intro": "fdcd0552e9a57c8dfb91ab03b26d2d0ee08df36d",
+    "group": "g1",
+    "findings": [
+      "f-e661c0e4",
+      "f-4d9e10bd",
+      "f-4f1e090f",
+      "f-4b1490c1",
+      "f-28b3789e",
+      "f-414c539a"
+    ],
+    "summary": "Replaying an incomplete hierarchy support read now deep-clones its cached reason array before cooperative polling.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, fact_resolution.rs:4677 changes cancellation_support_completions from Rc<ResolutionCompletion> to owned ResolutionCompletion. Exhausted session reads enter observe_hierarchy_support_completion through fact_resolution.rs:12783-12790 and :14234-14240. Reusing a support identity reaches get(&identity).cloned() at :14252-14257 before the per-reason ledger polls at :14266-14268. ResolutionCompletion derives Clone over Incomplete(Box<[ResolutionIncompleteReason]>) in crates/bifrost-analysis/src/analyzer/resolution/model.rs:935-938; reasons contain arbitrary semantic/path identities (:903-915), so their count is not bounded by the number of enum variants. A repeated large incomplete support result therefore incurs an additional proportional allocation and unpolled copy that was an Rc increment at base. Later fix 81bb278c4b0f2120de171c21df9af6638929ed01 removes this cloned() and retains shared evidence with cooperative equality. All fact_resolution.rs references are under crates/bifrost-analysis/src/analyzer/resolution/ at intro.",
+    "confidence": "high"
+  },
+  {
+    "intro": "27a65d69912b50de7a83fba15ebc039e347f61b8",
+    "group": "g1",
+    "findings": [
+      "f-38cd971b",
+      "f-f23fcff0"
+    ],
+    "summary": "Position-free index digests miss changes to definition selection caused by cross-file byte-offset ordering.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-store/src/analyzer/store/mod.rs:13088-13104 reads range rows but no longer hashes them. Meanwhile crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:13343-13368 sorts definitions by (priority, first_start_byte, source, ...). Two same-priority definitions in separate files can exchange order when padding moves one declaration across the other file's start offset without changing either file's declaration rank or semantic fields. The lookup sorts at :13567 and, for duplicate module definitions, retains only the first at :13570-13580, making this a changed selected answer rather than merely cosmetic ordering. Index reads can still verify against unchanged digests, permitting stale reuse. Later fix 27f067bb6de9a4690598e41e3bb2de0b8894b08a moves source before first_start_byte in the sort tuple.",
+    "confidence": "high"
+  },
+  {
+    "intro": "27a65d69912b50de7a83fba15ebc039e347f61b8",
+    "group": "g2",
+    "findings": [
+      "f-fbe1260d",
+      "f-a3120b46"
+    ],
+    "summary": "Per-call dispatch certificates use range-wide quality and coverage that do not match individual-call replay.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:208-247 combines the qualities and coverage of all selected calls. resolve_at_source_recorded then gives each observation the aggregate coverage (:119-122) and aggregate outcome quality (:126-128). procedure_dispatch_answer_digest hashes both quality and coverage (:742-754). In contrast, crates/bifrost-analysis/src/analyzer/read_verification.rs:1322-1331 resolves one located call and invokes one_call_dispatch_answer_digest; source.rs:708-729 derives quality and projected coverage solely from that call. Multiple selected calls are explicitly supported (source.rs:648-653). An exhaustive complete call alongside an open/unresolved available call yields a different recorded digest for the complete call than replay on the same workspace, preventing reuse. Later fix 27f067bb6de9a4690598e41e3bb2de0b8894b08a stores each observation's own quality and projected coverage.",
+    "confidence": "high"
+  },
+  {
+    "intro": "27a65d69912b50de7a83fba15ebc039e347f61b8",
+    "group": "g3",
+    "findings": [
+      "f-e8bc830d",
+      "f-19edb72e"
+    ],
+    "summary": "The new dispatch-read decoder rejects old persisted class-set reads without invalidating their cache families.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "The base encoder in crates/bifrost-store/src/analyzer/store/read_keys.rs:129-138 persists ProcedureDispatch start/end byte offsets and a separate ordinal. At intro, the same decoder accepts these columns only when start == end and any ordinal also equals that rank (:361-386), so an ordinary nonempty old call range fails decoding. Class-set surface loading calls this decoder at class_set_procedure_surfaces.rs:1218-1229 and summary loading at class_set_summaries.rs:1825-1832. Surface families remain reachable: their SQL keys on lineage/path/language/schema/local structure/behavior (class_set_procedure_surfaces.rs:469-475), constructed in crates/bifrost-flow/src/type_flow/summary.rs:1285-1309; SUMMARY_SCHEMA_VERSION remains 11 in crates/bifrost-flow/src/dataflow/reusable_summary.rs:36 and the diff changes neither the summary identity constants nor these constructors. The policy epoch bump does not invalidate these surface families. Loading an old surface records a query failure in summary.rs:1363-1372, not a cache miss; demanded old summary failures similarly stop reuse at :3510-3517. Publication also decodes existing rows before replacement (class_set_summaries.rs:909-925), so it cannot simply repair an affected existing lookup. This breaks analysis flows using previously persisted class-set dispatch reads after upgrade. No specific later encoding migration was identified. Unqualified store filenames above are under crates/bifrost-store/src/analyzer/store/ at intro.",
+    "confidence": "high"
+  },
+  {
+    "intro": "43553e0d358d58fd725d108b4e25e9236f98824b",
+    "group": "g1",
+    "findings": [
+      "f-98087c39"
+    ],
+    "summary": "The new required sink_files field is missing from the production candidate plan initializer, preventing compilation.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "At intro, crates/bifrost-policy/src/taint_policy.rs:367-382 defines PreparedTaintPlan with the new required sink_files field. The unconditional mod candidate at taint_policy.rs:131 compiles candidate.rs, whose PreparedTaintPlan literal at crates/bifrost-policy/src/taint_policy/candidate.rs:566-576 omits that field and has no struct update expression. Rust therefore rejects the literal with a missing-field error even if the candidate path is never called. The base had no such field. Later fix dbd3ec88e7c69427155afd37241f97569a3666ab computes policy-wide sink files and supplies sink_files in this initializer.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6",
+    "group": "g1",
+    "findings": [
+      "f-e6b647fa",
+      "f-0f846e04"
+    ],
+    "summary": "Deleting the shared scan-budget regression test reduces coverage but does not introduce the claimed incorrect query result.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:140-146 initializes Unknown coverage and one examined counter; :156-167 consumes the fact budget; :170-178 passes that same counter into collect_coverage; :193-200 reports RecordBudgetExhausted before admitting another coverage record. Thus one matching fact, one coverage record, and max_records=1 still returns the fact, no coverage claims, Unknown executable coverage, and the exhaustion gap. The diff removes tests only and does not reset the counter. The findings posit a future regression rather than a concrete failing input at intro. Later e3f2640c58426437ef7abb8ff2151231b3080107 restores the bounded-scan test, supporting its coverage value but not demonstrating a runtime defect in this diff.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6",
+    "group": "g2",
+    "findings": [
+      "f-27f55995",
+      "f-fa0c8191"
+    ],
+    "summary": "Test deletions leave incorrectly indented module closures and blank lines that fail the CI formatting check.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/callable_values.rs:375 closes the top-level tests module with four spaces of indentation and :278 contains an extra blank line. crates/bifrost-analysis/src/analyzer/semantic_model/catalog/mod.rs:6239 similarly closes its top-level generated_production_cache_version_tests module with four spaces. These are the deleted tests' closing braces retained as module closures; the base had correctly unindented module closures. The CI Check formatting step at .github/workflows/ci.yml:107-108 runs cargo fmt --check, which rejects these formatting differences. Later 724fe67a3c815516a19e6273a05fe8530b3e2510 corrects callable_values.rs's closure indentation and extra blank lines. Verified by source inspection only, without running a formatter, build, or tests.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5053bc5bea1ac33fb6e5ee71ffa46cc0f34429e6",
+    "group": "g3",
+    "findings": [
+      "f-15cb7edf",
+      "f-7237e55b"
+    ],
+    "summary": "Deleting the retry-deadline test reduces coverage but leaves the deadline enforcement intact.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic_model/catalog/db.rs:115-116 supplies BUSY_TIMEOUT to retry_initialization_with. That helper records the start time at :124 and returns the transient error when elapsed >= deadline at :130-133, bounds its sleep by remaining time at :134, and checks the deadline again at :135-136. BUSY and PROTOCOL are classified as transient at :147-154. Persistent transient errors therefore still stop at the deadline; Duration::ZERO returns on the first transient error without sleeping. This diff deletes the test at :733-734 but does not change the helper. An unbounded retry requires a hypothetical subsequent code regression. Later ab8b8ffeabd0d251df041700aca18da8690cedb0 restores the deadline test with a hardwon annotation, supporting its usefulness but not showing a new runtime hang at intro.",
+    "confidence": "high"
+  },
+  {
+    "intro": "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+    "group": "g1",
+    "findings": [
+      "f-d577508b",
+      "f-610bf37d",
+      "f-5b8df756",
+      "f-9e52e0ac",
+      "f-c8216128",
+      "f-df823f94"
+    ],
+    "summary": "An external alias inside a generic argument incorrectly blocks navigation to the workspace generic type.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for a field typed Container<ext::Item>, with an indexed Container<T> and using ext = External, selecting Container promotes its identifier to generic_name in crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:1780-1813 and classifies it as Type at :1844-1848. The newly added check at :562-568 runs before workspace resolution at :570-600. csharp_alias_qualified_boundary traverses all named descendants (:2188-2189, :2217-2218), including the type argument, finds ext::Item, and returns true when External and External.Item are unindexed (:2190-2215). Thus it returns an import boundary for Container itself. The base did not apply this boundary predicate to ordinary type references.",
+    "confidence": "high"
+  },
+  {
+    "intro": "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+    "group": "g2",
+    "findings": [
+      "f-b0863c8c",
+      "f-4460c7ba"
+    ],
+    "summary": "Comments between an anonymous-object member name and its equals token bypass declaration-name classification, but this failure predates the diff.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-csharp/src/graph/extractor.rs:1091-1094 checks the immediate next_sibling for =, so a comment between Name and = does bypass the new branch. However, base d112084d980f1401cf511b551c71ae5c41d76f5a has no anonymous-object branch at all: extractor.rs:1082-1107 only recognizes the listed declaration parents, excluding anonymous_object_creation_expression, and returns false for this same Name. The remaining classifier at intro (:1098-1119) retains that behavior. Both revisions therefore let this commented name pass the declaration gate in crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:543-547. This is an unhandled pre-existing case, not a failure introduced or newly exposed by the diff; the specification explicitly rejects pre-existing problems.",
+    "confidence": "high"
+  },
+  {
+    "intro": "a75a035026aedb57d18b9f4332e6d0a2d475b344",
+    "group": "g1",
+    "findings": [
+      "f-b6963d38",
+      "f-e4e4cec2",
+      "f-544f0a98",
+      "f-7b1a6d0b",
+      "f-33df6f04",
+      "f-b3920a64"
+    ],
+    "summary": "A same-package panic declaration in another file is misclassified as the builtin, eliminating the actual call and its normal continuation.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "At intro, two files can declare package p, with func panic(v int) {} in one and func run() { panic(1); sink() } in the other. In crates/bifrost-analysis/src/analyzer/go/semantic.rs:44-57, lowering receives only the current prepared tree; enumerate_procedures starts from that tree (:225-243) and collects package shadowing only from its nodes (:255-280). Top-level procedures inherit that incomplete inventory (:599-605), while binding_value checks only locals and parameters (:913-916). Consequently builtin_panic_argument (:1178-1194) accepts panic(1). The new arm at :2766-2805 emits Throw, routes exceptional completion, and ignores next, bypassing ordinary call lowering at :2807. In base a759d64749447aac3f939650b966f2037df07af3, this was an ordinary call at semantic.rs:2736. Later mitigation b757656ef83d3aa4b02c0342c8869593e2139914 records builtin assumptions including Panic and checks same-package declarations in workspace value-flow and race queries, leaving shadowed assumptions open rather than silently accepting builtin semantics; it does not itself reconstruct the ordinary call CFG.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5e17ecf53c3ffc620452b0bee0ab022c6ecd0ac4",
+    "group": "g1",
+    "findings": [
+      "f-e88f2620",
+      "f-7420bbd5",
+      "f-46c5ea6d",
+      "f-ebc24ec9",
+      "f-dcb5a637",
+      "f-552a987c"
+    ],
+    "summary": "Macro recovery incorrectly consumes identifiers in unrelated erroneous declarations immediately following a completed function-like macro.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, src/analyzer/usages/get_definition/cpp.rs:3953-3971 accepts an identifier with an ERROR ancestor inside an erroneous top-level declaration or expression_statement, walks backward across those wrappers, and returns true upon any preproc_function_def with a value. Lines 3991-3998 require only the wrapper kind and has_error(); nothing checks whether the directive continued beyond its parsed value. Thus an identifier recovered inside the erroneous declaration in int keep; followed by #define F(x) x followed by int later = keep keep; is suppressed despite being on a separate, uncontinued line. The identifier path at lines 284-290 returns no_definition with declaration_or_import_site before ordinary resolution. The base required the translation-unit child itself to be ERROR, so the nested-ERROR wrapper case is newly exposed. The new control in tests/get_definition_test.rs:21944-21975 places a clean separator before malformed code and does not exercise adjacency to a valid macro. The checked-out descendant still uses the same backward boundary heuristic in crates/bifrost-cpp-analysis/src/analyzer/usages/get_definition/cpp.rs:7796-7816; no corrective change was identified.",
+    "confidence": "medium"
+  },
+  {
+    "intro": "9dad3f2c71bdc0bfea12f55d0ceb5fb7bd2dad97",
+    "group": "g1",
+    "findings": [
+      "f-c52d582d",
+      "f-df92633d",
+      "f-37eeae9e"
+    ],
+    "summary": "Production Go requests accumulate new resolution metrics but discard them without exposing or reporting them.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/go/native_points.rs:232 declares the private point_metrics field, line 303 initializes it, and lines 439 and 610 pass it as an accumulation sink. These are its only occurrences in the Go module. Production definition and type wrappers return request.resolve_definition_with_evidence(query) and request.resolve_type(query) at lines 819 and 1134, dropping the request without reading its metrics. The fixture measurement instead creates its own ResolutionBatchMetrics at crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:3692, passes it directly to the selected operation at lines 3703/3726, and returns it at line 3746. This measures the lower-level fixture but leaves the newly attached production request metrics inaccessible. Later commit 0467e7a99f299bc93bf18972f7370c9bf2bd04a2 adds BIFROST_TRIAL_NATIVE_GO_POINT_WORK logging that reads request.point_metrics for both production entry points.",
+    "confidence": "high"
+  },
+  {
+    "intro": "9dad3f2c71bdc0bfea12f55d0ceb5fb7bd2dad97",
+    "group": "g2",
+    "findings": [
+      "f-6a7201c0",
+      "f-2729ae14",
+      "f-1cb4ce83",
+      "f-54a44244",
+      "f-cab7ba68"
+    ],
+    "summary": "SQL trace teardown can unregister another pooled reader and free a context still referenced by the traced connection.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:562-579 installs a raw pointer into a boxed context on one reader; begin returns that reader at lines 643-648. The new Go measurement opens an operation at line 3676 and calls finish at line 3741 without dropping it. SelectedResolutionMountInventory owns its ReaderGuard (resolution_selection.rs:1286-1287), so that connection remains checked out. finish obtains another active_read_conn at resolution_operation_tests.rs:671-675, disables tracing on that other connection at lines 589-590, and frees the original Box at lines 594-597. The callback dereferences its context at lines 495-498. Operation inventory destruction can execute cleanup SQL (resolution_selection.rs:2116-2121), and subsequent reader reuse can also invoke that dangling callback. The existing Rust measurement has the same outstanding-operation sequence at resolution_operation_tests.rs:2627-2646; this diff changes its previously thread-local callback state into a freed raw-pointer context, introducing memory unsafety. There is also no connection identity guarantee with multiple idle readers: general acquire uses the last idle reader (store/mod.rs:899-900), whereas resolution prefers a matching retained selection (lines 903-915), so begin/work/finish can select different connections even apart from the outstanding checkout. Later commit 486e811d579d9525f5b75e42b71f7cd231891aab adds drop(operation) before Go trace teardown; that supports the ownership defect but does not by itself prove the general multi-reader mismatch fixed.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+    "group": "g1",
+    "findings": [
+      "f-50188d8c",
+      "f-d61349f8",
+      "f-862ab892",
+      "f-ae1d16b2",
+      "f-ccd225b5",
+      "f-863c053f"
+    ],
+    "summary": "Repeated calls with equal syntax are incorrectly classified as tautological self-comparisons.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-js-ts/src/test_detection.rs:215-226 admits expect(counter.next()).toBe(counter.next()); :234-239 selects its operands. The structural comparison at :339-363 finds identical call trees, and :264-270 emits SelfComparison because a call is not a literal. Separate counter.next() invocations can return different values. crates/bifrost-core/src/analyzer/test_assertions.rs:38-42 assigns the tautology weight, and :131-144 emits the false finding. At base, the expect equality regex at crates/bifrost-js-ts/src/test_detection.rs:13-17 excluded parentheses in the actual operand and did not recognize this assertion. The structural call comparison remains in the pinned checkout; no later corrective change was identified.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+    "group": "g2",
+    "findings": [
+      "f-b842ab34",
+      "f-f2969674"
+    ],
+    "summary": "Parenthesized assertion operands lose constant-truth and equality smell classifications.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-js-ts/src/test_detection.rs:223-229 passes argument nodes through without unwrapping. assert.ok((true)) supplies a parenthesized_expression, fails the true-kind check at :241-245, and falls to Meaningful at :260. assert.strictEqual((value), value) reaches :265, but :342-343 rejects parenthesized_expression versus identifier. Meaningful has score zero, so crates/bifrost-core/src/analyzer/test_assertions.rs:131-134 suppresses the findings. Base assert regexes at crates/bifrost-js-ts/src/test_detection.rs:37-45 accepted these inputs, and normalize_js_ts_expr called normalize_assertion_expression, whose parentheses stripping remains visible at intro in crates/bifrost-core/src/analyzer/test_assertions.rs:60-66. Both symptoms need consistent unwrapping of grouping nodes before classification/comparison.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+    "group": "g3",
+    "findings": [
+      "f-5fa6a3e0"
+    ],
+    "summary": "Assertions invoked through chai.assert are dropped and can produce false no-assertions reports.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, chai.assert.equal(value, expected) has chai.assert as the matcher object. crates/bifrost-js-ts/src/test_detection.rs:203-206 sees its property assert, which is not not/resolves/rejects, and returns None. No separate assert.equal call exists among the child nodes. Thus :180-183 collects no assertion when this is the only assertion, and crates/bifrost-core/src/analyzer/test_assertions.rs:116-128 emits no-assertions. Base unanchored assert equality/truth regexes at crates/bifrost-js-ts/src/test_detection.rs:37-45 matched the assert.equal or assert.isTrue substring. Later 01dbb79095fd02413292517524515b1e741a54d3 added other chai styles; it does not establish a fix for this namespaced assert form.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g1",
+    "findings": [
+      "f-250d6990",
+      "f-106a4c00",
+      "f-9dfe82d5",
+      "f-9a77edbc",
+      "f-e2814021",
+      "f-f7b00111"
+    ],
+    "summary": "Qualified template-parameter pointees are not substituted in operator-arrow return types.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, local P p with using P = Wrapper<Node> is seeded with wrapper unit and alias P at src/analyzer/usages/get_definition.rs:7168-7177; arrow access routes through :6411-6425. For const T* operator->(), :7360-7369 produces const T. The exact parameter-name comparison at :7385-7392 cannot match T to const T, so :7370-7377 resolves the unsubstituted text. The imported normalizer (src/analyzer/usages/cpp_graph/resolver.rs:782-790) removes const only during that later resolution, leaving T rather than Node. With no concrete class named T, lookup fails and :6429 falls back to Wrapper, losing members present only on Node. The base helper at :7345-7355 resolved the alias first argument Node regardless of the return qualifier. The same substitution limitation remains in the pinned checkout.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g2",
+    "findings": [
+      "f-aab94fc1"
+    ],
+    "summary": "Pointer typedef return types are rejected before alias resolution can establish pointer indirection.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for template<class T> struct Wrapper with using pointer = T*; pointer operator->(); and using P = Wrapper<Node>, src/analyzer/usages/get_definition.rs:7357-7360 finds the operator and reads pointer. :7362-7363 rejects it because cpp_type_text_pointer_depth (:6141-6152) only counts literal stars; it never resolves the pointer typedef first. :6423-6429 supplies Wrapper as the member owner, and a member present only on Node cannot be found at :5737-5741. The base first-template-argument helper (:7345-7355 at base) selected Node. The literal pointer-depth gate remains in the pinned checkout.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g3",
+    "findings": [
+      "f-62ae70b1",
+      "f-2c542349",
+      "f-77cef644"
+    ],
+    "summary": "Omitted template arguments are not filled from defaults before operator-arrow return substitution.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for template<class T, class U = T> struct Wrapper with U* operator->() and alias Wrapper<Node>, src/analyzer/usages/get_definition.rs:7346-7347 collects only explicit argument Node. :7397-7408 extracts names T and U while discarding defaults. :7365-7370 yields U, whose parameter index is 1; :7389-7392 finds no args[1] and leaves U unchanged. :7372-7377 cannot resolve Node through U and falls back to Wrapper at :6429, losing Node-only members. The base helper (:7345-7355 at base) resolved the explicit first argument Node for this input. The pinned implementation still substitutes only explicit argument entries.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g4",
+    "findings": [
+      "f-8e10c1f3",
+      "f-fc81c966",
+      "f-bede1a70"
+    ],
+    "summary": "Class-valued operator-arrow results are rejected instead of following the proxy arrow chain.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for using P = Wrapper<Node>, Wrapper::operator-> returning Proxy<Node>, and Proxy::operator-> returning Node*, src/analyzer/usages/get_definition.rs:7357-7360 finds the first operator but :7362-7363 returns None because its return has no top-level star. No second operator lookup is attempted. :6423-6429 falls back to Wrapper, so :5737-5741 cannot find a Node-only member. C++ recursively applies overloaded operator-> to class-valued results, so the access is valid. The base first-argument helper (:7345-7355 at base) reached Node for this shape. The pointer-only gate remains in the pinned checkout.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g5",
+    "findings": [
+      "f-a84760e9",
+      "f-733a89c2"
+    ],
+    "summary": "Chained aliases lose the underlying wrapper template arguments, but this limitation predates the diff.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, src/analyzer/usages/get_definition.rs:7345-7355 reads only the outer alias RHS: using Alias = Ptr collects no arguments even though :7241-7269 and :7324-7335 can follow Ptr to Wrapper. However, base src/analyzer/usages/get_definition.rs:7345-7355 also passed only the outer RHS Ptr to cpp_template_first_argument; base :7382-7385 immediately returned None because Ptr contains no angle group. Base :6429-6436 therefore already fell back to Wrapper instead of selecting Node. Alias-chain member resolution was already broken; this diff did not introduce or newly expose that failure.",
+    "confidence": "high"
+  },
+  {
+    "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+    "group": "g6",
+    "findings": [
+      "f-6477d9cb",
+      "f-3018b628",
+      "f-ceb73de7"
+    ],
+    "summary": "Failed overloaded-arrow resolution falls back to wrapper members and returns false definitions.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, consider template<class T> struct Container with size() and no operator->; using X = Container<Node>; X x; x->size(), where Node has no size. src/analyzer/usages/get_definition.rs:7168-7177 stores Container as the unit and X as the alias. :6411-6425 attempts arrow resolution; :7357-7359 finds no operator and returns None. :6429 nevertheless returns Container, and :5737-5744 plus :5890-5898 find Container::size and return it as the definition of the invalid arrow access. Base :7345-7355 selected Node from the alias and did not return Container::size. The commit explicitly intends to stop unwrapping containers without operator->, but returning a confident wrapper member is not a conservative unresolved result. The same fallback remains in the pinned checkout.",
+    "confidence": "high"
+  },
+  {
+    "intro": "7e35e90ce9c60c9be56cce34f0916f4e4083a090",
+    "group": "g1",
+    "findings": [
+      "f-6e5e06f8"
+    ],
+    "summary": "Changed Scala resolution completeness can reuse persisted products under unchanged provider identities.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-store/src/analyzer/resolution/engine.rs:3439-3484 retains incomplete terminals unless Scala has a unique complete affirmative survivor; crates/bifrost-store/src/analyzer/store/resolution_operation/jvm_demand.rs:3233-3244 also restores qualifier inventory boundaries. Neither salts nor provider domains change in this four-file diff. Provider identity is built from the unchanged domains and engine inputs in crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:212-280, plus unchanged workspace content at :291-294. The persisted root key uses that identity and workspace content (crates/bifrost-rql/src/structural/search/type_flow.rs:2406-2436); an existing finding-free hit returns immediately without re-solving at :1536-1556. Thus upgrading an unchanged workspace can replay a result derived before the restored incompleteness. The explicit invalidation contract is .agents/docs/architecture-and-analyzer-store.md:298-302. Later fix e7f35f12f346cbccb9a2ccdd34baecbd47b6c556 rotates both ICFG domains and the policy substrate for #8665.",
+    "confidence": "high"
+  },
+  {
+    "intro": "378bd893ed9b7f893d1aa153ebb058c04c549141",
+    "group": "g1",
+    "findings": [
+      "f-c0fe8a7c",
+      "f-b4bad617",
+      "f-1cd1527f",
+      "f-942e848d",
+      "f-f398cf49",
+      "f-d6790eba"
+    ],
+    "summary": "Go package-variable dispatch runs a workspace census outside the semantic request's cancellation and work limits.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "The new Go field-call path invokes the proof per call at crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:1263-1289. Its helper charges one execution traversal and limits only the declaring-source read (:2087-2105), then passes no request into prove_stable_package_function_value. That proof calls find_usages (crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:100) and reparses each referenced file (:155-163). The convenience API creates UsageFinder::new() with default 1000-file/1000-hit limits (crates/bifrost-analysis/src/analyzer/usages/mod.rs:120-125; usages/finder.rs:65-66), whose cancellation token is newly allocated (finder.rs:138-145) and whose query has no source-byte limit (:182-191). Go then builds a graph and scans candidates with that independent token (usages/go_graph.rs:265-299, :469-477). Cancellation arriving during this work cannot stop it, and remaining semantic source/traversal allowance does not constrain or account for the census. Outer cancellation checks can stop subsequent work but do not interrupt this scan; distinct call sites repeat it.",
+    "confidence": "high"
+  },
+  {
+    "intro": "378bd893ed9b7f893d1aa153ebb058c04c549141",
+    "group": "g2",
+    "findings": [
+      "f-ad6a8fda",
+      "f-a3f435c7"
+    ],
+    "summary": "A truncated usage census can incorrectly prove that a mutable Go package function variable has only its initializer target.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/finder.rs:336-359 truncates candidate files to the default limit of 1000 (:65), and :428-443 reports CandidateFilesBudgetExhausted separately from the graph's FuzzyResult. Its find_usages wrapper returns only .result (:380-388). Go reference scanning is restricted to admitted files (usages/go_graph.rs:469-477), so a write in an omitted file cannot appear in the hits, even if that file contributed package declarations to the graph. The new proof accepts FuzzyResult::Success with no unproven hits (analyzer/go/package_function_value.rs:100-128), checks only returned references (:138-171), and publishes the initializer proof (:174-184). With more than 1000 candidate files but fewer than 1000 admitted hits, all admitted hits can be direct calls while an omitted file assigns another function. Dispatch then installs the initializer candidate at analyzer/semantic/workspace_oracle/dispatch.rs:1273-1290 without the missing target or an incompleteness boundary. Later fix 7180522d6b47237e3eaae6a52b9aa4bd980172e3 switches the moved proof to query_usages and requires complete coverage before accepting it.",
+    "confidence": "high"
+  },
+  {
+    "intro": "378bd893ed9b7f893d1aa153ebb058c04c549141",
+    "group": "g3",
+    "findings": [
+      "f-08dfea2c"
+    ],
+    "summary": "Dispatch cache weights omit the newly retained package-variable census arrays.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, every successful proof creates an owned reference vector (crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:138-178); workspace_oracle/dispatch.rs:2131-2135 boxes it into StablePackageValueProvenance. The provenance owns Box<[UsageHit]> (analyzer/semantic/oracle/dispatch.rs:994-999), and is retained in the final DispatchResult (workspace_oracle/dispatch.rs:1988-1994). ValueFlowCache keys include each distinct call site (crates/bifrost-flow/src/value_flow/provider.rs:280-300), so many calls to one variable retain separate census arrays. However weigh_dispatch (:391-406) charges only the fixed MemoizedDispatch size and candidate/boundary rows; the heap allocation for stable_package_values and its references is absent. The byte-bounded cache uses this weigher (:465-470), so hundreds of calls with hundreds of references retain quadratic proof data while charging essentially linear fixed-size entries. This is newly exposed by the added provenance, even though the prior weigher already omitted other dynamic allocations.",
+    "confidence": "high"
+  },
+  {
+    "intro": "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+    "group": "g1",
+    "findings": [
+      "f-902a61e1",
+      "f-1352eb1f"
+    ],
+    "summary": "Solver budget exhaustion or cancellation falsely changes complete semantic input into partial semantic evidence in the published reason.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-flow/src/value_flow/plan.rs:3575-3584 makes execution_result_modeled false whenever solver termination is not FixedPoint; result.rs:122,154-155 exposes that as ValueFlowSummaryResult::is_complete(). Semantic status can independently remain Complete: plan.rs:3749-3779 folds semantic boundaries without folding solver termination. crates/bifrost-rql/src/structural/search/value_flow.rs:674-707 passes the combined completion flag into public_semantic_status, changing Complete to Partial. Lines 752-800 then append 'semantic status partial: value-flow analysis retained incomplete semantic evidence' to the solver failure. A budget-limited solve still reaches endpoint projection (lines 197-232), including inconclusive sink rows (325-349), so the incorrect reason is observable. The base published semantic_status independently; this loss and false attribution are introduced by the new mapping.",
+    "confidence": "high"
+  },
+  {
+    "intro": "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+    "group": "g2",
+    "findings": [
+      "f-3c8ce226",
+      "f-d9cf89d4",
+      "f-90426ec3",
+      "f-1259d7e6"
+    ],
+    "summary": "Unavailable absent-member witnesses retain unproven/partial evidence rather than null dimensions.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "The described initializer and error behavior exist, but predate this diff. At intro, crates/bifrost-rql/src/structural/search/witness_projection.rs:75-95 initializes Unproven/Partial and adds error reasons without changing the axes; witness_status remains Unavailable (86) and unavailable_reason is populated (95), so unavailable witnesses are distinguishable. At base 0f997b56a2d1a5afca95e66c20eba971c68e96c0, the same file:75-96 already does exactly this under quality, with separate axis reasons and the same unavailable discriminator. The diff renames the object and combines reasons; it does not introduce this semantic behavior. The commit message's stated null-dimension goal is incompletely implemented (intro results/semantic.rs:833-837 still requires both enums), but the reported runtime problem is pre-existing under the specification's exclusion.",
+    "confidence": "high"
+  },
+  {
+    "intro": "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+    "group": "g3",
+    "findings": [
+      "f-abb5db43"
+    ],
+    "summary": "Untruncated partial or unproven flow and taint witnesses omit explanatory reasons.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "This omission predates the change. At intro, crates/bifrost-rql/src/structural/search/value_flow.rs:1092-1105 passes None to the evidence constructor; witness_projection.rs:789-809 supplies a reason only for truncation. At base 0f997b56a2d1a5afca95e66c20eba971c68e96c0, value_flow.rs:1018-1032 already sets both proof_reason and completeness_reason to None, and witness_projection.rs:791-812 already sets proof_reason to None and completeness_reason only on truncation. The new constructor preserves the same axes and missing explanations. No formerly available reason is discarded or new failure introduced by these edits.",
+    "confidence": "high"
+  },
+  {
+    "intro": "57069dc4f77fbc6d06ad07c2aa8831807751336e",
+    "group": "g4",
+    "findings": [
+      "f-2ba7ce5c"
+    ],
+    "summary": "The new stage property-gap unique index omits kind and source-site distinctions.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:138-142 defines the restrictive index and lines 329-336 generate its SQL. The ordinary lowering does preserve these distinctions (resolution_prepare/typed_rows.rs:766-787), and the ordinary table permits them (resolution_draft_schema.sql:388-396). However, no code at intro inserts into selected_resolution_stage_definition_property_gaps or projects ordinary typed rows into stage tables. resolution_selection.rs:135 merely installs the schema; resolution_stage.rs:117-187 defines an admission callback API with no call sites. The introduction commit explicitly identifies producer writes and projection as pending. Thus the alleged second-row projection failure is not reachable at this commit; it requires later implementation, rather than unsettled runtime or SQLite semantics.",
+    "confidence": "high"
+  },
+  {
+    "intro": "57069dc4f77fbc6d06ad07c2aa8831807751336e",
+    "group": "g5",
+    "findings": [
+      "f-71200974"
+    ],
+    "summary": "The new stage deferred-owner unique index permits only one owner fact per definition.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:116-121 declares definition-only uniqueness, materialized by lines 329-336. Ordinary lowering assigns separate sequence numbers to owner facts (resolution_prepare/typed_rows.rs:673-722), and ordinary storage allows them (resolution_draft_schema.sql:353-361). But there are no inserts into selected_resolution_stage_deferred_member_owners at intro, nor callers of resolution_stage.rs:117-187's with_capsule_admission callback. The schema is installed via resolution_selection.rs:135 without a typed projection implementation. The proposed constraint conflict is consequently a prospective schema concern, not a reachable failure introduced by this source-only checkpoint.",
+    "confidence": "high"
+  },
+  {
+    "intro": "4a12c7dafabb99c81e3a6b6c4d97979fc6547f82",
+    "group": "g1",
+    "findings": [
+      "f-360f7057",
+      "f-d709f6bd",
+      "f-ccf567c4",
+      "f-87677896"
+    ],
+    "summary": "Discarding base-side deletion ownership excludes surviving procedures when deletions land at their start or beyond their shortened end.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/diff_analysis.rs:1507-1513 converts pure deletions to a zero-width head position at the next surviving line or EOF. crates/bifrost-policy/src/coordinator.rs:4431-4443 reads the base but retains only those head ranges. PolicyChangedFile::overlaps in crates/bifrost-policy/src/taint_policy.rs:1525-1528 accepts only strict interior positions. Python procedures are anchored to their function_definition nodes (crates/bifrost-analysis/src/analyzer/python/semantic.rs:410-427). Deleting a final body statement therefore leaves the deletion position after the last remaining statement and outside the shortened function. Removing a decorator immediately before def, or a standalone Rust pub line before fn, instead puts the deletion exactly at the surviving declaration start, also excluded. Sink candidates in those procedures are dropped at taint_policy.rs:3066-3080; the second filter at 3099-3111 cannot recover them, and 3154-3167 takes the empty NoSinkInRange path. Before this diff the changed file retained these sinks. These are one ownership defect requiring base-side attribution, rather than simply making the head-boundary comparison inclusive (which would also admit unrelated gap deletions).",
+    "confidence": "high"
+  },
+  {
+    "intro": "4a12c7dafabb99c81e3a6b6c4d97979fc6547f82",
+    "group": "g2",
+    "findings": [
+      "f-eca110d2",
+      "f-78d76d68"
+    ],
+    "summary": "The whole-program span of a synthetic JavaScript/TypeScript initializer admits unrelated top-level sinks for edits inside functions or comments.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/js_ts/semantic/syntax.rs:145-162 creates an Initializer for a program containing executable statements and uses the program itself as its body; lines 332-336 require only one non-comment, non-declaration statement. semantic/inventory.rs:145-168 anchors that procedure to the program node. crates/bifrost-policy/src/taint_policy.rs:3021-3026 tests the full source anchor against every hunk. In a file containing a top-level sink and a separate function, an edit inside that function consequently marks both the function and the enclosing program initializer as overlapping. A top-level sink has no smaller enclosing function, so the smallest-enclosing-range filter at 3068-3080 admits it and the endpoint filter at 3099-3111 retains it. An interior module comment edit also overlaps the initializer. Although file-wide binding existed before, the newly implemented edited-procedure scope exposes this incorrect over-approximation and fails to provide the promised exclusion for top-level sinks. Nested-procedure ownership filtering of the sink itself does not filter ownership of the edit.",
+    "confidence": "high"
+  },
+  {
+    "intro": "2eaec0a7ad9102c79d5bb2b3850f7325cdfaf341",
+    "group": "g1",
+    "findings": [
+      "f-9d9bd027",
+      "f-5c1a5886"
+    ],
+    "summary": "Structural facts intentionally use the indexed source and matching indexed coordinates rather than raw working-file bytes.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/i_analyzer.rs:419-424 defines indexed_source as the source retained by the generation producing declarations and ranges. tree_sitter_analyzer.rs:3382-3388 selects that source; indexed_source delegates to it at 7916-7917, and ordinary ranges select indexed state at 8281-8289. StructuralSearchProvider::structural_source uses the same file_source (structural/provider.rs:349-350); fact extraction, snapshot decoding and cache materialization all receive that same source at 411-427. Rendering declaration coordinates also reads indexed_source (structural/search/mod.rs:977-985). Thus the fact offsets are paired with their actual source, not incorrectly applied to CRLF working-file bytes by this path. Keeping ordinary traversal on indexed state is the explicit purpose of intro (commit message: isolate exact source recovery to location queries), and the findings identify no consumer requiring raw working-file offsets. Source-aware location APIs are a separate path and have the confirmed mismatch in the next group.",
+    "confidence": "high"
+  },
+  {
+    "intro": "2eaec0a7ad9102c79d5bb2b3850f7325cdfaf341",
+    "group": "g2",
+    "findings": [
+      "f-df2d1639",
+      "f-51a6e1b2",
+      "f-a7e4f063",
+      "f-479d1231",
+      "f-50aaa24d"
+    ],
+    "summary": "Location scans compare a point computed from indexed LF source against module ranges projected onto CRLF working source.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:3382-3388 and 7916-7917 return retained indexed LF text. Its structural_file_state at 3742-3755 instead accepts current CRLF text when only line endings differ and builds state for that text; location_ranges at 8292-8295 returns those CRLF ranges. crates/bifrost-analysis/src/searchtools/scan_usages.rs:1192-1204 obtains the LF indexed_source, and 1214-1236 converts line/column to an LF byte position. With an explicit matching module selector, 1365-1376 compares that point to CRLF module ranges; the predicate at 1589-1595 directly compares bytes. For example, a module starting on a later line has a CRLF start advanced by one byte per preceding newline, so a point at its opening keyword can fall before its projected start and fail selection. Declaration-name recovery also mixes the LF tree with location_ranges (declaration_range.rs:19-22,95-108), though its line-based fallback at 120-129 repairs many such cases; the module branch bypasses that recovery entirely. This became inconsistent when intro changed file_source from structural_file_state to indexed state. Later fix 9af58e8fce5c16aed54453f6c774176fb56a2a41 changes location selection to read current working source, directly addressing this mismatch; cf4ffe8f9489801022736ce8c691cd6951e79d94 separately confines source-aware declaration ranges to location consumers.",
+    "confidence": "high"
+  },
+  {
+    "intro": "22207e44f0c4fd28f29b49f236f9c5ecedc08981",
+    "group": "g1",
+    "findings": [
+      "f-7746b61e"
+    ],
+    "summary": "The constructor-kind guard prevents JavaScript function constructors from receiving their allocated this object.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, js_ts/semantic/syntax.rs:147-153 inventories function Item as ProcedureKind::Function (full prefix crates/bifrost-analysis/src/analyzer/). js_ts/semantic/inventory.rs:177-198 and js_ts/semantic/mod.rs:377-383 make a function reading this own a receiver; js_ts/semantic/values.rs:1102-1108 publishes it. js_ts/semantic/control.rs:2468-2469 gives new Item(x) no receiver operand, and :2555-2557 allocates its result. semantic/oracle/call.rs:487-488 now rejects that allocation solely because the target is Function. semantic/workspace_oracle/value_flow.rs:5067-5083 consequently cannot bind the allocated result; its implicit receiver fallback (:1374-1404) cannot supply this from an ordinary caller function. The binding stays open at :5122-5123 with no Receiver transport, losing receiver-based member effects. The base helper in value_flow.rs:1021-1030 matched the result allocation without the new kind restriction, and therefore supplied this actual. No matching later fix was identified.",
+    "confidence": "high"
+  },
+  {
+    "intro": "6f9a2656f3a72bb23b3549c3dff738d78b19110b",
+    "group": "g1",
+    "findings": [
+      "f-00d64097",
+      "f-898d68b6",
+      "f-6d577554",
+      "f-62870af8"
+    ],
+    "summary": "Reverse-index construction retains all importers' resolved declaration sets simultaneously outside the memo-cache budget.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "At intro, src/analyzer/capabilities.rs:71-74 collects every resolved BTreeSet<CodeUnit> before the reduction at :76-86. Go resolution at src/analyzer/go_analyzer.rs:199-215 includes all non-module declarations of matching package files; JavaScript wildcard resolution at src/analyzer/javascript_analyzer.rs:175-181 does likewise. For N files importing one package/module with D declarations, the vector retains N*D CodeUnits even though the reverse map needs only file edges. CodeUnit owns cloned String fields (src/analyzer/model.rs:162-169). Cache hits also return cloned sets (go_analyzer.rs:185-187; javascript_analyzer.rs:165-167), so cache eviction cannot release the vector's copies. The old helper (capabilities.rs:49-60) consumed one candidate set at a time. This introduces an unbounded temporary working set capable of exhausting memory on large repositories. Later commit 2111bf7a3d8407be937879be8250e4034d504014 removes the all-CodeUnit-sets vector by projecting to file edges inside the parallel closure; it still retains a temporary edge vector and is not proof of fully bounded memory.",
+    "confidence": "high"
+  },
+  {
+    "intro": "6f9a2656f3a72bb23b3549c3dff738d78b19110b",
+    "group": "g2",
+    "findings": [
+      "f-7cc662ec",
+      "f-f7e82f51"
+    ],
+    "summary": "The claimed newly quadratic Go cold lookup already occurred through the old filter's full-resolution fallback.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, src/analyzer/go_analyzer.rs:270-287 shows could_import_file falling back to imported_code_units_of(source_file) whenever the requested target does not match an import path. This fallback is unchanged from base 5cfbe06f0104331f1899b2a8a666865eb432d62f, go_analyzer.rs:259-276. The old referencing_files_via_imports helper (src/analyzer/capabilities.rs:49-59) called that predicate for every candidate, then resolved matching candidates too. Thus nonmatching importers were not cheaply filtered out: a cold lookup already reached the all_files scan (intro go_analyzer.rs:190-207) for essentially every candidate. The new eager index does not introduce the claimed asymptotic regression.",
+    "confidence": "high"
+  },
+  {
+    "intro": "6f9a2656f3a72bb23b3549c3dff738d78b19110b",
+    "group": "g3",
+    "findings": [
+      "f-53c48270"
+    ],
+    "summary": "JavaScript's higher first-lookup work is the explicit tradeoff of the reusable whole-project reverse index.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, src/analyzer/javascript_analyzer.rs:226-234 intentionally builds a OnceLock-backed reverse index from every analyzed file, so it does perform more forward resolution on a sparse first query than the old capabilities.rs:53-59 filter using javascript_analyzer.rs:266-276. However, subsequent distinct target queries reuse that index instead of repeating a repository scan. The intro commit message explicitly identifies replacing on-demand per-target scans with one cached project-wide index as the change's purpose. The finding supplies no measured timeout, violated latency contract, or independent correctness failure beyond this intentional cold-versus-repeated-query tradeoff; the separate excessive temporary declaration retention is covered by g1. Later 04f4b4c7aee69455df5c32563ee1a03b30021a9c deliberately extends the same shared lazy indexing design to Java and Python.",
+    "confidence": "high"
+  },
+  {
+    "intro": "1c0f689be10f72194cf49e6363366e3188def335",
+    "group": "g1",
+    "findings": [
+      "f-e5464973",
+      "f-ef27134b",
+      "f-aa3f5552",
+      "f-7888d607"
+    ],
+    "summary": "An unconditionally registered C# demand test requires root-reference halves that its producer does not emit, causing ordinary tools test runs to fail.",
+    "verdict": "confirmed",
+    "severity": "high",
+    "evidence": "At intro, crates/bifrost-tools/src/lib.rs:38-40 includes engine_tests under cfg(test), and engine_tests/mod.rs:62 registers csharp_demand. engine_tests/csharp_demand.rs:12-30 defines an ordinary, non-ignored test whose parent always launches the same test with BIFROST_TRIAL_NATIVE_CSHARP=1 and requires child success. Its first lookup is the unqualified Peer field type (lines 33, 77-78), passed to probe_type at lines 97-99. crates/bifrost-csharp/src/resolution/names.rs:133-147 emits a positioned identifier and package reference for a single non-absolute name, then returns without emitting a root reference. fact_lowering.rs:3118-3119 builds canonical root-reference paths from indexed root references; selected_context.rs:406-442 requires the rooted witness, anchor and stack shape for classification as SelectedRootPathHalf::Reference. In resolution_operation/csharp_demand.rs:568-580, closed starts false and paths without that classification are skipped; only the root-half branch sets closed at line 612, so line 614 panics for Peer. The child failure propagates to the parent assertion at engine_tests/csharp_demand.rs:24. The new test exposes this missing producer obligation; it was absent at base. Supporting later repair: f9b0b816314495f9d0f22a0de67b7757b0b0f42e adds the bare lexical ResolutionRootReferenceFact in the producer branch; edfc84f8be8d0a24f8cd73d6449a45cab2ef39ff restricts it to Type references, and bde8713864103748a855386196b44cdaadb3c800 adapts the demand hooks to those roots. Verification used code reading only, without builds or tests.",
+    "confidence": "high"
+  },
+  {
+    "intro": "0041fe831aa2758c07076386c37401666075717b",
+    "group": "g1",
+    "findings": [
+      "f-dd1d1aa9"
+    ],
+    "summary": "Retained ICFG dispatch syntax is outside the query retained-memory accounting.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-rql/src/structural/search/semantic.rs:1597-1613 supplies a lease-window collector to concurrency summary projection. crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:1452-1453 disables outcome caching for that collector, but :1477-1496 still obtains a retained dispatch session; :610-629 stores every session in the provider-wide map without a memory reservation or eviction. workspace_oracle/dispatch.rs:153-169,207-229 retains the source and lazy parser, and usages/call_relations.rs:173-177,674-683 identifies their additional retained footprint. No caller of retained_bytes or lease reservation exists on this ICFG path. Artifact leases account for semantic rows and lease metadata (semantic/leases.rs:66-85), not this separately retained syntax. Thus visiting multiple artifacts accumulates live syntax without consuming lease-window capacity, whereas the previous oracle.resolve_call created a one-shot session. Scalar source-work charges do not account for physical retained bytes.",
+    "confidence": "high"
+  },
+  {
+    "intro": "0041fe831aa2758c07076386c37401666075717b",
+    "group": "g2",
+    "findings": [
+      "f-8e5f7492"
+    ],
+    "summary": "Reusing a dispatch session freezes the caller source rather than revalidating it per call.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "This is an explicit prepared-session contract at intro, not an accidental omission: crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:147-152 documents reuse of the exact source snapshot, and :5028-5102 tests overlay mutation after the first call, requires the retained session to keep its frozen second-call answer, and requires a fresh session to reject the stale artifact. The comment at :5075-5078 explicitly states that downstream declarations are not frozen. icfg.rs:610-629 deliberately extends that session to the query-local provider. Later cc37465b1bfc402e974694084dc1b1e8d1479e24 restores one-shot direct dispatch for transaction ownership reasons while retaining session reuse for transfers/snapshots; it does not establish a per-call revalidation requirement for retained sessions.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b607037341ce1af66354cf4d45b02a3c3644d5d3",
+    "group": "g1",
+    "findings": [
+      "f-f2a42546",
+      "f-1c7553a3",
+      "f-c5ffe06a",
+      "f-020f022e",
+      "f-82f4c62f",
+      "f-bdc191d7"
+    ],
+    "summary": "Overloaded subscript receivers are incorrectly typed as their container.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8012-8019 unconditionally unwraps a subscript to its argument. For a local Container c whose operator[] returns Item&, c[0].compute() therefore enters the identifier arm (:7908-7928), obtains Container through cpp_identifier_value_type and cpp_receiver_unit_for_access (:8104-8107,8169-8181), and never consults operator[]. Member navigation then searches those owners at :6000-6017 and returns any Container::compute candidate at :6056-6060, even when Item::compute is the actual target. Before the diff the subscript kind fell through to an empty owner set, so the newly introduced wrong target is attributable to this change. No later fix identified.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b607037341ce1af66354cf4d45b02a3c3644d5d3",
+    "group": "g2",
+    "findings": [
+      "f-824b5398",
+      "f-240385f1",
+      "f-c2c1b518"
+    ],
+    "summary": "Field type agreement ignores pointer depth, but the reported arbitrary selection predates this change.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8038-8056 indeed compares only the underlying unit/name and retains the first CppType, ignoring its indirection from :7889-7896. However, base e1161ee54c64f255389114aad68842f310c6887c already selected the first resolved field type unconditionally in cpp_field_expression_type (:7872-7875) and cpp_enclosing_member_field_type (:8583-8586). Inherited T versus T* fields therefore already produced the same arbitrary type and overload selection. The new qualified receiver arm at intro :7993-8006 feeds its result to cpp_receiver_unit_for_access (:8169-8181), which returns the common unit regardless of indirection; it does not expose the alleged pointer-dependent overload selection. This helper incompletely improves the prior agreement check, but the described concrete inherited-field failure was not introduced by the diff.",
+    "confidence": "high"
+  },
+  {
+    "intro": "0dc1b2afeff033dc3ede39f124d874f170a02bf5",
+    "group": "g1",
+    "findings": [
+      "f-a1904058",
+      "f-272db163",
+      "f-e150e509",
+      "f-588d886a",
+      "f-e15993be",
+      "f-57482d33"
+    ],
+    "summary": "Deferred method selection discards uncertainty from earlier value lookup.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26012-26035 allows an empty incomplete ordinary deferred lookup to proceed to the method-value alternative, saving its completion separately; 26063-26069 saves the method answer. Earlier ordinary owner origins without member scopes add an omission and are skipped at 26657-26690, so no earlier target need be selected. At 27003-27034 replay uncertainty, omitted-origin uncertainty and deferred_completion are combined into replayed. With no selected earlier target the precedence test at 27035-27039 fails, and the new 27041-27042 branch returns shadow_qualified_route_with_members(direct, members), discarding replayed. That helper combines only direct and members (27194-27231); neither contains the separately discovered earlier-route omission. Thus a complete deferred method and complete empty direct answer can produce a complete method binding despite the incomplete earlier value search.",
+    "confidence": "high"
+  },
+  {
+    "intro": "0dc1b2afeff033dc3ede39f124d874f170a02bf5",
+    "group": "g2",
+    "findings": [
+      "f-5b81bfd8"
+    ],
+    "summary": "A complete direct trait-method binding bypasses its concrete impl override for method values.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/typed_fact_lowering.rs:2058-2086 and 3693-3696 emit Value then Callable method-value routes. Trait methods are exposed in Value as well as Callable by crates/bifrost-rust/src/resolution.rs:2466-2485. For an imported type implementing a visible trait, crates/bifrost-analysis/src/analyzer/store/resolution_operation/rust_crate_context.rs:1790-1815 publishes the trait-member bridge; rust_crate_rows.rs:887-905 carries the original lookup into the trait scope, yielding its declaration rather than the impl item. When ordinary deferred lookup is absent and method lookup finds the override, crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26023-26036 sets deferred_precedence. The changed condition at 26052-26056 returns a complete nonempty direct answer even when implementation_declares_the_member is true, bypassing impl shadowing at 26075-26077 and 27194-27231. Before this diff a found impl prevented that return. The intended override contract is explicit at 26038-26046.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g1",
+    "findings": [
+      "f-8d6a0db4",
+      "f-696f3452"
+    ],
+    "summary": "Function-local importlib reassignment is ignored when validating a dynamic import receiver.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for import importlib; importlib = fake; canonical = importlib.import_module(\"pkg.mod\"); canonical.member(), crates/bifrost-python/src/imports.rs:60-68 accepts the canonical assignment via the callback. crates/bifrost-python/src/graph/extractor.rs:513-516 invokes importlib_binding_visible, whose range search finds the earlier import (536-541). Its function-scoped return at 542-543 checks only qualified_name == \"importlib\", ignoring intervening writes. The assignment to importlib does not invalidate canonical because imports.rs:71-76 checks only the requested local. The new attribute path at extractor.rs:1134-1139 records pkg.mod.member even though the call used fake. Literal candidate admission likewise uses import bindings without write invalidation (imports.rs:155-178).",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g2",
+    "findings": [
+      "f-8ea13eb8",
+      "f-b3122ec4",
+      "f-facd489a",
+      "f-9a9d94d2",
+      "f-8ee4c21c",
+      "f-9ae0639b"
+    ],
+    "summary": "Breadth-first inherited-member lookup can discard the member selected by Python C3 order.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-python/src/graph/resolver.rs:39-66 searches one ancestor layer at a time and returns on any declarations at that layer (61-62), sorting bases rather than retaining declared order (64-65). With A(X), C(A, B), and save declared on X and B, it finds B.save in the first base layer and returns before visiting X, although C3 order C,A,X,B selects X.save. With both direct bases declaring save it returns both. extractor.rs:761-771 uses this helper to decide whether a queried declaration is a usage; graph/inverted.rs:738-743 uses it for inverted edges. Previously ancestor membership retained X as a candidate; the new nearest-layer cutoff removes the actual target. The two-direct-base overapproximation alone predates the diff, but the lost actual ancestor target is new.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g3",
+    "findings": [
+      "f-a284512c"
+    ],
+    "summary": "Dynamic imports validate importlib at the later reference instead of at the import call.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, consider a function with import importlib; importlib = fake; mod = importlib.import_module(\"pkg\"); import importlib; mod.member(). crates/bifrost-python/src/graph/extractor.rs:513-516 closes over the final attribute node when invoking imported_module_assignment_at. That helper examines the earlier assignment at crates/bifrost-python/src/imports.rs:60-67, but the predicate receives only the receiver spelling (95-98, 110-118), not the call position. Consequently extractor.rs:536-543 selects the restored import before mod.member, accepting a call that used fake. No write to mod invalidates the saved result, so extractor.rs:1134-1139 records the false usage. Checking intervening writes only at the reference would still miss this distinct binding-time error.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g4",
+    "findings": [
+      "f-97aa1ef1"
+    ],
+    "summary": "Compound-statement and destructuring writes fail to invalidate a prior literal module assignment.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-python/src/imports.rs:47-79 scans only direct children of the function/module suite. After canonical = importlib.import_module(\"pkg\"), an intervening if enabled: canonical = other is passed as an if_statement to python_direct_scope_bindings_bounded at 71. The collector leaves descendant traversal to the caller (crates/bifrost-python/src/bindings.rs:453-458) and has no if_statement arm (466-584), so reports no write. For canonical, x = other, 1, the fast path fails its identifier-left check (imports.rs:60-63); the collector then receives expression_statement rather than the unwrapped assignment (71), also producing no binding. The saved module survives and the new extractor.rs:1134-1139 path reports pkg.member after reassignment.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g5",
+    "findings": [
+      "f-987898c7",
+      "f-146c0bdb"
+    ],
+    "summary": "An outer function import incorrectly overrides an inner function declaration.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, in outer(): from pkg import name; def inner(): def name(): ...; name(), crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 accepts the outer import because its scope range encloses the inner reference. The nearest-function inventory check at 1954-1961 does not block a function-only declaration: crates/bifrost-python/src/bindings.rs:371-383 checks parameters, binding_writes and comprehensions, while a def is classified FunctionOnly at 417-420. python.rs:1966-1970 resolves pkg.name and the new early return at 1625-1643 prevents local-name handling. Before the diff base python.rs:1623-1627 reached python_name_shadowed_at, recognizing the local and not selecting the outer import. Confirmed for the newly false imported target; the old identifier path did not itself guarantee navigation to the inner def.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g6",
+    "findings": [
+      "f-882f74fd",
+      "f-42547a0e"
+    ],
+    "summary": "A later import in an inner function fails to prevent selection of an enclosing import.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for outer(): from pkg import Worker; def inner(): Worker(); from other import Worker, crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 skips the later inner import by start_byte and selects the enclosing import by range containment. The nearest inventory records imports as locals without binding_writes (crates/bifrost-python/src/bindings.rs:139-143), so has_runtime_callable_binding_at (371-383) returns false. python.rs:1966-1970 resolves pkg.Worker and 1625-1643 returns it before python_name_shadowed_at can reject the whole-function local. Python treats Worker as local throughout inner and the earlier read is unbound. Base python.rs:1623-1627 instead reached the whole-function local check, so the shortcut introduces this false target.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g7",
+    "findings": [
+      "f-c5282523",
+      "f-d1c89c58"
+    ],
+    "summary": "Unaliased function-local dotted imports resolve the bound root to the submodule.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for def f(): import pkg.sub; return pkg, crates/bifrost-python/src/imports.rs:350-364 stores local_name pkg, qualified_name pkg.sub and consumed_attributes 1. crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 selects that binding, but 1966-1970 resolves the full qualified_name without consuming or accounting for attributes. The new early return at 1625-1643 navigates bare pkg to pkg.sub instead of pkg when both are indexed. python_reference_node at 2492-2499 also leaves a receiver/root identifier as an Identifier, so this is reachable on pkg in pkg.sub expressions. The false submodule target is introduced by the new shortcut.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g8",
+    "findings": [
+      "f-d4473be4"
+    ],
+    "summary": "Writes before a reference within its containing compound statement are skipped.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, for a function with canonical = importlib.import_module(\"pkg\") followed by an if enabled body containing canonical = other then canonical.target(), crates/bifrost-python/src/imports.rs:82-86 chooses the whole function body as the execution suite. The loop saves pkg from the first assignment (60-68), then breaks at the containing if statement because it encloses the reference (48-52). It never sees canonical = other, which necessarily precedes that reference inside the body. The saved module is returned at 79 and extractor.rs:1134-1139 records the false pkg.target usage. Unlike invalidation for an already completed preceding statement, this failure requires examining the prefix of the containing statement, which is skipped entirely.",
+    "confidence": "high"
+  },
+  {
+    "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+    "group": "g9",
+    "findings": [
+      "f-552c0cbc"
+    ],
+    "summary": "A local import replacing a parameter remains unresolved, but the failure predates this diff.",
+    "verdict": "rejected",
+    "severity": null,
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1957-1959 returns no candidates because crates/bifrost-python/src/bindings.rs:371-374 unconditionally counts a parameter, so def f(Worker): from pkg import Worker; return Worker() produces no definition through python.rs:1634-1640. However base crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1623-1627 already invokes python_name_shadowed_at and returns no definition for exactly this input: base lines 3072-3077 classify the parameter/import name as Local and return true (bindings.rs:347-348). The diff retains the same no-definition behavior rather than introducing or exposing this failure. Rejected as a finding on this commit.",
+    "confidence": "high"
+  },
+  {
+    "intro": "c2e0ac626414a90c7907277d9e602abcc45eedd9",
+    "group": "g1",
+    "findings": [
+      "f-52a5cf4a",
+      "f-0ead5452",
+      "f-818bcfbe",
+      "f-84b00748",
+      "f-47ed1739",
+      "f-f6b62b6d"
+    ],
+    "summary": "The restored C# receiver regression contains an extra closing brace and therefore tests malformed source.",
+    "verdict": "confirmed",
+    "severity": "low",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:773 declares file-scoped namespace Demo; Parent closes at :777 and the added brace at :778 has no opening counterpart. The malformed string is passed to AnalyzerFixture and parse_tree_for_language at :789-792, then used for this/base assertions at :794-827, without checking for syntax errors. The base lacks the extra brace. This concretely damages the intended valid-source regression; a particular parser-dependent assertion failure is not established. Later fix ed0d32a1839ea511489b54f5434477ed1516fae6 removes exactly this brace.",
+    "confidence": "high"
+  },
+  {
+    "intro": "a3b59a918343940f3b010783d30146b2766c04f3",
+    "group": "g1",
+    "findings": [
+      "f-99cb1913",
+      "f-e52d9513",
+      "f-b5f71091",
+      "f-9c0a449a"
+    ],
+    "summary": "Complete-empty Java supertype answers lose their implicit nominal fallback during hierarchy traversal.",
+    "verdict": "confirmed",
+    "severity": "medium",
+    "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:4015-4084 registers no-gap unqualified Java type references as implicit fallbacks, choosing an available durable java.lang owner at :4041-4056. This diff changes that registration from a provider claim to ImplicitFallback. crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1567-1569 now hides these claims from the provider getter. crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:29235-29240 uses only that getter for external hierarchy inventory, so a complete-empty selected supertype answer bypasses the owner and falls through to :29303-29326, returning empty targets as Complete. Hierarchy construction consumes those targets at :31545-31580, losing inherited members/subtype edges; without indexed inventory it also loses the incomplete-inventory boundary normally added at :29280-29291. Type projection handles the same fallback correctly at :38750-38762, but hierarchy lookup has no corresponding check. Later fix 8ca7eb63803b39dd44a3774628b2f24a194351b7 shares the complete-empty fallback condition with hierarchy traversal while retaining source-declaration precedence.",
+    "confidence": "high"
+  }
+]

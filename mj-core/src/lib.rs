@@ -82,4 +82,8 @@ pub mod cpu_usage;
 
 pub mod attention;
 
+pub mod notification_message;
+
 pub mod packed_text;
+
+pub mod session_image;

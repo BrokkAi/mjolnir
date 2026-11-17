@@ -83,7 +83,7 @@ pub enum RemoteSessionRequest {
     },
     Sync {
         session_id: String,
-        reply: oneshot::Sender<std::result::Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
     RespondElicitation {
         session_id: String,
@@ -169,9 +169,10 @@ impl RemoteSessionRequest {
             Self::Submit { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned().into()));
             }
-            Self::Sync { reply, .. }
-            | Self::RespondElicitation { reply, .. }
-            | Self::StopBackgroundTask { reply, .. } => {
+            Self::Sync { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(message.to_owned())));
+            }
+            Self::RespondElicitation { reply, .. } | Self::StopBackgroundTask { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned()));
             }
             Self::Reviewer { reply, .. } => {
@@ -335,6 +336,7 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(crate) session_gate: Arc<crate::recovery_gate::RecoveryGate>,
     pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub(crate) pending_observations:
@@ -564,6 +566,7 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            session_gate: Arc::default(),
             harness_failure: Default::default(),
             pending_observations: Default::default(),
             last_raw_options: Default::default(),

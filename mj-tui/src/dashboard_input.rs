@@ -116,7 +116,7 @@ impl DashboardState {
         // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
         // intentionally inert, including modal controls that happen to use
         // the letter `c` for another purpose.
-        if cancel_shortcut {
+        if cancel_shortcut && (self.focus != Focus::Notifications || self.component_modal_open()) {
             self.record_event_handled();
             return DashboardAction::None;
         }
@@ -140,7 +140,11 @@ impl DashboardState {
         DashboardPasteTarget {
             revision: self.paste_revision,
             mode: std::mem::discriminant(&self.mode),
-            session: self.current_session_id().map(str::to_owned),
+            session: if self.focus == Focus::Notifications {
+                self.displayed_notification_session_id()
+            } else {
+                self.current_session_id().map(str::to_owned)
+            },
             pane: self.focused_pane(),
             focus: self.focus,
         }
@@ -161,6 +165,10 @@ impl DashboardState {
         }
         if self.component_modal_open() {
             self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
+            return;
+        }
+        if self.focus == Focus::Notifications {
+            self.paste_notification_reply(pasted);
             return;
         }
         if self.focus != Focus::Prompt {
@@ -345,6 +353,19 @@ impl DashboardState {
             // a stray click elsewhere can't pair up with the next row click.
             self.last_row_click = None;
         }
+        if self
+            .notifications_area
+            .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+        {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.focus = Focus::Notifications,
+                MouseEventKind::ScrollUp => self.scroll_notification(-3),
+                MouseEventKind::ScrollDown => self.scroll_notification(3),
+                _ => return DashboardAction::None,
+            }
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
         // Expanded workspaces scroll their rows; the collapsed selector keeps
         // the adjacent-workspace wheel navigation.
         if matches!(
@@ -475,6 +496,9 @@ impl DashboardState {
         if let Some(action) = self.stopped_subagent_key(key) {
             return action;
         }
+        if let Some(action) = self.handle_notification_key(key) {
+            return action;
+        }
         let command = dashboard_accelerator(key.modifiers);
         let plain = !key
             .modifiers
@@ -538,7 +562,7 @@ impl DashboardState {
         }
         // List navigation, shared by visible lists. It comes before the
         // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
-        if self.focused_rows_visible() {
+        if self.focus != Focus::Notifications && self.focused_rows_visible() {
             match (key.code, command) {
                 (KeyCode::Up | KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
                     self.move_selection(-1);

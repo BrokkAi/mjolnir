@@ -1,0 +1,146 @@
+{
+  "recorded_epoch": 1794896657.1519804,
+  "diagnostic": "decisive-fact contains rate; original StageA/V1rule unchanged",
+  "status": "valid raw diagnostic; pending parent acceptance/ID join",
+  "schema_errors": [],
+  "rows": 17,
+  "exact17ids_once": true,
+  "matching_item_validation": "allnonnullquotesexactsubstrings",
+  "contains_counts": {
+    "no": 10,
+    "yes": 3,
+    "partial": 4
+  },
+  "nonnull_quote_count": 7,
+  "raw_output_path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-contains-relation/unit/contains.jsonl",
+  "raw_output_sha256": "170bfed71f07a0ee7c7ee0c807179c61fbe0eef0fa740435b4a9dd0cea2a4655",
+  "raw_copy_path": "/mnt/optane/review-arms-bifrost-20261116/arms/contains-driver/contains-raw.jsonl",
+  "sid": "b43336972ec8cd6c2a3ec7906921d5bb",
+  "actual_profile": "codex4",
+  "actual_config": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "lifecycle": "suspended",
+  "last_turn_outcome": {
+    "command_id": "review-arms-bifrost-contains-relation-batch-unit-b43336972ec8",
+    "accepted_ordinal": 140,
+    "turn_start_position": 141,
+    "completed_ordinal": 298,
+    "completed_at_ms": 1794896512531,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "transcript": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/contains-driver/transcript.json",
+    "sha256": "9d3faa430f9462316def1d791e131263d5bf6abc89631e96408fcbb958ebd2c2",
+    "pages": 1,
+    "next_after_seq": 292,
+    "latest_seq": 292,
+    "request_count": 11,
+    "requests_path": "/mnt/optane/review-arms-bifrost-20261116/arms/contains-driver/tool-requests.json"
+  },
+  "usage_totals": {
+    "cached_read_tokens": {
+      "tokens": 309120,
+      "reported_turns": 1
+    },
+    "cached_write_tokens": {
+      "tokens": 0,
+      "reported_turns": 1
+    },
+    "input_tokens": {
+      "tokens": 62446,
+      "reported_turns": 1
+    },
+    "output_tokens": {
+      "tokens": 2754,
+      "reported_turns": 1
+    },
+    "thought_tokens": {
+      "tokens": 742,
+      "reported_turns": 1
+    },
+    "total_tokens": {
+      "tokens": 374320,
+      "reported_turns": 1
+    }
+  },
+  "usage_coverage": {
+    "recorded_turns": 1,
+    "full_turn_reports": 1,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 1,
+    "missing_cost_turns": 0
+  },
+  "usage_by_model": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": null,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 309120,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 62446,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2754,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 742,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 374320,
+          "reported_turns": 1
+        }
+      }
+    }
+  ],
+  "root_cost_usd_ticks": 1833440000,
+  "estimated_api_cost_usd": 0.183344,
+  "usage_accounting": "Oneglobalrootonce/SID; completefullturn/page; no missingprice/usage, no paginationdoublecount; APIequivalentnot subscriptioncharge.",
+  "quota_before": {
+    "remaining_min_percent": 85,
+    "refreshed_epoch": 1794895972,
+    "age_seconds": 404.0423412322998
+  },
+  "quota_after": {
+    "remaining_percent": [
+      83
+    ],
+    "refreshed_epoch": 1794896572,
+    "age_seconds": 85.15234398841858,
+    "refresh_after_completion": true
+  },
+  "quota_note": "Validcached25gate unchanged; freshnessrecorded, sharedquota delta not isolatedconsumption",
+  "frozen_inputs_and_runtime_unchanged": true,
+  "protected17briefs_census_catchlabels_unchanged": true,
+  "input_freeze_sha256": "8226ad293925483f0a791f9f6c115bbc438806b2d370cc2668b8d0e249876f7c",
+  "unchanged_rule_sha256": "d989e66e01df153ac98450c2e5906ccf5e8c37a0721924596cab6ab1c4ea5609",
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794896562.7497876
+  },
+  "limits": [
+    "ExactlyoneblindedSol/highassessor; no replication/join/operatorlabeling performed.",
+    "Containsjudgmentcomparesbriefwithcensusfact; not engine reach/querycapability or primaryreviewrescore.",
+    "Parentaccepts/joinsIDs; raw outputandbriefs untouched; no extra models/probes/replacements/source/build/test/config/unrelatedsession edits/commits."
+  ]
+}

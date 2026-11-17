@@ -37,17 +37,22 @@ impl Controller {
     /// Materialize and locally verify a complete session checkpoint while the
     /// target remains live. A failed export or transfer leaves the previous
     /// archive and target untouched.
-    pub async fn checkpoint_session(&mut self, session_id: &str) -> Result<CheckpointMetadata> {
-        self.checkpoint_session_controlled(session_id, &ProcessExecutor)
+    pub async fn checkpoint_session(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+    ) -> Result<CheckpointMetadata> {
+        self.checkpoint_session_controlled(admission, session_id, &ProcessExecutor)
             .await
     }
 
     pub async fn checkpoint_session_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<CheckpointMetadata> {
-        self.checkpoint_session_controlled_with_manager(session_id, executor, None)
+        self.checkpoint_session_controlled_with_manager(admission, session_id, executor, None)
             .await
     }
 }

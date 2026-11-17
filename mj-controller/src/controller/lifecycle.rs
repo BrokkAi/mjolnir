@@ -90,6 +90,8 @@ pub(super) enum SourceTargetDisposition {
 /// close's point of no return. A daemon suspend commits its lifecycle here,
 /// so a cancel that arrives later is refused, and stops the session's
 /// sub-agents, so a close that fails at its checkpoint leaves them running.
+/// An explicit child close whose barrier cannot settle runs this before
+/// stopping its worker for checkpoint-only recovery.
 /// When this fails, the close does not proceed: the session returns to its
 /// previous state with its relay unsealed.
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
@@ -99,24 +101,30 @@ impl Controller {
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
     /// except when the checkpoint's worker restart left no live worker: that
     /// records `Error` and keeps the target for a later resume or forced close.
-    pub async fn suspend_session(&mut self, session_id: &str) -> Result<()> {
-        self.suspend_session_controlled(session_id, &ProcessExecutor)
+    pub async fn suspend_session(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+        session_id: &str,
+    ) -> Result<()> {
+        self.suspend_session_controlled(admission, session_id, &ProcessExecutor)
             .await
     }
 
     pub async fn suspend_session_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if self.state.subagents.contains_key(session_id) {
             return self
-                .suspend_subagent_controlled(session_id, executor, None, None)
+                .suspend_subagent_controlled(admission, session_id, executor, None, None)
                 .await
                 .map(|_| ());
         }
         if self
             .suspend_session_controlled_with_manager(
+                admission,
                 session_id,
                 executor,
                 None,
@@ -135,8 +143,10 @@ impl Controller {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub async fn suspend_session_managed_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -145,6 +155,7 @@ impl Controller {
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         self.suspend_session_controlled_with_manager(
+            admission,
             session_id,
             executor,
             Some(manager),
@@ -171,6 +182,7 @@ impl Controller {
     /// [`super::checkpoint::checkpoint_was_deferred`]) and stays running.
     pub(crate) async fn suspend_session_for_restart(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -178,6 +190,7 @@ impl Controller {
         automatic: bool,
     ) -> Result<()> {
         self.suspend_session_controlled_with_manager(
+            admission,
             session_id,
             executor,
             Some(manager),
@@ -204,6 +217,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn suspend_session_for_move(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -214,12 +228,14 @@ impl Controller {
     ) -> Result<bool> {
         let retained = source_relay.owner();
         crate::worker_lifecycle::run_with_owner(
+            admission,
             session_id,
             "suspend session for move",
             executor,
             retained,
             async {
                 self.prepare_move_source_checkpoint(
+                    admission,
                     session_id,
                     executor,
                     manager,
@@ -240,6 +256,7 @@ impl Controller {
                     LatchExclusivity::HoldThroughClose
                 };
                 self.suspend_session_controlled_with_manager(
+                    admission,
                     session_id,
                     executor,
                     Some(manager),
@@ -260,6 +277,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     async fn suspend_session_controlled_with_manager(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -274,7 +292,7 @@ impl Controller {
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
         exclusivity: LatchExclusivity,
     ) -> Result<bool> {
-        crate::worker_lifecycle::run(session_id, "suspend session controlled with manager", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
         let previous = self
             .state
@@ -296,7 +314,7 @@ impl Controller {
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
         let mut latched = match self
-            .checkpoint_session_latched_for_operation(
+            .checkpoint_session_latched_for_operation(admission,
                 session_id,
                 executor,
                 manager,
@@ -374,7 +392,7 @@ impl Controller {
                 .as_ref()
                 .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)
         {
-            latched.relay.cancel_abandoned_barrier().await?;
+            latched.relay.cancel_abandoned_barrier(admission).await?;
             // The relay is still open, so the session is running again. Left
             // `Closing`, the record would be an interrupted close, which the
             // next start finishes without the acknowledgement.
@@ -466,7 +484,7 @@ impl Controller {
         {
             // The session stays live: dropping the barrier resumes dispatch.
             // The record or lifecycle intent keeps the verified archive.
-            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier(admission).await {
                 tracing::warn!(
                     session_id,
                     error = format!("{cancel:#}"),
@@ -524,7 +542,7 @@ impl Controller {
             // is not sealed and the session is still live. Nothing about this
             // close can be resumed: release the barrier and return the
             // session to work, keeping the checkpoint it just verified.
-            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier(admission).await {
                 tracing::warn!(
                     session_id,
                     error = format!("{cancel:#}"),
@@ -605,8 +623,10 @@ impl Controller {
     /// publication check uses `acknowledge_unpublished_work` as the caller
     /// sent it. A relay already sealed was checked by the close that sealed
     /// it, and that close can only go forward.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub async fn recover_interrupted_close_managed(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -614,7 +634,7 @@ impl Controller {
         ignore_nested_repositories: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
-        crate::worker_lifecycle::run(session_id, "recover interrupted close managed", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
         let (state, verified) = {
             let session = self
                 .state
@@ -654,7 +674,7 @@ impl Controller {
                 .wait_for_session(session_id, Duration::from_secs(5))
                 .await?;
             phase = "lease worker connection";
-            let mut lease = handle.lease_connection().await?;
+            let mut lease = handle.lease_connection(admission).await?;
             phase = "read worker execution state";
             let execution = lease.connection_mut().sync().await?.operational.execution;
             anyhow::Ok((lease, execution))
@@ -690,7 +710,7 @@ impl Controller {
             RelayExecutionState::Idle | RelayExecutionState::Running => {
                 lease.release();
                 return self
-                    .suspend_session_controlled_with_manager(
+                    .suspend_session_controlled_with_manager(admission,
                         session_id,
                         executor,
                         Some(manager),
@@ -727,7 +747,8 @@ impl Controller {
         let placement = self.worker_placement(session_id);
         let probe = match placement {
             Ok((backend, worker_root)) => tokio::task::spawn_blocking(move || {
-                super::worker_binary::probe_worker(
+                // A diagnosis reports; it never installs or waits on the store.
+                super::worker_binary::diagnose_worker_read_only(
                     &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
                     &backend,
                     &worker_root,
@@ -1356,6 +1377,7 @@ impl Controller {
         }
         if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
+            self.remove_abandoned_move_stage(&operation, executor);
         }
         let retained_checkout = if self.state.subagents.contains_key(session_id) {
             super::environment::stop_borrower(session_id, &self.config, executor)?;
@@ -1516,6 +1538,7 @@ impl Controller {
                         cleanup,
                         executor,
                     )?;
+                    self.remove_abandoned_move_stage(&operation, executor);
                 }
                 outcome.cleanup(
                     if self.state.subagents.contains_key(session_id) {

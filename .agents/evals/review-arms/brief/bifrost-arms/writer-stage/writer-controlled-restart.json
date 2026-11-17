@@ -1,0 +1,217 @@
+{
+  "controlled_restart_at": "2026-11-17T04:03:06.818490+00:00",
+  "old_pid": 4066403,
+  "old_argv": [
+    "python3",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.agents/evals/review-arms/brief_driver.py",
+    "python-filescope-enclosing-tie",
+    "cpp-template-inherited-base-signature",
+    "incompatible-semantic-bundle-late-gate",
+    "retained-fill-java-memo-loses-gap",
+    "kotlin-source-constructor-steals-class-header-comment",
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "jvm-protected-unindexed-hierarchy-denied",
+    "python-module-mutation-repeated-scan-budget",
+    "dependency-failure-drops-independent-model-evidence",
+    "php-indexed-write-reenters-current-rhs",
+    "kotlin-value-class-this-loses-underlying-projection",
+    "go-nilness-ignores-modeled-nonreturn",
+    "java-static-getter-drops-incomplete-route",
+    "unproven-override-family-certifies-empty",
+    "js-synthetic-owner-leaks-file-summary",
+    "--kind",
+    "blind",
+    "--profile",
+    "codex4",
+    "--concurrency",
+    "1",
+    "--stop-on-failure"
+  ],
+  "paused_checkpoint_records": [
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "session_id": "28e9c397720cd9bb1d42b81a7cf4cdc7"
+    }
+  ],
+  "unresolved_intents": [],
+  "first_settings": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "first_session": {
+    "attention": "working",
+    "background_tasks": [],
+    "subagents": {
+      "mode": "none"
+    },
+    "at": "8ea28a492d39d520bc5e8c41d676460147910400",
+    "base": "96f5f3a9b099cfe72e83994dbc99dcad3db6b516",
+    "no_later_history": true,
+    "background_work": {
+      "known": null,
+      "tasks": []
+    },
+    "id": "28e9c397720cd9bb1d42b81a7cf4cdc7",
+    "workspace_id": "35b2367fbd89852d91b79743c552c3e1",
+    "title": "brief ef6af8e3",
+    "harness_kind": "codex",
+    "profile_id": "codex4",
+    "target_id": "podman",
+    "bundle_id": "bifrost-dev",
+    "state": "running",
+    "lifecycle": "live",
+    "chat_phase": "running",
+    "is_idle": false,
+    "activity_state": {
+      "state": "turn",
+      "started_at_ms": 1794888097877,
+      "last_activity_at_ms": 1794888178196
+    },
+    "has_error": false,
+    "created_at": "2026-11-17T03:59:33Z",
+    "updated_at": "2026-11-17T04:01:32Z",
+    "config_options": [
+      {
+        "key": "model",
+        "label": "Model",
+        "current": "gpt-6.1-sol",
+        "choices": [
+          {
+            "value": "gpt-6.1-sol",
+            "name": "GPT 6.1 Sol",
+            "description": "Latest workhorse model for coding and everyday work."
+          },
+          {
+            "value": "gpt-6-astra",
+            "name": "GPT 6 Astra",
+            "description": "Frontier intelligence for the most demanding work."
+          },
+          {
+            "value": "gpt-6.1-terra",
+            "name": "GPT 6.1 Terra",
+            "description": "GPT-6.1 Terra Codex model."
+          },
+          {
+            "value": "gpt-6-sol",
+            "name": "GPT 6 Sol",
+            "description": "Previous generation workhorse model."
+          },
+          {
+            "value": "gpt-6-luna",
+            "name": "GPT 6 Luna",
+            "description": "Fast and affordable model for easier tasks."
+          },
+          {
+            "value": "gpt-5.6-sol",
+            "name": "GPT 5.6 Sol",
+            "description": "Older generation workhorse model."
+          },
+          {
+            "value": "gpt-5.6-terra",
+            "name": "GPT 5.6 Terra",
+            "description": "Older balanced model for straightforward work."
+          },
+          {
+            "value": "gpt-5.6-luna",
+            "name": "GPT 5.6 Luna",
+            "description": "Older fast and efficient model."
+          }
+        ]
+      },
+      {
+        "key": "effort",
+        "label": "Reasoning effort",
+        "current": "high",
+        "choices": [
+          {
+            "value": "low",
+            "name": "Low",
+            "description": "Fast responses with lighter reasoning"
+          },
+          {
+            "value": "medium",
+            "name": "Medium",
+            "description": "Balances speed and reasoning depth for everyday tasks"
+          },
+          {
+            "value": "high",
+            "name": "High",
+            "description": "Greater reasoning depth for complex problems"
+          },
+          {
+            "value": "xhigh",
+            "name": "Xhigh",
+            "description": "Extra high reasoning depth for complex problems"
+          },
+          {
+            "value": "max",
+            "name": "Max",
+            "description": "Maximum reasoning depth for the hardest problems"
+          },
+          {
+            "value": "ultra",
+            "name": "Ultra",
+            "description": "Maximum reasoning with automatic task delegation"
+          }
+        ]
+      },
+      {
+        "key": "collaboration_mode",
+        "label": "Collaboration mode",
+        "current": "default",
+        "choices": [
+          {
+            "value": "default",
+            "name": "Default"
+          },
+          {
+            "value": "plan",
+            "name": "Plan",
+            "description": "Plan before making changes"
+          }
+        ]
+      },
+      {
+        "key": "fast-mode",
+        "label": "Fast mode",
+        "current": "off",
+        "choices": [
+          {
+            "value": "off",
+            "name": "Off",
+            "description": "Default speed, normal usage"
+          },
+          {
+            "value": "on",
+            "name": "On",
+            "description": "1.5x speed, increased usage"
+          }
+        ]
+      }
+    ],
+    "turn_controls": {
+      "status": "ready",
+      "primary": {
+        "kind": "interrupt",
+        "command": {
+          "type": "cancel_turn_for",
+          "data": {
+            "active_prompt_id": "brief-ef6af8e32692e11ce0de3f19880d8677"
+          }
+        }
+      },
+      "interrupt": {
+        "type": "cancel_turn_for",
+        "data": {
+          "active_prompt_id": "brief-ef6af8e32692e11ce0de3f19880d8677"
+        }
+      },
+      "message": null
+    }
+  },
+  "action": "terminate only paused local driver; preserve live accepted writer; resume same17 IDs concurrency3"
+}

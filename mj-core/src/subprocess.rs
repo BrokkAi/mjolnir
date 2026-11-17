@@ -318,6 +318,30 @@ pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
     })
 }
 
+/// Stream combined output straight to a log without a deadline or pipe buffers.
+/// Dropping the future kills the process group, including package-manager children.
+pub async fn run_to_file_async(
+    command: &mut tokio::process::Command,
+    output: std::fs::File,
+) -> Result<ExitStatus> {
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(
+            output.try_clone().context("clone subprocess log")?,
+        ))
+        .stdout(Stdio::from(output))
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let mut child = command.spawn().context("start logged subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    child.wait().await.context("wait for logged subprocess")
+}
+
 /// Capture a process with byte/time bounds, draining both pipes concurrently.
 /// Kill its process group before returning on overflow, timeout, or cancellation.
 pub async fn run_bounded(
@@ -1298,6 +1322,42 @@ mod tests {
             }
             assert!(!child.terminate().await.unwrap().success());
             assert_eq!(child.stderr().len(), 131072);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn logged_command_cancellation_kills_its_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let log_path = temp.path().join("log");
+        let output = std::fs::File::create(&log_path).unwrap();
+        let child_pid_file = pid_file.clone();
+        let command = tokio::spawn(async move {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "head -c 131072 /dev/zero; echo diagnostics >&2; echo $$ > \"$1\"; sleep 60 & wait", "logged-fixture"])
+                .arg(child_pid_file);
+            super::run_to_file_async(&mut command, output).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let pid: i32 = loop {
+                if let Ok(body) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = body.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            };
+            command.abort();
+            assert!(command.await.unwrap_err().is_cancelled());
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::task::yield_now().await;
+            }
+            let log = std::fs::read(&log_path).unwrap();
+            assert!(log.len() > 131072);
+            assert!(log.ends_with(b"diagnostics\n"));
         })
         .await
         .unwrap();

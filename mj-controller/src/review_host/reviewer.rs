@@ -21,16 +21,16 @@ pub(super) async fn reviewer_action(
         .await
         .map_err(|error| format!("{error:#}"))?;
     let deadline = tokio::time::Instant::now() + LIFECYCLE_WAIT;
-    let mut pause = LEASE_RETRY_PAUSE;
+    let mut changes = control.session_gate.subscribe();
     loop {
+        changes.borrow_and_update();
         match handle
             .reviewer(action.clone())
             .await
             .map_err(|error| format!("{error:#}"))
         {
             Err(reason)
-                if preempted_by_lifecycle(&reason)
-                    && tokio::time::Instant::now() + pause < deadline =>
+                if preempted_by_lifecycle(&reason) && tokio::time::Instant::now() < deadline =>
             {
                 tracing::info!(
                     %session_id,
@@ -38,8 +38,18 @@ pub(super) async fn reviewer_action(
                     %reason,
                     "a running review waits for another operation on the session"
                 );
-                tokio::time::sleep(pause).await;
-                pause = (pause * 2).min(LIFECYCLE_RETRY_PAUSE_MAX);
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline,
+                        control
+                            .session_gate
+                            .wait_for_lease_return(session_id, &mut changes)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    return Err(reason);
+                }
             }
             outcome => return outcome,
         }
@@ -49,9 +59,6 @@ pub(super) async fn reviewer_action(
 /// How long a running review's reviewer action waits out a foreground
 /// operation holding the session before the review reports the refusal.
 pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// The longest pause between attempts while a running review waits.
-const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The step of review preparation in progress.
 ///
@@ -188,7 +195,7 @@ pub(super) async fn prepare(
     // A copy already running is waited for, not preempted.
     let background = {
         let _stage = stages.enter(session_id, "waiting for background work on the session");
-        environment.hold_background_work(session_id, deadline).await
+        hold_background_work(environment, session_id, deadline).await?
     };
     // Capture committed work before choosing reviewers. Matching trees need
     // no reviewer, and capture refusals go straight back to the caller.
@@ -196,7 +203,7 @@ pub(super) async fn prepare(
     let captured = {
         let _stage = stages.enter(session_id, "capturing the change set through the worker");
         let handle = &handle;
-        after_background_work(session_id, deadline, move || {
+        after_background_work(&control.session_gate, session_id, deadline, move || {
             let repositories = scoped_repositories.clone();
             async move {
                 handle
@@ -230,13 +237,15 @@ pub(super) async fn prepare(
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewers: vec![ReviewerIdentity::default()],
+            brief_writer: None,
+            brief_skipped: None,
             captured,
             background,
         });
     }
     let reviewer = {
         let _stage = stages.enter(session_id, "choosing reviewers");
-        after_background_work(session_id, deadline, || {
+        after_background_work(&control.session_gate, session_id, deadline, || {
             environment.resolve(handle.clone(), config.clone())
         })
         .await
@@ -252,10 +261,38 @@ pub(super) async fn prepare(
             .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
             .map_err(StartRefusal)?;
     }
+    // The writer is an aid: any trouble choosing it leaves the review to run
+    // without a brief and tells the requester, instead of refusing the review.
+    let (brief_writer, brief_skipped) = match config.brief_writer.as_ref().and_then(|w| w.choice())
+    {
+        None => (None, None),
+        Some(choice) => {
+            let _stage = stages.enter(session_id, "choosing the brief writer");
+            let chosen = match environment.resolve_choice(choice).await {
+                Ok(writer) => {
+                    let profile = writer.profile.clone();
+                    let session = session_id.to_owned();
+                    let environment = environment.clone();
+                    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+                        .await
+                        .map_err(|e| format!("checking the brief writer: {e}"))
+                        .and_then(|checked| checked)
+                        .map(|()| writer)
+                }
+                Err(error) => Err(error),
+            };
+            match chosen {
+                Ok(writer) => (Some(writer), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+    };
     Ok(Prepared {
         seed: seed_from_session(&snapshot.materialized),
         state,
         reviewers: reviewer.clone(),
+        brief_writer,
+        brief_skipped,
         captured,
         background,
     })
@@ -265,9 +302,20 @@ pub(super) async fn prepare(
 /// automatic recovery copy the same finished turn starts, before it gives up.
 pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Pause between attempts when the session's lease was taken by something the
-/// recovery gate does not coordinate, so a retry does not spin.
-const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Hold the session's background work off its worker until the returned hold
+/// is dropped, waiting until `deadline` for work already running. Everything
+/// in the review host that sends reviewer work to the worker takes this first:
+/// the worker refuses that work while a recovery copy holds its checkpoint
+/// barrier, and only the gate behind this hold knows whether one is running.
+pub(super) async fn hold_background_work(
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Option<BackgroundHold>, StartRefusal> {
+    tokio::time::timeout_at(deadline, environment.hold_background_work(session_id, deadline))
+        .await
+        .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))
+}
 
 pub(super) use crate::review_selection::preempted_by_lifecycle;
 
@@ -275,11 +323,11 @@ pub(super) use crate::review_selection::preempted_by_lifecycle;
 /// operation holds the session.
 ///
 /// The review's background hold keeps recovery copies and worker upgrades
-/// from starting, but a foreground lifecycle operation (a suspend, a move, a
-/// copy still running when the hold's wait ran out) can still refuse or
+/// from starting, but a foreground lifecycle operation (a suspend, a move) can still refuse or
 /// cancel the capture or the reviewer choice. The step tries again until
 /// `deadline` instead of giving up. Cancelling the review drops this future.
 async fn after_background_work<T, Step, Attempt>(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
     session_id: &str,
     deadline: tokio::time::Instant,
     mut step: Step,
@@ -289,10 +337,9 @@ where
     Attempt: std::future::Future<Output = Result<T, String>>,
 {
     let mut attempt = 0_u32;
+    let mut changes = gate.subscribe();
     loop {
-        if attempt > 0 {
-            tokio::time::sleep(LEASE_RETRY_PAUSE).await;
-        }
+        changes.borrow_and_update();
         attempt += 1;
         match step().await {
             Err(reason)
@@ -304,6 +351,16 @@ where
                     %reason,
                     "code review waits for another operation on the session"
                 );
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline,
+                        gate.wait_for_lease_return(session_id, &mut changes)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    return Err(reason);
+                }
             }
             outcome => return outcome,
         }
@@ -406,5 +463,6 @@ pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed
         task,
         user_messages,
         declined: Vec::new(),
+        brief: None,
     }
 }

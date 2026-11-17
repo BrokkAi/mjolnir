@@ -17,6 +17,12 @@ rewrite prompt of brief/workflow-oracle.js) and judged again. Stage B used one
 Opus/high judge; here both judges of `verify_driver.py --kind judge` read it, and
 a brief leaks when either says caught or partial.
 
+Set REVIEW_ARMS_SETS to select frozen P/S/C membership.
+Leak/rewrite steps also accept --kind blind --bugs-from jobs.json --name <stage>.
+Use the same flags on every step. This selects only the jobs' known-bug diffs,
+uses briefs/<stage>-leak-<round> and briefs/<stage>-rewrite, and validates saved
+scope before consuming results. A still-leaking round 1 result is reported.
+
 Usage:
   python3 brief_writer_terra.py leak-build [--writer terra|sonnet] [--round 0|1]
       round 0: every brief; round 1: the briefs rewritten after round 0
@@ -45,6 +51,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import random
 import secrets
@@ -92,26 +99,53 @@ def out_dir(study):
     return ROOT / "briefs" / study["kind"]
 
 
-def leak_dir(n, study=TERRA):
-    return ROOT / "briefs" / f"{study['kind']}-leak-{n}"
+def leak_dir(n, scope):
+    return ROOT / "briefs" / f"{scope['name']}-leak-{n}"
 
 
-def leak_build(n, study=TERRA):
-    OUT = out_dir(study)
-    corpus = {r["id"]: r for r in map(json.loads, open(SCRIPTS / "corpus/corpus.jsonl"))}
+def rewrite_dir(scope):
+    return ROOT / "briefs" / f"{scope['name']}-rewrite"
+
+
+def round_scope(kind, name, bugs_from):
+    selected = diffs()
+    if bugs_from is not None:
+        bugs = {j["bug"] for j in json.loads(bugs_from.read_text())}
+        if not bugs or bugs - selected.keys():
+            raise SystemExit(f"empty or unknown leak subset: {sorted(bugs - selected.keys())}")
+        selected = {b: g for b, g in selected.items() if b in bugs}
+    return {"kind": kind, "name": name or kind, "diffs": selected}
+
+
+def check_scope(directory, scope, *, create=False, legacy=False):
+    path = directory / "settings.json"
+    if path.exists():
+        if json.loads(path.read_text()) != scope:
+            raise SystemExit(f"{directory}: leak/rewrite scope differs from saved settings")
+    elif create:
+        save(path, scope)
+    elif not legacy:
+        raise SystemExit(f"{directory}: missing saved leak/rewrite settings")
+    # Original registered writer rounds predate this metadata.
+
+
+def leak_build(n, scope):
+    out = out_dir(scope)
+    corpus = driver.CORPUS
     if n == 0:
-        bugs = list(diffs())
+        bugs = list(scope["diffs"])
     else:
-        bugs = [b for b in diffs() if (OUT / b / "brief-writer.md").exists()]
-    missing = [b for b in bugs if not (OUT / b / "done.json").exists()]
+        bugs = [b for b in scope["diffs"] if (out / b / "brief-writer.md").exists()]
+    missing = [b for b in bugs if not (out / b / "done.json").exists()]
     if missing:
         raise SystemExit(f"briefs not written yet: {missing}")
-    d = leak_dir(n, study)
+    d = leak_dir(n, scope)
     if (d / "key.json").exists():
         raise SystemExit(f"{d} already exists; its key binds verdicts to texts")
+    check_scope(d, scope, create=True)
     batch, key = [], {}
     for b in bugs:
-        brief = (OUT / b / "brief.md").read_text()
+        brief = (out / b / "brief.md").read_text()
         oid = secrets.token_hex(8)
         key[oid] = {"bug": b, "brief_sha256": sha(brief)}
         batch.append({"bug": b, **{k: corpus[b][k] for k in CORPUS_FIELDS},
@@ -122,25 +156,33 @@ def leak_build(n, study=TERRA):
     print(f"wrote {d} for {len(batch)} briefs")
 
 
-def leak_collect(n, study=TERRA):
-    OUT = out_dir(study)
-    d = leak_dir(n, study)
+def leak_collect(n, scope, *, legacy=False):
+    out = out_dir(scope)
+    d = leak_dir(n, scope)
+    check_scope(d, scope, legacy=legacy)
     key = json.loads((d / "key.json").read_text())
-    verdicts = json.loads((d / "workflow-out.json").read_text())["verdicts"]
+    result = json.loads((d / "workflow-out.json").read_text())
+    assert not result.get("missing"), result.get("missing")
+    verdicts = result["verdicts"]
     judged = {}
     for v in verdicts:
         judged.setdefault(v["output_id"], []).append(v)
+    assert set(judged) == set(key), "leak verdicts must cover exactly the round outputs"
+    # Validate the whole round before updating any published decision.
+    for oid, k in key.items():
+        assert k["bug"] in scope["diffs"], f"{k['bug']}: leak output is outside the round's scope"
+        vs = judged[oid]
+        assert sorted(v["judge"] for v in vs) == ["A", "B"], (k["bug"], vs)
+        assert all(v.get("bug") == k["bug"] and v["label"] in ("caught", "partial", "missed") for v in vs), "wrong bug or invalid leak label"
+        assert sha((out / k["bug"] / "brief.md").read_text()) == k["brief_sha256"], \
+            f"{k['bug']}: brief.md changed since leak round {n} was built"
     rows = []
     for oid, k in key.items():
-        b, vs = k["bug"], judged.get(oid, [])
-        assert sorted(v["judge"] for v in vs) == ["A", "B"], (b, vs)
-        brief = (OUT / b / "brief.md").read_text()
-        # A verdict counts only for the text it was given.
-        assert sha(brief) == k["brief_sha256"], f"{b}: brief.md changed since leak round {n} was built"
+        b, vs = k["bug"], judged[oid]
         label = "missed" if all(v["label"] == "missed" for v in vs) else \
             "caught" if any(v["label"] == "caught" for v in vs) else "partial"
-        path = OUT / b / "blind-leak.json"
-        record = json.loads(path.read_text()) if path.exists() else {"id": b, "group": diffs()[b], "rounds": []}
+        path = out / b / "blind-leak.json"
+        record = json.loads(path.read_text()) if path.exists() else {"id": b, "group": scope["diffs"][b], "rounds": []}
         record["rounds"] = [r for r in record["rounds"] if r["round"] != n] + [
             {"round": n, "label": label, "brief_sha256": k["brief_sha256"], "judge_dir": str(d),
              "verdicts": [{f: v.get(f) for f in ("judge", "label", "matching_finding", "rationale", "confidence")}
@@ -163,17 +205,18 @@ The brief is brief-in.md in this folder. Write the rewritten brief to brief.md i
 """
 
 
-def rewrite_build(study=TERRA):
-    OUT = out_dir(study)
-    base = ROOT / "briefs" / f"{study['kind']}-rewrite"
+def rewrite_build(scope):
+    out = out_dir(scope)
+    base = rewrite_dir(scope)
+    check_scope(base, scope, create=True)
     made = 0
-    for b in diffs():
-        record = json.loads((OUT / b / "blind-leak.json").read_text())
+    for b in scope["diffs"]:
+        record = json.loads((out / b / "blind-leak.json").read_text())
         first = next(r for r in record["rounds"] if r["round"] == 0)
         if first["label"] == "missed" or (base / b).exists():
             continue
         u = base / b
-        brief = (OUT / b / "brief.md").read_text()
+        brief = (out / b / "brief.md").read_text()
         assert sha(brief) == first["brief_sha256"], f"{b}: brief.md is not the text judged in round 0"
         (u / "brief-in.md").parent.mkdir(parents=True, exist_ok=True)
         (u / "brief-in.md").write_text(brief)
@@ -184,16 +227,23 @@ def rewrite_build(study=TERRA):
     print(f"wrote {made} rewrite units under {base}")
 
 
-def rewrite_collect(study=TERRA):
-    OUT = out_dir(study)
-    base = ROOT / "briefs" / f"{study['kind']}-rewrite"
-    for u in sorted(p for p in base.iterdir() if p.is_dir()):
-        b, d = u.name, OUT / u.name
+def rewrite_collect(scope, *, legacy=False):
+    briefs = out_dir(scope)
+    base = rewrite_dir(scope)
+    check_scope(base, scope, legacy=legacy)
+    for u in sorted(p for p in base.iterdir() if p.is_dir() and p.name in scope["diffs"]):
+        b, d = u.name, briefs / u.name
         out = u / "brief.md"
         if not out.exists():
             print(json.dumps({"bug": b, "state": "no rewrite fetched"}))
             continue
         text = out.read_text()
+        original = (u / "brief-in.md").read_text()
+        record = json.loads((d / "blind-leak.json").read_text())
+        first = next(r for r in record["rounds"] if r["round"] == 0)
+        assert sha(original) == first["brief_sha256"], f"{b}: rewrite input is not the round0 judged text"
+        current = (d / "brief.md").read_text()
+        assert current in (original, text), f"{b}: brief changed since rewrite was prepared"
         problems = brief_driver.lint(text, driver.CORPUS[b])
         if problems:
             print(json.dumps({"bug": b, "state": "rewrite fails lint", "problems": problems}))
@@ -554,13 +604,31 @@ def main():
                                     "contains-build", "usage", "readout"])
     p.add_argument("--writer", choices=sorted(STUDIES), default="terra")
     p.add_argument("--round", type=int, choices=[0, 1], default=0)
-    p.add_argument("--name", help="readout: judging round (default: the writer's registered round)")
+    p.add_argument("--name", help="readout judging round, or path prefix for leak/rewrite")
+    p.add_argument("--kind", choices=("blind", *(s["kind"] for s in STUDIES.values())),
+                   help="leak/rewrite brief kind (default: the selected writer's kind)")
+    p.add_argument("--bugs-from", type=pathlib.Path, help="leak/rewrite jobs whose diffs are the explicit subset")
     a = p.parse_args()
     study = STUDIES[a.writer]
-    {"leak-build": lambda: leak_build(a.round, study), "leak-collect": lambda: leak_collect(a.round, study),
-     "rewrite-build": lambda: rewrite_build(study), "rewrite-collect": lambda: rewrite_collect(study),
-     "contains-build": lambda: contains_build(study), "usage": lambda: usage(study),
-     "readout": lambda: readout(a.name or study["round"], study)}[a.step]()
+    leak_steps = ("leak-build", "leak-collect", "rewrite-build", "rewrite-collect")
+    if (a.kind or a.bugs_from) and a.step not in leak_steps:
+        p.error("--kind and --bugs-from apply only to leak/rewrite steps")
+    if a.step in leak_steps and a.name is not None and (
+            pathlib.Path(a.name).name != a.name or a.name in ("", ".", "..")):
+        p.error("--name must be a single round path component")
+
+    if a.step in leak_steps:
+        kind = a.kind or study["kind"]
+        scope = round_scope(kind, a.name, a.bugs_from)
+        legacy = (kind == study["kind"] and a.name is None and a.bugs_from is None
+                  and not os.environ.get("REVIEW_ARMS_SETS"))
+        {"leak-build": lambda: leak_build(a.round, scope),
+         "leak-collect": lambda: leak_collect(a.round, scope, legacy=legacy),
+         "rewrite-build": lambda: rewrite_build(scope),
+         "rewrite-collect": lambda: rewrite_collect(scope, legacy=legacy)}[a.step]()
+    else:
+        {"contains-build": lambda: contains_build(study), "usage": lambda: usage(study),
+         "readout": lambda: readout(a.name or study["round"], study)}[a.step]()
 
 
 if __name__ == "__main__":

@@ -298,6 +298,7 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
+                    supports_open_request: false,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -450,6 +451,9 @@ impl ViewerSnapshot {
             .map(|(id, target)| ViewerTarget {
                 id: id.to_owned(),
                 kind: target.kind_name().into(),
+                permission_mode: target.permission_mode(),
+                subagents_configured: config.subagents.is_configured_for(target.is_yolo()),
+                oracle_configured: config.subagents.oracle_configured_for(target.is_yolo()),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
@@ -513,10 +517,10 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             last_oracle_choices: state.last_oracle_choices.clone(),
-            oracle_configured: config.subagents.oracle_configured(),
+            oracle_configured: config.subagents.oracle_configured_for(false),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
-            subagents_configured: config.subagents.is_configured(),
+            subagents_configured: config.subagents.is_configured_for(false),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
@@ -604,6 +608,11 @@ pub struct ViewerSession {
     /// viewer or API JSON contract.
     #[serde(skip, default)]
     pub(crate) is_subagent_session: bool,
+    /// Whether the session's worker keeps a persistent open request (relay
+    /// protocol 64 and later). In-process only, like `is_subagent_session`:
+    /// the notification message rule needs it, the JSON contract does not.
+    #[serde(skip, default)]
+    pub(crate) supports_open_request: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.
@@ -1262,6 +1271,16 @@ fn unknown_availability() -> crate::server::api::LaunchAvailability {
 pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
+    /// The approval mode of a bare target; `None` for an isolated runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<mj_core::config::PermissionMode>,
+    /// Whether the Mjolnir sub-agent choices this target would use are
+    /// configured. A YOLO target reads its own set.
+    #[serde(default)]
+    pub subagents_configured: bool,
+    /// Whether the oracle this target would use is configured.
+    #[serde(default)]
+    pub oracle_configured: bool,
     /// Target sizing class, used for create validation and the size picker.
     #[serde(default)]
     pub resource_allocation_kind: ResourceAllocationKind,

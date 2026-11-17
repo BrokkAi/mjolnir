@@ -99,6 +99,29 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     }
     struct SourceExists;
     impl CommandExecutor for SourceExists {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 0,
@@ -301,16 +324,19 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "claude",
-            "local-bare",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &ProcessExecutor,
+            controller.resume_session_controlled(
+                session_id,
+                "claude",
+                "local-bare",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &ProcessExecutor,
+            ),
         ))
         .unwrap_err();
 
@@ -375,6 +401,29 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     // Hard-won: 055d8a772 review: a stale locator hid source confirmation.
     struct MissingTarget;
     impl CommandExecutor for MissingTarget {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "check for Mjolnir session container" {
                 return Ok(CommandOutput {
@@ -552,6 +601,29 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
     }
 
     impl CommandExecutor for ConcurrentSourceExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "check checkpoint base commit" {
                 self.source_checks.wait();
@@ -661,6 +733,29 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
@@ -875,16 +970,19 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "localhost",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &RefusingExecutor("resume before rejecting the target"),
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "localhost",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &RefusingExecutor("resume before rejecting the target"),
+            ),
         ))
         .unwrap_err();
 
@@ -902,16 +1000,19 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "retired-ec2",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &RefusingExecutor("retired EC2 resume must not execute a command"),
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "retired-ec2",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &RefusingExecutor("retired EC2 resume must not execute a command"),
+            ),
         ))
         .unwrap_err();
     assert!(
@@ -929,6 +1030,29 @@ struct BarrierExecutor {
 }
 
 impl CommandExecutor for BarrierExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.seen.lock().unwrap().push(command.purpose.clone());
         self.barrier.wait();
@@ -1065,10 +1189,8 @@ fn cross_harness_provisioning_lane_drives_tokio_io_and_timers() {
 // Hard-won: 7e50fc9fa: a cross-harness lane waited for its parent Move's worker permit.
 #[test]
 fn cross_harness_lanes_borrow_the_parent_worker_owner() {
-    use crate::worker_lifecycle::WorkerPermit;
-
     let session_id = "cross-harness-lane-owner-test";
-    let owner = WorkerPermit::try_acquire(session_id, "test parent move")
+    let owner = crate::controller::test_support::worker_test_permit(session_id, "test parent move")
         .unwrap()
         .unwrap();
     let (provision_owner, handoff_owner) = owner
@@ -1077,26 +1199,14 @@ fn cross_harness_lanes_borrow_the_parent_worker_owner() {
                 "provision",
                 |_cancellation| {
                     block_on_cross_harness_lane("provision", async {
-                        let nested = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            WorkerPermit::acquire(
-                                session_id,
-                                "test provisioning",
-                                &ProcessExecutor,
-                            ),
-                        )
-                        .await??;
+                        let nested = crate::worker_lifecycle::require(session_id)?;
                         Ok(nested.operation_id().to_owned())
                     })
                 },
                 "handoff",
                 |_cancellation| {
                     block_on_cross_harness_lane("handoff", async {
-                        let nested = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            WorkerPermit::acquire(session_id, "test handoff", &ProcessExecutor),
-                        )
-                        .await??;
+                        let nested = crate::worker_lifecycle::require(session_id)?;
                         Ok(nested.operation_id().to_owned())
                     })
                 },
@@ -1106,13 +1216,13 @@ fn cross_harness_lanes_borrow_the_parent_worker_owner() {
     assert_eq!(provision_owner, owner.operation_id());
     assert_eq!(handoff_owner, owner.operation_id());
     assert!(
-        WorkerPermit::try_acquire(session_id, "test unrelated operation")
+        crate::controller::test_support::worker_test_permit(session_id, "test unrelated operation")
             .unwrap()
             .is_none()
     );
     drop(owner);
     assert!(
-        WorkerPermit::try_acquire(session_id, "test next operation")
+        crate::controller::test_support::worker_test_permit(session_id, "test next operation")
             .unwrap()
             .is_some()
     );
@@ -1213,6 +1323,29 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             Ok(CommandOutput {
@@ -1386,6 +1519,29 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     }
 
     impl CommandExecutor for FailingPreflightExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // Provisioning probes the mount source's filesystem before it
             // builds the run arguments; a local disk keeps the overlay.
@@ -1511,7 +1667,8 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         .unwrap();
     let executor = FailingPreflightExecutor::default();
     let error = runtime
-        .block_on(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
+            session_id,
             controller.resume_session_controlled_with_repository_preflight_and_admission(
                 session_id,
                 "codex",
@@ -1544,7 +1701,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                     );
                 },
             ),
-        )
+        ))
         .unwrap_err();
     assert!(
         executor
@@ -1609,6 +1766,29 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     struct FailAfterWorktreeRestore;
 
     impl CommandExecutor for FailAfterWorktreeRestore {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if matches!(command.program.as_str(), "git" | "mkdir") {
                 return ProcessExecutor.execute(command);
@@ -1663,16 +1843,19 @@ fn failed_resume_retires_a_checkout_it_recreated() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "local-bare",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &FailAfterWorktreeRestore,
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "local-bare",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &FailAfterWorktreeRestore,
+            ),
         ))
         .unwrap_err();
 
@@ -1807,6 +1990,29 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     struct GitWithoutPodmanExecutor;
 
     impl CommandExecutor for GitWithoutPodmanExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.program == "git" {
                 return ProcessExecutor.execute(command);
@@ -1903,16 +2109,19 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "podman",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &GitWithoutPodmanExecutor,
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &GitWithoutPodmanExecutor,
+            ),
         ))
         .unwrap_err();
     // The conversion archive was written, then the destination could not be
@@ -2177,27 +2386,30 @@ exit 0
         .enable_all()
         .build()
         .unwrap();
-    let restored = runtime.block_on(controller.restore_into_target(
+    let restored = runtime.block_on(crate::controller::test_support::worker_test_scope_async(
         session_id,
-        RestoreIntoTarget {
-            profile: &profile,
-            archive: &verified,
-            restored_archive: &verified.archive_path,
-            resumed_project_directory: Some(checkout.clone()),
-            resumed_container_workspace: None,
-            restore_repositories: false,
-            native_continuity: true,
-            discard_queued_prompts: false,
-            replay_queue: true,
-            utility_handoff: None,
-            projection_build: None,
-            resume_notices: Vec::new(),
-            include_in_place_subagents: false,
-            install_attached_resources: true,
-            worker_root_reset: WorkerRootReset::FreshTarget,
-            retire_after_ready: None,
-        },
-        &ProcessExecutor,
+        controller.restore_into_target(
+            session_id,
+            RestoreIntoTarget {
+                profile: &profile,
+                archive: &verified,
+                restored_archive: &verified.archive_path,
+                resumed_project_directory: Some(checkout.clone()),
+                resumed_container_workspace: None,
+                restore_repositories: false,
+                native_continuity: true,
+                discard_queued_prompts: false,
+                replay_queue: true,
+                utility_handoff: None,
+                projection_build: None,
+                resume_notices: Vec::new(),
+                include_in_place_subagents: false,
+                install_attached_resources: true,
+                worker_root_reset: WorkerRootReset::FreshTarget,
+                retire_after_ready: None,
+            },
+            &ProcessExecutor,
+        ),
     ));
     assert!(
         restore_spec.exists(),
@@ -2448,6 +2660,29 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for Engine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.purpose.clone());
             let (status, stdout) = match command.purpose.as_str() {
@@ -2520,16 +2755,19 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
             commands: Mutex::default(),
         };
         let error = runtime
-            .block_on(controller.resume_session_controlled(
+            .block_on(crate::controller::test_support::worker_test_scope_async(
                 id,
-                "codex",
-                "podman",
-                SessionResumeOptions {
-                    additional_mounts: None,
-                    resource_allocation: None,
-                    discard_queue: false,
-                },
-                &engine,
+                controller.resume_session_controlled(
+                    id,
+                    "codex",
+                    "podman",
+                    SessionResumeOptions {
+                        additional_mounts: None,
+                        resource_allocation: None,
+                        discard_queue: false,
+                    },
+                    &engine,
+                ),
             ))
             .unwrap_err();
         let error = format!("{error:#}");
@@ -2573,7 +2811,7 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
     controller.state.sessions.insert(id.into(), parent.clone());
     crate::database::save_session(&parent).unwrap();
     let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(id, "resume rollback boot regression")
+        crate::controller::test_support::worker_test_permit(id, "resume rollback boot regression")
             .unwrap()
             .unwrap();
     owner.scope_blocking(|| {
@@ -2622,6 +2860,29 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
         commands: Mutex<Vec<String>>,
     }
     impl CommandExecutor for AppleEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program == "ssh", self.remote);
             self.commands.lock().unwrap().push(command.purpose.clone());
@@ -2775,6 +3036,29 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         home: PathBuf,
     }
     impl CommandExecutor for HostShell {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert!(matches!(
                 command.purpose.as_str(),
@@ -2848,7 +3132,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         }
         let (backend, worker_root) = controller.worker_placement(id).unwrap();
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         controller
@@ -2861,7 +3145,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         let stale_seed = root.join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
         std::fs::write(&stale_seed, b"old bootstrap input").unwrap();
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         std::fs::remove_file(stale_seed).unwrap();
@@ -2884,7 +3168,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         std::fs::create_dir_all(root.parent().unwrap()).unwrap();
         // The other caller keeps its existing no-relay recovery semantics.
         assert_eq!(
-            worker_recovery(&executor, &backend, &worker_root),
+            worker_recovery(&executor, &backend, id, &worker_root),
             WorkerRecovery::NothingToRecover
         );
         // A present non-directory is evidence of an unusable lookup, not loss.

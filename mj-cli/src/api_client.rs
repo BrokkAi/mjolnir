@@ -176,6 +176,54 @@ impl ApiClient {
         }
     }
 
+    pub(crate) fn daemon_instance(&self) -> Option<&str> {
+        self.daemon_instance.as_deref()
+    }
+
+    pub(crate) async fn image_start(
+        &self,
+        request: &mj_client::session_image::ImageRequest,
+        status: bool,
+    ) -> Result<mj_client::session_image::ImageStarted> {
+        self.post_json(
+            if status {
+                "/images/status"
+            } else {
+                "/images/build"
+            },
+            request,
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn image_follow(
+        &self,
+        id: &str,
+        offset: usize,
+    ) -> Result<Option<mj_client::session_image::ImageFollow>> {
+        let response = self
+            .send_optional(
+                self.http
+                    .get(self.url(&format!("/images/operations/{id}")))
+                    .query(&[("offset", offset)]),
+            )
+            .await?;
+        match response {
+            Some(response) => Ok(Some(decode(response).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn image_cancel(&self, id: &str) -> Result<()> {
+        self.send(
+            self.http
+                .delete(self.url(&format!("/images/operations/{id}"))),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -845,6 +893,23 @@ impl ApiClient {
             .await
     }
 
+    /// A finished review's per-reviewer output, or the latest when `review_id`
+    /// is `None`.
+    pub(crate) async fn finished_review(
+        &self,
+        session_id: &str,
+        review_id: Option<&str>,
+    ) -> Result<mj_controller::server::api::FinishedReviewResponse> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}/reviews")));
+        if let Some(review_id) = review_id {
+            request = request.query(&[("review", review_id)]);
+        }
+        let response = self.send(request).await?;
+        decode(response).await
+    }
+
     pub(crate) async fn stop_background_task(&self, session_id: &str, task_id: &str) -> Result<()> {
         self.send(
             self.http
@@ -1032,7 +1097,7 @@ impl ApiError {
         }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
-                " Configure [subagents.straightforward], and optionally [subagents.subtle], in config.toml or TUI Settings → Sub-agents."
+                " Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings → Sub-agents."
             }
             _ => "",
         };

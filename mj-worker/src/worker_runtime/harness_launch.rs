@@ -142,6 +142,100 @@ pub async fn prepare_harness_launch(
     })
 }
 
+/// Keep Mjolnir's JavaScript entrypoints independent of project-selected Node
+/// shims. Provider launch APIs accept an executable path, so those get a private
+/// launcher rather than depending on the bridge's PATH again.
+pub(super) async fn freeze_node_entrypoints(
+    root: &Path,
+    launch: &mut PreparedHarnessLaunch,
+) -> Result<()> {
+    let bridge_uses_node = uses_env_node(&launch.spec.command).await?;
+    let mut providers = Vec::new();
+    for name in ["CODEX_PATH", "CLAUDE_CODE_EXECUTABLE", "MUSE_CLI"] {
+        if let Some(path) = launch.environment.get(name)
+            && uses_env_node(Path::new(path)).await?
+        {
+            providers.push((name, PathBuf::from(path)));
+        }
+    }
+    if !bridge_uses_node && providers.is_empty() {
+        return Ok(());
+    }
+    let mut probe = tokio::process::Command::new("node");
+    probe
+        .args(["-p", "process.execPath"])
+        .env_clear()
+        .envs(&launch.environment)
+        .current_dir(&launch.spec.cwd);
+    let output = mj_core::subprocess::capture(&mut probe)
+        .await
+        .context("resolve bridge Node executable")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "resolve bridge Node executable: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // process.execPath resolves version-manager shims to the actual interpreter.
+    let node = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    anyhow::ensure!(node.is_absolute(), "bridge Node executable is not absolute");
+    if bridge_uses_node {
+        launch
+            .spec
+            .args
+            .insert(0, launch.spec.command.to_string_lossy().into_owned());
+        launch.spec.command = node.clone();
+    }
+    let root = root.join("node-entrypoints");
+    let providers = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut launchers = Vec::new();
+        if !providers.is_empty() {
+            std::fs::create_dir_all(&root)?;
+        }
+        for (name, entrypoint) in providers {
+            let launcher = root.join(name);
+            let quote = mj_core::targets::posix_quote;
+            let script = format!(
+                "#!/bin/sh\nexec {} {} \"$@\"\n",
+                quote(&node.to_string_lossy()),
+                quote(&entrypoint.to_string_lossy())
+            );
+            // The shared writer never holds a writable descriptor in this
+            // multithreaded process, so a concurrent fork cannot make the
+            // published launcher fail with ETXTBSY.
+            super::shell_environment::write_executable(&launcher, &script)?;
+            launchers.push((name, launcher));
+        }
+        Ok(launchers)
+    })
+    .await
+    .context("prepare Node entrypoint launchers")??;
+    for (name, launcher) in providers {
+        let launcher = launcher.to_string_lossy().into_owned();
+        launch.environment.insert(name.into(), launcher.clone());
+        launch.spec.environment.insert(name.into(), launcher);
+    }
+    Ok(())
+}
+
+async fn uses_env_node(path: &Path) -> Result<bool> {
+    use tokio::io::AsyncReadExt;
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read runtime entrypoint {}", path.display()));
+        }
+    };
+    // Read just the interpreter prefix, not the JavaScript bundle or ELF body.
+    let mut prefix = Vec::new();
+    file.take(b"#!/usr/bin/env node\r\n".len() as u64)
+        .read_to_end(&mut prefix)
+        .await?;
+    Ok(prefix.starts_with(b"#!/usr/bin/env node\n")
+        || prefix.starts_with(b"#!/usr/bin/env node\r\n"))
+}
+
 /// DSH can launch its own native binary. Its npm fallback is the only branch
 /// that needs Node.js. Other Node-using harnesses always need the runtime,
 /// even when their adapter is already installed.

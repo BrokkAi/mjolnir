@@ -73,8 +73,7 @@ impl ActiveChat {
         self.publish_conversation_notices();
         // Applying an update can queue a history page or listing; every
         // wakeup ends here, so neither waits for a key press.
-        dispatch_history_search_request(self.session.clone(), &mut self.state);
-        dispatch_session_history_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
+        self.dispatch_composer_requests();
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {
@@ -124,27 +123,18 @@ impl ActiveChat {
     /// Hands one request to the daemon bridge, or reports that this chat has
     /// none: a chat without a bridge cannot reach the daemon at all.
     pub(crate) fn send_daemon_request(&mut self, request: ChatDaemonRequest) {
-        let Some(persistence) = &self.persistence else {
-            self.state
-                .set_notice("This chat cannot reach the Mjolnir daemon");
-            return;
-        };
-        if let Err(error) = persistence.send(request) {
-            tracing::warn!(%error, "a review request could not be queued for the daemon");
-            self.state.set_notice("The Mjolnir daemon is not reachable");
-        }
+        self.state
+            .composer_requests
+            .push_back(super::super::history::ComposerRequest::Daemon(request));
+        self.dispatch_composer_requests();
     }
 
-    pub(crate) fn dispatch_abandoned_prompt_request(&mut self) {
-        let Some(request) = self.state.take_abandoned_prompt_request() else {
-            return;
-        };
-        let Some(persistence) = &self.persistence else {
-            return;
-        };
-        if let Err(error) = persistence.send(request) {
-            tracing::warn!(%error, "an abandoned prompt could not be queued for the daemon");
-        }
+    pub(crate) fn dispatch_composer_requests(&mut self) {
+        let session = self.session.clone();
+        self.state.dispatch_composer_requests(
+            || std::future::ready(Ok(session.clone())),
+            self.persistence.as_ref(),
+        );
     }
 
     /// Reports a daemon refusal in the prompt status, or as a notice when no

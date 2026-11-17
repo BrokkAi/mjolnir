@@ -157,6 +157,183 @@ pub(super) async fn session_row(
     Ok(response)
 }
 
+/// The identity a card captured: the session it opens, the pending request ids
+/// (comma separated) and the question message id. The answer is for exactly
+/// this identity or a conflict, so text is never shown under another's card.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NotificationMessageQuery {
+    holder: String,
+    #[serde(default)]
+    requests: String,
+    #[serde(default)]
+    question: String,
+    /// An `!` card's ReadThrough completed ordinal: the newest agent message
+    /// at or before it is the card's message.
+    through: Option<u64>,
+}
+
+/// Resolve the first source of the shared rule to text. A question read that
+/// finds nothing is "not available", not a reason to show another message.
+pub(super) fn notification_message_text(
+    kind: mj_core::notification_message::NotificationKind,
+    facts: &mj_core::notification_message::NotificationMessageFacts<'_>,
+    question_item: impl FnOnce(&str) -> anyhow::Result<Option<String>>,
+    last_agent_message: impl FnOnce() -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<String>> {
+    use mj_core::notification_message::{NotificationMessageSource, notification_message_sources};
+    match notification_message_sources(kind, facts).into_iter().next() {
+        None => Ok(None),
+        Some(
+            NotificationMessageSource::PendingRequest(text)
+            | NotificationMessageSource::ReviewActivity(text),
+        ) => Ok(Some(text.to_owned())),
+        Some(NotificationMessageSource::QuestionMessage(target)) => question_item(target),
+        Some(NotificationMessageSource::LastAgentMessage) => last_agent_message(),
+    }
+}
+
+/// The full message a notification card shows for one session. Which message
+/// that is comes from `mj_core::notification_message`, the rule the terminal
+/// pane uses too. A parent promoted by a child's pending form reads the child's
+/// request, and `session_id` names the session the card opens. `text` is
+/// `null` when the located message is no longer stored.
+pub(super) async fn notification_message(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(expected): Query<NotificationMessageQuery>,
+) -> Result<Response<Body>, ApiError> {
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    validate_public_id(&session_id)?;
+    // Copy what the snapshot holds, then release it before any database read.
+    let (
+        holder,
+        kind,
+        pending_request,
+        review_activity,
+        question_message,
+        supports_open_request,
+        through,
+    ) = {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        let holder = session
+            .form_holder
+            .as_deref()
+            .filter(|holder| snapshot.sessions.get(holder).is_some())
+            .unwrap_or(&session_id)
+            .to_owned();
+        let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
+        let requests = holder_session
+            .pending_elicitations
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        // An `!` card's boundary is its ReadThrough ordinal, checked here and
+        // then used as the bound of the read, so no newer reply can answer.
+        let through = match (&session.notification_dismissal, expected.through) {
+            (Some(mj_core::attention::NotificationDismissal::ReadThrough(held)), Some(asked))
+                if *held == asked =>
+            {
+                Some(asked)
+            }
+            (Some(mj_core::attention::NotificationDismissal::ReadThrough(_)), _) | (_, Some(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the notification changed; its message will be read again",
+                )
+                .with_code(Some("notification_changed")));
+            }
+            _ => None,
+        };
+        if holder != expected.holder
+            || requests != expected.requests
+            || holder_session.question_message.as_deref().unwrap_or("") != expected.question
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "the notification changed; its message will be read again",
+            )
+            .with_code(Some("notification_changed")));
+        }
+        (
+            holder.clone(),
+            if session.attention == mj_core::attention::SessionAttention::NeedsInput {
+                NotificationKind::NeedsInput
+            } else {
+                NotificationKind::Important
+            },
+            holder_session
+                .pending_elicitations
+                .last()
+                .map(|request| request.message.clone()),
+            holder_session
+                .turn_review
+                .as_ref()
+                .map(|review| review.status.clone()),
+            holder_session.question_message.clone(),
+            holder_session.supports_open_request,
+            through,
+        )
+    };
+    let reader = holder.clone();
+    let text = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        let facts = NotificationMessageFacts {
+            pending_request: pending_request.as_deref(),
+            review_activity: review_activity.as_deref(),
+            question_message: question_message.as_deref(),
+            supports_open_request,
+        };
+        notification_message_text(
+            kind,
+            &facts,
+            |target| {
+                let item = crate::database::load_materialized_transcript_item(&reader, target)?;
+                Ok(item.and_then(|item| {
+                    mj_core::transcript::materialized_agent_message_text(
+                        std::iter::once(&item),
+                        target,
+                    )
+                }))
+            },
+            || match (kind, through) {
+                (NotificationKind::Important, Some(through)) => {
+                    crate::database::load_materialized_agent_message_through(&reader, through)
+                }
+                // An important card with no boundary has no message to name.
+                (NotificationKind::Important, None) => Ok(None),
+                // A legacy worker's question is the agent's latest reply.
+                (NotificationKind::NeedsInput, _) => {
+                    Ok(crate::database::load_materialized_session_summary(&reader)?
+                        .and_then(|summary| summary.last_agent_message))
+                }
+            },
+        )
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, session_id, "notification message read did not finish");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the notification message",
+        )
+    })?
+    .map_err(|error| {
+        tracing::error!(error = %format!("{error:#}"), session_id, "could not read the notification message");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the notification message",
+        )
+    })?;
+    let mut response =
+        Json(serde_json::json!({ "session_id": holder, "text": text })).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 /// Optimize and install one browser image off the async request task. The
 /// request body is deliberately raw bytes: base64 would inflate the upload,
 /// and the response contains only the small immutable reference the prompt
@@ -820,7 +997,7 @@ pub(super) async fn save_draft(
     if request.draft.len() > MAX_DRAFT_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "draft must be 65536 bytes or fewer",
+            format!("draft must be {MAX_DRAFT_BYTES} bytes or fewer"),
         ));
     }
     let Some(client_id) = viewer_client_id(&state, &headers) else {

@@ -190,10 +190,16 @@ pub(crate) async fn run_server(
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
-    options.set_worker_source_check(std::sync::Arc::new(|target_id| {
+    options.set_worker_source_check(std::sync::Arc::new(|target_id, bundle_id| {
         let controller = Controller::load().ok()?;
-        let template = controller.config.targets.get(target_id)?;
-        crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
+        let template = crate::controller::backend::session_target(
+            &controller.config,
+            bundle_id.unwrap_or_default(),
+            target_id,
+            &crate::targets::ProcessExecutor,
+        )
+        .ok()?;
+        crate::controller::worker_source_problem(&template, &crate::targets::ProcessExecutor)
     }));
     startup.finished("configure API and source checks");
     let renewal_cancellation = termination.child_token();
@@ -246,6 +252,7 @@ pub(crate) async fn run_server(
         local_address: None,
     };
 
+    let image_builds = options.image_builds.clone();
     let mut serve = ViewerServer::spawn({
         let daemon_runtime = daemon_runtime.clone();
         async move {
@@ -1243,7 +1250,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1568,7 +1575,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel("server shutdown");
+            control.stop_for_server_shutdown();
         }
         match failure {
             Some(failure) => Err(failure),
@@ -1592,6 +1599,9 @@ pub(crate) async fn run_server(
     {
         tracing::warn!(%error, "native API activity recorder panicked");
     }
+    // Image builds are reproducible work, so shutdown cancels and reaps them
+    // before aborting the HTTP task that accepted them.
+    image_builds.finish().await;
     // Dropping the handle aborts the server task, which is what dropping the
     // server future used to do when this `select!` owned it directly.
     drop(serve);

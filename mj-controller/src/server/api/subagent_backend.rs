@@ -15,6 +15,12 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }
 
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`, which selects its own sub-agent choices.
+    fn session_is_yolo_target(&self, _session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// The dashboard's load-balancing preference order, from `[quota] prefer`.
     fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -379,6 +385,21 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 crate::database::load_session_usage(&session_id, after_seq, limit)
+            })
+            .await?
+        })
+    }
+
+    /// One finished review's per-role output, or the latest when `review_id`
+    /// is `None`. The rows outlive the reviewer child sessions.
+    fn finished_review(
+        &self,
+        session_id: String,
+        review_id: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<Option<crate::database::FinishedReview>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::finished_review(&session_id, review_id.as_deref())
             })
             .await?
         })

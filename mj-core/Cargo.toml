@@ -33,6 +33,7 @@ include = [
     "assets/antigravity/runtime.json",
     "assets/grok/runtime.json",
     "assets/kimi/runtime.json",
+    "assets/mise/runtime.json",
     "assets/muse/runtime.json",
     "assets/node/runtime.json",
     "assets/opencode/runtime.json",
@@ -78,6 +79,7 @@ reqwest.workspace = true
 ruzstd.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
+serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar = "2.7"

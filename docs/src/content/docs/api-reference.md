@@ -638,11 +638,14 @@ full `session_id`, `via: "turn"`, and the `turn_id` that `wait` takes.
 
 With `sender_session_id`, the daemon requires the sender to be an existing
 top-level session. An authenticated local caller may claim another top-level
-session ID. The reply is `202` with `session_id`, `via` (`mailbox` or `turn`),
-and an optional `turn_id`. Message delivery refuses an unknown, destroyed,
-stopped, self, or other session's sub-agent target. A peer mailbox message
-wakes an idle recipient; workers below relay protocol 36 receive a queued turn
-with the same sender label and reply instruction.
+session ID. The reply is `202` with `session_id`, `via` (`mailbox`, `turn`, or
+`queued`), and an optional `turn_id`. A session that is still starting accepts
+the message and replies with `via: "queued"` until startup ends. If startup
+fails, the sender is told the message was not delivered. Message delivery
+refuses an unknown, destroyed, stopped, self, or other session's sub-agent
+target. A peer mailbox message wakes an idle recipient; workers below relay
+protocol 36 receive a queued turn with the same sender label and reply
+instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.
 Its acceptance is not completion: observe the `command_ended` event and the
@@ -899,6 +902,28 @@ cannot start answers `409` with the reason in `error`.
 `GET` answers `200` with the open review, or `"review": null` when none is open.
 A verdict appears when available. An unknown session answers `404`.
 
+### Finished review
+
+```text
+GET /api/v1/sessions/{session_id}/reviews
+GET /api/v1/sessions/{session_id}/reviews?review=<review_id>
+```
+
+A finished review's per-reviewer output, kept after its reviewer sessions are
+destroyed. Without `review`, the newest finished review answers; with it, that
+review does. An unknown review id answers `404`, and an unknown session answers
+`404`.
+
+`review` is null when no finished review is recorded. Otherwise it carries the
+review id, its finish time and resolution (`completed`, `failed`, or
+`cancelled`), and one row per reviewing role. Each row names the role, its
+label, its command id, the reviewer child session id, the reviewer's profile,
+model, and effort, the role's verdict, and the reviewer turn with its token
+usage. `handback` carries the text the role's outcome was settled from, so it is
+present only when that reviewer handed back and the review used its report; a
+failed, pending, or cancelled role has none. The child session may no longer
+exist; the turn is read from retained accounting.
+
 ### Resume a suspended session
 
 ```text
@@ -1077,6 +1102,7 @@ viewer does not act on these requests.
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 | `mj review start --session <id>` | `POST /sessions/{id}/review` |
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
+| `mj review show --session <id> [--review <id>]` | `GET /sessions/{id}/reviews[?review=<id>]` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 | `mj ui pane\|show\|settings …` | `POST /ui/requests` |
 

@@ -70,6 +70,7 @@ use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -705,6 +706,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -868,6 +870,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -968,6 +971,74 @@ fn accept(pairs: &[(&str, &str)]) -> ElicitationResponse {
 
 fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
     snapshot.sessions[0].pending_elicitations = vec![sample_elicitation()];
+}
+
+#[tokio::test]
+async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        pending_elicitation_snapshot(snapshot);
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
+    });
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(
+                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
+            )
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(
+        body["text"],
+        "Which CI architecture should the workflow use?"
+    );
+
+    // A card that captured another holder or request gets a conflict, never text.
+    for stale in [
+        "holder=other-session&requests=elicitation-1",
+        "holder=session-1&requests=elicitation-0",
+        "holder=session-1&requests=elicitation-1&question=agent:9",
+        "holder=session-1",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "notification_changed");
+    }
+
+    let missing = app
+        .oneshot(
+            Request::get(
+                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
+            )
+            .header(COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1871,7 +1942,7 @@ fn a_tampered_cookie_is_refused() {
 #[tokio::test]
 async fn an_oversized_draft_is_refused_with_a_stable_code() {
     let (app, _, _, _, mut stored) = app();
-    let draft = "x".repeat(64 * 1024 + 1);
+    let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
             Request::put("/api/sessions/session-1/draft")
@@ -4888,7 +4959,7 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ subagents_configured: false, profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
 const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
@@ -5093,6 +5164,26 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
         ),
         (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
             "/api/settings/save",
             serde_json::json!({"page": ["subagents"]}),
         ),
@@ -5144,6 +5235,22 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
         "opus"
+    );
+    assert!(!saved.subagents.use_same_on_all_targets);
+    assert_eq!(
+        saved.subagents.yolo.straightforward.as_ref().unwrap().model,
+        "opus"
+    );
+    assert_eq!(
+        saved
+            .subagents
+            .yolo
+            .straightforward
+            .as_ref()
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high")
     );
 
     let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();
@@ -5506,4 +5613,62 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
         "github-relevance-notices",
         &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
     );
+}
+
+// A worker without open requests (relay protocol before 64) has no question
+// target, so its question is the last thing the agent wrote.
+#[test]
+fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    let facts = |supports_open_request| NotificationMessageFacts {
+        pending_request: None,
+        review_activity: None,
+        question_message: None,
+        supports_open_request,
+    };
+    let read = |facts| {
+        super::handlers::notification_message_text(
+            NotificationKind::NeedsInput,
+            &facts,
+            |_| unreachable!("no question target"),
+            || Ok(Some("the agent's last words".to_owned())),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read(facts(false)).as_deref(),
+        Some("the agent's last words")
+    );
+    assert_eq!(read(facts(true)), None);
+}
+
+// An `!` card names its message by ReadThrough ordinal: a different or missing
+// boundary is a conflict, never the latest reply.
+#[tokio::test]
+async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
+        snapshot.sessions[0].notification_dismissal =
+            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
+    });
+    let cookie = login_cookie(&app).await;
+    for stale in [
+        "holder=session-1&through=4",
+        "holder=session-1",
+        "holder=session-1&through=3&requests=x",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+    }
 }

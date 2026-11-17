@@ -97,7 +97,10 @@ impl ControllerRelayLease {
     /// Completing it instead would advance the relay's recovery floor past
     /// history that no verified checkpoint covers, so reclaim the connection
     /// and drop it: the worker cancels the barrier and resumes dispatch.
-    pub(in crate::controller) async fn cancel_abandoned_barrier(&mut self) -> Result<()> {
+    pub(in crate::controller) async fn cancel_abandoned_barrier(
+        &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
+    ) -> Result<()> {
         let Self::Managed { handle, lease } = self else {
             // A standalone connection is dropped with this value, which the
             // worker sees as the same disconnect.
@@ -105,7 +108,10 @@ impl ControllerRelayLease {
         };
         match lease.take() {
             Some(lease) => drop(lease),
-            None => drop(handle.lease_connection().await?),
+            None => {
+                admission.abandon_copy().await?;
+                drop(handle.lease_connection(admission).await?);
+            }
         }
         Ok(())
     }
@@ -187,6 +193,7 @@ pub(in crate::controller) enum CheckpointCompletion {
 }
 
 pub(in crate::controller) struct LatchedCheckpoint {
+    pub(in crate::controller) admission: crate::recovery_gate::SessionAdmission,
     pub(in crate::controller) artifact: CheckpointArtifact,
     pub(in crate::controller) relay: ControllerRelayLease,
     pub(in crate::controller) barrier_command_id: String,
@@ -237,7 +244,7 @@ impl LatchedCheckpoint {
             // archive that was never installed. Doing nothing is the exit.
             return;
         }
-        if let Err(error) = self.relay.cancel_abandoned_barrier().await {
+        if let Err(error) = self.relay.cancel_abandoned_barrier(&self.admission).await {
             tracing::warn!(
                 session_id,
                 "abandoned checkpoint could not cancel its relay barrier: {error:#}"

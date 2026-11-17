@@ -13,7 +13,7 @@
 //! the owner of that fact stays the only place that records it.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long draining lasts after the most recent handoff attempt. The
@@ -39,7 +39,7 @@ pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-pub(crate) struct Gate(Mutex<State>);
+pub(crate) struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
 
 #[derive(Default)]
 struct State {
@@ -58,6 +58,9 @@ struct State {
     /// Each hold by label, keyed by admission order.
     active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
     next_hold: u64,
+    // Test synchronization only; never part of admission policy.
+    #[cfg(test)]
+    resumable_waiters: usize,
 }
 
 struct Hold {
@@ -274,6 +277,89 @@ struct Registration {
 }
 
 impl Gate {
+    fn publish(&self) {
+        self.1.notify_waiters();
+        self.2.notify_all();
+    }
+
+    /// Resumable work owns no admission while handoff drains. The same lock
+    /// decides whether to resume control or yield to a closed daemon.
+    pub(crate) fn enter_after_draining(
+        self: &Arc<Self>,
+        label: &'static str,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        loop {
+            anyhow::ensure!(
+                !state.closed,
+                mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                    .with_code(HANDOFF_REFUSAL_CODE)
+            );
+            if !state.draining() {
+                return Ok(self.register_as(&mut state, label, None, None));
+            }
+            // This is the owner's existing lapse deadline, not a polling
+            // interval or a bound on the resumable operation.
+            let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
+            #[cfg(test)]
+            {
+                state.resumable_waiters += 1;
+                self.1.notify_waiters();
+            }
+            (state, _) = self
+                .2
+                .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            {
+                state.resumable_waiters -= 1;
+            }
+        }
+    }
+
+    /// Resumable background observers wait on this owner's exact drain
+    /// deadline and publication, without holding daemon admission.
+    pub(crate) async fn wait_after_draining(&self) -> bool {
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let deadline = {
+                let state = self.lock();
+                if state.closed {
+                    return false;
+                }
+                if !state.draining() {
+                    return true;
+                }
+                state.drain_requested.expect("draining has a request") + DRAIN_LAPSE
+            };
+            tokio::select! {
+                () = changed => {},
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {},
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock().resumable_waiters > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_drain_for_test(&self) {
+        self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        self.publish();
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         !self.lock().closed
     }
@@ -283,6 +369,25 @@ impl Gate {
     pub(crate) fn is_draining(&self) -> bool {
         let state = self.lock();
         state.closed || state.draining()
+    }
+
+    /// Publish a drain from the same owner that decides admission. Queued,
+    /// unaccepted requests release their outer client hold when this wakes.
+    pub(crate) fn begin_draining(&self) {
+        self.lock().drain_requested = Some(Instant::now());
+        self.publish();
+    }
+
+    pub(crate) async fn wait_until_draining(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_draining() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Admit a short control operation. The handoff waits for it. Refused
@@ -338,8 +443,27 @@ impl Gate {
     /// Admit the destroy of `session_id`. The handoff and the graceful stop
     /// wait for it, but only up to [`DESTROY_WAIT_BOUND`].
     pub(crate) fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
+        self.enter_destroy_mode(session_id, false)
+    }
+
+    pub(crate) fn enter_destroy_unless_draining(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> anyhow::Result<Work> {
+        self.enter_destroy_mode(session_id, true)
+    }
+
+    fn enter_destroy_mode(
+        self: &Arc<Self>,
+        session_id: &str,
+        deferrable: bool,
+    ) -> anyhow::Result<Work> {
         let mut state = self.lock();
-        anyhow::ensure!(!state.closed, "daemon upgrade handoff is underway");
+        anyhow::ensure!(
+            !state.closed && (!deferrable || !state.draining()),
+            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
         state.destroying.push(session_id.to_owned());
         Ok(self.register_as(&mut state, DESTROY_LABEL, Some(session_id.to_owned()), None))
     }
@@ -386,7 +510,10 @@ impl Gate {
             return false;
         }
         state.drain_requested = Some(Instant::now());
-        state.destroy_wait_holds()
+        let holds = state.destroy_wait_holds();
+        drop(state);
+        self.publish();
+        holds
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -421,6 +548,7 @@ impl Gate {
             let report = state.refused_handoff_report();
             state.drain_requested = Some(Instant::now());
             drop(state);
+            self.publish();
             if let Some(report) = report {
                 report.log();
             }
@@ -436,6 +564,8 @@ impl Gate {
             "daemon upgrade handoff closed admission; the daemon is shutting down"
         );
         state.closed = true;
+        drop(state);
+        self.publish();
         true
     }
 }
@@ -491,6 +621,10 @@ pub(crate) fn activity_unless_draining_described(
 
 pub(crate) fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
     gate().enter_destroy(session_id)
+}
+
+pub(crate) fn destroy_activity_unless_draining(session_id: &str) -> anyhow::Result<Work> {
+    gate().enter_destroy_unless_draining(session_id)
 }
 
 pub(crate) fn is_draining() -> bool {
@@ -648,7 +782,7 @@ mod tests {
         let gate = Arc::new(Gate::default());
         let running = gate.enter("session lifecycle").unwrap();
         assert!(!gate.try_close());
-        gate.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        gate.expire_drain_for_test();
         assert!(!gate.is_draining());
         assert!(gate.enter_unless_draining("worker swap").is_ok());
         drop(running);
@@ -735,5 +869,46 @@ mod tests {
             drop(admitted);
             assert!(gate.try_close());
         }
+    }
+    // Hard-won: 5b46f3845: queued client admission could not observe a draining handoff.
+    #[tokio::test]
+    async fn drain_publication_wakes_existing_and_late_waiters() {
+        let gate = Arc::new(Gate::default());
+        let held = gate.enter("client request").unwrap();
+        let mut waiting = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(!gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        assert!(
+            gate.enter_destroy_unless_draining("queued-destroy")
+                .is_err()
+        );
+        let mut late = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut late).is_ready());
+        let mut resumed = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut resumed).is_pending());
+        gate.expire_drain_for_test();
+        assert!(
+            resumed.await,
+            "lapse resumes background recovery without admission"
+        );
+        gate.begin_draining();
+        let mut shutdown = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        drop(held);
+        assert!(gate.try_close());
+        assert!(
+            !shutdown.await,
+            "closure retires the old daemon's observers"
+        );
+        let gate = Arc::new(Gate::default());
+        let mut closing = Box::pin(gate.wait_until_draining());
+        assert!(futures::poll!(&mut closing).is_pending());
+        assert!(gate.try_close());
+        tokio::time::timeout(Duration::from_secs(1), closing)
+            .await
+            .unwrap();
     }
 }

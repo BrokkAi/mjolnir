@@ -1797,7 +1797,7 @@ impl RelaySnapshot {
     pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
         self.assessment_context
             .as_deref()
-            .map(crate::assessment::ContextHistory::without_generated_prompts)
+            .map(crate::assessment::ContextHistory::reader_view)
     }
 
     /// The open turn that began without a prompt.

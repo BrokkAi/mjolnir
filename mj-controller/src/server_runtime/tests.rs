@@ -1586,6 +1586,7 @@ fn golden_phone_session_snapshot() {
 fn controller_with_profiles(ids: &[&str]) -> Controller {
     Controller {
         config: Config {
+            images: Default::default(),
             keys: Default::default(),
             jev: Default::default(),
             quota: Default::default(),
@@ -2455,10 +2456,12 @@ fn phone_cancel_targets_the_matching_background_action() {
     let first = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
         lifecycle: None,
+        kind: None,
     };
     let second = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
         lifecycle: None,
+        kind: None,
     };
     let action_sessions =
         std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -2485,6 +2488,7 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
             lifecycle: Some(create),
+            kind: None,
         };
         let cancelling = control.clone();
         let committing = control.clone();

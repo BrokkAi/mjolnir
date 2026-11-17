@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 pub(in crate::controller) async fn wait_for_relay_closed(
     relay: &mut StandaloneSession,
@@ -384,8 +385,12 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             );
             execute_checked(
                 executor,
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
-                    .purpose("create remote checkpoint staging"),
+                crate::targets::ssh_command(
+                    SshTrafficClass::Control,
+                    ssh,
+                    ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING],
+                )
+                .purpose("create remote checkpoint staging"),
             )?;
             execute_checked(
                 executor,
@@ -395,6 +400,7 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             execute_checked(
                 executor,
                 crate::targets::ssh_engine_command(
+                    SshTrafficClass::Bulk,
                     ssh,
                     engine,
                     ["cp", &staging, &format!("{container_id}:{remote}")],
@@ -403,8 +409,12 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             )?;
             execute_checked(
                 executor,
-                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &staging])
-                    .purpose("remove remote checkpoint staging"),
+                crate::targets::ssh_command(
+                    SshTrafficClass::Control,
+                    ssh,
+                    ["rm", "-f", "--", &staging],
+                )
+                .purpose("remove remote checkpoint staging"),
             )?;
             Ok(())
         }

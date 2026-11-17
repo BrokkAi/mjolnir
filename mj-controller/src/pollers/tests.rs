@@ -2530,6 +2530,29 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     }
 
     impl CommandExecutor for AppleExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
             let stopped = line == "container system status" && !self.service_running;
@@ -2635,6 +2658,29 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
     }
 
     impl CommandExecutor for FailingPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands
                 .lock()
@@ -2751,6 +2797,29 @@ fn a_missing_image_is_pulled_once_and_not_again_when_present() {
     }
 
     impl CommandExecutor for FirstPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.args.clone());
             if command.args.first().map(String::as_str) == Some("pull") {
@@ -3131,40 +3200,6 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
         .wait_for_session("session-1", wait)
         .await
         .unwrap();
-}
-
-#[test]
-fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
-    let (observations, _receiver) = crate::recovery_gate::observation_channel();
-    let observer = crate::recovery_gate::RecoveryObserver {
-        observations,
-        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
-    };
-    let copy = observer.gate.try_start("session").unwrap();
-
-    let cancelled = AtomicBool::new(true);
-    let error = reserve_recovery_or_cancel(&observer, "session", &cancelled)
-        .err()
-        .expect("a cancelled operation does not reserve");
-    assert!(error.to_string().contains("operation cancelled"));
-    assert!(observer.is_busy("session"));
-    assert!(!copy.load(Ordering::Acquire));
-    // The failed call also left no reservation behind.
-    drop(copy);
-    assert!(observer.gate.try_start("session").is_some());
-
-    // An operation cancelled while it waits still preempts the copy first.
-    let copy = observer.gate.try_start("session").unwrap();
-    let cancelled = AtomicBool::new(false);
-    let reservation = std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| reserve_recovery_or_cancel(&observer, "session", &cancelled));
-        while !copy.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        drop(copy);
-        waiting.join().unwrap()
-    });
-    assert!(reservation.is_ok());
 }
 
 // Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.

@@ -107,11 +107,12 @@ impl Controller {
     /// stop got that far.
     pub async fn park_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(session_id, executor, manager, None)
+        self.stop_idle_subagent_worker(admission, session_id, executor, manager, None)
             .await
     }
 
@@ -127,12 +128,13 @@ impl Controller {
     /// worker was stopped and the record now says `Error`.
     pub async fn fail_subagent_start_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         cause: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
-        self.stop_idle_subagent_worker(session_id, executor, manager, Some(cause))
+        self.stop_idle_subagent_worker(admission, session_id, executor, manager, Some(cause))
             .await
     }
 
@@ -140,12 +142,13 @@ impl Controller {
     /// `Parked`, or `Error` with `failure` as its cause.
     async fn stop_idle_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         failure: Option<&str>,
     ) -> Result<ParkOutcome> {
-        crate::worker_lifecycle::run(session_id, "stop idle subagent worker", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
             ensure!(
                 self.state.subagents.contains_key(session_id),
@@ -162,7 +165,8 @@ impl Controller {
                 .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
                 .await?;
             let Some(mut lease) =
-                IdleWorkspaceLease::acquire_for_upgrade(&handle, session.harness_kind).await?
+                IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, session.harness_kind)
+                    .await?
             else {
                 return Ok(ParkOutcome::Busy);
             };
@@ -206,10 +210,11 @@ impl Controller {
     /// It never stops a worker that may have resumed accepted work.
     pub async fn unpark_subagent_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        crate::worker_lifecycle::run(session_id, "unpark subagent worker", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
             let owner = crate::worker_lifecycle::require(session_id)?;
             owner.verify_cached_target(&self.state)?;
             ensure!(
@@ -238,10 +243,7 @@ impl Controller {
             // An older failed wake may have left a parked record and boot
             // intent. Only proved death permits retiring that intent.
             if crate::database::load_worker_restart(session_id)?.is_some() {
-                let output = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend,
-                    &worker_root,
-                ))?;
+                let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root)?;
                 ensure!(
                     output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
                     "parked sub-agent still has a live worker boot"
@@ -330,9 +332,7 @@ impl Controller {
             if let Err(error) = observed {
                 // A failed connection alone does not prove death. The same
                 // lifecycle owner probes and settles before recovery can act.
-                let liveness = executor.execute(&super::worker_binary::worker_liveness_command(
-                    &backend, &worker_root,
-                )).context("check whether the failed unpark worker exited")?;
+                let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root).context("check whether the failed unpark worker exited")?;
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
                     let failure = if mj_core::credentials::text_reports_auth_failure(&detail) {
@@ -404,6 +404,29 @@ mod tests {
     }
 
     impl CommandExecutor for RacingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             if let Some((handle, runtime)) = self.racer.lock().unwrap().take() {
@@ -498,6 +521,29 @@ mod tests {
     }
 
     impl CommandExecutor for WakeTarget {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
             if command.purpose == "start detached Mjolnir worker" {
@@ -627,7 +673,7 @@ mod tests {
             .clone()
             .unwrap();
         let owner =
-            crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test unpark")
+            crate::controller::test_support::worker_test_permit(LATCH_RELAY_SESSION, "test unpark")
                 .unwrap()
                 .unwrap();
         owner.scope(async {
@@ -662,7 +708,11 @@ mod tests {
         let executor = WakeTarget::new();
         tokio::time::timeout(
             Duration::from_secs(10),
-            controller.unpark_subagent_worker(LATCH_RELAY_SESSION, &executor),
+            controller.unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+            ),
         )
         .await
         .expect("a running turn must not delay readiness")
@@ -721,7 +771,11 @@ mod tests {
         )
         .unwrap();
         controller
-            .unpark_subagent_worker(LATCH_RELAY_SESSION, &WakeTarget::new())
+            .unpark_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &WakeTarget::new(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -744,7 +798,11 @@ mod tests {
             let executor = executor.clone();
             async move {
                 controller
-                    .unpark_subagent_worker(LATCH_RELAY_SESSION, &*executor)
+                    .unpark_subagent_worker(
+                        &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                        LATCH_RELAY_SESSION,
+                        &*executor,
+                    )
                     .await
             }
         });
@@ -806,13 +864,15 @@ mod tests {
             workspace: None,
             exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["alive\n"])
-                .purpose("probe Mjolnir worker daemon liveness"),
+                .purpose("probe Mjolnir worker daemon liveness")
+                .into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "a live wake must not be restarted".into(),
                 commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
-            },
+            }
+            .into(),
         });
         executor.cancelled.store(false, Ordering::SeqCst);
         assert_eq!(
@@ -883,7 +943,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'wake publication failed'); END;",
             )
             .unwrap();
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test wake transaction",
         )
@@ -962,7 +1022,12 @@ mod tests {
         });
 
         let outcome = loaded_controller()
-            .park_subagent_worker(LATCH_RELAY_SESSION, &executor, &control)
+            .park_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+                &control,
+            )
             .await
             .unwrap();
 
@@ -1055,7 +1120,13 @@ mod tests {
         let cause = "this agent does not offer high as a effort";
 
         let outcome = loaded_controller()
-            .fail_subagent_start_worker(LATCH_RELAY_SESSION, cause, &executor, &control)
+            .fail_subagent_start_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                cause,
+                &executor,
+                &control,
+            )
             .await
             .unwrap();
 
@@ -1107,7 +1178,12 @@ mod tests {
         let executor = RacingStop::default();
 
         let outcome = loaded_controller()
-            .park_subagent_worker(LATCH_RELAY_SESSION, &executor, &channels.control)
+            .park_subagent_worker(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                LATCH_RELAY_SESSION,
+                &executor,
+                &channels.control,
+            )
             .await
             .unwrap();
 

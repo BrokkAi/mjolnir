@@ -916,6 +916,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     context.config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "gpt-6-terra".into(),
@@ -939,6 +940,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
         mj_core::config::ReviewConfig {
             legacy: None,
             disabled: false,
+            brief_writer: None,
             reviewers: vec![
                 mj_core::config::SubagentChoice {
                     model: "gpt-6-terra".into(),

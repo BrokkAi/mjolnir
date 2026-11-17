@@ -285,6 +285,8 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
+         DROP TRIGGER subagent_accounting_kind_insert;
+         DROP TRIGGER subagent_accounting_kind_update;
          DROP TABLE subagent_accounting;
          DROP TABLE session_turn_selections;
          DROP TABLE github_watch_classification_failures;
@@ -388,7 +390,11 @@ fn assert_upgraded(path: &std::path::Path) {
 #[test]
 fn the_daemon_is_listed_as_mj_daemon_run() {
     let storage = upgrade_storage();
-    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    let output = mj_core::subprocess::run_with_input(
+        upgrade_command(&storage).env("XDG_RUNTIME_DIR", storage.path()),
+        &[],
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -404,6 +410,84 @@ fn the_daemon_is_listed_as_mj_daemon_run() {
         .map(|argument| String::from_utf8_lossy(argument).into_owned())
         .collect::<Vec<_>>();
     assert_eq!(arguments, ["mj", "daemon-run"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_launch_moves_from_the_login_cgroup_to_the_systemd_user_manager() {
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        eprintln!("skipping systemd user scope test without XDG_RUNTIME_DIR");
+        return;
+    };
+    // SAFETY: geteuid only reads the caller's effective user ID.
+    let user_subtree = format!("/user@{}.service/", unsafe { libc::geteuid() });
+    let parent_cgroups = fs::read_to_string("/proc/self/cgroup").unwrap();
+    if parent_cgroups.contains(&user_subtree) {
+        eprintln!("skipping systemd user scope test inside the user manager");
+        return;
+    }
+    if !mj_core::login_environment::account_name().is_ok_and(|user| {
+        std::path::Path::new("/var/lib/systemd/linger")
+            .join(user)
+            .is_file()
+    }) {
+        eprintln!("skipping systemd user scope test without lingering");
+        return;
+    }
+    let mut probe = Command::new("systemd-run");
+    probe.args([
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--",
+        "/bin/true",
+    ]);
+    if !std::path::Path::new(&runtime_dir)
+        .join("systemd/private")
+        .exists()
+        || !mj_core::subprocess::run_with_input(&mut probe, &[])
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping systemd user scope test without a reachable user manager");
+        return;
+    }
+
+    let storage = upgrade_storage();
+    fs::write(
+        storage.path().join("config/config.toml"),
+        r#"version = 18
+[phone]
+enabled = false
+[targets.podman]
+kind = "podman"
+pull_policy = "never"
+[targets.docker]
+kind = "docker"
+pull_policy = "never"
+"#,
+    )
+    .unwrap();
+    let mut command = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    let output =
+        mj_core::subprocess::run_with_input(command.args(["daemon", "endpoint", "--json"]), &[])
+            .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+            .unwrap();
+    let cgroups = fs::read_to_string(format!("/proc/{}/cgroup", metadata.pid)).unwrap();
+    assert!(cgroups.contains(&user_subtree), "{cgroups}");
+    let command_line = fs::read(format!("/proc/{}/cmdline", metadata.pid)).unwrap();
+    assert_eq!(
+        command_line.split(|byte| *byte == 0).nth(1),
+        Some(b"daemon-run".as_slice())
+    );
 }
 
 /// A replacement daemon is a new start, and a client proves that from the
@@ -595,8 +679,17 @@ fn old_daemon_fixture() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let protocol_version: u32 = std::env::var("MJ_TEST_OLD_PROTOCOL").unwrap().parse().unwrap();
+        // Every daemon of the current protocol answers `Identity`, and clients
+        // treat a failed one as a failure. A daemon of an older protocol is
+        // never asked.
+        let identity = (protocol_version == PROTOCOL_VERSION).then(|| DaemonIdentity {
+            instance_id: format!("upgrade-fixture-{}", std::process::id()),
+            build_version: version.clone(),
+            placement: DaemonPlacement::Host,
+        });
         let metadata = DaemonMetadata {
-            protocol_version: std::env::var("MJ_TEST_OLD_PROTOCOL").unwrap().parse().unwrap(),
+            protocol_version,
             pid: std::process::id(),
             address: listener.local_addr().unwrap(),
             token: "isolated-upgrade-fixture".into(),
@@ -615,6 +708,7 @@ fn old_daemon_fixture() {
                 accepted = listener.accept() => {
                     let (mut stream, _) = accepted.unwrap();
                     let stop = stop.clone();
+                    let identity = identity.clone();
                     connections.spawn(async move {
                         while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
                             let busy = std::env::var_os("MJ_TEST_UPGRADE_BUSY_FILE")
@@ -642,12 +736,15 @@ fn old_daemon_fixture() {
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
-                                // A daemon from before `Identity` or
-                                // `Configuration` cannot decode the frame: it
-                                // drops the connection. Clients must treat
-                                // that as an unknown answer, not as a reason to
-                                // keep asking.
-                                DaemonAction::Identity | DaemonAction::Configuration => break,
+                                DaemonAction::Identity => match &identity {
+                                    Some(identity) => DaemonReply::Identity(identity.clone()),
+                                    None => break,
+                                },
+                                // A daemon from before `Configuration` cannot
+                                // decode the frame: it drops the connection.
+                                // Clients must treat that as an unknown
+                                // answer, not as a reason to keep asking.
+                                DaemonAction::Configuration => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {
@@ -880,10 +977,17 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
         .stdout(fs::File::create(&log).unwrap())
         .stderr(fs::File::create(&log).unwrap());
     let mut client = command.spawn().unwrap();
-    // The handoff asks again each round; several asks with the record in place
-    // show that the client waits for the daemon instead of replacing it.
+    // The client asks again each round. One that took two unanswered pings
+    // as absence launched a replacement after its third connection, so the
+    // record is checked through several asks beyond that.
     let deadline = Instant::now() + Duration::from_secs(60);
-    while connections.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+    loop {
+        let kept: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(kept.token, stale.token, "the record was replaced");
+        if connections.load(std::sync::atomic::Ordering::SeqCst) >= 6 {
+            break;
+        }
         assert!(
             client.try_wait().unwrap().is_none(),
             "the client gave up: {}",
@@ -891,13 +995,10 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
         );
         assert!(
             Instant::now() < deadline,
-            "the client did not ask the daemon"
+            "the client did not keep asking the daemon"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let kept: mj_client::daemon::DaemonMetadata =
-        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-    assert_eq!(kept.token, stale.token, "the record was replaced");
     client.kill().unwrap();
     client.wait().unwrap();
 }

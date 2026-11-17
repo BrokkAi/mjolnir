@@ -1,6 +1,6 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
-mod backend;
+pub(crate) mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
@@ -98,11 +98,13 @@ pub use mbx::install::{
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
 pub use mbx::{MBX_VERSION, preview_build_cache};
-use provisioning::apply_failed_new_session_rollback;
-pub use provisioning::{GitIdentity, controller_git_identity, set_controller_git_identity};
+pub use provisioning::{
+    CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
+};
 pub(crate) use worker_binary::{
-    image_worker_label, prepare_recovery_worker_binary, recorded_exit_reason,
-    refresh_target_worker_binary_if_stale, worker_source_problem,
+    image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
+    recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
+    shared_content_ssh, worker_source_problem,
 };
 pub(crate) use worktree::path_exists_on_managed_target;
 
@@ -313,6 +315,7 @@ pub fn create_bundle_from_sources(
                 .bundles
                 .insert(canonical.clone(), saved.bundle.clone());
             config.bundles.remove(&id);
+            config.images.consolidate_bundle(&id, &canonical);
             crate::database::store_catalog_project(&canonical, &saved, true)?;
         }
         Ok(canonical)
@@ -339,6 +342,7 @@ pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
             config.bundles.remove(bundle_id).is_some(),
             "project {bundle_id:?} is no longer saved"
         );
+        config.images.bundles.remove(bundle_id);
         config.validate()?;
         crate::database::hide_catalog_project(bundle_id)?;
         Ok(())
@@ -840,34 +844,6 @@ impl Controller {
         Some(format!("{filesystem} ({reason})"))
     }
 
-    fn fail_new_session_with_cleanup(
-        &mut self,
-        session_id: &str,
-        error: anyhow::Error,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<anyhow::Error> {
-        let original = provisioning::note_new_session_launch_failure(session_id, &error);
-        let cleanup_error = self
-            .cleanup_new_session_worktree_after_failure(session_id, executor)
-            .err()
-            .map(|cleanup_error| format!("{cleanup_error:#}"));
-        if let Some(cleanup_error) = &cleanup_error {
-            tracing::warn!(
-                session_id,
-                error = %cleanup_error,
-                "new-session worktree rollback reported a cleanup failure"
-            );
-        }
-        let failure = apply_failed_new_session_rollback(
-            &mut self.state,
-            session_id,
-            &original,
-            cleanup_error,
-        );
-        self.persist_session_state(session_id)?;
-        Ok(failure)
-    }
-
     pub fn register_session_with_resources(
         &mut self,
         profile_id: &str,
@@ -962,6 +938,7 @@ impl Controller {
         };
         let profile = self.config.named_profile(profile_id)?;
         let template = self.config.ensure_target_enabled(target_id)?;
+        let yolo_target = template.is_yolo();
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
         }
@@ -1080,7 +1057,11 @@ impl Controller {
             && (oracle == Some(true) || options_oracle_explicit)
             && oracle_choice
                 .as_ref()
-                .or(self.config.subagents.oracle.as_ref())
+                .or_else(|| {
+                    self.config
+                        .subagents
+                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
+                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
         {
             oracle_enabled = false;

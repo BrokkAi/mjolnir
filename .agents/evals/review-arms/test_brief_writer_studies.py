@@ -327,7 +327,8 @@ class SonnetArtifacts(Study):
         key = json.loads((d / 'key.json').read_text())
         self.assertEqual(len(key), 22)
         self.assertFalse((self.root / 'briefs/blind-terra-leak-0').exists())
-        verdicts = [{'output_id': oid, 'judge': j, 'label': 'missed'} for oid in key for j in 'AB']
+        verdicts = [{'output_id': oid, 'bug': record['bug'], 'judge': j, 'label': 'missed'}
+                    for oid, record in key.items() for j in 'AB']
         (d / 'workflow-out.json').write_text(json.dumps({'verdicts': verdicts}))
         # A brief edited after its leak judgment cannot reuse the verdict.
         (self.root / 'briefs/blind-sonnet' / ALL[0] / 'brief.md').write_text('changed after judging\n')

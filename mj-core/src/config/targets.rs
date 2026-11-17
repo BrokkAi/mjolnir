@@ -13,7 +13,6 @@ use super::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectRepository {
     /// Stable name within the bundle, used by `primary_repo`.
     pub id: String,
@@ -30,7 +29,6 @@ pub struct ProjectRepository {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectBundle {
     /// Repository id used as the ACP session cwd.
     pub primary_repo: String,
@@ -162,7 +160,7 @@ pub struct TargetBuildCache {
 /// container. `memory` is an admission budget used to weight concurrent
 /// compilations, not an operating-system memory limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BuildCacheScheduler {
     /// Number of compiler permits shared across all mbx builds on the machine.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,8 +178,10 @@ impl BuildCacheScheduler {
 }
 
 /// Consume obsolete budgets without interpreting or migrating their values.
+/// They are read whole rather than as `IgnoredAny`, which the file loader
+/// counts as a key no setting reads.
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct BuildCacheSettings {
     enabled: Option<bool>,
     directory: Option<PathBuf>,
@@ -189,9 +189,9 @@ struct BuildCacheSettings {
     max_total_size: Option<String>,
     scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
-    _legacy_max_size: Option<serde::de::IgnoredAny>,
+    _legacy_max_size: Option<serde_json::Value>,
     #[serde(rename = "target_max_size")]
-    _legacy_target_max_size: Option<serde::de::IgnoredAny>,
+    _legacy_target_max_size: Option<serde_json::Value>,
 }
 
 impl From<BuildCacheSettings> for TargetBuildCache {
@@ -324,14 +324,14 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 /// The image a container target runs when its table names none: the
 /// reference image CI publishes, which `mj setup` also writes.
 fn default_container_image() -> String {
-    super::DEFAULT_CONTAINER_IMAGE.to_owned()
+    super::DEFAULT_SESSION_IMAGE.to_owned()
 }
 
 /// Whether a container image is exactly this build's default. A template that
 /// keeps the default writes no `image` line, so an upgraded install follows
 /// the image built for its own version.
 fn is_default_image(image: &String) -> bool {
-    image == super::DEFAULT_CONTAINER_IMAGE
+    image == super::DEFAULT_SESSION_IMAGE
 }
 
 /// Every key a container runtime's table may carry beside `kind` and
@@ -350,7 +350,6 @@ pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 8] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
     #[serde(
         default = "default_container_image",
@@ -381,7 +380,7 @@ pub struct ContainerTemplate {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum PodmanWorkspaceStorage {
     #[default]
     PodmanVolume,
@@ -454,7 +453,6 @@ pub enum AwsAddressSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SshConnection {
     /// OpenSSH destination such as `builder.example.com` or an SSH config alias.
     pub host: String,
@@ -682,6 +680,13 @@ impl TargetTemplate {
             Self::SshBare { permissions, .. } => Some(*permissions),
             _ => None,
         }
+    }
+
+    /// Whether this target runs with `permissions = "yolo"`. Container
+    /// runtimes are unconstrained inside their boundary but have no
+    /// permission mode, so they are not YOLO targets.
+    pub const fn is_yolo(&self) -> bool {
+        matches!(self.permission_mode(), Some(PermissionMode::Yolo))
     }
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {

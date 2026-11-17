@@ -6,6 +6,120 @@ use super::*;
 use agent_client_protocol::v1::schema::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
+// Hard-won: 3f3f3927b: updates sent right behind the `session/load` response were judged by a flag the session task flipped later, so a live turn start and reply were dropped as replay.
+#[cfg(unix)]
+#[tokio::test]
+async fn updates_right_behind_the_load_response_are_live_and_those_before_it_are_replay() {
+    for native_children in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("load_boundary.py");
+        std::fs::write(&script, format!(r#"
+import json, sys
+
+NATIVE_CHILDREN = {native}
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+def update(value):
+    emit({{'jsonrpc':'2.0', 'method':'session/update', 'params':{{'sessionId':'native', 'update':value}}}})
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    ident = request.get('id')
+    if method == 'initialize':
+        caps = ['nativeSubagentSessions'] if NATIVE_CHILDREN else []
+        result = {{'protocolVersion':1, 'agentCapabilities':{{'loadSession':True}},
+            '_meta':{{'jetbrains':{{'air':{{'version':1,'capabilities':caps}}}}}}}}
+    elif method == 'session/load':
+        update({{'sessionUpdate':'async_task_spawned','taskType':'turn','asyncTaskId':'old-turn'}})
+        update({{'sessionUpdate':'agent_message_chunk', 'content':{{'type':'text','text':'old history'}}}})
+        emit({{'jsonrpc':'2.0','id':ident,'result':{{'sessionId':'native',
+            'modes':{{'currentModeId':'default','availableModes':[{{'id':m,'name':m}} for m in ('default','acceptEdits','plan','auto')]}}}}}})
+        update({{'sessionUpdate':'async_task_spawned','taskType':'turn','asyncTaskId':'live-turn'}})
+        update({{'sessionUpdate':'agent_message_chunk', 'content':{{'type':'text','text':'live reply'}}}})
+        continue
+    else:
+        result = {{}}
+    if ident is not None:
+        emit({{'jsonrpc':'2.0','id':ident,'result':result}})
+"#, native = if native_children { "True" } else { "False" })).unwrap();
+        let (request_tx, request_rx) = mpsc::channel(4);
+        // A channel that holds one event and is not read at first keeps the
+        // session task waiting on its own sends while the notification
+        // handler runs, which is the order that exposed the race.
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let runtime = tokio::spawn(run(
+            LaunchSpec {
+                operator_away: Default::default(),
+                imported_logins: None,
+                login_identity: Default::default(),
+                bridge_spec_path: None,
+                subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+                managed_subagent: false,
+                subagent_mcp_socket: None,
+                clear_context_request: None,
+                context_restore: None,
+                goal_recovery: Default::default(),
+                command: "python3".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                environment: BTreeMap::new(),
+                cwd: temp.path().to_path_buf(),
+                additional_directories: Vec::new(),
+                extra_mcp_servers: Vec::new(),
+                project_memory: None,
+                resume_session: Some("native".into()),
+                native_session_may_have_history: true,
+                accepted_config: Default::default(),
+                initial_model: None,
+                harness: HarnessKind::Claude,
+                execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                claude_permission_mode: Default::default(),
+                observe_policy: None,
+                acp_activity: Default::default(),
+                step_clock: Default::default(),
+                tools_in_flight: Default::default(),
+                turn_context: Default::default(),
+                verdict: Some(crate::acp::VerdictSource::Disabled),
+                stall_policy: None,
+            },
+            request_rx,
+            event_tx,
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut trace = Vec::new();
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await
+        {
+            match event {
+                RuntimeEvent::AirTaskChanged {
+                    update: AirTaskUpdate::TurnSpawned { task_id, replayed },
+                    ..
+                } => trace.push(format!("turn {task_id} replayed={replayed}")),
+                RuntimeEvent::SessionUpdate { update } => {
+                    if let Some(text) = update.pointer("/content/text").and_then(|t| t.as_str()) {
+                        trace.push(format!("text {text}"));
+                    }
+                }
+                RuntimeEvent::NativeAgent {
+                    event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                } => trace.push("replay-commit".into()),
+                _ => {}
+            }
+        }
+        drop(request_tx);
+        runtime.abort();
+        let mut expected = vec!["turn old-turn replayed=true".to_owned()];
+        if native_children {
+            expected.push("replay-commit".into());
+        }
+        expected.push("turn live-turn replayed=false".into());
+        expected.push("text live reply".into());
+        assert_eq!(trace, expected, "native_children={native_children}");
+    }
+}
+
 // Hard-won: 61a1cfa: Codex replay dropped the current available-command catalogue and goal metadata, including on large history.
 // Hard-won: #1443: loading a session presented historical quota failures as new errors.
 #[cfg(unix)]
@@ -752,6 +866,8 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 ))
                 .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
+                // The `gh` approval is session-scoped, so it is sent even
+                // when no owned server or history tool needs an allow entry.
                 let expected = (harness == HarnessKind::Claude && guardian)
                     .then(|| serde_json::json!(["Bash(gh:*)"]));
                 assert_eq!(

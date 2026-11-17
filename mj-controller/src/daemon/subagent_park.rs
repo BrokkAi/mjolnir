@@ -201,17 +201,10 @@ impl RuntimeState {
             .run_lifecycle(
                 child_session_id,
                 LifecycleKind::Park,
-                move |state, session_id, _cancelled| async move {
+                move |state, session_id, _cancelled, session_admission| async move {
                     // A park is short and not cancellable: a close that asks for
                     // the child waits for it instead, so it never finds a worker
                     // stopped under a record that still says running.
-                    let never = AtomicBool::new(false);
-                    let _recovery_reservation = blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &never)
-                    })
-                    .await?;
                     if state.close_is_requested(&session_id) {
                         return Ok(DaemonLifecycleResult::Park(
                             crate::controller::ParkOutcome::NotRunning,
@@ -246,6 +239,7 @@ impl RuntimeState {
                         None => {
                             controller
                                 .park_subagent_worker(
+                                    &session_admission,
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
@@ -255,6 +249,7 @@ impl RuntimeState {
                         Some(cause) => {
                             controller
                                 .fail_subagent_start_worker(
+                                    &session_admission,
                                     &session_id,
                                     cause,
                                     &executor,
@@ -291,27 +286,16 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
-                |state, session_id, cancelled| async move {
+                |state, session_id, cancelled, session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
                         CancellableProcessExecutor::new(cancelled.clone())
                             .with_deadline(UNPARK_TIMEOUT),
                         state.clone(),
                         session_id.clone(),
                     );
-                    executor.begin_resumable_work()?;
-                    // Waiting for a cancelled recovery copy is interruptible
-                    // preparation, not an admitted database operation.
-                    let _recovery_reservation = tokio::task::spawn_blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        let cancelled = cancelled.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                    })
-                    .await
-                    .context("reserve recovery for sub-agent wake")??;
                     let controller = blocking(Controller::load).await?;
                     controller
-                        .unpark_subagent_worker(&session_id, &executor)
+                        .unpark_subagent_worker(&session_admission, &session_id, &executor)
                         .await?;
                     Ok(DaemonLifecycleResult::Done)
                 },

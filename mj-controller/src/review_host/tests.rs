@@ -145,7 +145,20 @@ impl FakeManager {
                     if matches!(action, ReviewerAction::CaptureDelta { .. })
                         && let Some(refusal) = self.capture_refusals.pop_front()
                     {
+                        let hold = self
+                            .control
+                            .session_gate
+                            .enter_foreground(
+                                &self.session,
+                                "test capture lifecycle",
+                                crate::recovery_gate::LifecycleOrigin::Person,
+                                &std::sync::atomic::AtomicBool::new(false),
+                                &crate::targets::ProcessExecutor,
+                            )
+                            .await
+                            .unwrap();
                         let _ = reply.send(Err(anyhow::anyhow!(refusal)));
+                        drop(hold);
                         continue;
                     }
                     if wanted(&role, &action) {
@@ -242,6 +255,7 @@ struct FakeEnvironment {
     child_relations: Mutex<Vec<ReviewerChildRelation>>,
     registered_working_directories: Mutex<Vec<Option<PathBuf>>>,
     mailbox: Mutex<Vec<mj_core::mailbox::MailboxEvent>>,
+    registered_roles: Mutex<Vec<mj_core::worker_launch::ReviewChildRole>>,
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     close_error: Mutex<Option<String>>,
@@ -277,17 +291,20 @@ struct FakeEnvironment {
     /// save of its review, as the foreign key on its review state does.
     owner_deleted: std::sync::atomic::AtomicBool,
     deleted_owner_saves: std::sync::atomic::AtomicUsize,
-    subagent: std::sync::atomic::AtomicBool,
     review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
+    resolve_release: Mutex<Option<crate::recovery_gate::ForegroundAdmission>>,
     /// How many background holds the host took on the session.
     background_holds: std::sync::atomic::AtomicUsize,
+    background_hangs: std::sync::atomic::AtomicBool,
     /// How many of those holds are still held.
     live_holds: Arc<std::sync::atomic::AtomicUsize>,
     /// Set to make reviewer resolution wait forever, the way an Auto
     /// reviewer choice can take minutes on a real host (I2-10).
     resolve_hangs: std::sync::atomic::AtomicBool,
+    /// Every report the host handed to persistence, in arrival order.
+    saved_reports: Mutex<Vec<crate::database::AcceptedReport>>,
 }
 
 struct SaveGate {
@@ -338,6 +355,7 @@ impl FakeEnvironment {
             child_relations: Mutex::new(Vec::new()),
             registered_working_directories: Mutex::new(Vec::new()),
             mailbox: Mutex::new(Vec::new()),
+            registered_roles: Mutex::new(Vec::new()),
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             close_error: Mutex::new(None),
@@ -361,12 +379,14 @@ impl FakeEnvironment {
             final_save_error: Mutex::new(None),
             owner_deleted: std::sync::atomic::AtomicBool::new(false),
             deleted_owner_saves: std::sync::atomic::AtomicUsize::new(0),
-            subagent: std::sync::atomic::AtomicBool::new(false),
             review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
+            resolve_release: Mutex::new(None),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
+            background_hangs: std::sync::atomic::AtomicBool::new(false),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             resolve_hangs: std::sync::atomic::AtomicBool::new(false),
+            saved_reports: Mutex::new(Vec::new()),
         })
     }
 
@@ -485,6 +505,7 @@ impl ReviewEnvironment for FakeEnvironment {
         &self,
         session: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<PathBuf>,
@@ -510,6 +531,7 @@ impl ReviewEnvironment for FakeEnvironment {
         let mut children = self.children.lock().unwrap();
         let child = format!("{session}-child-{}", children.len());
         children.push((child.clone(), reviewer.clone(), prompt));
+        self.registered_roles.lock().unwrap().push(role);
         relations.push(ReviewerChildRelation {
             parent_session_id: session.to_owned(),
             request_key: canonical_key,
@@ -577,6 +599,7 @@ impl ReviewEnvironment for FakeEnvironment {
             .pop_front();
         Box::pin(async move {
             if let Some(refusal) = refusal {
+                self.resolve_release.lock().unwrap().take();
                 return Err(refusal);
             }
             if self
@@ -598,6 +621,26 @@ impl ReviewEnvironment for FakeEnvironment {
                     ..Default::default()
                 })
                 .collect())
+        })
+    }
+
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    > {
+        Box::pin(async move {
+            Ok(mj_core::review::settings::ResolvedReviewSettings {
+                profile: "writer".into(),
+                main: mj_core::review::settings::ReviewModelSettings {
+                    model: Some(choice.model),
+                    effort: choice.effort,
+                    fast_mode: false,
+                },
+                ..Default::default()
+            })
         })
     }
 
@@ -663,6 +706,19 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(())
     }
 
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        self.saved_reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(reports.iter().cloned());
+        self.save_state(session_id, state)
+    }
+
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         let mut state = self
             .state
@@ -690,7 +746,15 @@ impl ReviewEnvironment for FakeEnvironment {
         self.live_holds
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let hold: BackgroundHold = Box::new(LiveHold(self.live_holds.clone()));
-        Box::pin(async move { Some(hold) })
+        let hangs = self
+            .background_hangs
+            .load(std::sync::atomic::Ordering::Acquire);
+        Box::pin(async move {
+            if hangs {
+                std::future::pending::<()>().await;
+            }
+            Some(hold)
+        })
     }
 }
 
@@ -716,6 +780,20 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     environment.refuse_next_resolve("reviewer operation cancelled for session lifecycle change");
+    *environment.resolve_release.lock().unwrap() = Some(
+        manager
+            .control
+            .session_gate
+            .enter_foreground(
+                session,
+                "test reviewer lifecycle",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &std::sync::atomic::AtomicBool::new(false),
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap(),
+    );
     let host = TurnReviewHost::spawn_in(
         manager.control.clone(),
         armed(Some("reviewer")),
@@ -834,6 +912,7 @@ fn armed_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
@@ -842,6 +921,406 @@ fn armed_count(count: usize) -> ReviewConfigSource {
             count
         ],
     })
+}
+
+/// One reviewer, preceded by a brief writer.
+fn armed_with_writer() -> ReviewConfigSource {
+    Arc::new(move |_| ReviewConfig {
+        legacy: None,
+        disabled: false,
+        brief_writer: Some(mj_core::config::BriefWriterConfig {
+            enabled: true,
+            model: "test-writer".into(),
+            effort: Some("high".into()),
+        }),
+        reviewers: vec![mj_core::config::SubagentChoice {
+            model: "test-reviewer".into(),
+            effort: None,
+        }],
+    })
+}
+
+/// Waits for the review's `count`th child to be registered and started.
+async fn wait_for_nth_child(environment: &FakeEnvironment, count: usize) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let children = environment.children.lock().unwrap().clone();
+            if let Some((child, ..)) = children.get(count - 1)
+                && environment.started.lock().unwrap().contains(child)
+            {
+                return child.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("child {count} was not started"))
+}
+
+/// The next notice the requester's session records.
+async fn next_notice(manager: &mut FakeManager) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                break text;
+            }
+        }
+    })
+    .await
+    .expect("the requester is told")
+}
+
+async fn finish_the_review(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    environment: &FakeEnvironment,
+    session: &str,
+    reviewer: &str,
+) {
+    finish_child(host, environment, session, reviewer, Some("No findings.")).await;
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+        .await;
+    reply.send(answer_for(&action)).unwrap();
+    wait_until_review_resolves(host, session).await;
+}
+
+#[tokio::test]
+async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reaches_the_reviewer() {
+    let session = session_id("brief-handback");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    {
+        let children = environment.children.lock().unwrap().clone();
+        assert_eq!(children.len(), 1, "no reviewer starts before the brief");
+        assert_eq!(children[0].1.profile, "writer");
+        assert_eq!(children[0].1.main.effort.as_deref(), Some("high"));
+        assert!(children[0].2.contains("Relation brief for a code change"));
+        assert!(children[0].2.contains(
+            "git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new"
+        ));
+        assert!(!children[0].2.contains("Do not edit files or push"));
+    }
+    let view = host.view(&session).unwrap();
+    let rows: Vec<_> = view
+        .roles
+        .iter()
+        .map(|role| {
+            (
+                role.label.as_str(),
+                role.state.label(),
+                role.child_session_id.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [("Brief writer", "running", Some(writer.as_str()))],
+        "the writer is visible while it works"
+    );
+    let group = environment.state().active_group.unwrap();
+    assert!(
+        group
+            .registrations
+            .iter()
+            .any(|item| item.role == "brief-writer"
+                && item.child_session_id.as_deref() == Some(writer.as_str()))
+    );
+
+    host.reviewer_finished(
+        session.clone(),
+        writer.clone(),
+        Some("## Paths\n- `src/a.rs:1` is called by `src/b.rs:2`".into()),
+    )
+    .await
+    .unwrap();
+    let reviewer = wait_for_nth_child(&environment, 2).await;
+    let children = environment.children.lock().unwrap().clone();
+    assert!(
+        children[1]
+            .2
+            .contains("## Relations computed from the repository")
+    );
+    assert!(
+        children[1]
+            .2
+            .contains("`src/a.rs:1` is called by `src/b.rs:2`")
+    );
+    assert!(children[1].2.contains("Do not edit files or push"));
+    assert_eq!(children[1].1.profile, "reviewer");
+    assert_eq!(
+        *environment.registered_roles.lock().unwrap(),
+        [
+            mj_core::worker_launch::ReviewChildRole::BriefWriter,
+            mj_core::worker_launch::ReviewChildRole::Reviewer
+        ]
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.closed.lock().unwrap().contains(&writer) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the writer is closed once its brief is used");
+
+    finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
+    assert_eq!(environment.children.lock().unwrap().len(), 2);
+    assert_eq!(environment.live_holds(), 0);
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: d782078aa review: reconciliation matched a logical role key instead of the submitted prompt.
+#[tokio::test]
+async fn a_brief_writer_that_ends_with_a_recorded_startup_handback_keeps_its_brief() {
+    let session = session_id("brief-recorded-handback");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let handback = stored_handback(
+        &environment,
+        "brief-writer",
+        "## Paths\n- `a.rs:1` calls `b.rs:2`",
+    );
+    environment.standings.lock().unwrap().insert(
+        writer.clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback,
+        },
+    );
+    host.child_ended(writer, "writer ended after recording its brief".into());
+    let reviewer = wait_for_nth_child(&environment, 2).await;
+    let prompt = environment.children.lock().unwrap()[1].2.clone();
+    assert!(prompt.contains("`a.rs:1` calls `b.rs:2`"), "{prompt}");
+    finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_brief_writer_that_ends_without_a_handback_leaves_the_review_to_run_without_a_brief() {
+    let session = session_id("brief-no-handback");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    host.child_ended(
+        writer.clone(),
+        "the writer's session ended (stopped)".into(),
+    );
+    let notice = next_notice(&mut manager).await;
+    assert!(
+        notice.starts_with("Review started without a relation brief:"),
+        "{notice}"
+    );
+    assert!(notice.contains("session ended (stopped)"), "{notice}");
+    let reviewer = wait_for_nth_child(&environment, 2).await;
+    let prompt = environment.children.lock().unwrap()[1].2.clone();
+    assert!(!prompt.contains("Relations computed"), "{prompt}");
+    assert!(prompt.contains("Do not edit files or push"));
+    finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment.closed.lock().unwrap().contains(&writer) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the ended writer is still closed");
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_brief_writer_that_cannot_launch_does_not_stop_the_review() {
+    let session = session_id("brief-no-launch");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    *environment.register_error.lock().unwrap() = Some("no capacity for the writer".into());
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let reviewer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let notice = next_notice(&mut manager).await;
+    assert!(
+        notice.contains("Review started without a relation brief: no capacity for the writer"),
+        "{notice}"
+    );
+    let children = environment.children.lock().unwrap().clone();
+    assert_eq!(children.len(), 1, "only the reviewer was ever registered");
+    assert_eq!(children[0].1.profile, "reviewer");
+    assert!(!children[0].2.contains("Relations computed"));
+    finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
+    host.shutdown().await.unwrap();
+}
+
+/// A review a daemon restart interrupted while its writer worked: the writer's
+/// session ended while no daemon was attached, with `handback` recorded or not.
+async fn restart_while_the_writer_ended(
+    name: &str,
+    handback: Option<&str>,
+    outcome_saved: bool,
+) -> (String, String) {
+    let session = session_id(name);
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let review_id = "restored-brief";
+    let (mut driver, _) = TurnReviewDriver::start(
+        TurnReviewSeed {
+            task: "inspect the changes".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        review_id.into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured_with_writer(vec![push_delta("/workspace/app", "newtree")], true);
+    if outcome_saved {
+        match handback {
+            Some(text) => {
+                driver.brief_written(text.to_owned());
+            }
+            None => {
+                driver.brief_failed("writer stopped".into());
+            }
+        }
+    }
+    *environment.owner.lock().unwrap() = Some(session.clone());
+    *environment.state.lock().unwrap() = TurnReviewState {
+        active: Some(review_id.into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            brief_writer: Some(ReviewerIdentity::default()),
+            driver: driver.snapshot(),
+            reviewers: vec![ReviewerIdentity::default()],
+            registrations: vec![
+                mj_core::storage::ReviewerRegistration {
+                    role: "reviewer-1".into(),
+                    request_key: "key-reviewer".into(),
+                    child_session_id: None,
+                },
+                mj_core::storage::ReviewerRegistration {
+                    role: "brief-writer".into(),
+                    request_key: "key-writer".into(),
+                    child_session_id: Some("writer-child".into()),
+                },
+            ],
+        }),
+        ..Default::default()
+    };
+    environment.standings.lock().unwrap().insert(
+        "writer-child".into(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: handback
+                .and_then(|message| stored_handback(&environment, "brief-writer", message)),
+        },
+    );
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let reviewer = wait_for_nth_child(&environment, 1).await;
+    if handback.is_none() {
+        let notice = next_notice(&mut manager).await;
+        assert!(
+            notice.starts_with("Review started without a relation brief:"),
+            "{notice}"
+        );
+        if outcome_saved {
+            assert!(notice.contains("writer stopped"), "{notice}");
+        }
+    }
+    // Give a wrongly repeated start time to show up.
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    let children = environment.children.lock().unwrap().clone();
+    assert_eq!(children.len(), 1, "one reviewer, and no second writer");
+    assert!(
+        !environment
+            .started
+            .lock()
+            .unwrap()
+            .contains(&"writer-child".to_owned()),
+        "the ended writer is not started again"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment
+            .closed
+            .lock()
+            .unwrap()
+            .contains(&"writer-child".to_owned())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the restored writer is cleaned up");
+    host.shutdown().await.unwrap();
+    assert_eq!(
+        environment
+            .closed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|child| child.as_str() == "writer-child")
+            .count(),
+        1
+    );
+    (reviewer, children[0].2.clone())
+}
+
+#[tokio::test]
+async fn a_restart_after_the_writer_handed_back_starts_the_reviewer_once_with_the_brief() {
+    let (_, prompt) = restart_while_the_writer_ended(
+        "restored-brief-written",
+        Some("## Paths\n- `a.rs:1` is called by `b.rs:2`"),
+        false,
+    )
+    .await;
+    assert!(
+        prompt.contains("## Relations computed from the repository"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`a.rs:1` is called by `b.rs:2`"));
+}
+
+#[tokio::test]
+async fn a_restart_after_the_writer_ended_without_a_handback_starts_the_reviewer_without_a_brief() {
+    let (_, prompt) = restart_while_the_writer_ended("restored-brief-lost", None, false).await;
+    assert!(!prompt.contains("Relations computed"), "{prompt}");
+}
+
+// Hard-won: 5fc728617: restart discarded a persisted writer cleanup after either outcome.
+#[tokio::test]
+async fn a_restart_after_the_writer_outcome_was_saved_closes_it_once() {
+    for handback in [Some("## Paths\n- `a.rs:1` calls `b.rs:2`"), None] {
+        let (_, prompt) =
+            restart_while_the_writer_ended("saved-writer-outcome", handback, true).await;
+        assert_eq!(prompt.contains("Relations computed"), handback.is_some());
+    }
 }
 
 async fn wait_for_group_children(
@@ -1487,6 +1966,14 @@ async fn reviewer_outcome_is_saved_before_handback_acknowledgement() {
     );
     gate.release();
     finished.await.unwrap().unwrap();
+    assert_eq!(
+        environment.saved_reports.lock().unwrap().clone(),
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "No findings.".into(),
+        }],
+        "the store receives the exact text the host settled the role from"
+    );
     host.shutdown().await.unwrap();
 }
 
@@ -1541,6 +2028,7 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
     let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: choices.clone(),
     });
     let host = TurnReviewHost::spawn_in(manager.control.clone(), config, environment.clone());
@@ -2067,6 +2555,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
         task: "inspect the push".into(),
         user_messages: Vec::new(),
         declined: Vec::new(),
+        brief: None,
     };
     let (mut driver, _) = TurnReviewDriver::start(
         seed,
@@ -2077,6 +2566,7 @@ async fn startup_restores_group_before_push_or_override_admission() {
     let state = TurnReviewState {
         active: Some("group-1".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![ReviewerIdentity::default()],
             registrations: vec![mj_core::storage::ReviewerRegistration {
@@ -2158,6 +2648,7 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
             task: "inspect the changes".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "partly-failed-group".into(),
         std::num::NonZeroUsize::new(2).unwrap(),
@@ -2197,6 +2688,7 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
     *environment.state.lock().unwrap() = TurnReviewState {
         active: Some("partly-failed-group".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![ReviewerIdentity::default(); 2],
             registrations,
@@ -2297,6 +2789,7 @@ async fn restore_busy_group(
             task: "inspect the changes".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "restored-group".into(),
         std::num::NonZeroUsize::new(count).unwrap(),
@@ -2307,6 +2800,7 @@ async fn restore_busy_group(
     *environment.state.lock().unwrap() = TurnReviewState {
         active: Some("restored-group".into()),
         active_group: Some(mj_core::storage::ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![ReviewerIdentity::default(); count],
             registrations: children
@@ -2376,17 +2870,29 @@ fn stored_handback(
     role: &str,
     message: &str,
 ) -> Option<mj_core::subagent::SubagentHandback> {
-    let command_id = environment
+    let request_key = environment
         .state()
         .active_group
         .expect("a restored group")
-        .driver
-        .roles
+        .registrations
         .iter()
         .find(|item| item.role == role)
-        .expect("the role exists")
-        .command_id
+        .expect("the role is registered")
+        .request_key
         .clone();
+    // Use the actual submission path, not the driver's logical command key.
+    let command_id = crate::daemon::startup_followup::api_followup_steps(
+        &request_key,
+        crate::server::api::StartFollowup {
+            prompt: Some("review the changes".into()),
+            ..Default::default()
+        },
+    )
+    .into_iter()
+    .find_map(|(id, step)| {
+        matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }).then_some(id)
+    })
+    .expect("the submitted prompt step");
     Some(mj_core::subagent::SubagentHandback {
         command_id,
         message: message.to_owned(),
@@ -3000,6 +3506,7 @@ fn push_config() -> ReviewConfigSource {
     Arc::new(|_| ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![mj_core::config::SubagentChoice {
             model: "test-reviewer".into(),
             effort: None,
@@ -3011,6 +3518,7 @@ fn push_config_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
@@ -3512,6 +4020,8 @@ async fn old_git_push_delta_records_warning_and_clean_tree_without_reviewer() {
 }
 
 // Hard-won: c5e89cf12: explicit review requests were refused unless automatic review ran on push.
+// Hard-won: 4dc0e2851: review-off cases waited for a reviewer instead of answering RecordOverridden.
+// Review-off acceptance is covered by a_review_request_with_review_off_records_the_tree_and_chooses_no_reviewer.
 #[tokio::test]
 async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_primary() {
     for (name, report, expected) in [
@@ -3527,17 +4037,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         ),
         ("pushfailed", None, "Review of commits"),
         (
-            "manualoff",
-            Some("No findings."),
-            "Review clean for commits",
-        ),
-        (
             "manualturn",
-            Some("No findings."),
-            "Review clean for commits",
-        ),
-        (
-            "manualchild",
             Some("No findings."),
             "Review clean for commits",
         ),
@@ -3546,9 +4046,6 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
         let clean = report == Some("No findings.");
         let mut manager = FakeManager::new(&session).await;
         let environment = FakeEnvironment::new();
-        environment
-            .subagent
-            .store(name == "manualchild", std::sync::atomic::Ordering::Release);
         if name == "pushclean" {
             pending_push_findings(&environment);
             environment.state.lock().unwrap().decline_findings(
@@ -3556,10 +4053,10 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
                 vec!["/workspace/other".into()],
             );
         }
-        let disabled = matches!(name, "manualoff" | "manualchild");
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
             legacy: None,
-            disabled,
+            disabled: false,
+            brief_writer: None,
             reviewers: vec![mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),
                 effort: None,
@@ -5278,4 +5775,101 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
     release.send(()).unwrap();
     order.drain().await.unwrap();
     assert!(environment.state().push_findings.is_some());
+}
+
+// Hard-won: Reliability soak 2026-11-16: a review-off start sent its capture into a recovery copy's checkpoint barrier and the worker refused it.
+#[tokio::test(start_paused = true)]
+async fn a_review_off_request_waits_for_background_work_before_reaching_the_worker() {
+    let session = session_id("reviewoff-background");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .background_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let off: ReviewConfigSource = Arc::new(|_| ReviewConfig::default());
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), off, environment.clone());
+    manager
+        .publisher
+        .publish(
+            session.clone(),
+            view(
+                &session,
+                MaterializedExecutionState::Running { started_at_ms: 1 },
+            ),
+        )
+        .await
+        .unwrap();
+    let request = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        async move { host.begin_push(&session, None).await }
+    });
+    // A copy that never ends: the request must be waiting on the hold, having
+    // sent the worker nothing.
+    let request_to_worker = tokio::time::timeout(
+        super::reviewer::BACKGROUND_WORK_WAIT / 2,
+        manager.requests.recv(),
+    )
+    .await;
+    assert!(
+        request_to_worker.is_err(),
+        "the worker was sent work under running background work"
+    );
+    assert_eq!(environment.background_holds(), 1);
+    tokio::time::advance(super::reviewer::BACKGROUND_WORK_WAIT).await;
+    let refusal = request.await.unwrap().unwrap_err().0;
+    assert!(
+        refusal.contains("waiting for background work") && refusal.contains("deadline"),
+        "{refusal}"
+    );
+    assert_eq!(environment.live_holds(), 0);
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: 8481d8a51: review admission ignored its existing background-work deadline.
+#[tokio::test(start_paused = true)]
+async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
+    let session = session_id("admission-deadline");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .background_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(43);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        async move { host.begin_push(&session, None).await }
+    });
+    while environment.background_holds() == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(super::reviewer::BACKGROUND_WORK_WAIT + Duration::from_secs(1)).await;
+    let refusal = request.await.unwrap().unwrap_err().0;
+    assert!(
+        refusal.contains("waiting for background work") && refusal.contains("deadline"),
+        "{refusal}"
+    );
+    assert_eq!(environment.live_holds(), 0);
+    assert!(
+        host.view(&session).is_none(),
+        "a refused admission leaves review available to retry"
+    );
+    host.shutdown().await.unwrap();
 }

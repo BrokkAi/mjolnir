@@ -67,3 +67,50 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
+
+/// Axum's body limit beneath the response map that names it.
+type NamedBodyLimit<F> = tower::layer::util::Stack<
+    DefaultBodyLimit,
+    tower::layer::util::Stack<tower::util::MapResponseLayer<F>, tower::layer::util::Identity>,
+>;
+
+/// A request body limit whose refusal says what the limit is.
+///
+/// Axum refuses an oversized body with a bare plain-text "length limit
+/// exceeded", which leaves a caller to guess how much would have fit (#1556).
+/// The refusal is recognized by its status and plain-text type, so a 413 a
+/// handler writes itself, which is JSON, passes through untouched, and so
+/// does an inner limit's refusal under an outer one.
+pub(super) fn named_body_limit(
+    limit: usize,
+) -> tower::ServiceBuilder<
+    NamedBodyLimit<impl FnOnce(Response<Body>) -> Response<Body> + Clone + Send + Sync + 'static>,
+> {
+    tower::ServiceBuilder::new()
+        .map_response(move |response: Response<Body>| {
+            let plain_text = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/plain"));
+            if response.status() != StatusCode::PAYLOAD_TOO_LARGE || !plain_text {
+                return response;
+            }
+            // Only the body and its type change. Headers the layers inside
+            // added, such as `mj-api-version`, which a client checks before
+            // it reads a refusal, stay.
+            let (mut parts, _) = response.into_parts();
+            let (refusal, body) = ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("the request body is larger than this request accepts ({limit} bytes)"),
+            )
+            .into_response()
+            .into_parts();
+            parts.headers.remove(CONTENT_LENGTH);
+            if let Some(content_type) = refusal.headers.get(CONTENT_TYPE) {
+                parts.headers.insert(CONTENT_TYPE, content_type.clone());
+            }
+            Response::from_parts(parts, body)
+        })
+        .layer(DefaultBodyLimit::max(limit))
+}

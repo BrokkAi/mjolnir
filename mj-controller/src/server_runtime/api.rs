@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,14 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn workspace_admission(
+        &self,
+        _session_id: String,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async { bail!("workspace admission is unavailable") })
+    }
+
     fn request_review(
         &self,
         _session_id: String,
@@ -98,6 +107,17 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { bail!("durable startup delivery is unavailable") })
     }
 
+    /// Hold one peer message until `session_id` finishes starting. The default
+    /// has no startup queue, so a backend that can deliver the message now
+    /// must override this.
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        _session_id: String,
+        _message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("durable startup delivery is unavailable") })
+    }
+
     fn startup_status(&self, _session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(async { Ok(None) })
     }
@@ -124,6 +144,12 @@ pub trait ExportRuntime: Send + Sync {
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
+
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`. Backends without a daemon have none.
+    fn session_is_yolo_target(&self, _session_id: &str) -> bool {
+        false
+    }
 
     /// Whether a close the daemon admitted is still running for this session.
     ///
@@ -248,6 +274,25 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn workspace_admission(
+        &self,
+        session_id: String,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async move {
+            self.session_gate()
+                .enter_foreground(
+                    &session_id,
+                    "workspace file upload",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &cancelled,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .map(crate::recovery_gate::SessionAdmission::Foreground)
+        })
+    }
+
     fn request_review(
         &self,
         session_id: String,
@@ -312,6 +357,16 @@ impl ExportRuntime for RuntimeState {
         })
     }
 
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        session_id: String,
+        message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            RuntimeState::queue_startup_session_message(&self, &session_id, message).await
+        })
+    }
+
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -345,6 +400,11 @@ impl ExportRuntime for RuntimeState {
 
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn session_is_yolo_target(&self, session_id: &str) -> bool {
+        self.session_record(session_id)
+            .is_some_and(|record| record.is_yolo_target(&self.with_config(Clone::clone)))
     }
 
     fn close_is_requested(&self, session_id: &str) -> bool {
@@ -781,26 +841,19 @@ impl ApiBackend {
         })
         .await?;
         let prepared = if let Some((prepared, result)) = stored {
-            if let Some(mut result) = result {
+            if let Some(result) = result {
                 if matches!(
                     prepared.request.action,
                     mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                         | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
                 ) {
-                    blocking("retire legacy wait", {
+                    return blocking("retire legacy wait", {
                         let parent = parent.clone();
                         let id = request.request_id.clone();
                         move || crate::database::retire_legacy_wait(parent, id)
                     })
-                    .await?;
-                    // Retain the compatibility answer for every delivery retry.
-                    result.result.is_error = false;
-                    result.result.message = serde_json::json!({
-                        "status": "reports_arrive_as_messages",
-                        "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION
-                    })
-                    .to_string();
-                    result.reported_finishes.clear();
+                    .await?
+                    .context("legacy wait result disappeared before conversion");
                 }
                 return Ok(result);
             }
@@ -1087,12 +1140,14 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
+                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
+                        yolo,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -1179,6 +1234,9 @@ impl ApiBackend {
                 }))
             }
             SubagentToolAction::ListAgents => {
+                // This request was read from the parent's queue, so the queue
+                // is known here unless the parent's actor went away since; the
+                // listing then shows the mailbox's part, and decides nothing.
                 let inputs = self.subagent_input_progress(parent_session_id).await?;
                 let relations = self
                     .list_subagents(parent_session_id.to_owned())
@@ -1326,7 +1384,7 @@ impl ApiBackend {
                         request_created_at_ms,
                     )
                     .await?;
-                let status = if delivery.via == "mailbox" {
+                let status = if delivery.via == "mailbox" || delivery.via == "queued" {
                     "queued"
                 } else {
                     "submitted"
@@ -1877,14 +1935,8 @@ impl ApiBackend {
                         &progress,
                     ),
                 );
-                let identity = report_identity(
-                    &state,
-                    output.as_deref(),
-                    finished,
-                    inputs.last_failed_delivery(&id),
-                    &progress,
-                    relation.reported_finish.as_ref(),
-                );
+                let identity =
+                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
                 NotificationChildSnapshot {
                     relation,
                     progress,
@@ -1948,8 +2000,15 @@ impl ApiBackend {
         let (inputs, children) = self.notification_children(parent_id).await?;
         // Each child has one of a few ends here: not news (and why), not seen as
         // finished, held for its facts, or its finish is reported (by an earlier
-        // reconcile or by this one).
+        // reconcile or by this one). Whatever its finish, every message to a
+        // child that is news and failed is a notice of its own.
+        //
+        // A finish is decided without the parent's actor: its report waits in
+        // the durable outbox, and a child's park must not wait on the parent
+        // (3c8973b87). Failed deliveries are decided only from a parent queue
+        // that was read: an unread queue holds failures that are not absent.
         let mut ready = Vec::new();
+        let mut failures = Vec::new();
         for child in children {
             let id = child.relation.child_session_id.clone();
             let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
@@ -1963,6 +2022,11 @@ impl ApiBackend {
                 // turns while it waits, and handback refuses until the verdict.
                 ChildDisposition::NotNews("the child awaits its review's verdict")
             } else {
+                if inputs.queue_known() {
+                    for failed in inputs.failed_deliveries(&id) {
+                        failures.push(failed_delivery_notice(&inputs, &child, &failed)?);
+                    }
+                }
                 match &child.identity {
                     None => ChildDisposition::NotFinished,
                     Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
@@ -1976,7 +2040,55 @@ impl ApiBackend {
             };
             reconciled.children.insert(id, disposition);
         }
-        if ready.is_empty() {
+        // A marker stored before #1459 can hold this very finish with a failed
+        // delivery folded into it. Its own report row says so, whatever the
+        // parent's queue shows now.
+        let folded = ready
+            .iter()
+            .filter_map(|child| {
+                let reported = child.relation.reported_finish.clone().filter(|reported| {
+                    matches!(
+                        reported,
+                        mj_core::subagent::SubagentFinishIdentity::Terminal {
+                            detail: Some(_),
+                            ..
+                        }
+                    )
+                })?;
+                Some((
+                    child.relation.child_session_id.clone(),
+                    reported,
+                    child.identity.clone()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !folded.is_empty() {
+            let parent = parent_id.to_owned();
+            let told = blocking("recognize finishes told before #1459", move || {
+                crate::database::finishes_told_by_folded_markers(&parent, folded)
+            })
+            .await?;
+            ready.retain(|child| {
+                let id = &child.relation.child_session_id;
+                let keep = !told.contains(id);
+                if !keep {
+                    reconciled
+                        .children
+                        .insert(id.clone(), ChildDisposition::Reported);
+                }
+                keep
+            });
+        }
+        // Told failures stay listed until they leave the delivery window, so
+        // the store, not this snapshot, says which are news.
+        if !failures.is_empty() {
+            let parent = parent_id.to_owned();
+            failures = blocking("find untold failed child messages", move || {
+                crate::database::untold_failed_deliveries(&parent, failures)
+            })
+            .await?;
+        }
+        if ready.is_empty() && failures.is_empty() {
             return Ok(reconciled);
         }
         let spans = ready
@@ -1988,10 +2100,14 @@ impl ApiBackend {
                 )
             })
             .collect::<Vec<_>>();
-        let reports = blocking("load finished child reports", move || {
-            crate::database::load_child_answer_messages(&spans)
-        })
-        .await?;
+        let reports = if spans.is_empty() {
+            BTreeMap::new()
+        } else {
+            blocking("load finished child reports", move || {
+                crate::database::load_child_answer_messages(&spans)
+            })
+            .await?
+        };
         let mut notifications = Vec::with_capacity(ready.len());
         let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
@@ -2041,7 +2157,7 @@ impl ApiBackend {
         }
         let parent = parent_id.to_owned();
         blocking("enqueue finished child reports", move || {
-            crate::database::enqueue_subagent_reports(parent, notifications)
+            crate::database::enqueue_subagent_reports(parent, notifications, failures)
         })
         .await?;
         for id in enqueued {
@@ -2461,48 +2577,72 @@ pub enum ReportNudge {
     Holding { give_up_at_ms: i64 },
 }
 
-/// What makes a child's report new for its parent: its finish, or a message
-/// delivery to it that failed. The failed delivery keeps the child's own
-/// state (#1381); the parent still hears of it, once per failed request, in
-/// a report that carries the state and the `Message <id> failed` line. A
-/// finish that is still unreported travels in the same report.
+/// The notice that tells a parent one message to its child was not delivered:
+/// the child's own state, whether it can take the message again, what is still
+/// queued for it, and that one failed delivery. What the child's finish says
+/// (its output, facts and failure) is its finish report's to tell.
 ///
-/// Whether a failed delivery is news is decided against what the parent was
-/// last told (`reported`). A finished child's identity carries its state, so
-/// every finish after the failure reaches the parent, including one that
-/// settles without a new turn. A child that is not finished has news only if
-/// this failure was never reported: a message queued after it turns a
-/// finished child "running" with nothing new to say.
-fn report_identity(
-    state: &str,
-    output: Option<&str>,
-    finished: bool,
-    failed_delivery: Option<(&str, &str)>,
-    progress: &ChildProgress,
-    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
-) -> Option<mj_core::subagent::SubagentFinishIdentity> {
-    let Some((request_id, error)) = failed_delivery else {
-        return finished.then(|| finish_identity(state, output, progress));
-    };
-    let detail = format!("Message {request_id}: {error}");
-    if !finished
-        && let Some(
-            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
-                detail: Some(reported_detail),
-                ..
+/// A question to the oracle takes the oracle's report path, which names no
+/// session and points to `ask_oracle`; `send_message` refuses the oracle.
+/// Every worker's oracle path heads a report "answered" only for the state
+/// `completed`, so the notice carries the question's outcome as its state.
+fn failed_delivery_notice(
+    inputs: &subagent_input::InputProgress,
+    child: &NotificationChildSnapshot,
+    failed: &subagent_input::FailedDelivery<'_>,
+) -> Result<crate::database::FailedDeliveryNotice> {
+    let id = &child.relation.child_session_id;
+    if child.relation.kind == mj_core::subagent::SubagentKind::Oracle {
+        let entry = serde_json::json!({
+            "oracle": true,
+            "child_session_id": id,
+            "task_name": child.relation.task_name,
+            "state": "not-delivered",
+            "finished": false,
+            "failure": {
+                "kind": "question_not_delivered",
+                "summary": format!(
+                    "Your question was not delivered: {}. Ask again with ask_oracle.",
+                    failed.error.trim_end_matches('.')
+                ),
             },
-        ) = reported
-        && *reported_detail == detail
-    {
-        return Some(reported.clone());
+            "message_deliveries": [failed.delivery],
+            "output": null,
+            "report_dir": null,
+        });
+        return Ok(crate::database::FailedDeliveryNotice {
+            request_id: failed.request_id.to_owned(),
+            report: serde_json::from_value(entry)?,
+        });
     }
-    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-        state: if finished { state } else { "message-failed" }.to_owned(),
-        detail: Some(detail),
-        last_completed_ordinal: progress.last_completed_ordinal,
+    let mut entry = serde_json::json!({
+        "child_session_id": id,
+        "child_name": live_child_name(child.record.as_ref(), &child.relation.task_name),
+        "task_name": child.relation.task_name,
+        "state": child.state,
+        "finished": false,
+        "message_deliveries": [failed.delivery],
+        "output": null,
+        "report_dir": null,
+    });
+    inputs.annotate_pending(id, &mut entry);
+    mark_parked(&mut entry, child.record.as_ref());
+    mark_promptable(
+        &mut entry,
+        &child.state,
+        &child.progress,
+        child.record.as_ref(),
+    );
+    Ok(crate::database::FailedDeliveryNotice {
+        request_id: failed.request_id.to_owned(),
+        report: serde_json::from_value(entry)?,
     })
 }
 
+/// What makes a child's finish new for its parent. A failed message delivery
+/// is not part of it: it keeps the child's own state (#1381) and is told by a
+/// notice of its own (#1459), so a failure never hides, moves or repeats a
+/// finish.
 fn finish_identity(
     state: &str,
     output: Option<&str>,
@@ -3402,6 +3542,10 @@ async fn write_workspace_file(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), ExportError> {
     use std::sync::atomic::Ordering;
+    let session_admission = exports
+        .workspace_admission(session_id.clone(), cancelled.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let record = exports
         .session_record(&session_id)
         .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
@@ -3416,9 +3560,13 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
-    let mut lease = crate::controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
-        .await
-        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let mut lease = crate::controller::IdleWorkspaceLease::acquire(
+        &session_admission,
+        &handle,
+        record.harness_kind,
+    )
+    .await
+    .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -3442,9 +3590,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -3513,7 +3666,13 @@ fn worker_command_spec(
     let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
-    targets::command_on_locator(&layout.backend, session, argv, purpose)
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
@@ -3585,6 +3744,10 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
+    }
+
+    fn session_is_yolo_target(&self, session_id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.exports.session_is_yolo_target(&session_id)) })
     }
 
     fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {

@@ -176,6 +176,26 @@ Moving work in and out:
   calling session's target temporary directory; listings return structured data.
 - `mj put-file` — upload one file into an idle session's workspace.
 
+Project environments:
+
+- A repository declares its tools with mise: `mise.toml` (`[tools]` such as
+  `node = "24"`, and `[bootstrap.packages]` such as `"apt:libssl-dev" =
+  "latest"` for system packages), or the version files it already has
+  (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, `.ruby-version`,
+  `.go-version`, `.tool-versions`). Container sessions install whatever is
+  missing after the clone, in the background while the agent starts; the agent
+  gets a mailbox message when the install starts (listing the tools) and when
+  it finishes or fails (with the log path). A failure leaves a notice and the
+  session runs anyway.
+- `mj image build` — build an image from the repository's recipe on a
+  container target's host, push it to the registry named by `[images]
+  repository`, and record it for the project, so later sessions start with the
+  tools preinstalled. Run it from inside the repository; `--target`, `--bundle`
+  and `--name` override the defaults, `--print` shows the generated
+  Containerfile only. An unchanged recipe reuses the published image.
+- `mj image status` — whether each recorded project image still matches the
+  current recipe (`current`, `recipe changed`, or `unknown` without a target).
+
 Diagnosis:
 
 - `mj doctor` — platform and configuration prerequisites.

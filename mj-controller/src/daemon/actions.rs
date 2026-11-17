@@ -635,14 +635,28 @@ pub(super) async fn handle_action(
             all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
-            blocking(move || {
-                Controller::load()?.destroy_orphan_worker(
+            let admission = state
+                .recovery_observer
+                .gate
+                .enter_foreground(
                     &session_id,
-                    &target_id,
-                    &confirmation,
-                    all_instances,
+                    "destroy recovered environment",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &AtomicBool::new(false),
                     &ProcessExecutor,
                 )
+                .await?;
+            let owner = crate::worker_lifecycle::WorkerPermit::acquire(&session_id, &admission)?;
+            blocking(move || {
+                owner.scope_blocking(|| {
+                    Controller::load()?.destroy_orphan_worker(
+                        &session_id,
+                        &target_id,
+                        &confirmation,
+                        all_instances,
+                        &ProcessExecutor,
+                    )
+                })
             })
             .await?;
             Ok(DaemonReply::Done)
@@ -700,6 +714,16 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::StoredProjectionTail(
                 tail.map(|(session, _)| Box::new(session)),
             ))
+        }
+        DaemonAction::StoredTranscriptItem {
+            session_id,
+            stable_id,
+        } => {
+            let item = blocking(move || {
+                crate::database::load_materialized_transcript_item(&session_id, &stable_id)
+            })
+            .await?;
+            Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
         }
         DaemonAction::StoredSessionSummary { session_id } => {
             let summary =
@@ -1063,9 +1087,21 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::StartSessionLifecycle(request) => Ok(DaemonReply::LifecycleAccepted(
-            state.start_session_lifecycle(request).await?,
-        )),
+        DaemonAction::StartSessionLifecycle(request) => {
+            match state.start_session_lifecycle(request).await {
+                Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
+                Err(error)
+                    if Refusal::of(&error).is_some_and(|refusal| {
+                        refusal.code() == Some(crate::upgrade::HANDOFF_REFUSAL_CODE)
+                    }) =>
+                {
+                    // Only unaccepted lifecycle admission carries this code.
+                    // The client retries its original request and selections.
+                    Ok(DaemonReply::UpgradePending)
+                }
+                Err(error) => Err(error),
+            }
+        }
         DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
         DaemonAction::SuspendSession {
             session_id,
@@ -1104,8 +1140,10 @@ pub(super) async fn handle_action(
             state.start_create_session(request).await?,
         ))),
         DaemonAction::WaitCreateSession { session_id } => {
-            state.wait_create_session(&session_id).await?;
-            Ok(DaemonReply::Done)
+            match state.wait_create_outcome(&session_id).await {
+                crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
+                crate::daemon::create::CreateWait::Failed(error) => Err(error),
+            }
         }
         DaemonAction::ResumeSession(request) => {
             state.resume_session(request).await?;
@@ -1121,17 +1159,46 @@ pub(super) async fn handle_action(
             session_id,
             cleanup_operation_id,
         } => {
+            let admission = if cleanup_operation_id.is_some() {
+                Some(
+                    state
+                        .recovery_observer
+                        .gate
+                        .enter_foreground(
+                            &session_id,
+                            "retained Move source cleanup",
+                            crate::recovery_gate::LifecycleOrigin::Person,
+                            &AtomicBool::new(false),
+                            &ProcessExecutor,
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let owner = admission
+                .as_ref()
+                .map(|admission| {
+                    crate::worker_lifecycle::WorkerPermit::acquire(&session_id, admission)
+                })
+                .transpose()?;
             let sources = blocking(move || {
-                let _guard =
-                    crate::controller::move_session::MoveMutationGuard::reserve(&session_id)?;
-                if let Some(operation_id) = cleanup_operation_id {
-                    Controller::load()?.cleanup_retained_move_source(
-                        &session_id,
-                        &operation_id,
-                        &ProcessExecutor,
-                    )?;
+                let cleanup = || {
+                    let _guard =
+                        crate::controller::move_session::MoveMutationGuard::reserve(&session_id)?;
+                    if let Some(operation_id) = cleanup_operation_id {
+                        Controller::load()?.cleanup_retained_move_source(
+                            &session_id,
+                            &operation_id,
+                            &ProcessExecutor,
+                        )?;
+                    }
+                    crate::database::retained_move_sources(&session_id)
+                };
+                match owner {
+                    Some(owner) => owner.scope_blocking(cleanup),
+                    None => cleanup(),
                 }
-                crate::database::retained_move_sources(&session_id)
             })
             .await?;
             Ok(DaemonReply::MoveSources(sources))
@@ -1181,6 +1248,10 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            if cancellation.is_cancelled() {
+                return Ok(DaemonReply::Done);
+            }
+            crate::upgrade::gate().begin_draining();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
@@ -1237,6 +1308,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Identity
             | DaemonAction::Configuration
             | DaemonAction::WaitSessionLifecycle(_)
+            // Answered from durable state, so it holds no daemon work and a
+            // handoff does not wait for it; the client asks again.
+            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

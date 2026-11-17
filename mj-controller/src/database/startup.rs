@@ -136,6 +136,31 @@ pub(super) fn enqueue_startup_deliveries_with(
     Ok(inserted)
 }
 
+/// Any phase, including a settled one. Callers that only want unfinished work
+/// use [`next_startup_delivery`].
+pub fn load_startup_delivery(command_id: &str) -> Result<Option<StartupDelivery>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT session_id,command_id,step_json,phase,group_id,accepted_ordinal,error
+             FROM startup_steps WHERE command_id=?1",
+            [command_id],
+            |row| {
+                Ok(StartupDelivery {
+                    session_id: row.get(0)?,
+                    command_id: row.get(1)?,
+                    step_json: row.get(2)?,
+                    phase: row.get(3)?,
+                    group_id: row.get(4)?,
+                    accepted_ordinal: row.get(5)?,
+                    error: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 pub fn prepare_startup_delivery(command_id: &str, step_json: String) -> Result<()> {
     let command_id = command_id.to_owned();
     submit_database_write("prepare startup delivery", move |connection| {
@@ -198,6 +223,28 @@ pub fn set_startup_delivery_phase(
                AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
             [command_id],
         )?;
+        Ok(())
+    })
+}
+
+/// Record that a peer message queued during startup will not be delivered.
+///
+/// [`set_startup_delivery_phase`] deletes a failed ungrouped step that is not
+/// a user prompt. This row has to stay: it is the receipt a retry reads, so
+/// the same request is not sent again after startup has already failed.
+pub fn fail_retained_startup_step(command_id: &str, error: &str) -> Result<()> {
+    let command_id = command_id.to_owned();
+    let error = error.to_owned();
+    submit_database_write("retain failed session message", move |connection| {
+        ensure!(
+            connection.execute(
+                "UPDATE startup_steps SET phase='failed',error=?2
+                 WHERE command_id=?1
+                   AND phase IN ('pending','delivering','accepted','cancelling','rejecting','failed')",
+                params![command_id, error],
+            )? == 1,
+            "startup delivery disappeared"
+        );
         Ok(())
     })
 }

@@ -30,8 +30,9 @@ impl ApiBackend {
                     .exports
                     .session_record(primary_id)
                     .context("primary session disappeared")?;
+                let yolo = self.exports.session_is_yolo_target(primary_id);
                 let choice = primary
-                    .effective_oracle(&self.exports.subagent_config())
+                    .effective_oracle(&self.exports.subagent_config(), yolo)
                     .cloned()
                     .context("The oracle is not configured for this session.")?;
                 if let Some(oracle) = self.live_oracle(primary_id).await? {

@@ -27,10 +27,20 @@ pub trait ReviewEnvironment: Send + Sync {
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     >;
 
+    /// Resolves one model choice, such as the brief writer's, to a profile.
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    >;
+
     fn register_child(
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -55,6 +65,32 @@ pub trait ReviewEnvironment: Send + Sync {
     /// on the Tokio task that owns review state. Newly settled findings and
     /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
+
+    /// Records review state together with the text the host settled roles from.
+    ///
+    /// The host owns that decision, so the store must not re-derive it: a
+    /// reviewer child's handback row can be replaced by a later command, and
+    /// reading it here would pair unrelated text with a settled verdict.
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        let _ = reports;
+        self.save_state(session_id, state)
+    }
+
+    /// Clears an active review and records its per-role output in one durable
+    /// write. The default keeps a test environment that has no store.
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        _resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        self.save_state(session_id, state)
+    }
 
     /// Clears the in-flight flag of every review a restart interrupted, and
     /// reports whose they were. Baselines are deliberately left alone: the
@@ -95,7 +131,7 @@ pub trait ReviewEnvironment: Send + Sync {
 
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
-    /// running (up to `deadline`), then keeps new ones from starting until
+    /// running (bounded by the caller's review preparation deadline), then keeps new ones from starting until
     /// the returned hold is dropped.
     ///
     /// A recovery copy takes the session's lease, which cancels reviewer
@@ -166,6 +202,23 @@ pub(crate) type SharedReviewerRuntime =
     Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;
 
 impl ControllerEnvironment {
+    /// The daemon's reviewer profile service, once it has started.
+    async fn profile_backend(&self) -> Result<Arc<crate::server_runtime::api::ApiBackend>, String> {
+        let runtime = self.runtime().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(backend) = runtime.report_backend.get() {
+                    return backend
+                        .upgrade()
+                        .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| "reviewer profile service did not start".to_owned())?
+    }
+
     async fn runtime(&self) -> Result<Arc<crate::daemon::RuntimeState>, String> {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -281,6 +334,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -289,6 +343,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         let mut launch = controller
             .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
             .map_err(|e| format!("{e:#}"))?;
+        launch.role = role;
         launch.model = reviewer.main.model.clone();
         launch.effort = reviewer.main.effort.clone();
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
@@ -377,20 +432,24 @@ impl ReviewEnvironment for ControllerEnvironment {
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         Box::pin(async move {
-            let runtime = self.runtime().await?;
-            let backend = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    if let Some(backend) = runtime.report_backend.get() {
-                        return backend
-                            .upgrade()
-                            .ok_or_else(|| "reviewer profile service stopped".to_owned());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .map_err(|_| "reviewer profile service did not start".to_owned())??;
+            let backend = self.profile_backend().await?;
             crate::review_selection::resolve(handle, Some(config), backend)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    > {
+        Box::pin(async move {
+            let backend: Arc<dyn crate::server::api::SubagentBackend> =
+                self.profile_backend().await?;
+            crate::review_selection::resolve_choice(&backend, choice)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -405,6 +464,26 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))
     }
 
+    fn save_reviewer_outcome(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        reports: &[crate::database::AcceptedReport],
+    ) -> Result<(), String> {
+        crate::database::save_reviewer_outcome(session_id, state, reports.to_vec())
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn close_review(
+        &self,
+        session_id: &str,
+        state: &TurnReviewState,
+        resolution: crate::database::FinishedReviewResolution,
+    ) -> Result<(), String> {
+        crate::database::close_turn_review_state(session_id, state, resolution)
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
     }
@@ -416,13 +495,13 @@ impl ReviewEnvironment for ControllerEnvironment {
     fn hold_background_work<'a>(
         &'a self,
         session_id: &'a str,
-        deadline: tokio::time::Instant,
+        _deadline: tokio::time::Instant,
     ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
         Box::pin(async move {
             let gate = self.background.as_ref()?;
-            // A deadline that passes leaves the review to try anyway; the
-            // running work's own refusal then says what held the session.
-            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id, deadline).await);
+            // The caller bounds this wait by its preparation deadline. On
+            // expiry it drops the pending reservation and reports a refusal.
+            let hold: BackgroundHold = Box::new(gate.reserve_when_idle(session_id).await);
             Some(hold)
         })
     }

@@ -3,6 +3,7 @@ use super::*;
 impl Controller {
     pub(super) async fn checkpoint_session_controlled_with_manager(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -10,7 +11,7 @@ impl Controller {
         let previous = self.state.sessions.get(session_id).cloned();
         let operation_id = new_command_id("checkpoint-operation")?;
         let result = self
-            .checkpoint_session_owned(session_id, executor, manager, &operation_id)
+            .checkpoint_session_owned(admission, session_id, executor, manager, &operation_id)
             .await;
         if let Err(error) = &result
             && let Some(record) = self.state.sessions.get_mut(session_id)
@@ -37,6 +38,7 @@ impl Controller {
 
     async fn checkpoint_session_owned(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -67,6 +69,7 @@ impl Controller {
 
         match self
             .checkpoint_session_latched_for_operation(
+                admission,
                 session_id,
                 executor,
                 manager,
@@ -157,16 +160,18 @@ impl Controller {
     /// allowing the relay to garbage-collect through its event frontier.
     pub async fn create_recovery_checkpoint_managed_controlled(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         manager: &SessionManagerControl,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<CheckpointArtifact> {
-        self.create_recovery_checkpoint_with_manager(session_id, Some(manager), executor)
+        self.create_recovery_checkpoint_with_manager(admission, session_id, Some(manager), executor)
             .await
     }
 
     pub(super) async fn create_recovery_checkpoint_with_manager(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         manager: Option<&SessionManagerControl>,
         executor: &(impl CommandExecutor + Sync),
@@ -183,6 +188,7 @@ impl Controller {
         let previous_checkpoint = observed.checkpoint.clone();
         let latched = self
             .checkpoint_session_latched_with_recovery_stage(
+                admission,
                 session_id,
                 executor,
                 manager,

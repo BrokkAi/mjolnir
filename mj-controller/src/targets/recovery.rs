@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Clone/bootstrap commands for AWS once the exact instance ID and address are known.
 pub fn provision_on_locator_plan(
@@ -17,13 +18,13 @@ pub fn provision_on_locator_plan(
         bail!("post-launch provisioning is only required for AWS");
     };
     let mut commands = vec![
-        ssh_command(ssh, ["mkdir", "-p", workspace])
+        ssh_command(SshTrafficClass::Control, ssh, ["mkdir", "-p", workspace])
             .purpose("create EC2 session workspace")
             .stage(ProvisionStage::Cloning),
     ];
     commands.extend(install_git_plan(ExecutionBoundary::Ssh(ssh)).commands);
     commands.extend(clone_commands(bundle, workspace, github_token, |args| {
-        ssh_command_owned(ssh, args)
+        ssh_command_owned(SshTrafficClass::Bulk, ssh, args)
     }));
     Ok(CommandPlan {
         description: format!("initialize EC2 session {session_id}"),
@@ -53,7 +54,7 @@ pub(crate) fn recover_checkout_plan(
     Ok(CommandPlan {
         description: "reconstruct missing checkout in staging".into(),
         commands: clone_commands(&missing, workspace, github_token, |args| {
-            locator_command(locator, args)
+            locator_command(SshTrafficClass::Bulk, locator, args)
         }),
     })
 }
@@ -63,6 +64,7 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
     let root = worker_root(locator, session_id)?;
     let binary = format!("{root}/hel");
     let command = locator_command(
+        SshTrafficClass::Control,
         locator,
         vec![
             binary,
@@ -110,9 +112,9 @@ pub fn target_recovery_plan(
             session_id,
         )?;
         return Ok(local.map(|plan| TargetRecoveryPlan {
-            exists: command_over_ssh(plan.exists, ssh),
-            inspect: command_over_ssh(plan.inspect, ssh),
-            start: command_over_ssh(plan.start, ssh),
+            exists: command_over_ssh(SshTrafficClass::Control, plan.exists, ssh),
+            inspect: command_over_ssh(SshTrafficClass::Control, plan.inspect, ssh),
+            start: command_over_ssh(SshTrafficClass::Control, plan.start, ssh),
             session_id: plan.session_id,
         }));
     }
@@ -145,11 +147,11 @@ pub fn target_recovery_plan(
                 .purpose("start stopped Mjolnir Docker session container"),
         ),
         TargetLocator::SshPodman { ssh, container_id, .. } => (
-            ssh_command(ssh, ["podman", "container", "exists", container_id])
+            ssh_command(SshTrafficClass::Control, ssh, ["podman", "container", "exists", container_id])
                 .purpose("check for remote Mjolnir session container"),
-            ssh_command(ssh, ["podman", "container", "inspect", container_id])
+            ssh_command(SshTrafficClass::Control, ssh, ["podman", "container", "inspect", container_id])
                 .purpose("inspect remote Mjolnir session container"),
-            ssh_command(ssh, ["podman", "start", container_id])
+            ssh_command(SshTrafficClass::Control, ssh, ["podman", "start", container_id])
                 .purpose("start stopped remote Mjolnir session container"),
         ),
         // A retained sandbox stops when the host reboots or the unit dies, and
@@ -158,11 +160,11 @@ pub fn target_recovery_plan(
         TargetLocator::SshNitro {
             ssh, container_id, ..
         } => (
-            ssh_engine_command(ssh, MICROVM_ENGINE, ["container", "exists", container_id])
+            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["container", "exists", container_id])
                 .purpose("check for remote Mjolnir session sandbox"),
-            ssh_engine_command(ssh, MICROVM_ENGINE, ["container", "inspect", container_id])
+            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["container", "inspect", container_id])
                 .purpose("inspect remote Mjolnir session sandbox"),
-            ssh_engine_command(ssh, MICROVM_ENGINE, ["start", container_id])
+            ssh_engine_command(SshTrafficClass::Control, ssh, MICROVM_ENGINE, ["start", container_id])
                 .purpose("start stopped remote Mjolnir session sandbox"),
         ),
         TargetLocator::LocalBare { .. }

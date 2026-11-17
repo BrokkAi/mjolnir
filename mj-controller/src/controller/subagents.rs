@@ -1,5 +1,6 @@
 //! Registration and ownership rules for child sessions on a parent's target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -89,6 +90,7 @@ fn prepare_report_dir(
     exclude_in: Option<&str>,
 ) -> Result<String> {
     let command = mj_core::targets::command_on_locator(
+        SshTrafficClass::Control,
         backend,
         session_id,
         prepare_report_dir_argv(directory, exclude_in),
@@ -164,6 +166,7 @@ impl SubagentReportCleanup {
         ];
         argv.extend(self.child_ids.iter().cloned());
         let command = mj_core::targets::command_on_locator(
+            SshTrafficClass::Control,
             &self.backend,
             &self.session_id,
             argv,
@@ -388,8 +391,11 @@ impl Controller {
             project_directory: parent.project_directory.clone(),
             managed_worktree: None,
             review: None,
-            // A child works in its parent's tree and gets what its parent got.
-            no_project_memory: parent.no_project_memory,
+            // A child works in its parent's tree and gets what its parent got,
+            // except a reviewer: it reads the change it is asked about, so it
+            // carries no project memory, which was 99.96% of what each
+            // reviewer sent to its target (two copies of the memory, #1580).
+            no_project_memory: parent.no_project_memory || reviewer,
             no_github_events: parent.no_github_events,
             no_github_credentials: parent.no_github_credentials
                 || request.no_github_credentials

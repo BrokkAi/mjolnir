@@ -1,0 +1,46 @@
+[
+ {
+  "intro": "22207e44f0c4fd28f29b49f236f9c5ecedc08981",
+  "base": "646ccff2a1d97fcf7020ca06a3f33a394e5e5dce",
+  "findings": [
+   {
+    "id": "f-7746b61e",
+    "text": "- [P2] Bind the allocated receiver for JavaScript constructor functions \u2014 crates/bifrost-analysis/src/analyzer/semantic/oracle/call.rs:487-488. JavaScript supports `function Item(v) { this.value = v; }` followed by `new Item(x)`, but function declarations are inventoried as `ProcedureKind::Function` even when invoked with `new`. This check now excludes that candidate from the allocation binding that previously supplied its `this`, so receiver-based effects such as the assignment to `this.value` cannot propagate to the constructed object."
+   }
+  ]
+ },
+ {
+  "intro": "6f9a2656f3a72bb23b3549c3dff738d78b19110b",
+  "base": "5cfbe06f0104331f1899b2a8a666865eb432d62f",
+  "findings": [
+   {
+    "id": "f-00d64097",
+    "text": "- [P1] Avoid retaining every resolved import set at once \u2014 src/analyzer/capabilities.rs:70-73. In a project where many files wildcard-import a module with many declarations, this collects a full cloned `CodeUnit` set for every importer before constructing the reverse index, so peak memory grows with the number of importers times the number of declarations. The previous reverse lookup processed candidates one at a time, and the weighted forward cache cannot limit this temporary vector; a single reverse lookup can therefore exhaust memory on a large repository even though the resulting index contains only one file edge per importer."
+   },
+   {
+    "id": "f-898d68b6",
+    "text": "- [P2] Avoid retaining every resolved import set during index construction \u2014 src/analyzer/capabilities.rs:71-74. On a large repository, this collects the resolved `CodeUnit` sets for every file before constructing any reverse edges, so peak memory scales with the total number of imported declarations rather than the much smaller number of file-to-file edges. This is especially costly for Go packages with many declarations imported by many files, and can exhaust memory even when the final reverse index is modest; the previous scan held only one candidate's resolved set at a time."
+   },
+   {
+    "id": "f-7cc662ec",
+    "text": "- [P1] Avoid resolving every Go import with a full file scan \u2014 src/analyzer/go_analyzer.rs:230-232. On a large Go repository, the first reverse lookup now calls `imported_code_units_of` for every file, and that resolver scans all analyzed files for each import. This makes even a single lookup quadratic in repository size, whereas the previous lookup first filtered candidates by the requested target and only performed that expensive resolution for matching importers. The new index can therefore make the cold lookup substantially slower or cause timeouts on the large repositories this change targets."
+   },
+   {
+    "id": "f-f7e82f51",
+    "text": "- [P1] Avoid resolving every Go file on the first reverse lookup \u2014 src/analyzer/go_analyzer.rs:230-232. In a large Go repository, this now calls `imported_code_units_of` for every analyzed file, and that method scans `all_files` for each import. The previous reverse lookup first checked each import against the requested target and only performed that repository-wide scan for matching candidates. Consequently, even a single reverse lookup now incurs quadratic work in common projects with imports, which can make the operation substantially slower or time out."
+   },
+   {
+    "id": "f-6d577554",
+    "text": "- [P2] Avoid retaining all resolved declarations while building the index \u2014 src/analyzer/capabilities.rs:71-74. When many files import packages with many declarations, this vector holds a full `BTreeSet<CodeUnit>` for every importer at once, including duplicate copies of the same declarations. Its peak size is unbounded by `memo_cache_budget_bytes` and can greatly exceed both the final file-level reverse index and the previously bounded caches, potentially exhausting memory during the first reverse lookup."
+   },
+   {
+    "id": "f-62870af8",
+    "text": "- [P2] Avoid retaining every resolved declaration while building the index \u2014 src/analyzer/capabilities.rs:69-72. On repositories with many wildcard or package imports, each forward result can contain every declaration in the imported files, and this collection holds all of those sets simultaneously before reducing them to file-level edges. This bypasses the configured memo-cache budget and can make a single reverse lookup consume orders of magnitude more memory than the resulting index, potentially exhausting memory on large projects; the previous lookup processed one candidate at a time."
+   },
+   {
+    "id": "f-53c48270",
+    "text": "- [P2] Preserve cheap filtering for the first JavaScript reverse lookup \u2014 src/analyzer/javascript_analyzer.rs:226-229. When only one or a few targets are queried, the first lookup now fully resolves imports and fetches declarations for every JavaScript file in the repository. Previously `could_import_file` filtered candidates by the requested target before performing that resolution, so large repositories with sparse references can spend substantially more time and memory on a single lookup, including the single-seed CLI use case."
+   }
+  ]
+ }
+]

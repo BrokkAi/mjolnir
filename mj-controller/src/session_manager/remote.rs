@@ -117,12 +117,21 @@ pub(super) async fn run_remote_session_actor(
                 command_id,
                 command,
                 reply,
-            } => RemoteSessionRequest::Submit {
-                session_id: session_id.clone(),
-                command_id,
-                command,
-                reply,
-            },
+            } => {
+                let (remote_reply, result) = oneshot::channel();
+                tokio::spawn(async move {
+                    let answer = result
+                        .await
+                        .unwrap_or_else(|_| Err("remote submit receiver stopped".into()));
+                    let _ = reply.send(answer.map_err(SubmitFailure::from));
+                });
+                RemoteSessionRequest::Submit {
+                    session_id: session_id.clone(),
+                    command_id,
+                    command,
+                    reply: remote_reply,
+                }
+            }
             ActorCommand::Sync { reply } => RemoteSessionRequest::Sync {
                 session_id: session_id.clone(),
                 reply,
@@ -182,8 +191,12 @@ pub(super) async fn run_remote_session_actor(
                 RemoteSessionRequest::Submit { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
-                RemoteSessionRequest::Sync { reply, .. }
-                | RemoteSessionRequest::RespondElicitation { reply, .. }
+                RemoteSessionRequest::Sync { reply, .. } => {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "controller daemon request bridge stopped"
+                    )));
+                }
+                RemoteSessionRequest::RespondElicitation { reply, .. }
                 | RemoteSessionRequest::StopBackgroundTask { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
@@ -238,6 +251,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
     let (updates_tx, updates_rx) = coalesced_update_channel();
+    let session_gate = updates_tx.session_gate.clone();
     let (published_tx, mut published_rx) = mpsc::unbounded_channel();
     let (requests_tx, requests_rx) = mpsc::channel(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -322,6 +336,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     Ok(RemoteSessionManagerChannels {
         targets: targets_tx,
         control: SessionManagerControl {
+            session_gate,
             harness_failure: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,

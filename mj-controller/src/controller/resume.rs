@@ -1,5 +1,6 @@
 //! Resuming a stopped session onto a profile and target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -819,13 +820,14 @@ impl Controller {
                         if let Some(command) =
                             targets::clear_relay_state_plan(&backend, session_id)?
                         {
-                            execute_checked(syncing, command)?;
+                            command.execute(syncing)?;
                         }
                         // Both lanes below write into the worker root, so it
                         // exists first.
                         execute_checked(
                             syncing,
                             targets::command_on_locator(
+                                SshTrafficClass::Control,
                                 &backend,
                                 session_id,
                                 vec!["mkdir".into(), "-p".into(), worker_root.clone()],
@@ -849,7 +851,7 @@ impl Controller {
                                 previous_profile_root,
                             )?
                         };
-                        execute_checked(syncing, reset)?;
+                        reset.execute(syncing)?;
                     }
                 }
             }
@@ -1382,7 +1384,6 @@ fn fetch_source_commit(
 ) -> Result<CommandOutput> {
     let mut arguments = Vec::new();
     let mut token_auth = false;
-    let mut ssh_transport = false;
     let source = if let Some(source) = accepted_source {
         source.fetch_url.clone()
     } else if let Some(local) = &configured.local {
@@ -1402,16 +1403,12 @@ fn fetch_source_commit(
                 github.owner, github.repository
             )
         } else {
-            ssh_transport = true;
             format!("git@github.com:{}/{}.git", github.owner, github.repository)
         }
     };
-    if accepted_source.is_some() {
-        if github_token.is_some() && is_github_https_url(&source) {
-            token_auth = true;
-            arguments.extend(mj_core::remote_git::github_token_credential_config());
-        }
-        ssh_transport = source.starts_with("git@") || source.starts_with("ssh://");
+    if accepted_source.is_some() && github_token.is_some() && is_github_https_url(&source) {
+        token_auth = true;
+        arguments.extend(mj_core::remote_git::github_token_credential_config());
     }
     arguments.extend([
         "-C".to_owned(),
@@ -1424,22 +1421,10 @@ fn fetch_source_commit(
         commit.to_owned(),
     ]);
     let mut command = CommandSpec::new("git", arguments).purpose("check checkpoint base commit");
-    command
-        .env
-        .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    command
-        .env
-        .insert("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned());
+    mj_core::local_git::unattended_git_environment(&mut command);
     if token_auth {
         let token = github_token.expect("token authentication requires a GitHub token");
         command.env.insert("GH_TOKEN".to_owned(), token.to_owned());
-    }
-    if ssh_transport {
-        command.env.insert(
-            "GIT_SSH_COMMAND".to_owned(),
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-                .to_owned(),
-        );
     }
     executor.execute(&command)
 }
@@ -1885,7 +1870,8 @@ impl Controller {
         // requests, including probing the platform of an existing SSH host. A resume
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
-        super::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        let worker_target = super::backend::session_target(&self.config, &previous.bundle_id, target_id, executor)?;
+        super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         let native_continuity = self.config.native_continuity(
             archive_manifest.session.harness_kind,
             &archive_manifest.session.profile_id,
@@ -2709,6 +2695,14 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation.is_cancelled() || self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if self.cancellation.is_cancelled() {
             bail!("operation cancelled while provisioning destination");
@@ -2741,6 +2735,25 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecu
             bail!("operation cancelled while provisioning destination");
         }
         self.inner.execute_with_stdin(command, input)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        if self.cancellation.is_cancelled() {
+            bail!("operation cancelled while provisioning destination");
+        }
+        self.inner
+            .execute_with_stdin_without_deadline(command, input)
     }
 }
 

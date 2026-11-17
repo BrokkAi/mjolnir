@@ -1394,7 +1394,7 @@ pub(crate) fn confirmation_body(
         } => {
             let mut lines = vec![
                 Line::raw(format!(
-                    "This installs the pinned mbx release on {host} and runs `mbx setup --yes`."
+                    "This installs the pinned mbx release (a build cache shared by your sessions) on {host} and runs `mbx setup --yes`."
                 )),
                 Line::raw(""),
                 Line::raw(format!("It edits `{profile_file}` to add mbx to PATH.")),

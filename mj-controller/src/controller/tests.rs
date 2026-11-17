@@ -1,3 +1,4 @@
+use mj_core::targets::SshTrafficClass;
 use std::path::Path;
 
 use crate::targets::ProcessExecutor;
@@ -89,6 +90,29 @@ impl CompletionExecutor {
 }
 
 impl CommandExecutor for CompletionExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         assert_eq!(command.program, "ssh");
         let script = command.args.last().unwrap().clone();
@@ -110,6 +134,29 @@ impl CommandExecutor for CompletionExecutor {
 struct UnusedExecutor;
 
 impl CommandExecutor for UnusedExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         panic!("a local completion ran {}", command.program);
     }
@@ -331,6 +378,29 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
         home: &'static str,
     }
     impl CommandExecutor for HomeExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             assert_eq!(command.program, "ssh");
             let script = command.args.last().unwrap();
@@ -2435,6 +2505,29 @@ struct DurableTargetExecutor {
 }
 
 impl CommandExecutor for DurableTargetExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
         self.commands.lock().unwrap().push(command.clone());
         Ok(targets::CommandOutput {
@@ -2506,6 +2599,7 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
         .expect("a shared-connection session");
     assert!(
         shared
+            .target
             .ssh_args
             .contains(&"ServerAliveInterval=15".to_owned())
     );
@@ -2611,6 +2705,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     assert_eq!(backend, original_backend);
     // The branch-export worker command uses the same resolved destination as checkpoint/bundle export.
     let command = targets::command_on_locator(
+        SshTrafficClass::Control,
         &backend,
         &id,
         vec!["hel".into(), "worker".into(), "push-branch".into()],
@@ -2641,9 +2736,14 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             .as_ref(),
         Some(&runtime)
     );
-    controller
-        .force_destroy_session(&child.child_session_id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&child.child_session_id, || {
+        controller.force_destroy_session(
+            &child.child_session_id,
+            &executor,
+            BranchDisposition::Keep,
+        )
+    })
+    .unwrap();
     assert!(controller.state.sessions.contains_key(&id));
     let commands = executor.commands.lock().unwrap();
     assert!(
@@ -2656,16 +2756,21 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     executor
         .fail
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(controller.stop_subagent(&id, &executor).is_err());
+    assert!(
+        crate::controller::test_support::worker_test_scope(&id, || controller
+            .stop_subagent(&id, &executor))
+        .is_err()
+    );
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
     assert!(saved.sessions[&id].target.is_some());
     executor
         .fail
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    controller
-        .force_destroy_session(&id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&id, || {
+        controller.force_destroy_session(&id, &executor, BranchDisposition::Keep)
+    })
+    .unwrap();
     assert!(
         !crate::database::load_state()
             .unwrap()
@@ -2769,9 +2874,9 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert!(refusal.message().contains(&session.id));
     assert!(refusal.message().contains("podman"));
     assert!(
-        controller
-            .stop_subagent(&session.id, &UnusedExecutor)
-            .is_err()
+        crate::controller::test_support::worker_test_scope(&session.id, || controller
+            .stop_subagent(&session.id, &UnusedExecutor))
+        .is_err()
     );
     assert!(
         crate::database::load_state()
@@ -3083,6 +3188,12 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         "registration is idempotent"
     );
     assert_eq!(child.kind, mj_core::subagent::SubagentKind::Reviewer);
+    // A reviewer carries no project memory even though its parent does: the
+    // staged profile then holds none (#1580, memory was 99.96% of its upload).
+    assert!(
+        !controller.state.sessions[parent_id].no_project_memory
+            && controller.state.sessions[&child.child_session_id].no_project_memory
+    );
     assert_eq!(child.profile_id, "resolved-reviewer");
     assert_eq!(child.model.as_deref(), Some("resolved-model"));
     assert!(child.handback_tool);

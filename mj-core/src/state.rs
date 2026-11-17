@@ -1670,7 +1670,7 @@ pub struct SessionRecord {
     #[serde(default = "default_oracle_enabled")]
     pub oracle: bool,
     /// This session's own oracle model (`--subagent-oracle`), overriding
-    /// `[subagents.oracle]`.
+    /// `[subagents.oracle]` or `[subagents.yolo.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<Box<crate::config::SubagentChoice>>,
     /// Turn review chosen for this session when it was created. `None`
@@ -2056,7 +2056,7 @@ fn default_oracle_enabled() -> bool {
 
 /// What a session's creator is told when an explicit request for the oracle
 /// could not be honored.
-pub const ORACLE_UNAVAILABLE_NOTICE: &str = "Oracle is off for this session: no oracle model is configured; set [subagents.oracle] or pass --subagent-oracle.";
+pub const ORACLE_UNAVAILABLE_NOTICE: &str = "Oracle is off for this session: no oracle model is configured; set [subagents.oracle], or [subagents.yolo.oracle] for a YOLO target, or pass --subagent-oracle.";
 
 /// How a failed close's reason begins in [`SessionRecord::last_error`].
 ///
@@ -2124,18 +2124,25 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// Whether this session's recorded target runs with `permissions = "yolo"`.
+    pub fn is_yolo_target(&self, config: &Config) -> bool {
+        self.target_runtime_settings(config)
+            .is_ok_and(|settings| settings.is_yolo())
+    }
+
     /// The oracle this session may consult: none when its Oracle choice is
-    /// off, else its own override or the global `[subagents.oracle]`.
+    /// off, else its own override or the global oracle for its target mode.
     pub fn effective_oracle<'a>(
         &'a self,
         subagents: &'a crate::config::SubagentConfig,
+        yolo: bool,
     ) -> Option<&'a crate::config::SubagentChoice> {
         if !self.oracle {
             return None;
         }
         self.oracle_choice
             .as_deref()
-            .or(subagents.oracle.as_ref())
+            .or_else(|| subagents.choice_for(crate::subagent::SubagentTaskType::Oracle, yolo))
             .filter(|choice| !choice.model.trim().is_empty())
     }
     /// A completed close has no failure left to report. A stopped record

@@ -1,0 +1,44 @@
+{
+  "commits": [
+    {
+      "intro": "c2e0ac626414a90c7907277d9e602abcc45eedd9",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-52a5cf4a",
+            "f-0ead5452",
+            "f-818bcfbe",
+            "f-84b00748",
+            "f-47ed1739",
+            "f-f6b62b6d"
+          ],
+          "summary": "The restored C# receiver regression contains an extra closing brace and therefore tests malformed source.",
+          "verdict": "confirmed",
+          "severity": "low",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_type/csharp.rs:773 declares file-scoped namespace Demo; Parent closes at :777 and the added brace at :778 has no opening counterpart. The malformed string is passed to AnalyzerFixture and parse_tree_for_language at :789-792, then used for this/base assertions at :794-827, without checking for syntax errors. The base lacks the extra brace. This concretely damages the intended valid-source regression; a particular parser-dependent assertion failure is not established. Later fix ed0d32a1839ea511489b54f5434477ed1516fae6 removes exactly this brace.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "a3b59a918343940f3b010783d30146b2766c04f3",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-99cb1913",
+            "f-e52d9513",
+            "f-b5f71091",
+            "f-9c0a449a"
+          ],
+          "summary": "Complete-empty Java supertype answers lose their implicit nominal fallback during hierarchy traversal.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:4015-4084 registers no-gap unqualified Java type references as implicit fallbacks, choosing an available durable java.lang owner at :4041-4056. This diff changes that registration from a provider claim to ImplicitFallback. crates/bifrost-analysis/src/analyzer/resolution/selected_context.rs:1567-1569 now hides these claims from the provider getter. crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:29235-29240 uses only that getter for external hierarchy inventory, so a complete-empty selected supertype answer bypasses the owner and falls through to :29303-29326, returning empty targets as Complete. Hierarchy construction consumes those targets at :31545-31580, losing inherited members/subtype edges; without indexed inventory it also loses the incomplete-inventory boundary normally added at :29280-29291. Type projection handles the same fallback correctly at :38750-38762, but hierarchy lookup has no corresponding check. Later fix 8ca7eb63803b39dd44a3774628b2f24a194351b7 shares the complete-empty fallback condition with hierarchy traversal while retaining source-declaration precedence.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

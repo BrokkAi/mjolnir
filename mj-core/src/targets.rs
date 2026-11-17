@@ -91,7 +91,7 @@ impl ProvisionStage {
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
-            Self::WaitingForWorkerStore => "Waiting for the worker binary store".into(),
+            Self::WaitingForWorkerStore => "Waiting for shared target content".into(),
             Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
             Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),
@@ -152,6 +152,60 @@ impl std::fmt::Debug for SensitiveCommandInput {
         formatter.write_str("<redacted>")
     }
 }
+
+type StreamReplyObserver = dyn Fn(Option<&[u8]>) + Send + Sync;
+
+/// A streamed command's stdout replies, after SSH framing has been removed.
+/// End of an accepted stream is reported as `None` so input awaiting a reply
+/// can finish even when the remote command exits early.
+#[derive(Clone)]
+struct StreamReply(Arc<StreamReplyObserver>);
+
+impl PartialEq for StreamReply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StreamReply {}
+
+impl std::fmt::Debug for StreamReply {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<stream reply observer>")
+    }
+}
+
+#[derive(Clone)]
+struct CommandObserver(Arc<dyn Fn(CommandActivity) + Send + Sync>);
+
+impl CommandObserver {
+    fn report(&self, activity: CommandActivity) {
+        (self.0)(activity);
+    }
+}
+
+/// Events from the process executor during one streamed command.
+pub enum CommandActivity {
+    StdinStarted,
+    StdinBytes(usize),
+    StdinFinished,
+    StageStarted(ProvisionStage),
+    StageFinished(ProvisionStage),
+}
+
+impl std::fmt::Debug for CommandObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CommandObserver")
+    }
+}
+
+impl PartialEq for CommandObserver {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CommandObserver {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -219,7 +273,7 @@ pub struct CommandSpec {
     /// [`CommandSpec::open_ssh_session`]). The arguments stored here never
     /// contain them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_session: Option<SshTarget>,
+    pub ssh_session: Option<SshSessionRequest>,
     /// The session is a fail-fast probe: it is counted on a shard but never
     /// opens a master (see [`CommandSpec::ssh_probe_session`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -234,6 +288,10 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
+    #[serde(skip)]
+    stream_reply: Option<StreamReply>,
+    #[serde(skip)]
+    observer: Option<CommandObserver>,
 }
 
 impl CommandSpec {
@@ -263,7 +321,16 @@ impl CommandSpec {
             ssh_session_probe: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
+            stream_reply: None,
+            observer: None,
         }
+    }
+
+    /// Observe streamed stdin and any stages reported while opening SSH.
+    /// Callbacks may run on the writer thread and are local to this execution.
+    pub fn observe(mut self, report: impl Fn(CommandActivity) + Send + Sync + 'static) -> Self {
+        self.observer = Some(CommandObserver(Arc::new(report)));
+        self
     }
 
     /// Start the program with a specific `argv[0]`.
@@ -274,6 +341,14 @@ impl CommandSpec {
     #[cfg(unix)]
     pub fn arg0(mut self, arg0: impl Into<String>) -> Self {
         self.arg0 = Some(arg0.into());
+        self
+    }
+
+    pub fn with_stream_reply(
+        mut self,
+        observer: impl Fn(Option<&[u8]>) + Send + Sync + 'static,
+    ) -> Self {
+        self.stream_reply = Some(StreamReply(Arc::new(observer)));
         self
     }
 
@@ -311,9 +386,12 @@ impl CommandSpec {
     /// one session on `ssh`'s shared connection. It also opens a connection
     /// to that destination when sharing is off, so a server's refusal of it
     /// is retried the same way.
-    pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
+    pub fn ssh_session(mut self, ssh: &SshTarget, class: SshTrafficClass) -> Self {
         self.ssh_destination = Some(ssh.destination.clone());
-        self.ssh_session = Some(ssh.clone());
+        self.ssh_session = Some(SshSessionRequest {
+            target: ssh.clone(),
+            class,
+        });
         self
     }
 
@@ -324,7 +402,7 @@ impl CommandSpec {
     /// probe still uses one of the master's sessions while it runs, so the
     /// executor counts it in the session ledger like any other session.
     pub fn ssh_probe_session(mut self, ssh: &SshTarget) -> Self {
-        self = self.ssh_session(ssh);
+        self = self.ssh_session(ssh, SshTrafficClass::Control);
         self.ssh_session_probe = true;
         self
     }
@@ -366,12 +444,13 @@ impl CommandSpec {
         walk: &mut SshWalk,
         marker: bool,
     ) -> Result<SessionCommand<'_>> {
-        let Some(ssh) = &self.ssh_session else {
+        let Some(request) = &self.ssh_session else {
             return Ok(SessionCommand {
                 command: std::borrow::Cow::Borrowed(self),
                 lease: None,
             });
         };
+        let ssh = &request.target;
         let _waiting = BlockingOperation::start(
             &format!(
                 "lease SSH connection to {} for {}",
@@ -382,7 +461,11 @@ impl CommandSpec {
         let lease = if self.ssh_session_probe {
             SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, executor, walk)?
+            let reporting = SshStageReporter {
+                executor,
+                observer: self.observer.as_ref(),
+            };
+            SshSessions::lease(ssh, request.class, &reporting, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
@@ -520,7 +603,8 @@ esac
                 destination: "fake-host".to_owned(),
                 ssh_args: Vec::new(),
             };
-            let mut command = ssh_command(&ssh, remote).purpose("run through the fake ssh");
+            let mut command = ssh_command(SshTrafficClass::Control, &ssh, remote)
+                .purpose("run through the fake ssh");
             let path = std::env::var("PATH").unwrap_or_default();
             command.env.insert(
                 "PATH".to_owned(),
@@ -884,6 +968,14 @@ pub trait CommandExecutor {
     fn begin_resumable_work(&self) -> Result<()> {
         Ok(())
     }
+    /// Release daemon admission, if this operation holds it and the next
+    /// daemon restarts the operation from a durable record. Returns whether
+    /// admission was released; the caller then owes
+    /// [`Self::end_resumable_work`]. For a wait that can take minutes, such as
+    /// shared target content, so a handoff does not wait for it.
+    fn yield_admission_if_resumable(&self) -> bool {
+        false
+    }
     /// The daemon is yielding a durable operation to its replacement.
     fn shutdown_interrupted(&self) -> bool {
         false
@@ -899,6 +991,186 @@ pub trait CommandExecutor {
         _input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
         bail!("this command executor does not support streamed stdin")
+    }
+
+    /// Run `command` with this executor's cancellation but without its
+    /// deadline, for work a timeout named for another step must not cover.
+    /// An executor without a deadline runs it as `execute` does; one with a
+    /// deadline drops it and keeps its cancellation. Required, so every
+    /// executor states which it is.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput>;
+
+    /// [`Self::execute_without_deadline`] for a command that reads `input`.
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput>;
+
+    /// [`Self::cancellation_requested`] as the no-deadline methods see it: a
+    /// deadline that has passed is not a cancellation.
+    fn cancellation_requested_without_deadline(&self) -> bool;
+
+    /// Exclude this scope's wall time from the operation deadline. Required:
+    /// wrappers forward to their owner; executors with per-command deadlines
+    /// or no deadline return an empty guard. Cancellation remains active.
+    fn pause_deadline(&self) -> DeadlinePause;
+}
+
+/// Forward SSH admission stages through the command's owner while the process
+/// executor retains cancellation and executes the actual master commands.
+struct SshStageReporter<'a> {
+    executor: &'a dyn CommandExecutor,
+    observer: Option<&'a CommandObserver>,
+}
+
+impl CommandExecutor for SshStageReporter<'_> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute(command)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        if let Some(observer) = self.observer {
+            observer.report(CommandActivity::StageStarted(stage));
+        } else {
+            self.executor.stage_started(stage);
+        }
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        if let Some(observer) = self.observer {
+            observer.report(CommandActivity::StageFinished(stage));
+        } else {
+            self.executor.stage_finished(stage);
+        }
+    }
+}
+
+/// An executor whose commands run without the wrapped executor's deadline but
+/// still stop when its supervisor cancels. Staging work that precedes a
+/// timeout-bound command runs on this, so the timeout covers only the command
+/// it names. Its lifetime also pauses that deadline, including gate waits and
+/// other staging work that runs no command.
+pub struct WithoutDeadline<'a, E: ?Sized> {
+    executor: &'a E,
+    _pause: DeadlinePause,
+}
+
+impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self {
+            executor,
+            _pause: executor.pause_deadline(),
+        }
+    }
+}
+
+impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_cleanup(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.executor.execute_cleanup_with_timeout(command, timeout)
+    }
+
+    // The wrapper's whole purpose is to ignore the wrapped deadline, so a
+    // passed deadline must not read as a cancellation here either.
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        self.executor.stage_started(stage);
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        self.executor.stage_finished(stage);
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.executor.notify_notice(notice);
+    }
+
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.executor.begin_resumable_work()
+    }
+
+    fn yield_admission_if_resumable(&self) -> bool {
+        self.executor.yield_admission_if_resumable()
+    }
+
+    fn shutdown_interrupted(&self) -> bool {
+        self.executor.shutdown_interrupted()
+    }
+
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        self.executor.end_resumable_work(label)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
     }
 }
 
@@ -1073,6 +1345,29 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
@@ -1100,9 +1395,47 @@ impl CommandExecutor for ProcessExecutor {
                     &mut *input,
                     &|| false,
                     gate,
+                    None,
                 )
             })
         })
+    }
+}
+
+/// Observe bytes as a supervised command drains them. The callback may run
+/// concurrently for stdout and stderr, and must finish without blocking.
+pub type CommandOutputObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+struct ObservedStdin<'a>(&'a CommandObserver);
+
+impl Drop for ObservedStdin<'_> {
+    fn drop(&mut self) {
+        self.0.report(CommandActivity::StdinFinished);
+    }
+}
+
+struct ProgressWriter<'a> {
+    stdin: std::process::ChildStdin,
+    observer: Option<&'a CommandObserver>,
+}
+
+impl Write for ProgressWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(observer) = self.observer else {
+            return self.stdin.write(bytes);
+        };
+        // A blocking pipe write can wait for the whole request. Use smaller
+        // writes on observed streams so backpressure exposes progress before
+        // a full input buffer has drained.
+        let written = self.stdin.write(&bytes[..bytes.len().min(4096)])?;
+        if written != 0 {
+            observer.report(CommandActivity::StdinBytes(written));
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin.flush()
     }
 }
 
@@ -1125,6 +1458,7 @@ fn stream_command_with_stdin(
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
     gate: Option<&Arc<StartGate>>,
+    observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
     let started = Instant::now();
     if is_cancelled() {
@@ -1152,8 +1486,35 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let mut stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-    let mut stderr_reader = PipeCollector::spawn(stderr);
+    let reply = command.stream_reply.as_ref();
+    let reply_observer = reply.cloned().map(|reply| {
+        let observer = observer.clone();
+        Arc::new(move |bytes: &[u8]| {
+            if !bytes.is_empty() {
+                (reply.0)(Some(bytes));
+            }
+            if let Some(observer) = &observer {
+                observer(bytes);
+            }
+        }) as CommandOutputObserver
+    });
+    let mut reply_ended = false;
+    let mut end_reply = || {
+        if !reply_ended
+            && let Some(reply) = reply
+            && gate.is_none_or(|gate| gate.phase() == crate::targets::ssh::StartPhase::Started)
+        {
+            reply_ended = true;
+            (reply.0)(None);
+        }
+    };
+    let mut stdout_reader = PipeCollector::spawn_observed(
+        stdout,
+        gate.cloned(),
+        None,
+        reply_observer.or_else(|| observer.clone()),
+    );
+    let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -1168,11 +1529,21 @@ fn stream_command_with_stdin(
                     StartWait::Cancelled => bail!("operation cancelled"),
                 }
             }
+            // The command stage owns SSH startup and post-EOF work. Start
+            // the transfer clock once the writer can send and close stdin
+            // before dropping the progress guard.
+            let _progress = command.observer.as_ref().map(|observer| {
+                observer.report(CommandActivity::StdinStarted);
+                ObservedStdin(observer)
+            });
+            let mut stdin = ProgressWriter {
+                stdin,
+                observer: command.observer.as_ref(),
+            };
             // Owning `stdin` here is what closes the pipe's write end once the
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
             // copy of the write end is still open.
-            let mut stdin = stdin;
             let mut buffer = [0_u8; 64 * 1024];
             loop {
                 // Checking before each chunk makes large checkpoint copies
@@ -1204,6 +1575,7 @@ fn stream_command_with_stdin(
             }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
+                end_reply();
                 if let Err(error) = input_writer.join() {
                     tracing::warn!(
                         purpose = command.purpose.as_str(),
@@ -1211,6 +1583,9 @@ fn stream_command_with_stdin(
                     );
                 }
                 bail!("operation cancelled while {}", command.purpose);
+            }
+            if stdout_reader.is_finished() {
+                end_reply();
             }
             match if status.is_some() {
                 Ok(status)
@@ -1220,6 +1595,7 @@ fn stream_command_with_stdin(
                 Ok(observed) => status = observed,
                 Err(error) => {
                     terminate_cancellable_child(&mut child, false);
+                    end_reply();
                     if let Err(join_error) = input_writer.join() {
                         tracing::warn!(
                             purpose = command.purpose.as_str(),
@@ -1238,6 +1614,7 @@ fn stream_command_with_stdin(
                 let drained = (stdout_reader.is_finished() && stderr_reader.is_finished())
                     || exited_at.elapsed() >= IO_DRAIN_TIMEOUT;
                 if drained && !input_writer.is_finished() && !group_killed {
+                    end_reply();
                     group_killed = true;
                     if let Some(group) = &group {
                         group.kill();
@@ -1280,7 +1657,66 @@ pub struct CancellableProcessExecutor {
     token: Option<tokio_util::sync::CancellationToken>,
     #[cfg(unix)]
     foreground_terminal: bool,
-    deadline: Option<(Instant, Duration)>,
+    deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>,
+}
+
+/// One shared clock owns both deadline checks and nested pause accounting.
+struct ProcessDeadline {
+    expires: Instant,
+    timeout: Duration,
+    paused: Option<(Instant, usize)>,
+}
+
+impl ProcessDeadline {
+    fn new(timeout: Duration) -> Arc<std::sync::Mutex<Self>> {
+        Arc::new(std::sync::Mutex::new(Self {
+            expires: Instant::now() + timeout,
+            timeout,
+            paused: None,
+        }))
+    }
+
+    fn expired(&self) -> bool {
+        self.paused.map_or_else(Instant::now, |(start, _)| start) >= self.expires
+    }
+}
+
+/// Excludes a scope from its owner's deadline, including work between commands.
+/// Nested or overlapping scopes count their union rather than adding time twice.
+#[must_use]
+pub struct DeadlinePause(Option<Arc<std::sync::Mutex<ProcessDeadline>>>);
+
+impl DeadlinePause {
+    /// Executors with no operation-wide deadline have nothing to pause.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    fn new(deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>) -> Self {
+        if let Some(deadline) = &deadline {
+            let mut deadline = deadline.lock().unwrap();
+            match &mut deadline.paused {
+                Some((_, depth)) => *depth += 1,
+                paused @ None => *paused = Some((Instant::now(), 1)),
+            }
+        }
+        Self(deadline)
+    }
+}
+
+impl Drop for DeadlinePause {
+    fn drop(&mut self) {
+        if let Some(deadline) = &self.0 {
+            let mut deadline = deadline.lock().unwrap();
+            let (start, depth) = deadline.paused.as_mut().expect("a held deadline pause");
+            *depth -= 1;
+            if *depth == 0 {
+                let elapsed = start.elapsed();
+                deadline.expires += elapsed;
+                deadline.paused = None;
+            }
+        }
+    }
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1293,6 +1729,42 @@ impl Drop for ProcessCancellationGuard {
 }
 
 impl CancellableProcessExecutor {
+    /// Feed input, close stdin at EOF, and observe both output streams while
+    /// retaining the executor's process-group, cancellation and SSH ownership.
+    pub fn execute_with_stdin_observed(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        observer: Option<CommandOutputObserver>,
+    ) -> Result<CommandOutput> {
+        self.describe_cancellation(
+            command,
+            crate::runtime::off_async_worker(|| {
+                let _running = BlockingOperation::command(command);
+                // The stream is not read until the session has started, so a
+                // refused session is retried with the same stream. The child
+                // runs in its own process group so cancellation can kill the
+                // whole group, which is what releases a writer blocked on a
+                // full pipe.
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        stream_command_with_stdin(
+                            cancellable_command(command),
+                            command,
+                            &mut *input,
+                            &|| self.is_cancelled(),
+                            gate,
+                            observer.clone(),
+                        )
+                    },
+                )
+            }),
+        )
+    }
+
     pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
         ProcessCancellationGuard(self.cancelled.clone())
     }
@@ -1328,7 +1800,16 @@ impl CancellableProcessExecutor {
             || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
-                .is_some_and(|(deadline, _)| Instant::now() >= deadline)
+                .as_ref()
+                .is_some_and(|deadline| deadline.lock().unwrap().expired())
+    }
+
+    /// Whether the supervisor, not the deadline, has asked to stop.
+    pub fn is_cancelled_without_deadline(&self) -> bool {
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
@@ -1337,14 +1818,14 @@ impl CancellableProcessExecutor {
             token: None,
             #[cfg(unix)]
             foreground_terminal: false,
-            deadline: Some((Instant::now() + timeout, timeout)),
+            deadline: Some(ProcessDeadline::new(timeout)),
         }
     }
 
     /// Bounds an existing flag-based executor with a deadline, so a wedged
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
-        self.deadline = Some((Instant::now() + timeout, timeout));
+        self.deadline = Some(ProcessDeadline::new(timeout));
         self
     }
 
@@ -1354,12 +1835,13 @@ impl CancellableProcessExecutor {
                 .token
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled())
-            && let Some((deadline, timeout)) = self.deadline
-            && Instant::now() >= deadline
+            && let Some(deadline) = &self.deadline
+            && let deadline = deadline.lock().unwrap()
+            && deadline.expired()
         {
             return format!(
                 "timed out after {} s while {purpose}",
-                timeout.as_secs_f64()
+                deadline.timeout.as_secs_f64()
             );
         }
         format!("operation cancelled while {purpose}")
@@ -1490,9 +1972,18 @@ impl PipeCollector {
     }
 
     fn spawn_output(
+        pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Self {
+        Self::spawn_observed(pipe, gate, output, None)
+    }
+
+    fn spawn_observed(
         mut pipe: impl PollablePipe,
         gate: Option<Arc<StartGate>>,
         mut output: Option<std::fs::File>,
+        observer: Option<CommandOutputObserver>,
     ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1518,6 +2009,9 @@ impl PipeCollector {
                                     if scan.push(&chunk[..count], &mut passed) {
                                         gate.mark_started();
                                     }
+                                    if let Some(observer) = &observer {
+                                        observer(&passed);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&passed)?;
                                     } else {
@@ -1525,6 +2019,9 @@ impl PipeCollector {
                                     }
                                 }
                                 _ => {
+                                    if let Some(observer) = &observer {
+                                        observer(&chunk[..count]);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&chunk[..count])?;
                                     } else {
@@ -1543,6 +2040,9 @@ impl PipeCollector {
                 if let Some(scan) = &mut scan {
                     passed.clear();
                     scan.finish(&mut passed);
+                    if let Some(observer) = &observer {
+                        observer(&passed);
+                    }
                     if let Some(file) = &mut output {
                         file.write_all(&passed)?;
                     } else {
@@ -1714,6 +2214,7 @@ impl CancellableProcessExecutor {
                 &mut input,
                 &|| self.is_cancelled(),
                 gate,
+                None,
             );
         }
         let started = Instant::now();
@@ -1776,6 +2277,14 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::new(self.deadline.clone())
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.is_cancelled_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.clone()
             .with_deadline(Duration::from_secs(15))
@@ -1792,6 +2301,26 @@ impl CommandExecutor for CancellableProcessExecutor {
 
     fn cancellation_requested(&self) -> bool {
         self.is_cancelled()
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        Self {
+            deadline: None,
+            ..self.clone()
+        }
+        .execute_with_stdin(command, input)
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -1814,31 +2343,7 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        self.describe_cancellation(
-            command,
-            crate::runtime::off_async_worker(|| {
-                let _running = BlockingOperation::command(command);
-                // The stream is not read until the session has started, so a
-                // refused session is retried with the same stream. The child
-                // runs in its own process group so cancellation can kill the
-                // whole group, which is what releases a writer blocked on a
-                // full pipe.
-                with_ssh_refusal_retry(
-                    command,
-                    self,
-                    Some(&|| self.is_cancelled()),
-                    |command, gate| {
-                        stream_command_with_stdin(
-                            cancellable_command(command),
-                            command,
-                            &mut *input,
-                            &|| self.is_cancelled(),
-                            gate,
-                        )
-                    },
-                )
-            }),
-        )
+        self.execute_with_stdin_observed(command, input, None)
     }
 }
 
@@ -1886,6 +2391,31 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        // This executor's only bound is its deadline and it has no
+        // cancellation, so without the deadline it is a plain process.
+        ProcessExecutor.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &crate::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
@@ -2607,13 +3137,14 @@ pub fn engine_command(
 
 /// `engine` followed by `args`, run on the SSH host.
 pub fn ssh_engine_command(
+    class: SshTrafficClass,
     ssh: &SshTarget,
     engine: &str,
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> CommandSpec {
     let mut argv = engine_argv(engine);
     argv.extend(args.into_iter().map(Into::into));
-    ssh_command_owned(ssh, argv)
+    ssh_command_owned(class, ssh, argv)
 }
 
 impl ImageHost {
@@ -2652,7 +3183,7 @@ impl ImageHost {
             | Self::SshNitro(ssh) => {
                 let mut argv = engine_argv(&args[0]);
                 argv.extend(args.into_iter().skip(1));
-                ssh_command_owned(ssh, argv)
+                ssh_command_owned(SshTrafficClass::Control, ssh, argv)
             }
         }
         .purpose(purpose)
@@ -3141,6 +3672,7 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
 
 /// Wrap an argv vector for execution at a provisioned session target.
 pub fn command_on_locator(
+    class: SshTrafficClass,
     locator: &TargetLocator,
     session_id: &str,
     args: Vec<String>,
@@ -3150,13 +3682,17 @@ pub fn command_on_locator(
     if args.is_empty() {
         bail!("target command must not be empty");
     }
-    Ok(locator_command(locator, args).purpose(purpose))
+    Ok(locator_command(class, locator, args).purpose(purpose))
 }
 
 /// Wrap a non-empty argv vector for execution at a target, without checking
 /// that the locator belongs to a particular session. Every per-target command
 /// is built here, so each target kind is spelled out once.
-pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpec {
+pub fn locator_command(
+    class: SshTrafficClass,
+    locator: &TargetLocator,
+    args: Vec<String>,
+) -> CommandSpec {
     match locator {
         TargetLocator::LocalBare { .. } => {
             let mut args = args.into_iter();
@@ -3171,7 +3707,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             args,
         ),
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_owned(ssh, args)
+            ssh_command_owned(class, ssh, args)
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
@@ -3192,7 +3728,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             );
             let mut argv = vec![remote.program];
             argv.extend(remote.args);
-            ssh_command_owned(ssh, argv)
+            ssh_command_owned(class, ssh, argv)
         }
     }
 }
@@ -3650,6 +4186,29 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let reply = |status: i32, stderr: &str| CommandOutput {
                 status,
@@ -3709,7 +4268,7 @@ mod executor_tests {
             ssh_args: Vec::new(),
         };
         let executor = MasterKilledOnce::default();
-        let output = executor.execute(&ssh_command(&ssh, ["true"]));
+        let output = executor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
 
         assert_eq!(output.expect("the retry succeeds").status, 0);
@@ -3889,7 +4448,11 @@ mod executor_tests {
         let payload = vec![b'x'; 300 * 1024];
         for cancellable in [false, true] {
             let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
-            let command = fake.command(&["wc", "-c"]);
+            let activity = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = activity.clone();
+            let command = fake.command(&["wc", "-c"]).observe(move |event| {
+                observed.lock().unwrap().push(event);
+            });
             let mut input = std::io::Cursor::new(payload.clone());
             let output = if cancellable {
                 CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
@@ -3909,8 +4472,54 @@ mod executor_tests {
                 payload.len().to_string()
             );
             assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
+            let activity = activity.lock().unwrap();
+            let [
+                CommandActivity::StdinStarted,
+                writes @ ..,
+                CommandActivity::StdinFinished,
+            ] = &activity[..]
+            else {
+                panic!("only the admitted attempt should report stdin activity");
+            };
+            let bytes: usize = writes
+                .iter()
+                .map(|event| match event {
+                    CommandActivity::StdinBytes(count) => *count,
+                    _ => panic!("unexpected activity inside the admitted attempt"),
+                })
+                .sum();
+            assert!(writes.len() > 1);
+            assert_eq!(bytes, payload.len());
         }
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1583: a command still running after EOF was reported as a stalled stdin stream.
+    #[test]
+    fn streamed_stdin_finishes_before_the_command_exits() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        let (finished, watch) = std::sync::mpsc::channel();
+        let command =
+            CommandSpec::new("sh", ["-c", "cat >/dev/null; sleep 600"]).observe(move |event| {
+                if matches!(event, CommandActivity::StdinFinished)
+                    && let Err(error) = finished.send(())
+                {
+                    tracing::debug!(%error, "test stopped waiting for stdin completion");
+                }
+            });
+        let child = std::thread::spawn(move || {
+            let mut input = std::io::Cursor::new(vec![b'x'; 128 * 1024]);
+            executor.execute_with_stdin(&command, &mut input)
+        });
+        let ended = watch.recv_timeout(Duration::from_secs(10));
+        let pending = !child.is_finished();
+        cancelled.store(true, Ordering::Release);
+        let outcome = child.join().unwrap();
+        ended.expect("stdin completion should arrive while the command is still running");
+        assert!(pending);
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("cancelled"), "{error}");
     }
 
     #[test]

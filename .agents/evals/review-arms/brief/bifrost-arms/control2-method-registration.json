@@ -1,0 +1,16 @@
+{
+  "recorded_at": "2026-11-17T05:09:17.757921+00:00",
+  "before_control_outcomes": true,
+  "method": "StageC Control2: one primary blinded pooled group-and-verify pass over A/BT findings; every broad anchor-match rejected BT finding handmarked.",
+  "verifier": "gpt-6.1-sol/high oncodex4,localpodman,bifrost-dev,pin35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "model_gate": "valid ordinary cached codex4 report>=25/noerror perlaunch; unknown holds; no profile switch",
+  "source_spec_sha256": "76daa3791060d6320db1a77307fb9fb95db71eb5bd8789ce4e99a1d3abafed10",
+  "bifrost_spec_sha256": "f963d3f7f208e15991c47b6496307b6525e3bb5325b6102a2966cf2507ba4773",
+  "spec_changes": "Repository identity and actual checkout pin only. Grouping/verification/severity/output decision rules unchanged.",
+  "source_precondition": "Exactly40diffs*2arms*3Terra/high=240unique completed outputs, including zero-finding outputs.",
+  "truth_validation": "Exact finding coverage/no duplicates; valid group/verdict/severity/confidence/evidence fields and correct intro assignment; missing neverzero.",
+  "metrics": "Mean per-diff confirmed distinct groups per session, BT/A ratio>=0.90, paired10000-diff bootstrap difference; <=8rejected findings relying on brief after all broad matches handmarked.",
+  "registered_generalization_reading": "Follow PLAN-bifrost-bugs effect and confirmed-retention bars exactly; report the additional Control2 citing criterion beside them.",
+  "broad_matches": "Use existing brief_control2 citing_any/spans/cites computation to prepare handmarks; no copied anchor interpreter or new verifier/grouping mechanism.",
+  "second_verification_pass": "not scheduled; preserve StageC single-pass method rather than invent a reconciliation/selection rule"
+}

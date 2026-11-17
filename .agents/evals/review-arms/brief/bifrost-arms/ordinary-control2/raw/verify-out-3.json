@@ -1,0 +1,149 @@
+{
+  "commits": [
+    {
+      "intro": "0dc1b2afeff033dc3ede39f124d874f170a02bf5",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-a1904058",
+            "f-272db163",
+            "f-e150e509",
+            "f-588d886a",
+            "f-e15993be",
+            "f-57482d33"
+          ],
+          "summary": "Deferred method selection discards uncertainty from earlier value lookup.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26012-26035 allows an empty incomplete ordinary deferred lookup to proceed to the method-value alternative, saving its completion separately; 26063-26069 saves the method answer. Earlier ordinary owner origins without member scopes add an omission and are skipped at 26657-26690, so no earlier target need be selected. At 27003-27034 replay uncertainty, omitted-origin uncertainty and deferred_completion are combined into replayed. With no selected earlier target the precedence test at 27035-27039 fails, and the new 27041-27042 branch returns shadow_qualified_route_with_members(direct, members), discarding replayed. That helper combines only direct and members (27194-27231); neither contains the separately discovered earlier-route omission. Thus a complete deferred method and complete empty direct answer can produce a complete method binding despite the incomplete earlier value search.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-5b81bfd8"
+          ],
+          "summary": "A complete direct trait-method binding bypasses its concrete impl override for method values.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/resolution/typed_fact_lowering.rs:2058-2086 and 3693-3696 emit Value then Callable method-value routes. Trait methods are exposed in Value as well as Callable by crates/bifrost-rust/src/resolution.rs:2466-2485. For an imported type implementing a visible trait, crates/bifrost-analysis/src/analyzer/store/resolution_operation/rust_crate_context.rs:1790-1815 publishes the trait-member bridge; rust_crate_rows.rs:887-905 carries the original lookup into the trait scope, yielding its declaration rather than the impl item. When ordinary deferred lookup is absent and method lookup finds the override, crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26023-26036 sets deferred_precedence. The changed condition at 26052-26056 returns a complete nonempty direct answer even when implementation_declares_the_member is true, bypassing impl shadowing at 26075-26077 and 27194-27231. Before this diff a found impl prevented that return. The intended override contract is explicit at 26038-26046.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-8d6a0db4",
+            "f-696f3452"
+          ],
+          "summary": "Function-local importlib reassignment is ignored when validating a dynamic import receiver.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for import importlib; importlib = fake; canonical = importlib.import_module(\"pkg.mod\"); canonical.member(), crates/bifrost-python/src/imports.rs:60-68 accepts the canonical assignment via the callback. crates/bifrost-python/src/graph/extractor.rs:513-516 invokes importlib_binding_visible, whose range search finds the earlier import (536-541). Its function-scoped return at 542-543 checks only qualified_name == \"importlib\", ignoring intervening writes. The assignment to importlib does not invalidate canonical because imports.rs:71-76 checks only the requested local. The new attribute path at extractor.rs:1134-1139 records pkg.mod.member even though the call used fake. Literal candidate admission likewise uses import bindings without write invalidation (imports.rs:155-178).",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-8ea13eb8",
+            "f-b3122ec4",
+            "f-facd489a",
+            "f-9a9d94d2",
+            "f-8ee4c21c",
+            "f-9ae0639b"
+          ],
+          "summary": "Breadth-first inherited-member lookup can discard the member selected by Python C3 order.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-python/src/graph/resolver.rs:39-66 searches one ancestor layer at a time and returns on any declarations at that layer (61-62), sorting bases rather than retaining declared order (64-65). With A(X), C(A, B), and save declared on X and B, it finds B.save in the first base layer and returns before visiting X, although C3 order C,A,X,B selects X.save. With both direct bases declaring save it returns both. extractor.rs:761-771 uses this helper to decide whether a queried declaration is a usage; graph/inverted.rs:738-743 uses it for inverted edges. Previously ancestor membership retained X as a candidate; the new nearest-layer cutoff removes the actual target. The two-direct-base overapproximation alone predates the diff, but the lost actual ancestor target is new.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-a284512c"
+          ],
+          "summary": "Dynamic imports validate importlib at the later reference instead of at the import call.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, consider a function with import importlib; importlib = fake; mod = importlib.import_module(\"pkg\"); import importlib; mod.member(). crates/bifrost-python/src/graph/extractor.rs:513-516 closes over the final attribute node when invoking imported_module_assignment_at. That helper examines the earlier assignment at crates/bifrost-python/src/imports.rs:60-67, but the predicate receives only the receiver spelling (95-98, 110-118), not the call position. Consequently extractor.rs:536-543 selects the restored import before mod.member, accepting a call that used fake. No write to mod invalidates the saved result, so extractor.rs:1134-1139 records the false usage. Checking intervening writes only at the reference would still miss this distinct binding-time error.",
+          "confidence": "high"
+        },
+        {
+          "group": "g4",
+          "findings": [
+            "f-97aa1ef1"
+          ],
+          "summary": "Compound-statement and destructuring writes fail to invalidate a prior literal module assignment.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-python/src/imports.rs:47-79 scans only direct children of the function/module suite. After canonical = importlib.import_module(\"pkg\"), an intervening if enabled: canonical = other is passed as an if_statement to python_direct_scope_bindings_bounded at 71. The collector leaves descendant traversal to the caller (crates/bifrost-python/src/bindings.rs:453-458) and has no if_statement arm (466-584), so reports no write. For canonical, x = other, 1, the fast path fails its identifier-left check (imports.rs:60-63); the collector then receives expression_statement rather than the unwrapped assignment (71), also producing no binding. The saved module survives and the new extractor.rs:1134-1139 path reports pkg.member after reassignment.",
+          "confidence": "high"
+        },
+        {
+          "group": "g5",
+          "findings": [
+            "f-987898c7",
+            "f-146c0bdb"
+          ],
+          "summary": "An outer function import incorrectly overrides an inner function declaration.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, in outer(): from pkg import name; def inner(): def name(): ...; name(), crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 accepts the outer import because its scope range encloses the inner reference. The nearest-function inventory check at 1954-1961 does not block a function-only declaration: crates/bifrost-python/src/bindings.rs:371-383 checks parameters, binding_writes and comprehensions, while a def is classified FunctionOnly at 417-420. python.rs:1966-1970 resolves pkg.name and the new early return at 1625-1643 prevents local-name handling. Before the diff base python.rs:1623-1627 reached python_name_shadowed_at, recognizing the local and not selecting the outer import. Confirmed for the newly false imported target; the old identifier path did not itself guarantee navigation to the inner def.",
+          "confidence": "high"
+        },
+        {
+          "group": "g6",
+          "findings": [
+            "f-882f74fd",
+            "f-42547a0e"
+          ],
+          "summary": "A later import in an inner function fails to prevent selection of an enclosing import.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for outer(): from pkg import Worker; def inner(): Worker(); from other import Worker, crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 skips the later inner import by start_byte and selects the enclosing import by range containment. The nearest inventory records imports as locals without binding_writes (crates/bifrost-python/src/bindings.rs:139-143), so has_runtime_callable_binding_at (371-383) returns false. python.rs:1966-1970 resolves pkg.Worker and 1625-1643 returns it before python_name_shadowed_at can reject the whole-function local. Python treats Worker as local throughout inner and the earlier read is unbound. Base python.rs:1623-1627 instead reached the whole-function local check, so the shortcut introduces this false target.",
+          "confidence": "high"
+        },
+        {
+          "group": "g7",
+          "findings": [
+            "f-c5282523",
+            "f-d1c89c58"
+          ],
+          "summary": "Unaliased function-local dotted imports resolve the bound root to the submodule.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for def f(): import pkg.sub; return pkg, crates/bifrost-python/src/imports.rs:350-364 stores local_name pkg, qualified_name pkg.sub and consumed_attributes 1. crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952 selects that binding, but 1966-1970 resolves the full qualified_name without consuming or accounting for attributes. The new early return at 1625-1643 navigates bare pkg to pkg.sub instead of pkg when both are indexed. python_reference_node at 2492-2499 also leaves a receiver/root identifier as an Identifier, so this is reachable on pkg in pkg.sub expressions. The false submodule target is introduced by the new shortcut.",
+          "confidence": "high"
+        },
+        {
+          "group": "g8",
+          "findings": [
+            "f-d4473be4"
+          ],
+          "summary": "Writes before a reference within its containing compound statement are skipped.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for a function with canonical = importlib.import_module(\"pkg\") followed by an if enabled body containing canonical = other then canonical.target(), crates/bifrost-python/src/imports.rs:82-86 chooses the whole function body as the execution suite. The loop saves pkg from the first assignment (60-68), then breaks at the containing if statement because it encloses the reference (48-52). It never sees canonical = other, which necessarily precedes that reference inside the body. The saved module is returned at 79 and extractor.rs:1134-1139 records the false pkg.target usage. Unlike invalidation for an already completed preceding statement, this failure requires examining the prefix of the containing statement, which is skipped entirely.",
+          "confidence": "high"
+        },
+        {
+          "group": "g9",
+          "findings": [
+            "f-552c0cbc"
+          ],
+          "summary": "A local import replacing a parameter remains unresolved, but the failure predates this diff.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1957-1959 returns no candidates because crates/bifrost-python/src/bindings.rs:371-374 unconditionally counts a parameter, so def f(Worker): from pkg import Worker; return Worker() produces no definition through python.rs:1634-1640. However base crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1623-1627 already invokes python_name_shadowed_at and returns no definition for exactly this input: base lines 3072-3077 classify the parameter/import name as Local and return true (bindings.rs:347-348). The diff retains the same no-definition behavior rather than introducing or exposing this failure. Rejected as a finding on this commit.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

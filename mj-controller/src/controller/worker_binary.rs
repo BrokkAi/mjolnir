@@ -74,16 +74,19 @@ mod image_worker;
 pub(crate) use image_worker::image_worker_label;
 pub(super) use image_worker::*;
 mod install;
+mod prewarm;
 pub(super) use install::*;
+pub(crate) use prewarm::{prewarm_profile_content, shared_content_ssh};
 mod store;
+pub(in crate::controller) use store::install_worker_binary;
 use store::*;
 mod microvm;
 pub(crate) use microvm::ensure_microvm_engine;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;
-pub(crate) use process::recorded_exit_reason;
 pub(super) use process::*;
+pub(crate) use process::{recorded_exit_reason, run_control_command};
 
 #[cfg(test)]
 mod tests;

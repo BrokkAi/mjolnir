@@ -6,6 +6,7 @@ use mj_client::session::ViewError;
 const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
 const MIN_SESSION_ID_PREFIX_LENGTH: usize = mj_core::state::SHORT_ID_LEN;
+pub(crate) const QUEUED_UNTIL_STARTUP_NOTE: &str = "Queued until startup ends.";
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
@@ -73,7 +74,7 @@ impl ApiBackend {
     ) -> Result<crate::server::api::SessionMessageResponse> {
         let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (target_session_id, own_child, managed_child, sender_title) =
+        let (target_session_id, own_child, managed_child, sender_title, target_state) =
             blocking("authorize session message", move || {
             let state = Controller::load()?.state;
             let sender = state.sessions.get(&sender_for_auth).ok_or_else(|| {
@@ -138,7 +139,13 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, managed_child, sender.message_name()))
+            Ok((
+                target_id,
+                own_child,
+                managed_child,
+                sender.message_name(),
+                target.state,
+            ))
         })
         .await?;
 
@@ -203,6 +210,22 @@ impl ApiBackend {
                 turn_id: Some(ordinal),
                 managed_child: false,
             });
+        }
+
+        // A peer message sent while startup is still running joins that queue.
+        // Mailing it immediately would land before the first prompt, and
+        // refusing it makes the sender retry until the message is lost (#1553).
+        if let Some(queued) = self
+            .queue_session_message_until_startup(
+                &target_session_id,
+                target_state,
+                &request_id,
+                &command_id,
+                &event,
+            )
+            .await?
+        {
+            return Ok(queued);
         }
 
         let protocol = {
@@ -328,6 +351,131 @@ impl ApiBackend {
         Ok(())
     }
 
+    /// Queue `event` when `target` cannot take it yet. `None` means deliver now.
+    /// An existing step for `command_id` is the retry: the first sender, text,
+    /// and timestamp win, and a failed step stays failed.
+    async fn queue_session_message_until_startup(
+        &self,
+        target: &str,
+        target_state: SessionState,
+        request_id: &str,
+        command_id: &str,
+        event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
+        let (sender_id, message_text) = session_message_identity(event)?;
+        if let Some(response) = self
+            .session_message_startup_receipt(target, command_id, sender_id, message_text)
+            .await?
+        {
+            return Ok(Some(response));
+        }
+        let eligible = matches!(
+            target_state,
+            SessionState::Provisioning
+                | SessionState::Running
+                | SessionState::Disconnected
+                | SessionState::Checkpointing
+        );
+        if !eligible {
+            return Ok(None);
+        }
+        let (group_id, status) = self.exports.startup_context(target.to_owned()).await?;
+        let target_id = target.to_owned();
+        let in_progress = blocking("read startup queue", move || {
+            Ok(
+                crate::database::next_startup_delivery(&target_id)?.is_some_and(|step| {
+                    matches!(step.phase.as_str(), "pending" | "delivering" | "accepted")
+                }),
+            )
+        })
+        .await?;
+        let pending = matches!(status, Some(crate::server::api::StartStatus::Pending));
+        let provisioning = target_state == SessionState::Provisioning;
+        let actor_missing = !(provisioning || pending || in_progress)
+            && self.sessions.session(target.to_owned()).await.is_err();
+        if !(provisioning || pending || in_progress || actor_missing) {
+            return Ok(None);
+        }
+        // A sticky failed startup must not block a later message once the
+        // session can take work. Only a message queued behind a still-pending
+        // group remembers that group, and only that group can retire it.
+        let waited_on_group = pending.then_some(group_id).flatten();
+        let message = crate::daemon::startup_followup::QueuedSessionMessage {
+            request_id: request_id.to_owned(),
+            sender_id: sender_id.to_owned(),
+            sender_title: session_message_title(event)?,
+            text: message_text.to_owned(),
+            created_at_ms: event.created_at_ms,
+            waited_on_group,
+        };
+        let queued = queued_session_message_response(target.to_owned());
+        match Arc::clone(&self.exports)
+            .queue_startup_session_message(target.to_owned(), message)
+            .await
+        {
+            Ok(()) => Ok(Some(queued)),
+            Err(error) if error.is::<mj_client::daemon::StartupPromptIdentityConflict>() => self
+                .session_message_startup_receipt(target, command_id, sender_id, message_text)
+                .await?
+                .context("startup command ID was reused with a different payload")
+                .map(Some),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// What a retry of `command_id` should answer. `None` when no step exists.
+    async fn session_message_startup_receipt(
+        &self,
+        target: &str,
+        command_id: &str,
+        sender_id: &str,
+        message_text: &str,
+    ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
+        let command_id = command_id.to_owned();
+        let existing = blocking("read session-message startup step", move || {
+            crate::database::load_startup_delivery(&command_id)
+        })
+        .await?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if existing.session_id != target {
+            return Err(session_message_identity_conflict());
+        }
+        let stored: crate::daemon::StartupStep = serde_json::from_str(&existing.step_json)
+            .context("stored session message could not be read")?;
+        let crate::daemon::StartupStep::SessionMessage {
+            sender_id: stored_sender,
+            text,
+            ..
+        } = &stored
+        else {
+            return Err(session_message_identity_conflict());
+        };
+        if stored_sender != sender_id || text != message_text {
+            return Err(session_message_identity_conflict());
+        }
+        match existing.phase.as_str() {
+            "failed" | "rejecting" => bail!(
+                "{}",
+                existing
+                    .error
+                    .unwrap_or_else(|| "the message was not delivered".to_owned())
+            ),
+            "pending" | "delivering" | "accepted" | "cancelling" => {
+                Ok(Some(queued_session_message_response(target.to_owned())))
+            }
+            "done" | "dismissed" => {
+                bail!("the message was already settled but its delivery receipt is missing")
+            }
+            other => bail!("session message is in an unknown startup phase {other}"),
+        }
+    }
+
+    /// The parent's messages to its children and what became of them. The
+    /// mailbox's part comes from the store. The part kept in the parent's
+    /// worker queue is unknown while the parent has no session actor or its
+    /// actor has no snapshot yet; see [`InputProgress::queue_known`].
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
         let snapshot = self
             .session_handle(parent.to_owned())
@@ -711,6 +859,43 @@ pub(super) fn resolve_session_target(
     }
 }
 
+fn queued_session_message_response(
+    session_id: String,
+) -> crate::server::api::SessionMessageResponse {
+    crate::server::api::SessionMessageResponse {
+        session_id,
+        via: "queued".into(),
+        note: Some(QUEUED_UNTIL_STARTUP_NOTE.into()),
+        mailbox_delivery: None,
+        turn_id: None,
+        managed_child: false,
+    }
+}
+
+fn session_message_identity_conflict() -> anyhow::Error {
+    anyhow::Error::new(mj_client::daemon::StartupPromptIdentityConflict)
+}
+
+fn session_message_identity(event: &mj_core::mailbox::MailboxEvent) -> Result<(&str, &str)> {
+    match &event.body {
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { id, .. },
+            text,
+        } => Ok((id.as_str(), text.as_str())),
+        _ => bail!("session message is missing its sender"),
+    }
+}
+
+fn session_message_title(event: &mj_core::mailbox::MailboxEvent) -> Result<String> {
+    match &event.body {
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { title, .. },
+            ..
+        } => Ok(title.clone()),
+        _ => bail!("session message is missing its sender"),
+    }
+}
+
 async fn prompt_acceptance(child: &str, command: &str) -> Result<Option<u64>> {
     let child = child.to_owned();
     let command = command.to_owned();
@@ -724,11 +909,16 @@ async fn prompt_acceptance(child: &str, command: &str) -> Result<Option<u64>> {
 pub(super) struct InputProgress {
     pending: BTreeMap<String, Vec<String>>,
     deliveries: BTreeMap<String, Vec<serde_json::Value>>,
+    /// See [`Self::queue_known`]. The default is unknown.
+    queue_known: bool,
 }
 
 impl InputProgress {
     pub(super) fn from_snapshot(snapshot: &mj_core::state::ManagedSessionSnapshot) -> Self {
-        let mut progress = Self::default();
+        let mut progress = Self {
+            queue_known: true,
+            ..Self::default()
+        };
         let mut requests = snapshot.subagent_requests.iter().collect::<Vec<_>>();
         requests.sort_by_key(|r| (r.created_at_ms, &r.request_id));
         for request in requests {
@@ -877,7 +1067,7 @@ impl InputProgress {
     /// that is queued for a child that can take it means the child is about
     /// to run, whatever its last turn said. Nothing else changes the state: a
     /// delivery that failed is a fact about the message (see
-    /// [`Self::last_failed_delivery`]), not about the child, whose record
+    /// [`Self::failed_deliveries`]), not about the child, whose record
     /// alone says whether it can be given work (#1381).
     pub fn status(
         &self,
@@ -902,25 +1092,33 @@ impl InputProgress {
         current
     }
 
-    /// The request id and error of the child's newest message delivery, when
-    /// that delivery failed. A later delivery that succeeded supersedes it.
-    pub fn last_failed_delivery(&self, child: &str) -> Option<(&str, &str)> {
-        let last = self.deliveries.get(child)?.last()?;
-        (last["status"] == "failed").then(|| {
-            (
-                last["request_id"].as_str().unwrap_or_default(),
-                last["error"].as_str().unwrap_or("delivery failed"),
-            )
-        })
+    /// Whether the parent's worker queue was read: the messages still queued
+    /// in it and the outcome of every delivery made through it. It is not
+    /// read while the parent has no session actor, or its actor has no
+    /// snapshot yet, and then this progress holds only the mailbox's part.
+    /// Unknown is not empty: a failure in the unread queue is not absent.
+    pub fn queue_known(&self) -> bool {
+        self.queue_known
+    }
+
+    /// Every message delivery to the child that failed, oldest first. A
+    /// delivery that succeeded later does not undo one that failed: the work
+    /// in the failed message is still lost, so each one is news (#1459).
+    pub fn failed_deliveries(&self, child: &str) -> impl Iterator<Item = FailedDelivery<'_>> {
+        self.deliveries
+            .get(child)
+            .into_iter()
+            .flatten()
+            .filter(|delivery| delivery["status"] == "failed")
+            .map(|delivery| FailedDelivery {
+                request_id: delivery["request_id"].as_str().unwrap_or_default(),
+                error: delivery["error"].as_str().unwrap_or("delivery failed"),
+                delivery,
+            })
     }
 
     pub fn annotate(&self, child: &str, entry: &mut serde_json::Value) {
-        if let Some(pending) = self.pending.get(child) {
-            let pending = serde_json::json!(pending);
-            entry["pending_messages"] = pending.clone();
-            // Earlier parents already consume these field names.
-            entry["pending_inputs"] = pending;
-        }
+        self.annotate_pending(child, entry);
         if let Some(deliveries) = self.deliveries.get(child) {
             let deliveries = serde_json::json!(deliveries);
             entry["message_deliveries"] = deliveries.clone();
@@ -928,6 +1126,22 @@ impl InputProgress {
             entry["input_deliveries"] = deliveries;
         }
     }
+
+    pub fn annotate_pending(&self, child: &str, entry: &mut serde_json::Value) {
+        if let Some(pending) = self.pending.get(child) {
+            let pending = serde_json::json!(pending);
+            entry["pending_messages"] = pending.clone();
+            // Earlier parents already consume these field names.
+            entry["pending_inputs"] = pending;
+        }
+    }
+}
+
+/// One failed message delivery, as `list_agents` shows it.
+pub(super) struct FailedDelivery<'a> {
+    pub request_id: &'a str,
+    pub error: &'a str,
+    pub delivery: &'a serde_json::Value,
 }
 
 #[cfg(test)]
@@ -942,6 +1156,7 @@ mod tests {
         let progress = InputProgress {
             pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
             deliveries: BTreeMap::new(),
+            queue_known: true,
         };
         assert_eq!(
             progress.status("child", Some(&record), ("stopping".into(), None, false)),

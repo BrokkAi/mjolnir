@@ -1,45 +1,24 @@
-//! One owner for a session's worker processes, independent of relay connections.
-//!
-//! Nested calls borrow the operation's permit. Disposable background callers
-//! try admission; foreground callers wait without blocking an async worker.
+//! Worker mutation capabilities derived from RecoveryGate admissions.
+//! Nested helpers borrow the operation's permit and never decide admission.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use tokio::sync::Notify;
 
+use crate::recovery_gate::{HoldsSession, SessionAdmission};
 use crate::targets::CommandExecutor;
 
-#[derive(Default)]
-struct Slot {
-    owner: Mutex<Option<(&'static str, String)>>,
-    released: Condvar,
-    changed: Notify,
-}
-
-/// A capability to mutate this session's worker. Clones share one admission;
-/// an executing blocking task retains it even when its waiter disappears.
+/// A worker mutation capability derived from the session owner's admission.
+/// Blocking work retains it even when its async waiter disappears.
 #[derive(Clone)]
 pub(crate) struct WorkerPermit(Arc<Admission>);
 
 struct Admission {
-    slot: Arc<Slot>,
+    admission: SessionAdmission,
     session_id: String,
     operation_id: String,
-}
-
-impl Drop for Admission {
-    fn drop(&mut self) {
-        let mut owner = self.slot.owner.lock().unwrap_or_else(|e| e.into_inner());
-        *owner = None;
-        self.slot.released.notify_all();
-        self.slot.changed.notify_waiters();
-    }
 }
 
 tokio::task_local! {
@@ -47,25 +26,6 @@ tokio::task_local! {
 }
 thread_local! {
     static BLOCKING_OWNER: RefCell<Option<WorkerPermit>> = const { RefCell::new(None) };
-}
-
-fn slot(session_id: &str) -> Arc<Slot> {
-    type Registry = Mutex<BTreeMap<(PathBuf, String), Weak<Slot>>>;
-    static SLOTS: OnceLock<Registry> = OnceLock::new();
-    let mut slots = SLOTS
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    slots.retain(|_, slot| slot.strong_count() > 0);
-    let entry = slots
-        .entry((mj_core::config::data_dir(), session_id.to_owned()))
-        .or_default();
-    if let Some(slot) = entry.upgrade() {
-        return slot;
-    }
-    let slot = Arc::new(Slot::default());
-    *entry = Arc::downgrade(&slot);
-    slot
 }
 
 pub(crate) fn capture() -> Option<WorkerPermit> {
@@ -195,101 +155,26 @@ impl WorkerPermit {
         &self.0.operation_id
     }
 
-    /// Claim before reading the worker. A snapshot read before a swap may not
-    /// clear its intent after the swap; observation owns read and decision.
-    pub(crate) fn try_observation(session_id: &str) -> Result<Option<Self>> {
-        Self::claim(slot(session_id), session_id, "replacement readiness")
-    }
-
-    pub(crate) fn try_acquire(session_id: &str, reason: &'static str) -> Result<Option<Self>> {
-        if let Some(permit) = current(session_id) {
-            return Ok(Some(permit));
+    /// Admission is decided only by RecoveryGate. Nested mutations retain
+    /// their operation identity; a fresh capability retains the caller's hold.
+    pub(crate) fn acquire(session_id: &str, admission: &impl HoldsSession) -> Result<Self> {
+        let admission = admission.admission();
+        ensure!(
+            admission.session_id() == session_id,
+            "worker admission belongs to another session: {session_id}"
+        );
+        if let Some(owner) = current(session_id) {
+            return Ok(owner);
         }
-        Self::claim(slot(session_id), session_id, reason)
-    }
-
-    fn claim(slot: Arc<Slot>, session_id: &str, reason: &'static str) -> Result<Option<Self>> {
-        let mut owner = slot.owner.lock().unwrap_or_else(|e| e.into_inner());
-        if owner.is_some() {
-            return Ok(None);
-        }
-        let operation_id = crate::session_manager::new_command_id("worker-owner")?;
-        *owner = Some((reason, operation_id.clone()));
-        drop(owner);
-        Ok(Some(Self(Arc::new(Admission {
-            slot,
+        Ok(Self(Arc::new(Admission {
+            admission,
             session_id: session_id.to_owned(),
-            operation_id,
-        }))))
+            operation_id: crate::session_manager::new_command_id("worker-owner")?,
+        })))
     }
 
-    pub(crate) async fn acquire(
-        session_id: &str,
-        reason: &'static str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Self> {
-        if let Some(permit) = current(session_id) {
-            return Ok(permit);
-        }
-        let slot = slot(session_id);
-        let mut announced = false;
-        loop {
-            let changed = slot.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if let Some(permit) = Self::claim(slot.clone(), session_id, reason)? {
-                return Ok(permit);
-            }
-            ensure!(
-                !executor.cancellation_requested(),
-                "waiting for worker ownership cancelled"
-            );
-            if !announced {
-                let owner = slot.owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                tracing::info!(
-                    session_id,
-                    ?owner,
-                    reason,
-                    "waiting for session worker ownership"
-                );
-                executor.notify_notice("Waiting for the session's worker lifecycle operation");
-                announced = true;
-            }
-            tokio::select! { _ = changed => {}, _ = tokio::time::sleep(Duration::from_millis(25)) => {} }
-        }
-    }
-
-    pub(crate) fn acquire_blocking(
-        session_id: &str,
-        reason: &'static str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Self> {
-        if let Some(permit) = current(session_id) {
-            return Ok(permit);
-        }
-        let slot = slot(session_id);
-        let mut announced = false;
-        loop {
-            if let Some(permit) = Self::claim(slot.clone(), session_id, reason)? {
-                return Ok(permit);
-            }
-            ensure!(
-                !executor.cancellation_requested(),
-                "waiting for worker ownership cancelled"
-            );
-            let owner = slot.owner.lock().unwrap_or_else(|e| e.into_inner());
-            if owner.is_some() {
-                if !announced {
-                    executor.notify_notice("Waiting for the session's worker lifecycle operation");
-                    announced = true;
-                }
-                drop(
-                    slot.released
-                        .wait_timeout(owner, Duration::from_millis(25))
-                        .unwrap_or_else(|e| e.into_inner()),
-                );
-            }
-        }
+    pub(crate) fn admission(&self) -> &SessionAdmission {
+        &self.0.admission
     }
 
     pub(crate) async fn scope<T>(&self, work: impl Future<Output = T>) -> T {
@@ -311,18 +196,27 @@ impl WorkerPermit {
 pub(crate) fn run<'a, T: 'a>(
     session_id: &'a str,
     reason: &'static str,
-    executor: &'a impl CommandExecutor,
+    _executor: &'a impl CommandExecutor,
     work: impl Future<Output = Result<T>> + 'a,
 ) -> impl Future<Output = Result<T>> + 'a {
-    run_with_owner(session_id, reason, executor, None, work)
+    let work = Box::pin(work);
+    async move {
+        require(session_id)
+            .with_context(|| {
+                format!("{reason} for session {session_id} requires its caller's worker permit")
+            })?
+            .scope(work)
+            .await
+    }
 }
 
 /// A lease returned by an earlier call carries its own admission capability.
 /// Borrow it before acquiring again, even outside the original task scope.
 pub(crate) fn run_with_owner<'a, T: 'a>(
+    admission: &'a impl HoldsSession,
     session_id: &'a str,
     reason: &'static str,
-    executor: &'a impl CommandExecutor,
+    _executor: &'a impl CommandExecutor,
     retained: Option<WorkerPermit>,
     work: impl Future<Output = Result<T>> + 'a,
 ) -> impl Future<Output = Result<T>> + 'a {
@@ -337,7 +231,9 @@ pub(crate) fn run_with_owner<'a, T: 'a>(
                 );
                 owner
             }
-            None => WorkerPermit::acquire(session_id, reason, executor).await?,
+            None => WorkerPermit::acquire(session_id, admission).with_context(|| {
+                format!("{reason} for session {session_id} requires its caller's admission")
+            })?,
         };
         owner.scope(work).await
     }
@@ -346,117 +242,113 @@ pub(crate) fn run_with_owner<'a, T: 'a>(
 pub(crate) fn run_blocking<T>(
     session_id: &str,
     reason: &'static str,
-    executor: &impl CommandExecutor,
+    _executor: &impl CommandExecutor,
     work: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    WorkerPermit::acquire_blocking(session_id, reason, executor)?.scope_blocking(work)
+    require(session_id)
+        .with_context(|| {
+            format!("{reason} for session {session_id} requires its caller's worker permit")
+        })?
+        .scope_blocking(work)
+}
+
+/// Entry point for work whose caller already holds the session owner.
+pub(crate) fn run_admitted<'a, T: 'a>(
+    admission: &'a impl HoldsSession,
+    session_id: &'a str,
+    work: impl Future<Output = Result<T>> + 'a,
+) -> impl Future<Output = Result<T>> + 'a {
+    // Preserve the original wrapper's bounded debug stack before composing
+    // the lifecycle's large capture/restore future with the task-local scope.
+    let work = Box::pin(work);
+    async move {
+        WorkerPermit::acquire(session_id, admission)?
+            .scope(work)
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::targets::{CancellableProcessExecutor, ProcessExecutor};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::recovery_gate::{BackgroundWork, LifecycleOrigin, RecoveryGate};
+    use crate::targets::ProcessExecutor;
+    use std::sync::atomic::AtomicBool;
 
-    // Hard-won: a6ad3cc3: separate replacement decisions let two workers write one relay journal.
     #[tokio::test]
-    async fn same_session_waits_while_background_defers_and_other_sessions_progress() {
-        let id = "worker-owner-serialized";
-        let owner = WorkerPermit::try_acquire(id, "upgrade").unwrap().unwrap();
-        assert!(
-            WorkerPermit::try_acquire(id, "actor recovery")
-                .unwrap()
-                .is_none()
-        );
-        let other = WorkerPermit::try_acquire("worker-owner-independent", "upgrade")
-            .unwrap()
-            .unwrap();
-        let foreground = WorkerPermit::acquire(id, "checkpoint", &ProcessExecutor);
-        tokio::pin!(foreground);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut foreground)
-                .await
-                .is_err()
-        );
-        let operation = owner.operation_id().to_owned();
-        drop(owner);
-        let next = tokio::time::timeout(Duration::from_secs(2), foreground)
+    async fn nested_lifecycle_calls_borrow_the_same_operation_and_reject_other_sessions() {
+        let gate = Arc::new(RecoveryGate::default());
+        let admission = gate
+            .enter_foreground(
+                "nested",
+                "test lifecycle",
+                LifecycleOrigin::Person,
+                &AtomicBool::new(false),
+                &ProcessExecutor,
+            )
             .await
-            .unwrap()
             .unwrap();
-        assert_ne!(next.operation_id(), operation);
-        drop(other);
-    }
-
-    // Hard-won: a6ad3cc3: cancellation could release a session permit while another operation owned it.
-    #[tokio::test]
-    async fn cancelling_a_waiter_does_not_release_the_current_owner() {
-        let id = "worker-owner-cancelled-waiter";
-        let owner = WorkerPermit::try_acquire(id, "upgrade").unwrap().unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let executor = CancellableProcessExecutor::new(cancelled.clone());
-        let waiter = WorkerPermit::acquire(id, "checkpoint", &executor);
-        tokio::pin!(waiter);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+        let owner = WorkerPermit::acquire("nested", &admission).unwrap();
+        owner
+            .scope(async {
+                run("nested", "nested async", &ProcessExecutor, async {
+                    assert_eq!(require("nested")?.operation_id(), owner.operation_id());
+                    run_blocking("nested", "nested blocking", &ProcessExecutor, || {
+                        assert_eq!(require("nested")?.operation_id(), owner.operation_id());
+                        Ok(())
+                    })?;
+                    let failure = run("other", "cross-session helper", &ProcessExecutor, async {
+                        Ok(())
+                    })
+                    .await
+                    .unwrap_err();
+                    assert!(
+                        format!("{failure:#}").contains("cross-session helper for session other")
+                    );
+                    Ok(())
+                })
                 .await
-                .is_err()
-        );
-        cancelled.store(true, Ordering::Release);
-        assert!(waiter.await.is_err());
-        assert!(WorkerPermit::try_acquire(id, "recovery").unwrap().is_none());
-        drop(owner);
-        assert!(WorkerPermit::try_acquire(id, "recovery").unwrap().is_some());
+                .unwrap();
+            })
+            .await;
+        let failure = run("nested", "missing owner helper", &ProcessExecutor, async {
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{failure:#}").contains("missing owner helper for session nested"));
     }
 
-    // Hard-won: a6ad3cc3: aborting a waiter could release the permit during a blocking worker swap.
+    // Hard-won: a6ad3cc3: aborting a waiter released ownership during an executing blocking swap.
     #[tokio::test]
     async fn dropping_an_executor_waiter_cannot_release_an_executing_swap() {
-        let id = "worker-owner-executor-cancellation";
-        let owner = WorkerPermit::try_acquire(id, "upgrade").unwrap().unwrap();
+        let gate = Arc::new(RecoveryGate::default());
+        let admission = gate
+            .try_start("swap", BackgroundWork::WorkerReplacement)
+            .unwrap();
+        let owner = WorkerPermit::acquire("swap", &admission).unwrap();
+        drop(admission);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let retained = owner.clone();
         let executing = tokio::task::spawn_blocking(move || {
-            retained.scope_blocking(|| {
-                assert!(require(id).is_ok());
+            owner.scope_blocking(|| {
                 started_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
             })
         });
         started_rx.await.unwrap();
-        drop(owner);
         executing.abort();
         assert!(
-            WorkerPermit::try_acquire(id, "checkpoint")
-                .unwrap()
-                .is_none()
+            gate.try_start("swap", BackgroundWork::RelayRecovery)
+                .is_err()
         );
         release_tx.send(()).unwrap();
         executing.await.unwrap();
         assert!(
-            WorkerPermit::try_acquire(id, "checkpoint")
-                .unwrap()
-                .is_some()
+            gate.try_start("swap", BackgroundWork::RelayRecovery)
+                .is_ok()
         );
-    }
-
-    #[tokio::test]
-    async fn nested_lifecycle_calls_borrow_the_same_operation() {
-        let id = "worker-owner-nested";
-        let owner = WorkerPermit::try_acquire(id, "checkpoint")
-            .unwrap()
-            .unwrap();
-        owner
-            .scope(async {
-                let nested = WorkerPermit::acquire(id, "restart", &ProcessExecutor)
-                    .await
-                    .unwrap();
-                assert_eq!(owner.operation_id(), nested.operation_id());
-                nested.scope_blocking(|| {
-                    assert_eq!(require(id).unwrap().operation_id(), owner.operation_id())
-                });
-            })
-            .await;
     }
 }

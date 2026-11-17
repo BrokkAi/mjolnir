@@ -1,0 +1,620 @@
+[
+  {
+    "cohort": "primary",
+    "sid": "4cb6f495095e423f10516d35a175970a",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/4cb6f495095e423f10516d35a175970a.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 17408,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 24409,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 274,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 24683,
+            "reported_turns": 3
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-06f9dd1a503646ae4d0495d68bea4103": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-2388e47742bb0087c4778c19f9a8fd3a": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-637030a37385a6a8a7fd0214f04063d6": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 62,
+        "command_id": "carrier-06f9dd1a503646ae4d0495d68bea4103",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 62,
+        "completed_at_ms": 1794891705751,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 138,
+        "command_id": "mailbox-wake-637030a37385a6a8a7fd0214f04063d6",
+        "accepted_ordinal": 77,
+        "turn_start_position": 78,
+        "completed_ordinal": 138,
+        "completed_at_ms": 1794891752548,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 336,
+        "command_id": "mailbox-wake-2388e47742bb0087c4778c19f9a8fd3a",
+        "accepted_ordinal": 149,
+        "turn_start_position": 154,
+        "completed_ordinal": 336,
+        "completed_at_ms": 1794891770689,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 336,
+      "latest_seq": 336,
+      "captured_turn_rows": 3
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  },
+  {
+    "cohort": "primary",
+    "sid": "3a8acbe12b3ecb5a6224de083634ed2a",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/3a8acbe12b3ecb5a6224de083634ed2a.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 7168,
+            "reported_turns": 2
+          },
+          "input_tokens": {
+            "tokens": 12088,
+            "reported_turns": 2
+          },
+          "output_tokens": {
+            "tokens": 223,
+            "reported_turns": 2
+          },
+          "total_tokens": {
+            "tokens": 12311,
+            "reported_turns": 2
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-9a6ac1169d209488a0259e77c4100de6": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-da2da31c53bfdf68ec9c16b64dd84918": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 101,
+        "command_id": "carrier-9a6ac1169d209488a0259e77c4100de6",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 101,
+        "completed_at_ms": 1794891690666,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 282,
+        "command_id": "mailbox-wake-da2da31c53bfdf68ec9c16b64dd84918",
+        "accepted_ordinal": 130,
+        "turn_start_position": 133,
+        "completed_ordinal": 282,
+        "completed_at_ms": 1794891755557,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 282,
+      "latest_seq": 282,
+      "captured_turn_rows": 2
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  },
+  {
+    "cohort": "secondary",
+    "sid": "2a3cd7c623e895eb4b2e6d77b84d3cd8",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/carrier-usage/2a3cd7c623e895eb4b2e6d77b84d3cd8.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 13696,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 20910,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 67,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 20977,
+            "reported_turns": 4
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-100cdad2f5041e5d8424c2b6351ea21b": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-2fea20b13236e27779f8fe0efc0d6435": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-47cc73412b766befe600097a41fd53f0": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-f0ad1a4381e772cd1aa64b14b73dab63": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 81,
+        "command_id": "carrier-100cdad2f5041e5d8424c2b6351ea21b",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 81,
+        "completed_at_ms": 1794898092429,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 104,
+        "command_id": "mailbox-wake-47cc73412b766befe600097a41fd53f0",
+        "accepted_ordinal": 96,
+        "turn_start_position": 97,
+        "completed_ordinal": 104,
+        "completed_at_ms": 1794898130575,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 118,
+        "command_id": "mailbox-wake-2fea20b13236e27779f8fe0efc0d6435",
+        "accepted_ordinal": 110,
+        "turn_start_position": 111,
+        "completed_ordinal": 118,
+        "completed_at_ms": 1794898136412,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 132,
+        "command_id": "mailbox-wake-f0ad1a4381e772cd1aa64b14b73dab63",
+        "accepted_ordinal": 124,
+        "turn_start_position": 125,
+        "completed_ordinal": 132,
+        "completed_at_ms": 1794898142857,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 132,
+      "latest_seq": 132,
+      "captured_turn_rows": 4
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  },
+  {
+    "cohort": "secondary",
+    "sid": "0d10bae3567df373aeccfa3d08939d0d",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/carrier-usage/0d10bae3567df373aeccfa3d08939d0d.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 21504,
+            "reported_turns": 3
+          },
+          "input_tokens": {
+            "tokens": 30390,
+            "reported_turns": 3
+          },
+          "output_tokens": {
+            "tokens": 92,
+            "reported_turns": 3
+          },
+          "total_tokens": {
+            "tokens": 30482,
+            "reported_turns": 3
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-508ef92778c02a3e08cc0c372865928f": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-592756d0c3f52a0c98b2641c976b102e": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-985a4be229282cb6d9416a93296d9411": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 106,
+        "command_id": "carrier-508ef92778c02a3e08cc0c372865928f",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 106,
+        "completed_at_ms": 1794898110127,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 140,
+        "command_id": "mailbox-wake-985a4be229282cb6d9416a93296d9411",
+        "accepted_ordinal": 128,
+        "turn_start_position": 131,
+        "completed_ordinal": 140,
+        "completed_at_ms": 1794898156566,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 154,
+        "command_id": "mailbox-wake-592756d0c3f52a0c98b2641c976b102e",
+        "accepted_ordinal": 146,
+        "turn_start_position": 147,
+        "completed_ordinal": 154,
+        "completed_at_ms": 1794898165835,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 154,
+      "latest_seq": 154,
+      "captured_turn_rows": 3
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  },
+  {
+    "cohort": "ordinary-reviews",
+    "sid": "29f3499d7467c5fe85f5564d6315df4e",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/29f3499d7467c5fe85f5564d6315df4e.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 23424,
+            "reported_turns": 4
+          },
+          "input_tokens": {
+            "tokens": 32713,
+            "reported_turns": 4
+          },
+          "output_tokens": {
+            "tokens": 194,
+            "reported_turns": 4
+          },
+          "total_tokens": {
+            "tokens": 32907,
+            "reported_turns": 4
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-702e79f9b4f58708d3b9a5ee233c7c49": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-64f20120373533a0e47d495c6685b2ef": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-c251e5f78037cb9fc8b0dd3621510422": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-fc9c2a8bc316c2420b874aa8c8925746": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 189,
+        "command_id": "carrier-702e79f9b4f58708d3b9a5ee233c7c49",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 189,
+        "completed_at_ms": 1794904858916,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 212,
+        "command_id": "mailbox-wake-c251e5f78037cb9fc8b0dd3621510422",
+        "accepted_ordinal": 204,
+        "turn_start_position": 205,
+        "completed_ordinal": 212,
+        "completed_at_ms": 1794904900959,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 226,
+        "command_id": "mailbox-wake-64f20120373533a0e47d495c6685b2ef",
+        "accepted_ordinal": 218,
+        "turn_start_position": 219,
+        "completed_ordinal": 226,
+        "completed_at_ms": 1794904922286,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 259,
+        "command_id": "mailbox-wake-fc9c2a8bc316c2420b874aa8c8925746",
+        "accepted_ordinal": 232,
+        "turn_start_position": 233,
+        "completed_ordinal": 259,
+        "completed_at_ms": 1794904952579,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 259,
+      "latest_seq": 259,
+      "captured_turn_rows": 4
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  },
+  {
+    "cohort": "ordinary-reviews",
+    "sid": "f94dfb2f31897e2091334e91c52d454e",
+    "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/f94dfb2f31897e2091334e91c52d454e.json",
+    "root_keys": [
+      "session_id",
+      "turns",
+      "next_after_seq",
+      "latest_seq",
+      "totals",
+      "coverage",
+      "turn_cost_usd_ticks",
+      "turn_selections",
+      "by_model"
+    ],
+    "by_model": [
+      {
+        "model": "deepseek-v4-pro",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 10368,
+            "reported_turns": 2
+          },
+          "input_tokens": {
+            "tokens": 21109,
+            "reported_turns": 2
+          },
+          "output_tokens": {
+            "tokens": 135,
+            "reported_turns": 2
+          },
+          "total_tokens": {
+            "tokens": 21244,
+            "reported_turns": 2
+          }
+        }
+      }
+    ],
+    "turn_selections": {
+      "carrier-186acd757fc9e14f27c04060458d0bb0": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      },
+      "mailbox-wake-141d545c77d17de7a61fc8b91522965d": {
+        "model": "deepseek-v4-pro",
+        "effort": null
+      }
+    },
+    "captured_turn_metadata": [
+      {
+        "answered_through": 98,
+        "command_id": "carrier-186acd757fc9e14f27c04060458d0bb0",
+        "accepted_ordinal": 22,
+        "turn_start_position": 23,
+        "completed_ordinal": 98,
+        "completed_at_ms": 1794904866583,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      {
+        "answered_through": 180,
+        "command_id": "mailbox-wake-141d545c77d17de7a61fc8b91522965d",
+        "accepted_ordinal": 113,
+        "turn_start_position": 114,
+        "completed_ordinal": 180,
+        "completed_at_ms": 1794904962676,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "page_metadata": {
+      "next_after_seq": 180,
+      "latest_seq": 180,
+      "captured_turn_rows": 2
+    },
+    "scope_checks": {
+      "only_deepseek_by_model": true,
+      "only_deepseek_turn_selections": true,
+      "by_model_tokens_equal_root_tokens": true,
+      "no_reviewer_child_commands_in_captured_page": true
+    }
+  }
+]

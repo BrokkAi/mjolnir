@@ -16,7 +16,10 @@ pub fn save_at(
     updated: &str,
     state: &State,
 ) -> Result<Config> {
-    let original: serde_json::Value = serde_json::from_str(original)?;
+    // Both sides are read through this build's configuration, so a field
+    // the editing client predates arrives on both at the same default, and
+    // the merge keeps whatever the file holds for it (#1557).
+    let original = serde_json::to_value(serde_json::from_str::<Config>(original)?)?;
     let updated_config: Config = serde_json::from_str(updated)?;
     updated_config.validate()?;
     let updated = serde_json::to_value(&updated_config)?;
@@ -123,3 +126,43 @@ impl std::fmt::Display for EditConflict {
 }
 
 impl std::error::Error for EditConflict {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client older than the daemon sends neither side of a settings edit
+    /// with the fields it does not know. Those must neither conflict with nor
+    /// replace what the file holds.
+    // Hard-won: #1557: once older clients could attach, their saves conflicted on fields newer than them
+    #[test]
+    fn a_save_from_a_client_that_predates_a_field_keeps_the_files_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut current = Config::default();
+        current.review.reviewers =
+            vec![serde_json::from_value(serde_json::json!({"model": "reviewer-model"})).unwrap()];
+        current.save_to(&path).unwrap();
+        // `review.reviewers` is always written, so a client that predates it
+        // is the only way it can be missing.
+        let mut original = serde_json::to_value(&current).unwrap();
+        original["review"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reviewers");
+        let mut updated = original.clone();
+        updated["sessions_side"] = "right".into();
+        let saved = save_at(
+            &path,
+            &original.to_string(),
+            &updated.to_string(),
+            &State::default(),
+        )
+        .unwrap();
+        assert_eq!(saved.sessions_side, mj_core::config::SessionsSide::Right);
+        assert_eq!(
+            Config::load_from(&path).unwrap().review.reviewers,
+            current.review.reviewers
+        );
+    }
+}

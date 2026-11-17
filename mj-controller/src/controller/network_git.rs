@@ -2,6 +2,7 @@
 
 use crate::targets::{self, CommandExecutor};
 use anyhow::{Context, Result, ensure};
+use mj_core::targets::SshTrafficClass;
 
 use super::Controller;
 
@@ -53,6 +54,7 @@ impl Controller {
             ];
             args.extend(arguments.iter().map(|argument| (*argument).to_owned()));
             let output = executor.execute(&targets::command_on_locator(
+                SshTrafficClass::Control,
                 backend,
                 session_id,
                 args,
@@ -178,6 +180,7 @@ fn initialize_workspace(
         ];
         args.extend(arguments.iter().map(|argument| (*argument).to_owned()));
         executor.execute(&targets::command_on_locator(
+            SshTrafficClass::Bulk,
             backend,
             session_id,
             args,
@@ -308,6 +311,7 @@ pub(super) fn configure_workspace(
         .accepted_statuses([0, 5]),
     );
     let command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         session_id,
         targets::step_script(steps),
@@ -590,6 +594,29 @@ mod tests {
     }
 
     impl CommandExecutor for FixtureTransport {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut command = command.clone();
             ensure!(
@@ -827,6 +854,29 @@ mod tests {
 
     struct InterruptAfterSwitch;
     impl CommandExecutor for InterruptAfterSwitch {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let output = ProcessExecutor.execute(command)?;
             if command.args.iter().any(|arg| arg == "switch") {

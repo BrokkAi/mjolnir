@@ -1,10 +1,12 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Load the account's login exports, then interpret our script as POSIX sh.
 /// User shells such as zsh have reserved variables and different syntax.
 pub fn ssh_login_script(ssh: &SshTarget, script: &str) -> CommandSpec {
     let login_command = format!("exec /bin/sh -c {}", posix_quote(script));
     ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "sh",
@@ -48,6 +50,7 @@ pub fn bootstrap_probe_plan(
     validate_executable(harness.executable)?;
     let mut commands = vec![
         at_boundary(
+            SshTrafficClass::Control,
             boundary,
             std::iter::once(harness.executable)
                 .chain(harness.version_args.iter().copied())
@@ -59,17 +62,87 @@ pub fn bootstrap_probe_plan(
     if let Some(bridge) = harness.bridge_executable {
         validate_executable(bridge)?;
         commands.push(
-            at_boundary(boundary, vec![bridge.to_owned(), "--version".to_owned()])
-                .purpose("probe ACP bridge version"),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec![bridge.to_owned(), "--version".to_owned()],
+            )
+            .purpose("probe ACP bridge version"),
         );
     }
     commands.push(
-        at_boundary(boundary, vec!["git".to_owned(), "--version".to_owned()]).purpose("probe Git"),
+        at_boundary(
+            SshTrafficClass::Control,
+            boundary,
+            vec!["git".to_owned(), "--version".to_owned()],
+        )
+        .purpose("probe Git"),
     );
     Ok(CommandPlan {
         description: "probe reusable target tools".to_owned(),
         commands,
     })
+}
+
+/// Complete container creation before clone/profile staging can write HOME.
+/// Query as the configured container user, then create/chown as container root.
+/// This also handles images whose non-root user's home is missing.
+pub(crate) fn initialize_container_home(
+    locator: &TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let (engine, container, ssh) = match locator {
+        TargetLocator::LocalPodman { container_id, .. }
+        | TargetLocator::LocalDocker { container_id, .. }
+        | TargetLocator::AppleContainer { container_id, .. } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            None,
+        ),
+        TargetLocator::SshPodman {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshDocker {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshAppleContainer {
+            container_id, ssh, ..
+        }
+        | TargetLocator::SshNitro {
+            container_id, ssh, ..
+        } => (
+            locator.container_engine().expect("container target"),
+            container_id,
+            Some(ssh),
+        ),
+        _ => return Ok(()),
+    };
+    let script = format!(
+        r#"set -eu
+mj_home_engine() {{ {} "$@"; }}
+container=$1
+owner=$(mj_home_engine exec "$container" sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')
+# The slash sentinel preserves even a HOME ending with newlines through $().
+home=$(mj_home_engine exec "$container" sh -c 'printf "%s/" "${{HOME:?container HOME is unset}}"')
+home=${{home%/}}
+mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chown -- "$2" "$1"' mj-home "$home" "$owner"
+"#,
+        engine_shell_words(engine)
+    );
+    let command = CommandSpec::new("sh", ["-c", &script, "mj-container-home", container]);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
+        None => command,
+    }
+    .purpose("initialize session container home")
+    .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "initialize session container home failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 /// Thin Linux Git bootstrap. Managed containers also receive GitHub CLI and
@@ -88,6 +161,7 @@ pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
         description: "install missing Git".to_owned(),
         commands: vec![
             at_boundary(
+                SshTrafficClass::Control,
                 boundary,
                 vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             )
@@ -271,9 +345,13 @@ pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
     CommandPlan {
         description: "install EC2 Move transport".into(),
         commands: vec![
-            at_boundary(boundary, vec!["sh".into(), "-c".into(), script.into()])
-                .purpose("install supported rsync")
-                .stage(ProvisionStage::Provisioning),
+            at_boundary(
+                SshTrafficClass::Control,
+                boundary,
+                vec!["sh".into(), "-c".into(), script.into()],
+            )
+            .purpose("install supported rsync")
+            .stage(ProvisionStage::Provisioning),
         ],
     }
 }

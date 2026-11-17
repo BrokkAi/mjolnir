@@ -30,28 +30,6 @@ impl RuntimeState {
         acknowledge_container_recreation: bool,
         control: Option<LifecycleControl>,
     ) -> Result<StartedLifecycle> {
-        let joining_restart = self
-            .owner()
-            .lifecycle
-            .get(&session_id)
-            .is_some_and(|active| {
-                matches!(
-                    active.kind,
-                    LifecycleKind::Restart | LifecycleKind::UpgradeContainer
-                ) && active.is_running()
-            });
-        if !joining_restart {
-            self.wait_before_close(&session_id).await?;
-            self.wait_for_active_suspend(&session_id).await?;
-            let cleanup_running = self
-                .owner()
-                .lifecycle
-                .get(&session_id)
-                .is_some_and(|active| active.kind == LifecycleKind::Cleanup && active.is_running());
-            if cleanup_running {
-                self.wait_for_deferred_cleanup(&session_id).await?;
-            }
-        }
         let workspace_id = blocking({
             let session_id = session_id.clone();
             move || {
@@ -68,47 +46,34 @@ impl RuntimeState {
 
         let key = serde_json::to_string(&acknowledge_container_recreation)?;
         let (accepted, acceptance) = tokio::sync::watch::channel(None);
-        let operation = self.admit_prepared_lifecycle(
-            session_id.clone(),
-            LifecycleKind::Restart,
-            super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
-            Some(acceptance),
-            move |state, session_id, cancelled| async move {
-                let _workspace_admission = _workspace_admission;
-                state
-                    .restart_admitted_with_acceptance(
-                        session_id,
-                        cancelled,
-                        None,
-                        acknowledge_container_recreation,
-                        Some(accepted),
-                    )
-                    .await
-            },
-        )?;
+        let operation = self
+            .admit_prepared_lifecycle(
+                session_id.clone(),
+                LifecycleKind::Restart,
+                super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
+                Some(acceptance),
+                move |state, session_id, cancelled, session_admission| async move {
+                    let _workspace_admission = _workspace_admission;
+                    state
+                        .restart_admitted_with_acceptance(
+                            &session_admission,
+                            session_id,
+                            cancelled,
+                            None,
+                            acknowledge_container_recreation,
+                            Some(accepted),
+                        )
+                        .await
+                },
+            )
+            .await?;
         Ok(operation)
-    }
-
-    async fn wait_for_active_suspend(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let pending = {
-            let owner = self.owner();
-            owner.lifecycle.get(session_id).and_then(|active| {
-                (active.kind == LifecycleKind::Suspend && active.is_running())
-                    .then(|| active.result.clone())
-            })
-        };
-        if let Some(pending) = pending {
-            let completed = pending.clone();
-            Self::wait_lifecycle_result(pending).await?;
-            self.remove_completed_lifecycle(&completed);
-        }
-        Ok(())
     }
 
     /// Recover an accepted Restart after a daemon replacement. Its durable
     /// phase distinguishes a completed restore from a request that had only
     /// begun stopping the old worker.
-    pub(super) fn recover_restarts(
+    pub(super) async fn recover_restarts(
         self: &Arc<Self>,
         intents: Vec<crate::database::SessionRestartIntent>,
     ) -> Result<BTreeSet<String>> {
@@ -151,35 +116,46 @@ impl RuntimeState {
                 continue;
             }
             let key = format!("recovery:{}", intent.operation_id);
-            let result = self.admit_lifecycle(
-                session_id.clone(),
-                if intent.container_upgrade.is_some() {
-                    LifecycleKind::UpgradeContainer
-                } else {
-                    LifecycleKind::Restart
-                },
-                super::lifecycle::LifecycleStart {
-                    resume_workspace_id: None,
-                    request_key: Some(key),
-                    control: None,
-                    phase: if intent.container_upgrade.is_some()
-                        && intent.phase == crate::database::SessionRestartPhase::RecreatingContainer
-                    {
-                        LifecyclePhase::RetiringContainer
+            let result = self
+                .admit_lifecycle(
+                    session_id.clone(),
+                    if intent.container_upgrade.is_some() {
+                        LifecycleKind::UpgradeContainer
                     } else {
-                        LifecyclePhase::Executing
+                        LifecycleKind::Restart
                     },
-                    move_operation_id: None,
-                    deferrable_admission: None,
-                },
-                move |state, session_id, cancelled| async move {
-                    // A recovered intent keeps the rules it was started with,
-                    // including an automatic one's refusal to interrupt work.
-                    state
-                        .restart_admitted(session_id, cancelled, Some(intent), false)
-                        .await
-                },
-            )?;
+                    super::lifecycle::LifecycleStart {
+                        origin: super::lifecycle::LifecycleOrigin::Automatic,
+                        resume_workspace_id: None,
+                        request_key: Some(key),
+                        control: None,
+                        phase: if intent.container_upgrade.is_some()
+                            && intent.phase
+                                == crate::database::SessionRestartPhase::RecreatingContainer
+                        {
+                            LifecyclePhase::RetiringContainer
+                        } else {
+                            LifecyclePhase::Executing
+                        },
+                        move_operation_id: None,
+                        deferrable_admission: None,
+                        holds_through_drain: false,
+                    },
+                    move |state, session_id, cancelled, session_admission| async move {
+                        // A recovered intent keeps the rules it was started with,
+                        // including an automatic one's refusal to interrupt work.
+                        state
+                            .restart_admitted(
+                                &session_admission,
+                                session_id,
+                                cancelled,
+                                Some(intent),
+                                false,
+                            )
+                            .await
+                    },
+                )
+                .await?;
             owned.insert(session_id.clone());
             let state = self.clone();
             tokio::spawn(async move {
@@ -207,12 +183,14 @@ impl RuntimeState {
 
     pub(super) async fn restart_admitted(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
     ) -> Result<DaemonLifecycleResult> {
         self.restart_admitted_with_acceptance(
+            session_admission,
             session_id,
             cancelled,
             recovered,
@@ -224,6 +202,7 @@ impl RuntimeState {
 
     async fn restart_admitted_with_acceptance(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: String,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
@@ -237,6 +216,7 @@ impl RuntimeState {
             self.request_close(&session_id);
         }
         let result = Box::pin(self.restart_admitted_inner(
+            session_admission,
             &session_id,
             cancelled,
             recovered,
@@ -250,20 +230,13 @@ impl RuntimeState {
 
     async fn restart_admitted_inner(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
         acceptance: Option<LifecycleAcceptanceSender>,
     ) -> Result<DaemonLifecycleResult> {
-        let _recovery_reservation = tokio::task::spawn_blocking({
-            let observer = self.recovery_observer.clone();
-            let session_id = session_id.to_owned();
-            let cancelled = cancelled.clone();
-            move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-        })
-        .await
-        .context("reserve recovery for daemon restart task")??;
         let move_operation = crate::database::load_move_operation(session_id)?;
         ensure!(
             !move_operation
@@ -337,6 +310,7 @@ impl RuntimeState {
             }
             let operation_id = intent.operation_id.clone();
             Box::pin(controller.upgrade_container_worker(
+                session_admission,
                 session_id,
                 plan,
                 intent.phase == crate::database::SessionRestartPhase::RecreatingContainer,
@@ -395,6 +369,7 @@ impl RuntimeState {
             ensure_target_unavailable_for_fallback(&controller, session_id, &executor)?;
             tracing::info!(%session_id, "Restart selected suspend-and-resume fallback");
             self.restart_fallback(
+                session_admission,
                 session_id,
                 &intent.operation_id,
                 &mut controller,
@@ -442,6 +417,7 @@ impl RuntimeState {
                     "Restart selected suspend-and-resume because the target was unavailable before checkpointing"
                 );
                 self.restart_fallback(
+                    session_admission,
                     session_id,
                     &intent.operation_id,
                     &mut controller,
@@ -471,6 +447,7 @@ impl RuntimeState {
             .await?;
             tracing::info!(%session_id, "Restart selected in-place checkpoint and restore");
             let suspended = Box::pin(controller.suspend_session_for_restart(
+                session_admission,
                 session_id,
                 &executor,
                 &self.session_manager,
@@ -822,6 +799,7 @@ impl RuntimeState {
 
     async fn restart_fallback(
         self: &Arc<Self>,
+        session_admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         restart_intent: &str,
         controller: &mut Controller,
@@ -853,7 +831,15 @@ impl RuntimeState {
         self.begin_restart_container_teardown(session_id, restart_intent)?;
         let stopped = async {
             match self
-                .suspend_with_loaded_controller(session_id, controller, executor, true, false, None)
+                .suspend_with_loaded_controller(
+                    session_admission,
+                    session_id,
+                    controller,
+                    executor,
+                    true,
+                    false,
+                    None,
+                )
                 .await?
             {
                 DaemonLifecycleResult::Done => {}

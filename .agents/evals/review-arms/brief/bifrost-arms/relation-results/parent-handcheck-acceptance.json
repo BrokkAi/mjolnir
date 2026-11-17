@@ -1,0 +1,191 @@
+{
+  "accepted_at": "2026-11-17T06:04:49.184771+00:00",
+  "method": "Parent read all15 full outputs, frozen match_rule/near_misses, paired reasons and raw handcheck proposal; did not inspect arm catch rates/private attribution before fixing decisions.",
+  "raw_proposal_sha256": "2692318bbc9c441ed3f243fc0845455c820480538f329abe8600208c3d31ecb6",
+  "required_rows": 15,
+  "accepted_rows": 15,
+  "parent_overrides_to_handcheck": 0,
+  "changes_from_paired_judges": 2,
+  "decisions": [
+    {
+      "output_id": "07f60e503e05d025",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "partial",
+      "parent_label": "partial",
+      "parent_accepts_proposal": true,
+      "parent_reason": "The frozen match rule requires stable source incompleteness/StructureUnavailable. This concrete transient/store-failure witness does not establish that case; retain partial for the right memo and related completeness mechanism, using the required lower-label rule."
+    },
+    {
+      "output_id": "0dccc5d2f53401fe",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "Full finding traces the same unfinished indexed assignment through its RHS back into itself, with stack overflow; different indexed-write syntax preserves the exact cause."
+    },
+    {
+      "output_id": "1fec177b18443e06",
+      "bug": "python-module-binding-representative-after-event",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All three findings explicitly connect repeated bindings sharing one retained later range to the event-end cutoff losing a valid earlier read."
+    },
+    {
+      "output_id": "7a7a8bdfc573d473",
+      "bug": "python-module-binding-representative-after-event",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All three findings explicitly connect repeated bindings sharing one retained later range to the event-end cutoff losing a valid earlier read."
+    },
+    {
+      "output_id": "7d69459eea839714",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "partial",
+      "parent_label": "partial",
+      "parent_accepts_proposal": true,
+      "parent_reason": "The frozen match rule requires stable source incompleteness/StructureUnavailable. This concrete transient/store-failure witness does not establish that case; retain partial for the right memo and related completeness mechanism, using the required lower-label rule."
+    },
+    {
+      "output_id": "88ecd411b54d7daa",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "97f529126b0ee920",
+      "bug": "python-module-binding-representative-after-event",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All three findings explicitly connect repeated bindings sharing one retained later range to the event-end cutoff losing a valid earlier read."
+    },
+    {
+      "output_id": "b44108d3af0ea42f",
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "Full finding traces the same unfinished indexed assignment through its RHS back into itself, with stack overflow; different indexed-write syntax preserves the exact cause."
+    },
+    {
+      "output_id": "bf7ac647b2db1355",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "ca5c95bd2b507e4f",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "d2336695ab71bc78",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "d55615da017c69cd",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "d7cb9e72bcab7b20",
+      "bug": "python-filescope-enclosing-tie",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "Finding states equal whole-file Python module/FileScope spans, unordered selection of the synthetic owner and downstream wrong/nondeterministic ownership; deterministic semantic-owner preference catches the recorded defect."
+    },
+    {
+      "output_id": "dcf5a5d3c0d89809",
+      "bug": "unproven-override-family-certifies-empty",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "All six findings state the essential unproven->Some(empty)->absence-proof confusion and unsound gap/completeness discharge, matching the frozen rule."
+    },
+    {
+      "output_id": "e763e5e86adbd730",
+      "bug": "retained-fill-java-memo-loses-gap",
+      "paired_labels": [
+        "caught",
+        "caught"
+      ],
+      "handcheck_label": "caught",
+      "parent_label": "caught",
+      "parent_accepts_proposal": true,
+      "parent_reason": "The unrestricted failed Java declaration-build finding covers the stable incomplete-index/receipt loss and later false-complete absence; it does not limit its witness to transient/store errors."
+    }
+  ]
+}

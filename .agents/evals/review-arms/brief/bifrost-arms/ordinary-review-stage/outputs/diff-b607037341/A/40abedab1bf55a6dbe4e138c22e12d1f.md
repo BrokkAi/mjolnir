@@ -1,0 +1,2 @@
+- [P2] Resolve overloaded subscripts to their element type — crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8014-8018
+  When the receiver is a class with an overloaded `operator[]`, such as `container[0].compute()`, this recurses into `container` and uses the container's type instead of the operator's return type. Consequently, navigation either reports the element's member as unresolved or incorrectly resolves a same-named member on the container. This also affects common container types whose subscript returns a different class.

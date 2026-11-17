@@ -1,0 +1,55 @@
+{
+  "accepted_at": "2026-11-17T08:37:42.803365+00:00",
+  "writers": 40,
+  "all_final_brief_transcript_usage_hashes_rechecked": true,
+  "all40_api_states_suspended": true,
+  "lint_repairs": 0,
+  "runtime_and_input_hashes_rechecked": true,
+  "prior_artifact_hashes_rechecked": 2898,
+  "raw_tool_hits": [
+    {
+      "file": "diff-5053bc5bea-88.json",
+      "seq": 88,
+      "classification": "Literal brief body in quoted heredoc, no trailing command.",
+      "raw_input_available": false,
+      "represented_source_sha256": "169516aaa540b2b05d1cd725e6c2db9de55b3c49195f78170f2864b008f7b5be",
+      "literal_body_sha256": "9749fcf492732c71d61103191dd0be0ac15aef636b02f0e3eeefad4d6ea96eb1",
+      "writer_own_ordering_edit": false,
+      "final_bytes_explained": true
+    },
+    {
+      "file": "diff-6f9a2656f3-109.json",
+      "seq": 109,
+      "classification": "Literal brief body in quoted heredoc, no trailing command.",
+      "raw_input_available": false,
+      "represented_source_sha256": "886f2d17c096391675d3ad0104d20dc55395688cc287397203647be8d934f8b3",
+      "literal_body_sha256": "d2ded1c44bdd060cd536d142743d4c5b44e6cb48f319e742597256a0d077e986",
+      "writer_own_ordering_edit": true,
+      "final_bytes_explained": true
+    },
+    {
+      "file": "diff-a3b59a9183-104.json",
+      "seq": 104,
+      "classification": "Literal brief body in quoted heredoc, no trailing command.",
+      "raw_input_available": false,
+      "represented_source_sha256": "3e699553e53c5f6c31f51e572b98973bc448957c8e9239ec9b1206eb9ab10669",
+      "literal_body_sha256": "0674b2254f4c4c4ad7c8bf486491394b0331a504e60f4a72532f8a00559e5154",
+      "writer_own_ordering_edit": false,
+      "final_bytes_explained": true
+    },
+    {
+      "file": "diff-d3b5598051-110.json",
+      "seq": 110,
+      "classification": "Literal brief body in quoted heredoc, no trailing command.",
+      "raw_input_available": false,
+      "represented_source_sha256": "b0675614f64e66346ccdd8d55257eb690ecfe9f41b3233d91ffbdd9998ed485c",
+      "literal_body_sha256": "d4343a6391a4a6ee54b625e88699634b59cac9c399585ca2eaa045907c5f22e9",
+      "writer_own_ordering_edit": false,
+      "final_bytes_explained": true
+    }
+  ],
+  "actual_forbidden_operations_observed": 0,
+  "tool_audit_limit": "Existing scanner covers516tools/40fulltranscripts. Parent checked four complete represented quoted-heredoc commands. rawInput is null in those bridge records; titles/presentation retain full commands, not OS isolation. One subsequent same-writer ordering edit has complete rawInput and accepted-turn proof.",
+  "unknown_truth_controls": true,
+  "next_stage": "80 registered A/BT jobs,3Terrahigh each; no known-defect leak/catch-judge stages."
+}

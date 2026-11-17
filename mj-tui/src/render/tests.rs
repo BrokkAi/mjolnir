@@ -338,6 +338,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
         SupportPane::Sessions,
         SupportPane::Targets,
         SupportPane::Quota,
+        SupportPane::Notifications,
     ]
     .into_iter()
     .map(|pane| {
@@ -357,6 +358,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
         SupportPane::Sessions,
         SupportPane::Targets,
         SupportPane::Quota,
+        SupportPane::Notifications,
     ] {
         let maximize_enabled = dashboard.pane_maximize_enabled(pane);
         let expected_sizes = [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized]
@@ -3413,6 +3415,36 @@ fn golden_dashboard_session_render() {
 #[test]
 fn golden_dashboard_layout_render() {
     let mut output = String::new();
+    let mut notifications = crate::notifications_pane::tests::dashboard();
+    // Keep the age unknown in this golden; ordering is exercised through keys.
+    for detail in notifications.session_details.values_mut() {
+        detail.last_activity_at_ms = None;
+    }
+    for character in "I'll investigate.".chars() {
+        notifications.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dashboard_golden(
+        &mut output,
+        "question notification card",
+        120,
+        44,
+        &mut notifications,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut notifications))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (x, y) = (0..buffer.area.height)
+        .find_map(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.find("? Newest question ·")
+                .map(|byte| (row[..byte].chars().count() as u16, y))
+        })
+        .expect("notification header");
+    append_golden_value(&mut output, "notification header color", buffer[(x, y)].fg);
 
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());

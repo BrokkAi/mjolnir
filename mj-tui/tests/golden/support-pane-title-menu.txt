@@ -1,6 +1,6 @@
 title click action: None
 focus after title click: Prompt
-menu anchor: (47, 31, 47, 31)
+menu anchor: (47, 28, 47, 28)
 === Targets title menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -11,12 +11,9 @@ menu anchor: (47, 31, 47, 31)
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -40,11 +37,14 @@ menu anchor: (47, 31, 47, 31)
 │                                            │││CPU by session…  │Code  refreshing…                                                        │
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 title click action: None
 focus after title click: Prompt
-menu anchor: (47, 34, 47, 34)
+menu anchor: (47, 31, 47, 31)
 === Profiles title menu (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
@@ -55,12 +55,9 @@ menu anchor: (47, 34, 47, 34)
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -84,7 +81,10 @@ menu anchor: (47, 34, 47, 34)
 │                                            │││Refresh            │de  refreshing…                                                        │
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
-╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 Targets Refresh action: RefreshAll
 === Targets after Refresh (140x40) ===
@@ -97,12 +97,9 @@ Targets Refresh action: RefreshAll
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -126,6 +123,9 @@ Targets Refresh action: RefreshAll
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets Runtimes… action: None
@@ -152,9 +152,6 @@ Targets Runtimes… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -164,9 +161,12 @@ Targets Runtimes… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -194,9 +194,6 @@ Targets Machines… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -206,9 +203,12 @@ Targets Machines… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -223,12 +223,9 @@ Profiles Refresh action: RefreshAll
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -252,6 +249,9 @@ Profiles Refresh action: RefreshAll
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Settings… action: None
@@ -264,12 +264,9 @@ Profiles Settings… action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
-│  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │                  │   codex-1                         9 settings  ›                            Detect profiles   │                     │
+│                     │   codex-2                         9 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -290,9 +287,12 @@ Profiles Settings… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
@@ -307,12 +307,9 @@ Targets dot action: None
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -336,6 +333,9 @@ Targets dot action: None
 │                                            │││CPU by session…  │Code  refreshing…                                                        │
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets number 2 action: None
@@ -362,9 +362,6 @@ Targets number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -374,9 +371,12 @@ Targets number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -404,9 +404,6 @@ Targets number 3 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -416,9 +413,12 @@ Targets number 3 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -432,12 +432,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -461,6 +458,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                            │││CPU by session…  │Code  refreshing…                                                        │
 │                                            ││╰─────────────────╯      refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Escape action: None
@@ -476,12 +476,9 @@ Targets menu after Escape: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -505,6 +502,9 @@ Targets menu after Escape: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Enter Refresh action: RefreshAll
@@ -518,12 +518,9 @@ Targets Enter Refresh action: RefreshAll
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -547,6 +544,9 @@ Targets Enter Refresh action: RefreshAll
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 Targets Enter setup action: None
@@ -573,9 +573,6 @@ Targets Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -585,9 +582,12 @@ Targets Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
@@ -602,12 +602,9 @@ Profiles dot action: None
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -631,7 +628,10 @@ Profiles dot action: None
 │                                            │││Refresh            │de  refreshing…                                                        │
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
-╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles number 2 action: None
 === Profiles number 2: Settings…, profiles (140x40) ===
@@ -643,12 +643,9 @@ Profiles number 2 action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
-│  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │                  │   codex-1                         9 settings  ›                            Detect profiles   │                     │
+│                     │   codex-2                         9 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -669,9 +666,12 @@ Profiles number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
@@ -685,12 +685,9 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -714,7 +711,10 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                            │││Refresh            │de  refreshing…                                                        │
 │                                            │││Settings…          │    refreshing…                                                        │
 │                                            │││Usage by session…  │    refreshing…                                                        │
-╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Escape action: None
 Profiles focus after Escape: Quota
@@ -729,12 +729,9 @@ Profiles menu after Escape: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -758,6 +755,9 @@ Profiles menu after Escape: false
 │                                            ││› claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Enter Refresh action: RefreshAll
@@ -771,12 +771,9 @@ Profiles Enter Refresh action: RefreshAll
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -800,6 +797,9 @@ Profiles Enter Refresh action: RefreshAll
 │                                            ││› claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
 Profiles Enter setup action: None
@@ -812,12 +812,9 @@ Profiles Enter setup action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
-│  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
-│                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │                  │   codex-1                         9 settings  ›                            Detect profiles   │                     │
+│                     │   codex-2                         9 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -838,9 +835,12 @@ Profiles Enter setup action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │   Back     Save and Close                                                                    │                     │
-│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
+│                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯  ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
 │                                                                                                                                          │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette
@@ -857,12 +857,9 @@ Targets menu after size click: false
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -885,6 +882,9 @@ Targets menu after size click: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Targets Standard size action: None
@@ -899,12 +899,9 @@ Targets menu after size click: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -928,6 +925,9 @@ Targets menu after size click: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Minimized size action: None
@@ -944,12 +944,9 @@ Profiles menu after size click: false
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
 │                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -971,7 +968,10 @@ Profiles menu after size click: false
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-╰────────────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
+│                                            │─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ───────── ▁   ▄ ─
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Profiles Standard size action: None
 Profiles menu after size click: false
@@ -985,12 +985,9 @@ Profiles menu after size click: false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1014,5 +1011,8 @@ Profiles menu after size click: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
