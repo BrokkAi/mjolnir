@@ -52,7 +52,7 @@ pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.
 /// `capacity_retry`, `retry_assessment_pending`, `quota_recovery`, `operation`,
 /// `move_recovery`, `chat_phase`, `is_idle`, `active`, `activity_details`, `activity`,
 /// and `capabilities`. Prompt and elicitation bodies become
-/// `queued_prompt_count` and `pending_elicitation_count`. These are the
+/// `queued_prompt_count`, `pending_elicitation_count` and `pending_elicitation_ids`. These are the
 /// dashboard, resume-list, session-index, and sub-agent workspace/count fields
 /// read by viewer.js; resume detail, Move, and conversation fields are fetched
 /// from the row route.
@@ -223,6 +223,18 @@ fn project_row(session: &ViewerSession, summary: bool) -> Result<WireRow> {
         object.insert(
             "pending_elicitation_count".into(),
             Value::from(session.pending_elicitations.len()),
+        );
+        // The ids name which requests are pending, so a card that shows one
+        // can tell a new form from the one it already read.
+        object.insert(
+            "pending_elicitation_ids".into(),
+            Value::from(
+                session
+                    .pending_elicitations
+                    .iter()
+                    .map(|request| request.id.clone())
+                    .collect::<Vec<_>>(),
+            ),
         );
     }
     if let Some(Value::Array(agents)) = object.get_mut("native_subagents") {

@@ -37,8 +37,9 @@ class Node {
 
 /// The notifications screen running on its real source with hand-built fakes
 /// for the daemon (`request`), the router and the DOM.
-function screen(rows) {
+function screen(rows, { launchFailures = [] } = {}) {
   const requests = [];
+  const drafts = [];
   const answers = new Map();
   const nav = [];
   const container = new Node('div');
@@ -54,7 +55,17 @@ function screen(rows) {
     requests,
     answers,
     nav,
-    snapshot: {},
+    snapshot: { launch_failures: launchFailures },
+    dismissedLaunchFailures: new Set(),
+    pendingSubmissions: new Map(),
+    renderPendingSubmissions: () => {},
+    renderRoute: () => context.rendered.push('route'),
+    rendered: [],
+    drafts,
+    queueDraftSave: async (id, text) => { drafts.push([id, text]); },
+    MAX_PROMPT_REQUEST_BYTES: 32 * 1024 * 1024,
+    TextEncoder,
+    crypto: { getRandomValues: array => array.fill(7) },
     snapshotReceivedAtMs: 0,
     serverClockMs: () => 100_000,
     formatClock: ms => `${Math.floor(ms / 1000)}s`,
@@ -65,21 +76,23 @@ function screen(rows) {
     sessionMessageMs: row => row.last_message_at_ms ?? 0,
     navigate: next => nav.push(next),
     refresh: async () => {},
-    newCommandId: action => `web-${action}-fixed`,
     request: async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, body });
       const answer = answers.get(body ? `${body.action}:${body.session_id}` : url);
       if (answer instanceof Error) throw answer;
+      if (typeof answer === 'function') return answer();
       return answer ?? null;
     },
   });
   vm.runInContext(sourceBetween('function el(', 'const bootStatus'), context);
+  vm.runInContext(sourceBetween('function newCommandId(', '/// Guard against sending twice.'), context);
+  vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
   vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
   vm.runInContext(sourceBetween('// The notifications screen\n', 'function renderSessions() {'), context);
   const read = expression => vm.runInContext(expression, context);
   return {
-    context, requests, answers, nav, container,
+    context, requests, answers, nav, container, drafts,
     read,
     nodes: read('inboxNodes'),
     render: () => read('renderInbox()'),
@@ -168,7 +181,7 @@ test('quick reply sends to the captured session; drafts follow their session; em
   view.nodes.reply.onsubmit({ preventDefault() {} });
   await settle();
   assert.deepEqual(plain(view.requests.at(-1).body), {
-    action: 'prompt', session_id: 'a', text: 'draft for a', images: [], command_id: 'web-prompt-fixed',
+    action: 'prompt', session_id: 'a', text: 'draft for a', images: [], command_id: 'web-prompt-07070707070707070707070707070707',
   });
   assert.equal(view.nodes.input.value, '');
   assert.equal(view.read('inboxDrafts.has("a")'), false);
@@ -178,16 +191,78 @@ test('quick reply sends to the captured session; drafts follow their session; em
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
 });
 
-test('a failed send keeps the draft and says so', async () => {
+test('a send the daemon refuses keeps the draft and says so', async () => {
   const view = screen([row('a', 'needs_input', 3)]);
   view.render();
   view.nodes.input.value = 'hello';
   view.nodes.input.oninput();
-  view.answers.set('prompt:a', new Error('session is closed'));
+  view.answers.set('prompt:a', Object.assign(new Error('session is closed'), { status: 409 }));
   view.nodes.reply.onsubmit({ preventDefault() {} });
   await settle();
   assert.equal(view.read('inboxDrafts.get("a")'), 'hello');
+  assert.equal(view.nodes.input.value, 'hello');
   assert.equal(view.nodes.cardError.textContent, 'Not sent: session is closed');
+  assert.equal(view.read('pendingSubmissions.size'), 0, 'a refused line leaves no pending row behind');
+});
+
+// A lost acknowledgement does not authorize replay (AGENTS.md).
+test('a lost acknowledgement reports delivery unconfirmed and never mints a second command', async () => {
+  const view = screen([row('a', 'needs_input', 3)]);
+  view.render();
+  view.nodes.input.value = 'hello';
+  view.nodes.input.oninput();
+  view.answers.set('prompt:a', new Error('network lost'));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  const prompts = () => view.requests.filter(r => r.body?.action === 'prompt');
+  assert.equal(prompts().length, 1);
+  const id = prompts()[0].body.command_id;
+  const [pending] = view.read('[...pendingSubmissions.values()]');
+  assert.equal(pending.id, id, 'the pending row keeps the original command id for reconciliation');
+  assert.match(pending.status, /^Delivery unconfirmed/);
+  assert.match(view.nodes.cardError.textContent, /^Delivery unconfirmed: network lost/);
+  assert.equal(view.nodes.input.value, '', 'an unconfirmed line is not offered for resending');
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.equal(prompts().length, 1, 'Send again does not create a second command');
+});
+
+test('an edit made while a send is in flight survives its acknowledgement', async () => {
+  const view = screen([row('a', 'needs_input', 3)]);
+  view.render();
+  view.nodes.input.value = 'first';
+  view.nodes.input.oninput();
+  let acknowledge;
+  view.answers.set('prompt:a', () => new Promise(resolve => { acknowledge = resolve; }));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.equal(view.nodes.send.disabled, true, 'a second send of the same session waits');
+  view.nodes.input.value = 'first, and more';
+  view.nodes.input.oninput();
+  acknowledge(null);
+  await settle();
+  assert.equal(view.nodes.input.value, 'first, and more');
+  assert.equal(view.read('inboxDrafts.get("a")'), 'first, and more');
+  assert.equal(view.nodes.send.disabled, false);
+});
+
+test('quick reply builds the composer\'s own action: ! runs a shell command and a slash command goes to the composer unsent', async () => {
+  const view = screen([row('a', 'needs_input', 3)]);
+  view.render();
+  view.nodes.input.value = '!ls -l';
+  view.nodes.input.oninput();
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(plain(view.requests.find(r => r.body?.action === 'run-shell').body).command, 'ls -l');
+  assert.equal(view.requests.some(r => r.body?.action === 'prompt'), false);
+
+  view.nodes.input.value = '/model fast';
+  view.nodes.input.oninput();
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.deepEqual(plain(view.drafts), [['a', '/model fast']]);
+  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
+  assert.equal(view.requests.some(r => r.body?.text === '/model fast'), false, 'a local command is never sent as a prompt');
 });
 
 test('Go to Session opens a pending form\'s holder and returns here on Back', () => {
@@ -219,4 +294,93 @@ test('the full message loads from the daemon: loading, text, and not available',
 test('the header count is the ? and ! sessions', () => {
   const view = screen([row('a', 'needs_input', 3), row('b', 'important', 2), row('c', 'failed', 1), row('d', 'unread', 1)]);
   assert.equal(view.read('inboxEntries().length'), 2);
+  const withFailure = screen([row('a', 'needs_input', 3)], { launchFailures: [{ id: 'f', workspace_id: 'w' }] });
+  assert.equal(withFailure.read('inboxEntries().length'), 2, 'launch failures count too');
+});
+
+// Hard-won: skipping past the last card appended a duplicate id, which stuck the screen and doubled counts.
+test('skip rotates through unique cards however many times it is pressed', () => {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2), row('c', 'important', 1)]);
+  const seen = [];
+  for (let press = 0; press < 7; press += 1) { seen.push(view.ids()[0]); view.nodes.skip.onclick(); }
+  assert.deepEqual(seen, ['a', 'b', 'c', 'a', 'b', 'c', 'a']);
+  assert.deepEqual(view.ids(), ['b', 'c', 'a']);
+  assert.equal(new Set(plain(view.read('inboxSkipped'))).size, view.read('inboxSkipped.length'));
+  view.render();
+  assert.match(view.nodes.headerText.textContent, /3 left/);
+  assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)');
+});
+
+test('a failed message read is not cached: it retries when the card is shown again, not in a loop', async () => {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)]);
+  view.answers.set('/api/sessions/a/notification-message', new Error('offline'));
+  view.render();
+  await settle();
+  const reads = () => view.requests.filter(r => r.url.endsWith('/a/notification-message')).length;
+  assert.equal(reads(), 1);
+  assert.match(view.nodes.body.textContent, /Could not read the message: offline/);
+  assert.equal(view.nodes.retry.hidden, false);
+  view.render(); view.render();
+  await settle();
+  assert.equal(reads(), 1, 'rendering the same card again does not refetch');
+  view.answers.set('/api/sessions/a/notification-message', { text: 'back again' });
+  view.nodes.retry.onclick();
+  await settle();
+  assert.equal(view.nodes.body.textContent, 'back again');
+
+  // A failure is also retried on the next visit to the card.
+  const other = screen([row('a', 'needs_input', 3)]);
+  other.answers.set('/api/sessions/a/notification-message', new Error('offline'));
+  other.render();
+  await settle();
+  other.answers.set('/api/sessions/a/notification-message', { text: 'recovered' });
+  other.read('inboxShownKey = null');
+  other.render();
+  await settle();
+  assert.equal(other.nodes.body.textContent, 'recovered');
+});
+
+test('a new pending form, from the same or another holder, reads the message again', async () => {
+  const parent = row('p', 'needs_input', 3, { form_holder: 'c1' });
+  const child = (id, requests) => row(id, 'working', 1, { pending_elicitation_ids: requests, subagent_parent_id: 'p' });
+  const view = screen([parent, child('c1', ['r1']), child('c2', [])]);
+  view.answers.set('/api/sessions/p/notification-message', { text: 'form r1' });
+  view.render();
+  await settle();
+  const reads = () => view.requests.filter(r => r.url.endsWith('/p/notification-message')).length;
+  assert.equal(reads(), 1);
+  view.context.viewerState.rows.get('c1').pending_elicitation_ids = ['r2'];
+  view.answers.set('/api/sessions/p/notification-message', { text: 'form r2' });
+  view.render();
+  await settle();
+  assert.equal(reads(), 2, 'a new request id from the same holder');
+  assert.equal(view.nodes.body.textContent, 'form r2');
+  view.context.viewerState.rows.get('c2').pending_elicitation_ids = ['r2'];
+  view.context.viewerState.rows.get('p').form_holder = 'c2';
+  view.render();
+  await settle();
+  assert.equal(reads(), 3, 'the same request id under another holder');
+});
+
+test('launch failures are cards after the ! cards, counted, openable and dismissable', () => {
+  const view = screen([row('a', 'important', 3), row('b', 'needs_input', 1, { notifications_ignored: true })], {
+    launchFailures: [
+      { id: 'f1', workspace_id: 'w', session_id: 'a', error: 'target is down' },
+      { id: 'f2', workspace_id: 'w' },
+    ],
+  });
+  assert.deepEqual(view.ids(), ['a', 'launch-failure:f1', 'launch-failure:f2']);
+  view.nodes.skip.onclick();
+  view.render();
+  assert.equal(view.nodes.body.textContent, 'target is down');
+  assert.equal(view.nodes.reply.hidden, true);
+  assert.equal(view.nodes.open.hidden, false);
+  view.nodes.open.onclick();
+  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
+  view.nodes.clear.onclick();
+  assert.deepEqual(plain([...view.read('dismissedLaunchFailures')]), ['f1']);
+  assert.deepEqual(view.ids(), ['launch-failure:f2', 'a']);
+  view.render();
+  assert.equal(view.nodes.open.hidden, true, 'a failure with no session has nothing to open');
+  assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)', 'only the ! card counts for Clear all !');
 });

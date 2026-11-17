@@ -157,18 +157,22 @@ pub(super) async fn session_row(
     Ok(response)
 }
 
-/// The full message a notification card shows for one session: the pending
-/// form's request, else the question's own reply, else the latest agent
-/// message. A parent promoted by a child's pending form reads the child's
+/// The full message a notification card shows for one session. Which message
+/// that is comes from `mj_core::notification_message`, the rule the terminal
+/// pane uses too. A parent promoted by a child's pending form reads the child's
 /// request, and `session_id` names the session the card opens. `text` is
 /// `null` when the located message is no longer stored.
 pub(super) async fn notification_message(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Response<Body>, ApiError> {
+    use mj_core::notification_message::{
+        NotificationKind, NotificationMessageFacts, NotificationMessageSource,
+        notification_message_sources,
+    };
     validate_public_id(&session_id)?;
-    // Read what the snapshot holds, then release it before any database read.
-    let (holder, form, question_message) = {
+    // Copy what the snapshot holds, then release it before any database read.
+    let (holder, kind, pending_request, review_activity, question_message) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         let holder = session
@@ -180,48 +184,70 @@ pub(super) async fn notification_message(
         let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
         (
             holder.clone(),
+            if session.attention == mj_core::attention::SessionAttention::NeedsInput {
+                NotificationKind::NeedsInput
+            } else {
+                NotificationKind::Important
+            },
             holder_session
                 .pending_elicitations
                 .last()
                 .map(|request| request.message.clone()),
-            (session.attention == mj_core::attention::SessionAttention::NeedsInput)
-                .then(|| holder_session.question_message.clone())
-                .flatten(),
+            holder_session
+                .turn_review
+                .as_ref()
+                .map(|review| review.status.clone()),
+            holder_session.question_message.clone(),
         )
     };
     let reader = holder.clone();
-    let text = if form.is_some() {
-        form
-    } else {
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
-            if let Some(target) = question_message {
-                let item = crate::database::load_materialized_transcript_item(&reader, &target)?;
-                return Ok(item.and_then(|item| {
+    let text = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        let facts = NotificationMessageFacts {
+            pending_request: pending_request.as_deref(),
+            review_activity: review_activity.as_deref(),
+            question_message: question_message.as_deref(),
+            // The viewer does not carry the legacy no-open-request flag; those
+            // harnesses are only reachable from the terminal pane.
+            supports_open_request: true,
+        };
+        // The first source is the card's message: a read that finds nothing is
+        // "not available", not a reason to show another message.
+        let Some(source) = notification_message_sources(kind, &facts).into_iter().next() else {
+            return Ok(None);
+        };
+        match source {
+            NotificationMessageSource::PendingRequest(text)
+            | NotificationMessageSource::ReviewActivity(text) => Ok(Some(text.to_owned())),
+            NotificationMessageSource::QuestionMessage(target) => {
+                let item = crate::database::load_materialized_transcript_item(&reader, target)?;
+                Ok(item.and_then(|item| {
                     mj_core::transcript::materialized_agent_message_text(
                         std::iter::once(&item),
-                        &target,
+                        target,
                     )
-                }));
+                }))
             }
-            Ok(crate::database::load_materialized_session_summary(&reader)?
-                .and_then(|summary| summary.last_agent_message))
-        })
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, session_id, "notification message read did not finish");
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not read the notification message",
-            )
-        })?
-        .map_err(|error| {
-            tracing::error!(error = %format!("{error:#}"), session_id, "could not read the notification message");
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not read the notification message",
-            )
-        })?
-    };
+            NotificationMessageSource::LastAgentMessage => {
+                Ok(crate::database::load_materialized_session_summary(&reader)?
+                    .and_then(|summary| summary.last_agent_message))
+            }
+        }
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, session_id, "notification message read did not finish");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the notification message",
+        )
+    })?
+    .map_err(|error| {
+        tracing::error!(error = %format!("{error:#}"), session_id, "could not read the notification message");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the notification message",
+        )
+    })?;
     let mut response =
         Json(serde_json::json!({ "session_id": holder, "text": text })).into_response();
     response

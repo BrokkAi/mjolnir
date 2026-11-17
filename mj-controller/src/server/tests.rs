@@ -975,7 +975,10 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
 
 #[tokio::test]
 async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
-    let (app, _, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        pending_elicitation_snapshot(snapshot);
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
+    });
     let cookie = login_cookie(&app).await;
     let response = app
         .clone()

@@ -244,49 +244,61 @@ impl DashboardState {
                 })
         });
         match level {
-            AttentionLevel::Waiting => detail
-                .and_then(|detail| detail.pending_elicitations.last())
-                .map(|request| request.message.clone())
-                .or_else(|| {
-                    self.session_review(session_id)
-                        .and_then(|review| review.activity_label())
-                        .map(str::to_owned)
-                })
-                .or_else(|| {
-                    let detail = detail?;
-                    let target = detail.question_message.as_deref()?;
-                    mj_core::transcript::materialized_agent_message_text(
-                        detail.projection.transcript.iter().map(AsRef::as_ref),
-                        target,
-                    )
-                    .or_else(|| {
-                        located_read.map(|read| {
-                            if read.status == crate::ingest::TranscriptHydration::Loading {
-                                return "loading…".to_owned();
-                            }
-                            read.item
-                                .as_deref()
-                                .and_then(|item| {
-                                    mj_core::transcript::materialized_agent_message_text(
-                                        std::iter::once(item),
-                                        target,
-                                    )
+            AttentionLevel::Waiting | AttentionLevel::Important => {
+                use mj_core::notification_message::{
+                    NotificationKind, NotificationMessageFacts, NotificationMessageSource,
+                    notification_message_placeholder, notification_message_sources,
+                };
+                let kind = if level == AttentionLevel::Waiting {
+                    NotificationKind::NeedsInput
+                } else {
+                    NotificationKind::Important
+                };
+                let review_activity = self
+                    .session_review(session_id)
+                    .and_then(|review| review.activity_label());
+                let facts = NotificationMessageFacts {
+                    pending_request: detail
+                        .and_then(|detail| detail.pending_elicitations.last())
+                        .map(|request| request.message.as_str()),
+                    review_activity,
+                    question_message: detail.and_then(|detail| detail.question_message.as_deref()),
+                    supports_open_request: detail.is_none_or(|detail| detail.supports_open_request),
+                };
+                notification_message_sources(kind, &facts)
+                    .into_iter()
+                    .find_map(|source| match source {
+                        NotificationMessageSource::PendingRequest(text)
+                        | NotificationMessageSource::ReviewActivity(text) => Some(text.to_owned()),
+                        NotificationMessageSource::QuestionMessage(target) => {
+                            let detail = detail?;
+                            mj_core::transcript::materialized_agent_message_text(
+                                detail.projection.transcript.iter().map(AsRef::as_ref),
+                                target,
+                            )
+                            .or_else(|| {
+                                located_read.map(|read| {
+                                    if read.status == crate::ingest::TranscriptHydration::Loading {
+                                        return "loading…".to_owned();
+                                    }
+                                    read.item
+                                        .as_deref()
+                                        .and_then(|item| {
+                                            mj_core::transcript::materialized_agent_message_text(
+                                                std::iter::once(item),
+                                                target,
+                                            )
+                                        })
+                                        .unwrap_or_else(|| "message not available".to_owned())
                                 })
-                                .unwrap_or_else(|| "message not available".to_owned())
-                        })
+                            })
+                        }
+                        NotificationMessageSource::LastAgentMessage => {
+                            detail?.last_agent_message.as_deref().map(str::to_owned)
+                        }
                     })
-                })
-                .or_else(|| {
-                    let detail = detail?;
-                    (!detail.supports_open_request)
-                        .then(|| detail.last_agent_message.as_deref().map(str::to_owned))
-                        .flatten()
-                })
-                .unwrap_or_else(|| "Waiting for your input".to_owned()),
-            AttentionLevel::Important => detail
-                .and_then(|detail| detail.last_agent_message.as_deref())
-                .map(str::to_owned)
-                .unwrap_or_else(|| "Important update".to_owned()),
+                    .unwrap_or_else(|| notification_message_placeholder(kind).to_owned())
+            }
             AttentionLevel::Failed => self
                 .state
                 .sessions

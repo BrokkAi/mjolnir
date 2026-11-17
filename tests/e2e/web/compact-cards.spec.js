@@ -361,10 +361,16 @@ test('golden_viewer_dashboard', async ({ context }) => {
   compactState.snapshot.launch_failures = [{ id: 'failed-launch', workspace_id: OTHER_WORKSPACE_ID }];
   await refresh(compactPage, compactState);
   await compactPage.goto('https://viewer.test/');
-  await expect(compactPage.locator('#launch-failures')).toContainText('A session could not be started.');
   await expect(compactPage).toHaveURL(/#notifications$/);
   await expect(compactPage.locator('#inbox .inbox-message')).toContainText('Second paragraph.');
   await captureGoldenState(output, compactPage, 'notifications screen on first visit');
+  // The launch failure is a card of its own, after the ? and ! cards.
+  await expect(compactPage.locator('#launch-failures')).toBeEmpty();
+  await expect(compactPage.locator('#notifications-badge')).toBeHidden();
+  await compactPage.getByRole('button', { name: 'Skip', exact: true }).click();
+  await compactPage.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(compactPage.locator('.inbox-message')).toContainText('A session could not be started.');
+  await expect(compactPage.getByRole('button', { name: 'Clear & Next' })).toBeEnabled();
   await compactPage.close();
 
   const orderedPage = await context.newPage();
