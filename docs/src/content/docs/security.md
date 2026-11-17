@@ -84,6 +84,33 @@ under configured approvals selects dsh-acp's `permission_mode` `ask`, so every
 write, command, and MCP tool call asks first, but it has no sandbox either:
 commands run directly on the host, and only its file tools are confined to the
 workspace roots.
+
+Under configured approvals Mjolnir also pre-approves the GitHub CLI (`gh`),
+because an agent's issue, pull-request, and review work is ordinary session
+work. Every worker start writes the approval into the configuration the
+harness already reads, so a profile staged by an older release converges too:
+
+| Harness | GitHub CLI approval |
+| --- | --- |
+| Codex | `rules/mj-gh.rules` in its staged home |
+| Claude Code | `Bash(gh:*)` in the `allowedTools` of every new, load and resume request, so the grant is scoped to the session and no settings file is edited |
+| Kimi Code | an allow rule in `permission.rules` in its staged `config.toml` |
+| Grok Build | `Bash(gh *)` and `Bash(gh)` in `permission.allow` in its staged `config.toml` |
+| Muse Code | the `gh` prefix in muse-acp's `MUSE_ACP_ALLOW_COMMAND_PREFIXES` |
+| OpenCode | bash rules in the session's own `OPENCODE_CONFIG_CONTENT` document |
+| Antigravity | `command(gh)` in agy's staged project grants; a person's own `deny` rule still wins |
+| DSH | no configuration of its own: the worker answers its `gh` permission requests |
+
+OpenCode reads its configuration documents in order and takes the last rule
+that matches, and a project's `opencode.json` and a profile's
+`OPENCODE_CONFIG_CONTENT` both follow the staged file. Mjolnir therefore
+asserts OpenCode's approval in the document it supplies last, so a later
+blanket rule cannot shadow it. The staged files are part of the
+[profile staging allowlist](/profiles/#what-a-sessions-staged-home-holds),
+so the setting reaches every session. A harness with neither a configuration
+file for commands (DSH) nor session-scoped tool options keeps its approval on
+the ACP boundary instead.
+
 The dashboard's new-session and resume wizards warn when a harness without
 guardian support is paired with a raw target; `mj new`, the API, and the web
 viewer do not. A warning is not a sandbox either way—choose a container or

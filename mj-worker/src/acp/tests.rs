@@ -866,6 +866,8 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 ))
                 .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
+                // The `gh` approval is session-scoped, so it is sent even
+                // when no owned server or history tool needs an allow entry.
                 let expected = (harness == HarnessKind::Claude && guardian)
                     .then(|| serde_json::json!(["Bash(gh:*)"]));
                 assert_eq!(

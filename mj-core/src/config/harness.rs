@@ -220,6 +220,39 @@ pub struct LaunchArgument {
     pub present: bool,
 }
 
+/// Where Mjolnir records its approval of the GitHub CLI (`gh`) for one
+/// harness. An agent's issue, pull-request and review work is ordinary session
+/// work, so every launch trusts `gh` in the harness's own configuration rather
+/// than interrupting the person once per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhApproval {
+    /// A file the worker edits inside the session's staged profile. The
+    /// profile staging allowlist must carry the file (or its parent
+    /// directory) from the profile home, so a harness that names a new file
+    /// here also adds it there.
+    StagedFile(&'static str),
+    /// A file the launch writes into the session home itself, because what it
+    /// grants depends on the servers and commands that launch offers.
+    LaunchFile(&'static str),
+    /// The session-open request's own options. Claude Code accepts
+    /// `Bash(gh:*)` in `allowedTools` on every new, load and resume request,
+    /// so the grant is scoped to the session and no file is edited — including
+    /// a home Mjolnir does not own.
+    SessionOptions,
+    /// A configuration document the launch supplies in this environment
+    /// variable, for a harness whose last-read document must carry the rule.
+    /// OpenCode takes the last matching permission rule across its documents,
+    /// so a rule in the staged file alone is shadowed by a project or profile
+    /// document that follows it.
+    SessionConfigDocument(&'static str),
+    /// The adapter that serves the harness reads this variable from its
+    /// environment; the harness itself has no settings key for a command.
+    AdapterEnvironment(&'static str),
+    /// The harness asks for approval over ACP and reads no configuration of
+    /// its own; the worker answers the request.
+    AcpRequest,
+}
+
 /// A setting the controller writes into a staged harness profile because the
 /// harness reads it from disk and no launch-time channel can carry it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -631,6 +664,32 @@ impl HarnessKind {
             // reads this. No dsh-acp release writes the file.
             Self::Dsh => "auth.json",
             Self::Antigravity => "antigravity-cli/antigravity-oauth-token",
+        }
+    }
+
+    /// The Claude Code allow rule for the GitHub CLI.
+    pub const CLAUDE_GH_RULE: &str = "Bash(gh:*)";
+
+    /// Where this harness accepts Mjolnir's `gh` approval. See [`GhApproval`]
+    /// for how each destination is delivered to a session.
+    pub const fn gh_approval(self) -> GhApproval {
+        match self {
+            // Codex loads every `rules/*.rules` file from its home.
+            Self::Codex => GhApproval::StagedFile("rules/mj-gh.rules"),
+            Self::Claude => GhApproval::SessionOptions,
+            Self::Kimi | Self::Grok => GhApproval::StagedFile("config.toml"),
+            // OpenCode merges its configuration documents and takes the last
+            // matching permission rule, so the rule is asserted in the
+            // document Mjolnir supplies last.
+            Self::OpenCode => GhApproval::SessionConfigDocument("OPENCODE_CONFIG_CONTENT"),
+            // Muse keeps command prefixes in its adapter, not its settings.
+            Self::Muse => GhApproval::AdapterEnvironment("MUSE_ACP_ALLOW_COMMAND_PREFIXES"),
+            // agy's Auto mode answers commands from its project's grant file,
+            // which the launch stages for the servers it registers.
+            Self::Antigravity => GhApproval::LaunchFile("config/projects/default-cli-project.json"),
+            // dsh-acp has no configuration of its own; its permission mode is
+            // all-or-nothing, so the worker answers its `gh` requests.
+            Self::Dsh => GhApproval::AcpRequest,
         }
     }
 

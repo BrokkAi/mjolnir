@@ -293,7 +293,7 @@ pub(super) fn configure_kimi_subagent_mcp(
 
 /// Rewrite a staged profile's JSON file, writing only when its content changes.
 /// A missing file starts as an empty object.
-fn edit_profile_json(
+pub(super) fn edit_profile_json(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
@@ -527,34 +527,6 @@ fn configure_codex_mcp_with_mailboxes(
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
     }
-    // Install on every worker start, including without delegation and in YOLO,
-    // so changing the execution policy never leaves an older profile behind.
-    let rules = home.join("rules");
-    match std::fs::symlink_metadata(&rules) {
-        Ok(metadata) => anyhow::ensure!(
-            metadata.is_dir(),
-            "Codex rules directory {} must be a real directory",
-            rules.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&rules)
-                .with_context(|| format!("create Codex rules directory {}", rules.display()))?;
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("inspect Codex rules {}", rules.display()));
-        }
-    }
-    let rule = rules.join("mj-gh.rules");
-    anyhow::ensure!(
-        regular_file_or_absent(&rule),
-        "managed Codex rule {} must be a regular file",
-        rule.display()
-    );
-    mj_core::config::atomic_write(
-        &rule,
-        b"prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n",
-    )
-    .with_context(|| format!("write managed Codex rule {}", rule.display()))?;
     // The staged copy is session-private, so re-serializing it through a
     // structured table (which drops comments and formatting) is acceptable.
     let path = home.join("config.toml");
@@ -2316,11 +2288,6 @@ enabled = false
                 let first = std::fs::read_to_string(&path).unwrap();
                 assert!(configure_codex_mcp(root.path(), &home, Some(role), policy).unwrap());
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
-                let gh_rule = "prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n";
-                assert_eq!(
-                    std::fs::read_to_string(rules.join("mj-gh.rules")).unwrap(),
-                    gh_rule
-                );
                 assert_eq!(
                     std::fs::read_to_string(rules.join("user.rules")).unwrap(),
                     user_rule
@@ -2386,10 +2353,6 @@ enabled = false
                     toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 assert!(disabled["mcp_servers"].get("mj-agents").is_none());
                 assert_eq!(
-                    std::fs::read_to_string(rules.join("mj-gh.rules")).unwrap(),
-                    gh_rule
-                );
-                assert_eq!(
                     std::fs::read_to_string(rules.join("user.rules")).unwrap(),
                     user_rule
                 );
@@ -2413,12 +2376,6 @@ enabled = false
             |role| configure_codex_mcp(root.path(), &home, role, ExecutionPolicy::Unconstrained);
         configure(None).unwrap();
         assert!(!path.exists());
-        let rule = home.join("rules/mj-gh.rules");
-        let expected = "prefix_rule(pattern=[\"gh\"], decision=\"allow\")\n";
-        assert_eq!(std::fs::read_to_string(&rule).unwrap(), expected);
-        std::fs::write(&rule, "obsolete managed rule").unwrap();
-        configure(None).unwrap();
-        assert_eq!(std::fs::read_to_string(&rule).unwrap(), expected);
         configure(Some(SubagentMcpRole::Child)).unwrap();
         let config: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -2479,10 +2436,6 @@ enabled = false
                     )
                     .unwrap()
                 );
-                assert_eq!(
-                    std::fs::read_to_string(remote.join("rules/mj-gh.rules")).unwrap(),
-                    expected
-                );
             }
         }
         assert!(
@@ -2540,16 +2493,6 @@ enabled = false
         assert!(staged.join("config.toml").is_file());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert!(!source.path().join("rules").exists());
-        let rules = staged.join("rules");
-        std::fs::remove_dir_all(&rules).unwrap();
-        std::os::unix::fs::symlink(source.path(), &rules).unwrap();
-        assert!(configure(&staged, None).is_err());
-        assert!(!source.path().join("mj-gh.rules").exists());
-        std::fs::remove_file(&rules).unwrap();
-        std::fs::create_dir(&rules).unwrap();
-        std::os::unix::fs::symlink(&path, rules.join("mj-gh.rules")).unwrap();
-        assert!(configure(&staged, None).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 
         let source_session = source.path().join("session");
         std::fs::create_dir(&source_session).unwrap();
