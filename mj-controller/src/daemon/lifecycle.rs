@@ -666,8 +666,7 @@ impl RuntimeState {
                         // lands in the startup delivery wait below: cancelled,
                         // not failed.
                         Err(_)
-                            if kind == LifecycleKind::Move
-                                && cancelled.load(Ordering::Acquire) =>
+                            if kind == LifecycleKind::Move && cancelled.load(Ordering::Acquire) =>
                         {
                             Ok(DaemonLifecycleResult::Done)
                         }
