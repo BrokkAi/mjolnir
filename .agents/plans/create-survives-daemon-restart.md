@@ -22,7 +22,7 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 
 - [x] Milestone 6: sub-agent creates use the same durable intent and recovery as top-level creates; the `resumable` flag and the separate interrupted state are gone.
 
-- [ ] Milestone 7 (restructure, see the 2026-11-16 restructure decision): (a) a create wait is answered only from durable state, so any daemon gives the same answer and a client only reconnects; (b) one create body serves top-level and sub-agent creates; (c) delete the wait machinery that (a) makes unnecessary.
+- [x] Milestone 7 (code and unit tests done in 4e82c9302; end-to-end scripts and full suites recorded in Outcomes) (restructure, see the 2026-11-16 restructure decision): (a) a create wait is answered only from durable state, so any daemon gives the same answer and a client only reconnects; (b) one create body serves top-level and sub-agent creates; (c) delete the wait machinery that (a) makes unnecessary.
 
 
 ## Surprises & Discoveries
@@ -30,6 +30,8 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
 - The server's REST/phone action control (`PhoneActionControl`, `server_runtime/run.rs`) also cancelled the create's `LifecycleControl` with "server shutdown" before the lifecycle registry interrupted it, so shutdown cancelled and rolled back creates started through `mj new`. Found by the end-to-end test; fixed with `LifecycleControl::stop_for_server_shutdown`, which interrupts a resumable create.
 - (Superseded by Milestone 6.) Sub-agents first kept caller replay and had no intent; they now register an intent in `register_subagent_with_startup` and recover like top-level creates.
 - Rollback writes `StartupCleanup` first, and every session write outside Provisioning/Disconnected settles the intent, so an intent only ever coexists with a creating session; recovery re-admits only those and discards any other leftover.
+
+- Milestone 7 found that `WaitCreateSession` and the phone `New` action held the non-deferrable "client request"/"web action" handoff admission for the whole create wait. With waits answered from durable state that would have made a handoff wait for creates, so both now hold none (registration keeps "session admission"). The phone wait ends with no result via `LifecycleControl::shutdown_stopped`.
 
 
 ## Decision Log
@@ -61,11 +63,15 @@ To see it: in an isolated instance, start `mj new` for a session, run `mj daemon
   (b) One create body. A single function admits and runs every create, with the kind-specific parts (publication for phone creates; relation, request key and parent target for sub-agents) passed in as data. Commit admission, `grant_commit`, the Running write, recovery reset (retire the partial environment, restore the checkout fields) and intent settlement each exist once. Recovery accepts exactly the states `holds_create_intent` accepts.
   Rationale: one owner per fact (the repository's concurrency rule), and race-free by construction rather than by patching each window. Date: 2026-11-16.
 
+- Decision (Milestone 7 deviations from the restructure spec): (1) a record in `StartupCleanup` with no intent row is reported as failed (with `last_error`), not finished, because a failed top-level create settles its intent on the way through `StartupCleanup` to `Error`; "any other state is finished" would have answered a failing create as success. (2) `DaemonUpgradePending` and `wait_create_session_once` are deleted outright: the wait request is exempt from handoff admission, so a draining daemon never answers it `UpgradePending`; `wait_create_session` is now the single-attempt call and marks a dropped connection `DaemonTransportLost`. (3) The one create body is `start_create_lifecycle(.., CreateInputs, recovery_operation)` in the daemon and `Controller::run_create(.., CreateKind, recovering, ..)`; the kind-specific provisioning (own environment versus child worker on the parent's target) stays two private functions, called from `run_create`, because they do different work. Date: 2026-11-16.
+
 
 ## Outcomes & Retrospective
 
 Implemented in four commits. The end-to-end test `tests/e2e/create_survives_restart.py` passes: `mj daemon restart` with a create held after its target exists returns in about 1.3 s, the next daemon logs "resuming a session creation interrupted by a daemon restart", and the session reaches running with no error and no leftover intent. Validation: workspace clippy clean; controller and CLI suites pass except four tests that look unrelated (three quota/spawn tests in `server_runtime::api::tests`, `push_review_delivers_each_verdict_without_holding_or_prompting_the_primary` which hangs, and `review_start_fails_with_the_reason_the_daemon_refused_it` whose message lacks a suffix); all four plus the CLI one fail identically at baseline a78ea5196. Limitations: recovery redoes the clone, sub-agent creates are recovered by the same mechanism (e2e: `tests/e2e/delegation.py --create-restart-only`), a child whose startup was already in the retry cleanup window when the daemon stopped still fails, other target kinds (Docker, SSH, Nitro) were not exercised end to end.
 
+
+Milestone 7 (4e82c9302): the create wait is answered from the intent row and the record, top-level and sub-agent creates share one body, and about 110 net lines of wait machinery are gone. Validation: workspace clippy clean; controller, client and CLI suites pass except the known baseline failures (three `server_runtime::api::tests` spawn/profile tests and `review_start_fails_with_the_reason_the_daemon_refused_it`; `push_review_delivers_each_verdict...` skipped because it hangs) and one load flake, `claude_usage::tests::a_refused_unexpired_keychain_login_is_reread_under_the_native_lock`, which passes alone. `tests/e2e/create_survives_restart.py` (restart returned in 1.35 s) and `tests/e2e/delegation.py --create-restart-only` pass on isolated instances.
 
 ## Context and Orientation
 
