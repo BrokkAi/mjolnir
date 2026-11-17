@@ -4360,14 +4360,22 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     runtime.container_settings = Some(applied);
     session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
-    // A historical default marker survives persistence and only an explicit
-    // container upgrade requests the current session default.
+    // A historical default marker survives persistence and follows the
+    // current release image, not the new session default.
     let recorded = crate::database::load_session_record("session-1")
         .unwrap()
         .unwrap();
     assert_eq!(
         mj_core::state::ContainerSettings::requested(&recorded).default_image,
-        Some(Some(mj_core::config::DEFAULT_SESSION_IMAGE.to_owned()))
+        Some(Some(mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned()))
+    );
+    // Hard-won: review of a13f351: upgrading an agent-dev session onto buildpack-deps lost its hel account, home and control directory.
+    assert_eq!(
+        mj_core::state::ContainerSettings::upgrade_image(
+            &recorded,
+            mj_core::config::DEFAULT_SESSION_IMAGE
+        ),
+        mj_core::config::RELEASE_CONTAINER_IMAGE
     );
     let state = test_runtime_state();
     let controller = Controller {

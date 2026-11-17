@@ -1288,11 +1288,13 @@ pub(super) fn worker_launch_config_with_checkout(
         mj_core::credentials::remove_github_authentication_environment(&mut environment);
         mj_core::credentials::remove_github_authentication_environment(&mut target_environment);
     }
-    if podman_container && profile.kind == mj_core::config::HarnessKind::Claude {
+    if backend.container_engine().is_some() && profile.kind == mj_core::config::HarnessKind::Claude
+    {
         // Claude Code rejects bypassPermissions under uid 0 unless it is
-        // told the process is already running in an isolated sandbox.
-        // Podman container exec inherits HOME and the configured user from
-        // the container, preserving both for stopped legacy sessions.
+        // told the process is already running in an isolated sandbox. Every
+        // container engine can run the session as root: Podman always does,
+        // and Docker, Apple container and Nitro do whenever the image's user
+        // is root, as on the default buildpack-deps image.
         environment.insert("IS_SANDBOX".into(), "1".into());
     }
     // Placement owns this directive; profile/target environment cannot enable

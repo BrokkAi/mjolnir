@@ -371,10 +371,11 @@ impl Controller {
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
         let root = targets::worker_root(&backend, session_id)?;
+        let image = mj_core::state::ContainerSettings::upgrade_image(session, &container.image);
         let plan = targets::inspect_retained_container(
             &backend,
             session_id,
-            &container.image,
+            image,
             operation_id,
             Path::new(&workspace),
             Path::new(&root),
@@ -400,8 +401,7 @@ impl Controller {
             .as_mut()
             .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
-            settings.default_image =
-                Some((image == mj_core::config::DEFAULT_SESSION_IMAGE).then(|| image.to_owned()));
+            settings.default_image = Some(mj_core::state::ContainerSettings::default_marker(image));
         }
         self.persist_session_state(session_id)
     }

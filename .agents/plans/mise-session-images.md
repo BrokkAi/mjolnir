@@ -143,6 +143,16 @@ To see it working, in an isolated instance: create a session for a repository th
 - Decision (Milestone 1): use one controller-authored `MJ_SESSION_PROJECT_TOOLS_ROOTS` JSON-array directive in the existing launch environment, parsed and removed by the worker. Older workers ignore it and retain their current behavior; a new launch field would be rejected by older readers. Documented in `.agents/docs/internal-environment-variables.md`. The existing relay notice path needs no protocol revision. Preparation runs package/tool commands without a deadline and streams both outputs directly into `project-tools.log`; cancellation retains the preparation supervisor's process-group ownership.
   Date/Author: 2026-11-16, parent-approved worker implementation.
 
+- Decision: an explicit container upgrade of a session created on the old default (the release image) upgrades to the current release image, not to the new session default; the replacement keeps the source's user, which buildpack-deps lacks. This supersedes the Milestone 5 entry that sent such upgrades to the new default.
+  Rationale: integrated review found that crossing images broke the retained `hel` account, home and `/var/lib/hel`; carrying numeric ids was not enough (the worker needs an account entry and a writable control directory). Keeping the session on its image family avoids the cross-image user change entirely. `ContainerSettings::upgrade_image` and `default_marker` in mj-core/src/state/target_runtime.rs own the rule.
+  Date/Author: 2026-11-17, Claude.
+- Decision: Claude sessions get `IS_SANDBOX=1` on every container engine, not only Podman.
+  Rationale: Docker, Apple container and Nitro run the session as the image's user, which is root on buildpack-deps; Claude refuses bypassPermissions as root without the marker.
+  Date/Author: 2026-11-17, Claude.
+- Decision: image build operations keep their whole log and result until the daemon exits.
+  Rationale: releasing them after delivery lost output or the result for a second follower or a repeated follow; builds are rare and user-started, so retention is simpler and correct.
+  Date/Author: 2026-11-17, Claude.
+
 ## Outcomes & Retrospective
 
 Milestone 1 works on unmodified `docker.io/library/buildpack-deps:noble` with a real Codex bridge and no model prompts. The clone's Rust1.99.1 and Node24 are usable through the session's user-shell surface. A Node18 project uses Node24.22.1 for the bridge while its user tools see Node18. A failed recipe records a visible notice and log without preventing the session from running. Repositories without a recipe skip installation. Two prerequisite defects were fixed at their owners: container creation establishes HOME before concurrent writers begin, and JavaScript bridge/provider entrypoints bind their compatible interpreter independently of project PATH. Milestones2–5 remain separate work.
