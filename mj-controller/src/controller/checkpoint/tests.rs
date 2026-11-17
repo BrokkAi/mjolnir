@@ -4560,6 +4560,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
 /// A failed suspend can leave an `Error` record and no relay worker while its
 /// target is still present. Restart must attach to the durable relay again,
 /// export the target's current state, and seal it without cleaning the target.
+// Hard-won: 8dd7f6384: omitting an empty stack let restore seed a cleared notification.
 #[cfg(unix)]
 #[tokio::test]
 async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
@@ -4618,8 +4619,12 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     })
     .await
     .expect("the dead worker actor did not retire");
-    let restored_target =
+    let mut restored_target =
         latch_relay_target(&relay_root, Some(&starts), ReleaseSupport::Supported, false);
+    restored_target.spec.env.insert(
+        LATCH_RELAY_MAX_PROTOCOL.into(),
+        mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL.to_string(),
+    );
     let targets = channels.targets.clone();
     let restore_actor = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), async move {
@@ -4665,7 +4670,13 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();
-    assert!(intent.handoff.is_some());
+    let handoff = intent.handoff.as_ref().expect("fresh restart checkpoint");
+    let archived = verify_archive_streaming(&handoff.archive_path).unwrap();
+    let stack = archived
+        .canonical_session
+        .notification_stack
+        .expect("a stack-capable worker exports an explicit stack");
+    assert!(stack.entries.is_empty());
     assert_eq!(
         intent.checkpoint_sha256.as_ref(),
         intent.handoff.as_ref().map(|handoff| &handoff.sha256)
