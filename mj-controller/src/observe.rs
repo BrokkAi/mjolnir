@@ -43,9 +43,80 @@ pub struct ObserveSession {
     pub profile_id: Option<String>,
     pub target_id: Option<String>,
     pub runtime: Option<String>,
+    /// Where the session started: `head` is the commit it launched from, never
+    /// a later one. Observe keeps the first head it is told as the start.
     pub git: Option<ObserveGitMeta>,
     pub commits: Vec<ObserveCommit>,
     pub historical: bool,
+}
+
+/// Where a checkpoint found the session's primary repository. A checkpoint is
+/// the only place the daemon learns the head of a checkout that lives on the
+/// target, so each one that moves the session is published as its own event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserveCheckpoint {
+    pub sha256: String,
+    pub created_at_ms: i64,
+    pub event_frontier: u64,
+    pub branch: Option<String>,
+    pub head: String,
+    /// The launch commit, set only while Observe has not been told it. It is
+    /// published ahead of `head` so that Observe's first head is the start.
+    pub launch: Option<String>,
+}
+
+const CHECKPOINT_EVENT: &str = "Checkpoint";
+
+/// The events that tell Observe where a checkpoint found the session.
+pub fn checkpoint_envelopes(
+    session: &ObserveSession,
+    checkpoint: &ObserveCheckpoint,
+) -> Result<Vec<ObserveEnvelope>> {
+    let positions = checkpoint
+        .launch
+        .as_deref()
+        .filter(|launch| *launch != checkpoint.head)
+        .map(|launch| ("launch", launch))
+        .into_iter()
+        .chain([("head", checkpoint.head.as_str())]);
+    let mut envelopes = Vec::new();
+    for (ordinal, (position, head)) in (0_u8..).zip(positions) {
+        let mut envelope = envelope(
+            session,
+            checkpoint.created_at_ms,
+            checkpoint.event_frontier,
+            CHECKPOINT_EVENT,
+            ordinal,
+            json!({
+                "hook_event_name": CHECKPOINT_EVENT,
+                "session_id": session.id,
+                "cwd": session.cwd,
+                "checkpoint": checkpoint.sha256,
+                "git_position": position,
+                "branch": checkpoint.branch,
+                "head": head,
+            }),
+        );
+        // Two checkpoints can share an event frontier, so the archive digest
+        // is part of the identity.
+        envelope.meta.event_id = event_id(
+            &session.id,
+            checkpoint.event_frontier,
+            &format!("{CHECKPOINT_EVENT}\0{}", checkpoint.sha256),
+            ordinal,
+        );
+        envelope.meta.git = Some(ObserveGitMeta {
+            remote: session.git.as_ref().and_then(|git| git.remote.clone()),
+            branch: checkpoint.branch.clone(),
+            head: Some(head.to_owned()),
+        });
+        if position == "launch" {
+            envelope.meta.commits.clear();
+        }
+        envelope.validate()?;
+        envelopes.push(envelope);
+    }
+    Ok(envelopes)
 }
 
 /// Convert all supported transcript items into an ordered Observe stream.
@@ -306,6 +377,22 @@ fn envelope(
     ordinal: u8,
     event: Value,
 ) -> ObserveEnvelope {
+    // Observe reads the first head of a session as its start and the newest as
+    // its end, on any event. Only the start event may carry the start head, or
+    // every later event would move the end back to it.
+    let git = session
+        .git
+        .clone()
+        .map(|git| ObserveGitMeta {
+            head: git.head.filter(|_| kind == "SessionStart"),
+            ..git
+        })
+        .filter(|git| git.remote.is_some() || git.branch.is_some() || git.head.is_some());
+    let commits = if matches!(kind, "Stop" | "SessionEnd" | CHECKPOINT_EVENT) {
+        session.commits.clone()
+    } else {
+        Vec::new()
+    };
     ObserveEnvelope {
         v: OBSERVE_ENVELOPE_VERSION,
         meta: ObserveMeta {
@@ -327,8 +414,8 @@ fn envelope(
             profile_id: session.profile_id.clone(),
             target_id: session.target_id.clone(),
             runtime: session.runtime.clone(),
-            git: session.git.clone(),
-            commits: session.commits.clone(),
+            git,
+            commits,
             collector_version: Some(env!("CARGO_PKG_VERSION").into()),
             client_version: Some(env!("CARGO_PKG_VERSION").into()),
             ..Default::default()
@@ -594,6 +681,14 @@ pub struct ObserveSessionDelivery {
     /// is nothing richer left to publish instead of rescanning on every event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_source_unavailable_at_ms: Option<i64>,
+    /// Digest of the checkpoint whose Git position was last examined. A
+    /// checkpoint can replace another without changing the record revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_sha256: Option<String>,
+    /// Branch and head last published from a checkpoint. A checkpoint that
+    /// finds the session where the last one did is not published again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_git: Option<ObserveGitMeta>,
 }
 
 /// Durable automatic-delivery state. The daemon is the only writer; the CLI

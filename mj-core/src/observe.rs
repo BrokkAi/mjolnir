@@ -394,8 +394,10 @@ pub struct ObserveCommit {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default)]
-    pub ts: i64,
+    /// Commit time in Unix epoch seconds, unlike the envelope's milliseconds.
+    /// Absent when only the commit id is known: Observe stores a zero as 1970.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
 }

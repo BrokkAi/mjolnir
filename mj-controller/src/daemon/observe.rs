@@ -7,8 +7,9 @@
 
 use super::*;
 use crate::observe::{
-    ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool, envelopes_for_transcript,
-    transcript_response_from_materialized, usage_envelopes,
+    ObserveCheckpoint, ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool,
+    checkpoint_envelopes, envelopes_for_transcript, transcript_response_from_materialized,
+    usage_envelopes,
 };
 use mj_core::observe::{ObserveCommit, ObserveDeliveryConfig, ObserveGitMeta};
 use mj_core::state::MaterializedExecutionState;
@@ -249,10 +250,13 @@ fn publish_one(
     let Some(summary) = crate::database::load_materialized_session_summary(&record.id)? else {
         return publish_checkpoint(&record.id, spool, delivery).map(|count| count.unwrap_or(0));
     };
+    let checkpoint = record.checkpoint.as_deref();
     if delivery.sessions.get(&record.id).is_some_and(|cursor| {
         cursor.record_updated_at == record.updated_at
             && cursor.materialized_event_ordinal == summary.applied_event_ordinal
             && cursor.execution == Some(summary.execution)
+            && cursor.checkpoint_sha256.as_deref()
+                == checkpoint.map(|checkpoint| checkpoint.sha256.as_str())
     }) {
         return Ok(0);
     }
@@ -281,7 +285,52 @@ fn publish_one(
         .map_or(0, |time| time.timestamp_millis());
     let historical = cursor.is_none() && started_at_ms < initialized_at;
     let (runtime, worker_id, hostname) = target_observation(record);
-    let (git, commits) = git_observation(record);
+    let (mut git, mut commits) = git_observation(record);
+    // The record knows where a session was asked to start. Only a checkpoint
+    // knows where a checkout on the target is now, or which commit a managed
+    // workspace resolved its launch to.
+    let found = match checkpoint.map(read_checkpoint_git).transpose() {
+        Ok(found) => found.flatten(),
+        Err(error) => {
+            tracing::warn!(
+                session_id = record.id,
+                error = %format!("{error:#}"),
+                "could not read the checkpoint's Git position for Brokk Observe"
+            );
+            None
+        }
+    };
+    let mut position = None;
+    if let Some(found) = found {
+        let known = git.get_or_insert_with(ObserveGitMeta::default);
+        known.remote = known.remote.take().or(found.remote);
+        known.branch = found.position.branch.clone().or(known.branch.take());
+        let start_already_sent = known.head.is_none()
+            && cursor.is_some_and(|cursor| {
+                cursor.reported_git.is_none()
+                    && cursor
+                        .emitted_event_ids
+                        .contains(&mj_core::observe::event_id(
+                            &record.id,
+                            0,
+                            "SessionStart",
+                            0,
+                        ))
+            });
+        if known.head.is_none() {
+            known.head = found.launch.clone();
+        }
+        let reported = reported_git(&found.position);
+        if cursor.and_then(|cursor| cursor.reported_git.as_ref()) != Some(&reported) {
+            position = Some(ObserveCheckpoint {
+                launch: found.launch.filter(|_| start_already_sent),
+                ..found.position
+            });
+        }
+    }
+    // A saved ref that still names the start commit is not this session's work.
+    let start = git.as_ref().and_then(|git| git.head.as_deref());
+    commits.retain(|commit| Some(commit.sha.as_str()) != start);
     let session = ObserveSession {
         id: record.id.clone(),
         parent_id,
@@ -303,6 +352,18 @@ fn publish_one(
     };
     let transcript = transcript_response_from_materialized(&record.id, &materialized)?;
     let mut envelopes = envelopes_for_transcript(&session, &transcript)?;
+    if let Some(position) = &position {
+        let mut found = checkpoint_envelopes(&session, position)?;
+        // A checkpoint from before delivery began is reported after the fact,
+        // like the session it belongs to. Observe then keeps its time instead
+        // of counting an old session as active now.
+        if position.created_at_ms < initialized_at {
+            for envelope in &mut found {
+                envelope.meta.historical = true;
+            }
+        }
+        insert_before_session_end(&mut envelopes, found);
+    }
     let mut usage_after = 0_u64;
     loop {
         let Some(page) = crate::database::load_session_usage(&record.id, usage_after, 500)? else {
@@ -323,6 +384,8 @@ fn publish_one(
             materialized_event_ordinal: materialized.applied_event_ordinal,
             execution: materialized.execution,
             historical,
+            checkpoint_sha256: checkpoint.map(|checkpoint| checkpoint.sha256.as_str()),
+            reported_git: position.as_ref().map(reported_git),
         },
         spool,
         delivery,
@@ -361,19 +424,18 @@ fn publish_checkpoint(
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let primary = &archive.manifest.bundle.primary_repository;
-    let repository = archive
-        .manifest
-        .repositories
-        .iter()
-        .find(|repository| &repository.metadata.id == primary);
-    let git = repository
-        .map(|repository| ObserveGitMeta {
-            remote: nonempty_string(&repository.metadata.origin),
-            branch: repository.metadata.branch.clone(),
-            head: nonempty_string(&repository.metadata.head_commit),
-        })
-        .filter(|git| git.remote.is_some() || git.branch.is_some() || git.head.is_some());
+    let found = checkpoint_git(
+        &archive.manifest,
+        &archive.archive_sha256,
+        &archive.manifest.session.checkpointed_at,
+        archive.canonical_session.event_frontier,
+    )?;
+    let git = found.as_ref().map(|found| ObserveGitMeta {
+        remote: found.remote.clone(),
+        branch: found.position.branch.clone(),
+        head: found.launch.clone(),
+    });
+    let position = found.map(|found| found.position);
     let native_session_id = nonempty_string(&archive.manifest.session.native_session_id);
     let started_at_ms = chrono::DateTime::parse_from_rfc3339(&archive.manifest.session.created_at)
         .ok()
@@ -404,7 +466,10 @@ fn publish_checkpoint(
         historical: true,
     };
     let transcript = transcript_response_from_materialized(session_id, &materialized)?;
-    let envelopes = envelopes_for_transcript(&session, &transcript)?;
+    let mut envelopes = envelopes_for_transcript(&session, &transcript)?;
+    if let Some(position) = &position {
+        insert_before_session_end(&mut envelopes, checkpoint_envelopes(&session, position)?);
+    }
     enqueue_envelopes(
         session_id,
         envelopes,
@@ -413,6 +478,8 @@ fn publish_checkpoint(
             materialized_event_ordinal: archive.canonical_session.event_frontier,
             execution: MaterializedExecutionState::Closed,
             historical: true,
+            checkpoint_sha256: Some(&archive.archive_sha256),
+            reported_git: position.as_ref().map(reported_git),
         },
         spool,
         delivery,
@@ -442,6 +509,10 @@ fn enqueue_envelopes(
     cursor.record_updated_at = batch.revision.to_owned();
     cursor.materialized_event_ordinal = batch.materialized_event_ordinal;
     cursor.execution = Some(batch.execution);
+    cursor.checkpoint_sha256 = batch.checkpoint_sha256.map(str::to_owned);
+    if let Some(reported) = batch.reported_git {
+        cursor.reported_git = Some(reported);
+    }
     if batch.historical && cursor.historical_imported_at_ms.is_none() {
         cursor.historical_imported_at_ms = Some(mj_core::clock::epoch_millis());
     }
@@ -453,6 +524,93 @@ struct ObserveBatch<'a> {
     materialized_event_ordinal: u64,
     execution: MaterializedExecutionState,
     historical: bool,
+    /// The checkpoint examined for this batch, if the session has one.
+    checkpoint_sha256: Option<&'a str>,
+    /// The checkpoint position this batch publishes, if it publishes one.
+    reported_git: Option<ObserveGitMeta>,
+}
+
+/// What a checkpoint recorded about the session's primary repository.
+struct CheckpointGit {
+    remote: Option<String>,
+    /// The commit the session launched from. Only a managed network workspace
+    /// records one: any other archive's base is where that capture started.
+    launch: Option<String>,
+    position: ObserveCheckpoint,
+}
+
+fn read_checkpoint_git(
+    checkpoint: &mj_core::state::CheckpointMetadata,
+) -> Result<Option<CheckpointGit>> {
+    let manifest = mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path)
+        .with_context(|| format!("read checkpoint {}", checkpoint.archive_path.display()))?;
+    checkpoint_git(
+        &manifest,
+        &checkpoint.sha256,
+        &checkpoint.created_at,
+        checkpoint.event_frontier,
+    )
+}
+
+/// `None` is a checkpoint with no Git position to report: no primary
+/// repository, a plain directory, or a repository without a commit.
+fn checkpoint_git(
+    manifest: &mj_core::archive::ArchiveManifest,
+    sha256: &str,
+    created_at: &str,
+    event_frontier: u64,
+) -> Result<Option<CheckpointGit>> {
+    let Some(repository) = manifest
+        .repositories
+        .iter()
+        .map(|repository| &repository.metadata)
+        .find(|repository| repository.id == manifest.bundle.primary_repository)
+    else {
+        return Ok(None);
+    };
+    let Some(head) = nonempty_string(&repository.head_commit) else {
+        return Ok(None);
+    };
+    let created_at_ms = chrono::DateTime::parse_from_rfc3339(created_at)
+        .with_context(|| format!("parse checkpoint time {created_at:?}"))?
+        .timestamp_millis();
+    Ok(Some(CheckpointGit {
+        remote: nonempty_string(&repository.origin),
+        launch: repository
+            .remote_workspace
+            .then(|| nonempty_string(&repository.base_commit))
+            .flatten(),
+        position: ObserveCheckpoint {
+            sha256: sha256.to_owned(),
+            created_at_ms,
+            event_frontier,
+            branch: repository.branch.clone(),
+            head,
+            launch: None,
+        },
+    }))
+}
+
+/// The part of a checkpoint position that decides whether it is news.
+fn reported_git(position: &ObserveCheckpoint) -> ObserveGitMeta {
+    ObserveGitMeta {
+        remote: None,
+        branch: position.branch.clone(),
+        head: Some(position.head.clone()),
+    }
+}
+
+/// A session's end is its last event, so a checkpoint taken while it stopped
+/// is placed ahead of it.
+fn insert_before_session_end(
+    envelopes: &mut Vec<mj_core::observe::ObserveEnvelope>,
+    checkpoint: Vec<mj_core::observe::ObserveEnvelope>,
+) {
+    let end = envelopes
+        .iter()
+        .rposition(|envelope| envelope.event["hook_event_name"] == "SessionEnd")
+        .unwrap_or(envelopes.len());
+    envelopes.splice(end..end, checkpoint);
 }
 
 fn nonempty_string(value: &str) -> Option<String> {
@@ -544,7 +702,6 @@ fn git_observation(record: &SessionRecord) -> (Option<ObserveGitMeta>, Vec<Obser
         .flat_map(|publication| publication.saved_commits.iter())
         .map(|sha| ObserveCommit {
             sha: sha.clone(),
-            ts: 0,
             ..Default::default()
         })
         .collect();
@@ -750,6 +907,176 @@ mod tests {
         assert!(uploaded.contains("\"hook_event_name\":\"SessionEnd\""));
         assert!(uploaded.contains("\"source\":\"mjolnir-backfill\""));
         assert!(uploaded.contains("\"harness\":\"codex\""));
+    }
+
+    /// A checkpoint of `session_id` whose primary repository is a managed
+    /// network workspace launched at `base` and now at `head`.
+    fn checkpoint_at(
+        directory: &Path,
+        session_id: &str,
+        event_frontier: u64,
+        base: &str,
+        head: &str,
+    ) -> mj_core::state::CheckpointMetadata {
+        use mj_checkpoint::archive::{RepositoryMetadata, RepositorySnapshot};
+        let input = crate::controller::test_support::checkpoint_archive_input(
+            session_id,
+            event_frontier,
+            vec![RepositorySnapshot {
+                metadata: RepositoryMetadata {
+                    review_baseline_ref: None,
+                    review_refs_metadata_only: false,
+                    saved_refs: Default::default(),
+                    stash_stack: Vec::new(),
+                    git_operation: None,
+                    id: "project".into(),
+                    relative_destination: "project".into(),
+                    checkout_subdirectory: None,
+                    origin: "https://github.com/example/project.git".into(),
+                    push_urls: Vec::new(),
+                    remote_workspace: true,
+                    plain_directory: false,
+                    base_commit: base.into(),
+                    head_commit: head.into(),
+                    branch: Some("fix/observed".into()),
+                },
+                committed_bundle: Vec::new(),
+                staged_patch: Vec::new(),
+                unstaged_patch: Vec::new(),
+                untracked_tar: Vec::new(),
+                operation_payloads: None,
+                linked_worktrees: Vec::new(),
+            }],
+            Vec::new(),
+        );
+        crate::controller::test_support::write_checkpoint_archive_input(
+            directory, session_id, &input,
+        )
+    }
+
+    #[test]
+    fn a_checkpoint_position_is_published_once_and_never_moves_the_start() {
+        const CHILD: &str = "MJOLNIR_OBSERVE_CHECKPOINT_POSITION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "a_checkpoint_position_is_published_once_and_never_moves_the_start",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        let _writer = crate::database::start_database_writer().unwrap();
+        let mut record =
+            crate::controller::test_support::checkpoint_test_session("observe-position-session");
+        crate::database::save_session(&record).unwrap();
+        let item = TranscriptItem {
+            stable_id: "user-1".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_700_000_000_100,
+            last_changed_at_ms: 1_700_000_000_100,
+            body: TranscriptBody::User {
+                content: vec![
+                    serde_json::to_value(ContentChunk::new(ContentBlock::Text(TextContent::new(
+                        "fix the bug",
+                    ))))
+                    .unwrap(),
+                ],
+            },
+        };
+        crate::database::save_materialized_session(&MaterializedSession {
+            session_id: record.id.clone(),
+            applied_event_ordinal: 1,
+            applied_event_digest: format!("{:064x}", 1),
+            last_activity_at_ms: Some(item.last_changed_at_ms),
+            execution: MaterializedExecutionState::Idle,
+            session_title: None,
+            configuration: SessionConfiguration::default(),
+            transcript: vec![Arc::new(item)],
+            queued_prompts: Vec::new(),
+            pending_elicitations: Vec::new(),
+            active_turn: None,
+            last_turn_outcome: None,
+        })
+        .unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let spool = ObserveSpool::open(root.path().join("spool")).unwrap();
+        let mut delivery =
+            ObserveDeliveryState::load(&root.path().join("delivery.json"), 1_800_000_000_000)
+                .unwrap();
+        let state = mj_core::state::State::default();
+        let mut publish = |record: &SessionRecord| {
+            publish_one(record, &state, &Config::default(), &spool, &mut delivery).unwrap()
+        };
+        // Every head in the spool, in delivery order, with the event carrying it.
+        let heads = || {
+            spool
+                .pending()
+                .unwrap()
+                .into_iter()
+                .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
+                .filter_map(|envelope| {
+                    let git = &envelope["meta"]["git"];
+                    assert_eq!(git["remote"], "https://github.com/example/project.git");
+                    assert_eq!(git["branch"], "fix/observed");
+                    git["head"].as_str().map(|head| {
+                        (
+                            envelope["event"]["hook_event_name"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                            head.to_owned(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let checkpoint = |head: &str| ("Checkpoint".to_owned(), head.to_owned());
+        let (launch, first, second) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let archives = tempfile::tempdir().unwrap();
+        let checkpointed =
+            |record: &mut SessionRecord, frontier: u64, head: &str, revision: &str| {
+                record.checkpoint = Some(Box::new(checkpoint_at(
+                    archives.path(),
+                    "observe-position-session",
+                    frontier,
+                    &launch,
+                    head,
+                )));
+                record.updated_at = revision.into();
+            };
+
+        // The session starts before anything says where its checkout is.
+        assert!(publish(&record) >= 2);
+        for path in spool.pending().unwrap() {
+            spool.remove(&path).unwrap();
+        }
+
+        // Its first checkpoint reports the launch commit ahead of the head, so
+        // Observe's first head is the start and its newest is the end.
+        checkpointed(&mut record, 1, &first, "2026-08-14T12:00:01Z");
+        assert_eq!(publish(&record), 2);
+        assert_eq!(heads(), [checkpoint(&launch), checkpoint(&first)]);
+        assert_eq!(publish(&record), 0);
+
+        // A later checkpoint that finds the session where it was is not news.
+        checkpointed(&mut record, 2, &first, "2026-08-14T12:00:02Z");
+        assert_eq!(publish(&record), 0);
+
+        // One that finds it elsewhere is, and does not repeat the launch.
+        checkpointed(&mut record, 3, &second, "2026-08-14T12:00:03Z");
+        assert_eq!(publish(&record), 1);
+        assert_eq!(
+            heads(),
+            [checkpoint(&launch), checkpoint(&first), checkpoint(&second)]
+        );
     }
 
     #[tokio::test]
