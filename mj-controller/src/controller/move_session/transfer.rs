@@ -213,6 +213,7 @@ fn host_stage_paths(host: &targets::TargetLocator, operation_id: &str) -> (PathB
 
 fn destination_stage(
     backend: &targets::TargetLocator,
+    session_id: &str,
     operation_id: &str,
 ) -> Result<DestinationStage> {
     use targets::TargetLocator as L;
@@ -244,7 +245,13 @@ fn destination_stage(
         ) => Some(ContainerStage {
             engine,
             container_id: container_id.clone(),
-            stage: Path::new("/var/lib/hel/move-stage").join(operation_id),
+            // Where the copy always went inside the container. The session's
+            // worker root does not exist before the worker is installed; the
+            // load creates it, and the restore's helper lands beside it.
+            stage: mj_core::target_path::join(
+                Path::new(&targets::worker_root(backend, session_id)?),
+                Path::new(&format!("move-{operation_id}")),
+            ),
         }),
         _ => None,
     };
@@ -1374,7 +1381,7 @@ impl Controller {
         );
         // The copy waits on the destination host, outside the container that
         // a failed attempt removes, so a retry or the next daemon resumes it.
-        let destination = destination_stage(&layout.backend, &operation.operation_id)?;
+        let destination = destination_stage(&layout.backend, id, &operation.operation_id)?;
         let identity = destination_stage_identity(&operation, &transfer)?;
         prepare_destination_stage(executor, &destination, &identity)?;
         copy_workspace(
@@ -1521,7 +1528,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) {
         let removed = self.session_export_layout(id, executor).and_then(|layout| {
-            let destination = destination_stage(&layout.backend, operation_id)?;
+            let destination = destination_stage(&layout.backend, id, operation_id)?;
             // The container's copy is a second full capture; it goes with
             // the host's once the restored workspace is the only one.
             if let Some(container) = &destination.container {
@@ -1834,15 +1841,34 @@ mod tests {
         let backend = targets::TargetLocator::LocalBare {
             worker_root: "/destination/workers/s".into(),
         };
-        let a = destination_stage(&backend, "move-abc").unwrap();
-        let b = destination_stage(&backend, "move-abc").unwrap();
+        let a = destination_stage(&backend, "session", "move-abc").unwrap();
+        let b = destination_stage(&backend, "session", "move-abc").unwrap();
         assert_eq!(a.stage, b.stage);
         assert_eq!(a.marker, b.marker);
         assert_ne!(
             a.stage,
-            destination_stage(&backend, "move-def").unwrap().stage
+            destination_stage(&backend, "session", "move-def")
+                .unwrap()
+                .stage
         );
         assert!(a.container.is_none());
+    }
+
+    // Hard-won: #1579: the container staging sat outside the session's worker root, which does not
+    // exist before the worker is installed, so the restore's helper had nowhere to land.
+    #[test]
+    fn container_staging_lives_in_the_session_worker_root_the_load_creates() {
+        let session = "0123456789abcdef0123456789abcdef";
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: mj_core::targets::move_resource_name(session, "move-abc").unwrap(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let stage = destination_stage(&backend, session, "move-abc").unwrap();
+        assert_eq!(
+            stage.container.unwrap().stage,
+            Path::new(&targets::worker_root(&backend, session).unwrap()).join("move-move-abc")
+        );
     }
 
     // Hard-won: 049656544: retained-source cleanup deleted a referenced checkout before refusing.
