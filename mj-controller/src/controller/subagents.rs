@@ -391,8 +391,11 @@ impl Controller {
             project_directory: parent.project_directory.clone(),
             managed_worktree: None,
             review: None,
-            // A child works in its parent's tree and gets what its parent got.
-            no_project_memory: parent.no_project_memory,
+            // A child works in its parent's tree and gets what its parent got,
+            // except a reviewer: it reads the change it is asked about, so it
+            // carries no project memory, which was 99.96% of what each
+            // reviewer sent to its target (two copies of the memory, #1580).
+            no_project_memory: parent.no_project_memory || reviewer,
             no_github_events: parent.no_github_events,
             no_github_credentials: parent.no_github_credentials
                 || request.no_github_credentials
