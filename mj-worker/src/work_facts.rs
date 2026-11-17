@@ -887,24 +887,32 @@ mod tests {
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
             children: ObserverChildren::default(),
         };
+        // The orphan carries the marker from the moment the shell forks it, but
+        // it is `sleep` only after `sh` and then `setsid` have exec'd. A scan
+        // between the fork and the last exec rightly reports the forked shell.
         let mut found = None;
+        let mut last = None;
         for _ in 0..100 {
             if let Observed::Known(facts) = scan_processes(&observer)
                 && facts.running == 1
             {
-                found = Some(facts);
-                break;
+                if facts.shown[0].command == "sleep 61" {
+                    found = Some(facts);
+                    break;
+                }
+                last = Some(facts.shown[0].command.clone());
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let facts = found.expect("the orphan was not found");
+        let facts = found.unwrap_or_else(|| {
+            panic!("the orphan was not found as `sleep 61`; last seen as {last:?}")
+        });
         let process = &facts.shown[0];
         let pid = process.pid;
         let identity = mj_core::subprocess::process_birth_identity(pid).unwrap();
         // Stop it before asserting so a failure leaves nothing behind.
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         assert!(process.detached);
-        assert_eq!(process.command, "sleep 61");
         assert_eq!(facts.identities[0].start, identity);
     }
     // The watcher recounts real processes: a killed one stops counting, and an
