@@ -62,13 +62,18 @@ async fn load_at_replay_boundary(
         .prepare_request(request)
         .on_receiving_result(async move |result| {
             if result.is_ok() {
-                if native_children {
-                    events
+                if native_children
+                    && events
                         .send(RuntimeEvent::NativeAgent {
                             event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
                         })
                         .await
-                        .map_err(|_| relay_event_channel_error())?;
+                        .is_err()
+                {
+                    // Give the session task the real cause; a dropped sender
+                    // would read as the connection ending.
+                    let _ = result_tx.send(Err(relay_event_channel_error()));
+                    return Err(relay_event_channel_error());
                 }
                 accept_live_history(&live_history_enabled);
             }
