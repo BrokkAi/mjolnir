@@ -439,6 +439,7 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -733,6 +734,34 @@ async fn a_forced_profile_probe_answers_now_and_only_once() {
     ));
     assert_eq!(next_update_report(&mut updates).await, "extra");
     assert_quiet(&mut updates).await;
+}
+
+#[test]
+fn a_short_hold_on_an_old_reading_waits_a_full_interval_from_the_refused_attempt() {
+    // The good reading is long past its interval; the provider's hold (60 s)
+    // is over a minute after the refused attempt. Scheduling on the hold
+    // would re-probe every minute for as long as the provider keeps refusing.
+    let interval = QUOTA_REFRESH_INTERVAL.as_secs();
+    let now = epoch_seconds();
+    let good = stored_report("a", interval + 3_600);
+    let (until, next_check) =
+        crate::quota::refused_check_schedule(now, Some(Duration::from_secs(30)));
+    let mut refused = stored_report("a", 0);
+    refused.windows.clear();
+    refused.error = Some("rate limited".into());
+    refused.refreshed_at_epoch_seconds = now;
+    refused.rate_limited_until_epoch_seconds = Some(until);
+    refused.next_check_at_epoch_seconds = Some(next_check);
+    // What the poller publishes: the old good reading, with the refusal's schedule.
+    let held = crate::quota::hold_report(Some(&good), refused);
+    assert_eq!(
+        held.refreshed_at_epoch_seconds,
+        good.refreshed_at_epoch_seconds
+    );
+    assert_eq!(next_probe_at(Some(&held)), now + interval);
+    // The hold stays the provider's own; a forced probe is allowed past it.
+    assert!(super::quota::on_hold(Some(&held), now));
+    assert!(!super::quota::on_hold(Some(&held), now + 61));
 }
 
 #[tokio::test]
@@ -1445,26 +1474,32 @@ struct CapacityPollerFixture {
     triggers: tokio::sync::mpsc::Sender<()>,
     updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
     started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityPollerFixture {
     fn new() -> Self {
         let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
-        let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
-            let started_tx = started_tx.clone();
-            async move {
-                let (finish, result) = tokio::sync::oneshot::channel();
-                started_tx
-                    .send(PendingCapacityProbe { target, finish })
-                    .unwrap();
-                result.await.context("test probe completion dropped")?
-            }
-        });
+        let requested = Arc::<std::sync::atomic::AtomicU64>::default();
+        let (targets, triggers, updates) = spawn_capacity_poller_with(
+            move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            },
+            requested.clone(),
+        );
         Self {
             targets,
             triggers,
             updates,
             started,
+            requested,
         }
     }
 
@@ -1488,6 +1523,32 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
         local_storage_paths: Vec::new(),
         probe_error: None,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
+    let mut fixture = CapacityPollerFixture::new();
+    fixture.targets.send_replace(vec![capacity_target("local")]);
+    // A scheduled probe is already running when the request arrives.
+    let running = fixture.started.recv().await.unwrap();
+    fixture
+        .requested
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    fixture.triggers.send(()).await.unwrap();
+    running.finish.send(Ok(None)).unwrap();
+    // Its result began before the request, so it does not answer it.
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    // The poller probes again at once, and that probe answers the request.
+    fixture
+        .started
+        .recv()
+        .await
+        .unwrap()
+        .finish
+        .send(Ok(None))
+        .unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1606,12 +1667,15 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 #[tokio::test]
 async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
     let first = AtomicBool::new(true);
-    let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
-        if first.swap(false, Ordering::SeqCst) {
-            panic!("test capacity probe panic");
-        }
-        async { Ok(None) }
-    });
+    let (targets, triggers, mut updates) = spawn_capacity_poller_with(
+        move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        },
+        Arc::default(),
+    );
     targets.send_replace(vec![capacity_target("local")]);
     let failure = updates.recv().await.unwrap();
     assert_eq!(failure.target_id, "local");
@@ -1753,74 +1817,77 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     );
 }
 
+// Hard-won: #1547: a cooldown held an authentication failure until the profile had been renewed, so the decision mistook the renewal for a refusal.
 #[test]
-fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
-    let signal = |ordinal, reason| CredentialSyncSignal { ordinal, reason };
+fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_the_cooldown() {
+    let signal = |ordinal, reason, token: Option<&str>| CredentialSyncSignal {
+        ordinal,
+        reason,
+        login_fingerprint: token.map(str::to_owned),
+    };
     let mut tracker = CredentialSyncSignalTracker::default();
     let started = Instant::now();
     tracker.observe(
         "session",
         "work",
-        signal(41, CredentialSyncReason::AuthenticationFailure),
+        signal(41, CredentialSyncReason::AuthenticationFailure, Some("old")),
     );
     assert_eq!(
         tracker.drain_due(started),
         vec![(
             "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::AuthenticationFailure,
+            Some("old".into())
         )]
+    );
+
+    // A second failure inside the old cooldown is still handled at once.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert_eq!(
+        tracker.drain_due(started + Duration::from_secs(1)),
+        vec![(
+            "session".into(),
+            "work".into(),
+            CredentialSyncReason::AuthenticationFailure,
+            None
+        )]
+    );
+    // An observation already handled is not handled twice.
+    tracker.observe(
+        "session",
+        "work",
+        signal(42, CredentialSyncReason::AuthenticationFailure, None),
+    );
+    assert!(
+        tracker
+            .drain_due(started + Duration::from_secs(2))
+            .is_empty()
     );
 
     tracker.observe(
         "session",
-        "work",
-        signal(42, CredentialSyncReason::AuthenticationFailure),
+        "new-profile",
+        signal(43, CredentialSyncReason::EmptyPromptResponse, None),
     );
     assert!(
         tracker
             .drain_due(started + Duration::from_secs(60))
             .is_empty()
     );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert_eq!(tracker.pending["session"].signal.ordinal, 43);
-
     // No repeated observation is needed: the loop timer drains the sticky
     // failure once its cooldown expires.
     assert_eq!(
-        tracker.drain_due(started + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
+        tracker.drain_due(started + Duration::from_secs(1) + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
         vec![(
             "session".into(),
             "new-profile".into(),
-            CredentialSyncReason::EmptyPromptResponse
-        )]
-    );
-    tracker.observe(
-        "session",
-        "new-profile",
-        signal(43, CredentialSyncReason::EmptyPromptResponse),
-    );
-    assert!(
-        tracker
-            .drain_due(started + (IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN * 2))
-            .is_empty()
-    );
-
-    tracker.observe(
-        "other",
-        "personal",
-        signal(1, CredentialSyncReason::AuthenticationFailure),
-    );
-    assert_eq!(
-        tracker.drain_due(started + Duration::from_secs(60)),
-        vec![(
-            "other".into(),
-            "personal".into(),
-            CredentialSyncReason::AuthenticationFailure
+            CredentialSyncReason::EmptyPromptResponse,
+            None
         )]
     );
 }
@@ -2146,10 +2213,12 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -2180,6 +2249,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -2205,10 +2275,12 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::EmptyPromptResponse,
+            login_fingerprint: None,
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2232,6 +2304,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
+            login_fingerprint: None,
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
@@ -2258,6 +2331,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
             step_failures: Vec::new(),
@@ -2300,6 +2374,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -2326,6 +2401,7 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
+            current_access_token: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures,
@@ -2873,12 +2949,14 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: Some(CredentialSyncCause {
                 session_id: session_id.into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: failure.map(str::to_owned),
             outcomes: outcome
                 .map(|outcome| {
                     vec![CredentialSyncOutcome {
                         unchanged_login: None,
+                        current_access_token: None,
                         session_id: session_id.into(),
                         outcome,
                         step_failures: Vec::new(),
@@ -2924,6 +3002,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             failure: None,
             outcomes: vec![CredentialSyncOutcome {
                 unchanged_login: None,
+                current_access_token: None,
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
                 step_failures: Vec::new(),
@@ -2985,6 +3064,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             trigger: Some(CredentialSyncCause {
                 session_id: "parked-child".into(),
                 reason,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: Vec::new(),
@@ -3136,6 +3216,7 @@ fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures(
 
     let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
         unchanged_login: None,
+        current_access_token: None,
         session_id: session.into(),
         outcome: Ok(Vec::new()),
         step_failures: detail

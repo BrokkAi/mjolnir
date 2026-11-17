@@ -8682,3 +8682,53 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
         Some("kept-model")
     );
 }
+
+// A turn Claude starts on its own ends a managed child's turn like a prompt
+// does: its facts set `work_liveness` with the settlement's ordinal, the
+// watcher can recount its processes, and the next prompt clears them.
+#[test]
+fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, WorkFacts};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.record_session_update(tool_call_update()).unwrap();
+    let result = mj_core::acp::RuntimeEvent::ClaudeTurnResult(cycle_result("task-notification"));
+    assert!(relay.event_settles_autonomous_turn(&result));
+    let identity = ProcessIdentity {
+        pid: 4242,
+        start: "boot-1".into(),
+    };
+    let facts = WorkFacts {
+        observed_at_ms: 77,
+        processes: Observed::Known(ProcessFacts {
+            running: 1,
+            shown: Vec::new(),
+            omitted: 1,
+            identities: vec![identity.clone()],
+            unattributed: 0,
+        }),
+        worktree: Observed::unavailable("not read"),
+    };
+    relay.offer_settle_facts(Some(facts.clone()));
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let settled = observations(&relay)
+        .into_iter()
+        .find_map(|observation| match observation {
+            RelayObservation::HarnessTurnSettled {
+                autonomous: Some(turn),
+                ..
+            } => Some(turn),
+            _ => None,
+        })
+        .expect("an autonomous settlement");
+    assert_eq!(settled.work_facts.as_deref(), Some(&facts));
+    let completion = relay.operational_state().turn_completion.unwrap();
+    let liveness = relay.operational_state().work_liveness.unwrap();
+    assert_eq!(liveness.completed_ordinal, completion.completed_ordinal);
+    assert_eq!((liveness.alive, liveness.checked_at_ms), (1, 77));
+    let (watched, identities) = relay.watched_work().unwrap();
+    assert_eq!(watched, liveness);
+    assert_eq!(identities, vec![identity]);
+}

@@ -1,0 +1,40 @@
+{
+ "QT": {
+  "sessions": 30,
+  "called_tool": 0,
+  "retrieved_decisive": 0,
+  "calls": 0,
+  "retrieval_rate": 0.0,
+  "per_diff_retrieved": {
+   "catalog-cache-key-collision": 0,
+   "child-model-wrong-efforts": 0,
+   "codex-effort-alias-lost": 0,
+   "held-prompt-ignores-interrupt": 0,
+   "metadata-checkpoint-overwrites-checkout": 0,
+   "projection-mixed-sqlite-snapshots": 0,
+   "stale-model-launch-spec": 0,
+   "symbol-change-keeps-cached-transcript": 0,
+   "terminal-id-reused": 0,
+   "web-feed-self-deadlock": 0
+  }
+ },
+ "QS": {
+  "sessions": 30,
+  "called_tool": 26,
+  "retrieved_decisive": 9,
+  "calls": 71,
+  "retrieval_rate": 0.3,
+  "per_diff_retrieved": {
+   "catalog-cache-key-collision": 0,
+   "child-model-wrong-efforts": 1,
+   "codex-effort-alias-lost": 1,
+   "held-prompt-ignores-interrupt": 0,
+   "metadata-checkpoint-overwrites-checkout": 2,
+   "projection-mixed-sqlite-snapshots": 1,
+   "stale-model-launch-spec": 2,
+   "symbol-change-keeps-cached-transcript": 0,
+   "terminal-id-reused": 1,
+   "web-feed-self-deadlock": 1
+  }
+ }
+}

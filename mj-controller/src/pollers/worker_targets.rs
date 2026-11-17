@@ -98,11 +98,14 @@ pub(crate) fn staged_credential_sessions(controller: &Controller) -> BTreeSet<St
         .state
         .sessions
         .values()
+        // Every session the daemon holds a worker connection for, whatever
+        // its lifecycle state, so a login renewed while one is checkpointing
+        // or closing reaches it too. A disconnected session would only produce
+        // connection errors. A session that is starting, resuming or parked
+        // has no connection yet: its start stages the current login, and a
+        // failure on a renewed one is handled the moment it is reported.
         .filter(|session| {
-            matches!(
-                session.state,
-                SessionState::Running | SessionState::Checkpointing
-            ) && session.target.is_some()
+            session_target_is_pollable(session) && session.state != SessionState::Disconnected
         })
         .filter(|session| {
             crate::controller::local_profile_homes::session_has_a_staged_home_of_its_own(session)

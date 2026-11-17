@@ -1085,6 +1085,9 @@ pub enum DaemonAction {
         workspace_id: String,
         last_session_id: Option<String>,
     },
+    /// Every host and fleet with the capacity service's latest CPU, RAM and
+    /// filesystem readings. Added in protocol 101.
+    HostCapacity,
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
@@ -1370,6 +1373,7 @@ pub enum DaemonReply {
     Workspace(WorkspaceRecord),
     /// Every workspace's detached drafts, without their text.
     WorkspaceDrafts(Vec<WorkspaceDrafts>),
+    HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
@@ -2320,6 +2324,15 @@ impl DaemonClient {
         match self.request(DaemonAction::ListWorkspaceDrafts).await? {
             DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
             reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
+        }
+    }
+
+    /// The capacity service's latest reading of every host and fleet. This
+    /// reads what the daemon holds and never probes.
+    pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
+        match self.request(DaemonAction::HostCapacity).await? {
+            DaemonReply::HostCapacity(rows) => Ok(rows),
+            reply => bail!("unexpected host-capacity reply {reply:?}"),
         }
     }
 
@@ -3611,7 +3624,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 99: one-shot quota probes for profiles outside the enabled set.
 // Version 100: a one-shot quota probe can be forced off the profile's
 // schedule; the daemon answers one all-workspaces draft listing.
-pub const PROTOCOL_VERSION: u32 = 100;
+// Version 101: the daemon answers the capacity service's per-host readings.
+pub const PROTOCOL_VERSION: u32 = 101;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -60,6 +60,10 @@ agent-client-protocol.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bytesize = "2"
+# Directory handles that keep project-memory sync below its root even when
+# the tree is changed underneath it (#1419).
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
 chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true

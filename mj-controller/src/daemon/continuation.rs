@@ -599,7 +599,7 @@ fn spawn_with_gate(
                                 let evidence = tokio::task::spawn_blocking(move || {
                                     crate::database::load_continuation_evidence(&snapshot.materialized.session_id, snapshot.materialized.applied_event_ordinal, &snapshot.materialized.applied_event_digest)
                                 }).await.context("collect retained authorization")??;
-                                let context = mj_core::assessment::ContextHistory { messages: evidence.messages, authorization_complete: true, assistant_history_omitted: evidence.assistant_history_omitted, open_assistant_id: None, final_reply_omitted: false };
+                                let context = mj_core::assessment::ContextHistory { messages: evidence.messages, authorization_complete: true, assistant_history_omitted: evidence.assistant_history_omitted, open_assistant_id: None, final_reply_omitted: false, set_aside_through: None };
                                 let handle = control.wait_for_session(&session, Duration::from_secs(5)).await?;
                                 handle.submit(format!("assessment-seed-{}", expected.ordinal), RelayCommand::SeedAssessmentContext { expected, context: Box::new(context) }).await?;
                                 handle.sync_now().await?;

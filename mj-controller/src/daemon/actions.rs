@@ -785,6 +785,12 @@ pub(super) async fn handle_action(
                 .go_startup_session(&workspace_id, last_session_id.as_deref())
                 .map(Box::new),
         )),
+        DaemonAction::HostCapacity => Ok(DaemonReply::HostCapacity(
+            state
+                .capacity_feed()
+                .context("the daemon capacity service is not running")?
+                .host_rows(),
+        )),
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)

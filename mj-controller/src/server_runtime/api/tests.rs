@@ -124,6 +124,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -140,6 +141,7 @@ fn usage_priced(profile_id: &str) -> ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -852,6 +854,12 @@ impl ExportRuntime for NoExports {
 
 /// A connected view whose harness is ready and offers one model.
 fn ready_view(model: &str) -> ManagedSessionView {
+    ready_view_waiting(model, None)
+}
+
+/// [`ready_view`] whose worker publishes that it is waiting to resubmit a turn
+/// that failed on the access token with this hash.
+fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let option: agent_client_protocol::v1::schema::SessionConfigOption =
         serde_json::from_value(serde_json::json!({
@@ -886,6 +894,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: waiting,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,
@@ -2275,6 +2284,101 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     );
 }
 
+// Hard-won: #1547: a sub-agent whose turn failed on a renewed login was reported failed and parked before the pushed login could reach it.
+#[tokio::test]
+async fn a_child_failed_on_a_renewed_login_is_held_only_while_its_worker_waits_for_the_new_login() {
+    let home = tempfile::tempdir().unwrap();
+    let login = |token: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {"accessToken": token, "expiresAt": 1}
+        }))
+        .unwrap()
+    };
+    std::fs::write(home.path().join(".credentials.json"), login("renewed")).unwrap();
+    let fingerprint =
+        |token: &str| mj_core::credentials::claude_access_token_fingerprint(&login(token));
+    let catalog = ProfileCatalog::with_probe(counting_probe(Default::default()));
+    let mut config = test_config(&[("claude6", HarnessKind::Claude)]);
+    config
+        .profiles
+        .get_mut("claude6")
+        .unwrap()
+        .home
+        .clone_from(&home.path().to_path_buf());
+    catalog.sync_now(&config).await;
+    // The child's worker publishes `waiting`, as its own retry rule decides.
+    let backend = |waiting: Option<String>| {
+        Arc::new(
+            ApiBackend::new(
+                SessionControl::new(FakeControl(FakeSession {
+                    session_id: "child".into(),
+                    accepted_ordinal: 1,
+                    submitted: mpsc::unbounded_channel().0,
+                    view: Some(ready_view_waiting("m", waiting)),
+                })),
+                running_states(),
+                Arc::new(ParentExports(parent_record("child", "claude6"))),
+            )
+            .with_profile_catalog(catalog.clone()),
+        )
+    };
+    let failed_on = |token: &str| {
+        let mut turn = finished_turn("task");
+        turn.outcome = mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "error".into(),
+        };
+        turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+            code: Some(agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()),
+            login_fingerprint: fingerprint(token),
+            ..mj_core::diagnostic::TurnDiagnostic::from_provider(
+                &serde_json::json!({"message": "Authentication required"}),
+            )
+            .unwrap()
+        });
+        let mut progress = ChildProgress::settled(ReportState::Fallback);
+        progress.login_failure = Some("claude6".into());
+        progress.failed_turn = Some(("failed", "Authentication required".into()));
+        progress.answer = Some(turn);
+        vec![("child".to_owned(), None, progress)]
+    };
+    let held = |children: &Vec<(String, Option<_>, ChildProgress)>| {
+        let progress = &children[0].2;
+        assert_eq!(progress.login_failure.is_none(), progress.turn_pending);
+        progress.turn_pending
+    };
+
+    // Failed on a token since renewed, and the worker waits for the new login.
+    let mut children = failed_on("revoked");
+    backend(fingerprint("revoked"))
+        .settle_renewed_login_failures(&mut children)
+        .await
+        .unwrap();
+    assert!(held(&children), "the child waits for its pushed login");
+    assert!(children[0].2.failed_turn.is_none());
+
+    // The worker stopped waiting (a driver attached, a question arrived, an
+    // older worker): the parent hears of the failure.
+    for waiting in [None, fingerprint("some other turn")] {
+        let mut children = failed_on("revoked");
+        backend(waiting)
+            .settle_renewed_login_failures(&mut children)
+            .await
+            .unwrap();
+        assert!(!held(&children));
+        assert_eq!(children[0].2.login_failure.as_deref(), Some("claude6"));
+        assert!(children[0].2.failed_turn.is_some());
+    }
+
+    // Failed on the profile's current token: a real refusal, whatever the worker says.
+    let mut children = failed_on("renewed");
+    backend(fingerprint("renewed"))
+        .settle_renewed_login_failures(&mut children)
+        .await
+        .unwrap();
+    assert!(!held(&children));
+    assert!(children[0].2.failed_turn.is_some());
+}
+
 /// Once the credential sync has found a profile's login refused, a spawn on it
 /// is refused at once instead of starting a child that cannot sign in. An
 /// unpinned spawn goes to another profile that offers the model.
@@ -2297,6 +2401,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "child-1".into(),
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
             }),
             failure: None,
             outcomes: vec![mj_core::credentials::CredentialSyncOutcome {
@@ -2308,6 +2413,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
                     .unwrap()
                     .0,
                 ),
+                current_access_token: None,
                 session_id: "child-1".into(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),
@@ -5169,6 +5275,55 @@ async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_
     let child = list().await;
     assert_eq!(child["state"], "error", "{child}");
     assert!(child.get("promptable").is_none(), "{child}");
+}
+
+/// A turn the harness started on its own ends a child like a prompted turn
+/// does: its reminder names the processes the worker found at that turn's end.
+#[tokio::test]
+async fn a_reminder_after_an_autonomous_turn_names_the_running_processes() {
+    if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_reminder_after_an_autonomous_turn_names_the_running_processes",
+            ),
+        )
+        .env(HANDBACK_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: Some(ready_view("model")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+    let mut turn = finished_turn(&mj_core::continuation::harness_turn_id(3));
+    turn.work_facts = Some(observed_work());
+    backend
+        .remind_subagent_to_hand_back(
+            "child-1",
+            true,
+            &turn,
+            &mj_core::subagent::Liveness::Known(None),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (_, command) = submitted.recv().await.unwrap();
+    let RelayCommand::HandbackReminder { running, .. } = command else {
+        panic!("expected a handback reminder: {command:?}");
+    };
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert!(running[0].contains("sleep 600"), "{running:?}");
 }
 
 fn observed_work() -> mj_core::work_facts::WorkFacts {

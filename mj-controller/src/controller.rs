@@ -95,9 +95,9 @@ pub(crate) use github_app::{
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
-pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
+pub use mbx::{MBX_VERSION, preview_build_cache};
 pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
 };
@@ -895,7 +895,7 @@ impl Controller {
             subagents,
             oracle,
             mut oracle_choice,
-            mut review,
+            review,
             no_project_memory,
             no_github_events,
             no_github_credentials,
@@ -1003,11 +1003,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        let mut review_notice = None;
-        if mj_core::review::settings::no_reviewers_turns_review_off(&self.config, review.as_ref()) {
-            review = Some(mj_core::config::SessionReview::Off);
-            review_notice = Some(mj_core::review::settings::NO_REVIEWERS_REVIEW_OFF);
-        }
+        let mut plain_directory = false;
         let (bundle_id, project) = if let Some(bundle) = bundle {
             let project = crate::project_catalog::snapshot(bundle, executor, true)?;
             let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
@@ -1020,21 +1016,21 @@ impl Controller {
             // validation has already refused anything else.
             let (host, resolved) =
                 crate::project_catalog::resolve_directory(template, directory, executor)?;
-            if resolved.plain_directory
-                && mj_core::review::settings::plain_directory_turns_review_off(
-                    &self.config,
-                    review.as_ref(),
-                )
-            {
-                review = Some(mj_core::config::SessionReview::Off);
-                review_notice = Some(mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF);
-            }
+            plain_directory = resolved.plain_directory;
             let (id, project) =
                 crate::project_catalog::accept_resolved_directory(host, directory, resolved)?;
             (id, Some(project))
         } else {
             (bundle_id.to_owned(), None)
         };
+        // The choice is stored as requested. The automatic rules apply at
+        // every launch; this reports what they do to this one.
+        let review_notice = mj_core::review::settings::automatic_review_off(
+            &self.config.review,
+            review.as_ref(),
+            plain_directory,
+        )
+        .map(mj_core::review::settings::AutomaticReviewOff::notice);
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref())

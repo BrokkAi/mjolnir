@@ -241,6 +241,35 @@ impl DurableRelay {
             .collect()
     }
 
+    /// Whether `update` is the terminal edge of the task that owns the open
+    /// harness turn, which ends that turn (see `air_task_changed`).
+    pub(super) fn air_update_settles_turn(
+        &self,
+        session_id: &str,
+        update: &crate::acp::AirTaskUpdate,
+    ) -> bool {
+        use crate::acp::AirTaskUpdate;
+        let AirTaskUpdate::Finished { task_id, .. } = update else {
+            return false;
+        };
+        self.background_work == BackgroundWorkPolicy::AirTasks
+            && !matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+            && self
+                .air_tasks
+                .get(&air_task_key(session_id, task_id))
+                .and_then(AirTaskEntry::turn_ordinal)
+                .is_some_and(|ordinal| {
+                    self.snapshot.active_prompt.is_none()
+                        && self
+                            .snapshot
+                            .harness_turn
+                            .is_some_and(|turn| turn.first_ordinal == ordinal)
+                })
+    }
+
     /// Apply AIR lifecycle changes at the single owner of live background work.
     pub fn air_task_changed(
         &mut self,

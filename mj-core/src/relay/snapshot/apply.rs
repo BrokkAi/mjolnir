@@ -348,6 +348,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if *native_continuity_lost {
                 snapshot.continuation.quota_recovery = None;
                 snapshot.continuation.quota_suppressed = true;
+                snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
             }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
@@ -459,10 +460,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     ) =>
                 {
                     snapshot.person_input_through = event.ordinal;
+                    let context = crate::acp::context_command(prompt).is_some();
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
-                        suppressed: crate::acp::context_command(prompt).is_some(),
-                        quota_suppressed: crate::acp::context_command(prompt).is_some(),
+                        suppressed: context,
+                        quota_suppressed: context,
+                        withdrawn_ordinal: if context {
+                            Some(event.ordinal)
+                        } else {
+                            snapshot.continuation.withdrawn_ordinal
+                        },
                         ..Default::default()
                     };
                 }
@@ -502,6 +509,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         bail!("dismissed question no longer matches the open request");
                     }
                     snapshot.person_input_through = event.ordinal;
+                    if let Some(context) = &mut snapshot.assessment_context {
+                        Arc::make_mut(context).set_aside_replies(false);
+                    }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
                     snapshot.assessment_context = Some(Arc::new((**context).clone()));
@@ -548,6 +558,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
                 _ => {}
             }
@@ -567,6 +578,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.continuation.quota_recovery = None;
                 if !matches!(command, RelayCommand::Prompt { .. }) {
                     snapshot.continuation.quota_suppressed = true;
+                    snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
                 }
             }
             if cancels_capacity_retry(command)
@@ -767,22 +779,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 ..
             } = outcome
             {
-                snapshot.work_liveness =
-                    work_facts
-                        .as_deref()
-                        .and_then(|facts| match &facts.processes {
-                            crate::work_facts::Observed::Known(processes)
-                                if !processes.identities.is_empty() =>
-                            {
-                                Some(crate::work_facts::WorkLiveness {
-                                    completed_ordinal: event.ordinal,
-                                    alive: u32::try_from(processes.identities.len())
-                                        .unwrap_or(u32::MAX),
-                                    checked_at_ms: facts.observed_at_ms,
-                                })
-                            }
-                            _ => None,
-                        });
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    work_facts.as_deref(),
+                );
                 // Always `KeepCurrent`; see `TurnCompletion` for why the field
                 // is still written.
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
@@ -1429,6 +1429,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             ..
         } => {
             if let Some(turn) = autonomous {
+                // The same rule as a prompted turn's outcome: whatever started
+                // the turn, its end decides what the worker watches.
+                snapshot.work_liveness = crate::work_facts::WorkLiveness::from_turn_facts(
+                    event.ordinal,
+                    turn.work_facts.as_deref(),
+                );
+                snapshot.harness_turn_work =
+                    turn.work_facts
+                        .as_deref()
+                        .map(|facts| crate::relay::HarnessTurnWork {
+                            completed_ordinal: event.ordinal,
+                            facts: facts.clone(),
+                        });
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
                     command_id: crate::continuation::harness_turn_id(turn.start_ordinal),
                     completed_ordinal: event.ordinal,
@@ -2020,6 +2033,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             snapshot.assessment_questions.remove(elicitation_id);
             if reply.is_some() {
                 snapshot.person_input_through = event.ordinal;
+                if let Some(context) = &mut snapshot.assessment_context {
+                    Arc::make_mut(context).set_aside_replies(true);
+                }
             }
         }
         RelayObservation::ElicitationsCleared => {

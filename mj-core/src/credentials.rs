@@ -661,12 +661,68 @@ pub enum CredentialSyncReason {
 pub struct CredentialSyncSignal {
     pub ordinal: u64,
     pub reason: CredentialSyncReason,
+    /// Hash of the access token the failed turn used (the turn diagnostic's
+    /// `login_fingerprint`). `None` when the failure carries none: a warning,
+    /// a worker that predates the field, or a harness without a token hash.
+    // Never serialized: an older client's copy of this struct denies unknown
+    // fields and would fail to decode the session view. The daemon passes it
+    // in-process only.
+    #[serde(skip)]
+    pub login_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncCause {
     pub session_id: String,
     pub reason: CredentialSyncReason,
+    /// The failed turn's access-token hash, as in [`CredentialSyncSignal`].
+    pub login_fingerprint: Option<String>,
+}
+
+/// What an authentication failure means, decided once against the profile's
+/// current login (#1547). Every consumer (the push, the refusal, the notice)
+/// reads this answer instead of comparing logins on its own snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticationVerdict {
+    /// The failed token is no longer the profile's: the login was renewed
+    /// under the session. The current login is pushed and the turn retries.
+    LoginRenewed,
+    /// The failed token is still the profile's current one: the provider
+    /// refused the current login.
+    CurrentLoginRefused,
+    /// Either side's token identity is missing. Never grounds for a refusal.
+    Unknown,
+}
+
+/// Is the access token that failed still the profile's current access token?
+pub fn classify_authentication_failure(
+    failed_token: Option<&str>,
+    current_token: Option<&str>,
+) -> AuthenticationVerdict {
+    match (failed_token, current_token) {
+        (Some(failed), Some(current)) if failed == current => {
+            AuthenticationVerdict::CurrentLoginRefused
+        }
+        (Some(_), Some(_)) => AuthenticationVerdict::LoginRenewed,
+        _ => AuthenticationVerdict::Unknown,
+    }
+}
+
+/// The failed turn's access-token hash, when this event is a failed prompt.
+pub fn relay_event_login_fingerprint(event: &RelayEvent) -> Option<String> {
+    match &event.observation {
+        RelayObservation::CommandCompleted {
+            outcome:
+                RelayCommandOutcome::Prompt {
+                    diagnostic: Some(diagnostic),
+                    ..
+                },
+            ..
+        } if turn_diagnostic_reports_auth_failure(diagnostic) => {
+            diagnostic.login_fingerprint.clone()
+        }
+        _ => None,
+    }
 }
 
 /// Detect a reason for immediate credential reconciliation only in relay
@@ -839,6 +895,10 @@ pub struct StepFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncOutcome {
     pub session_id: String,
+    /// Hash of the access token in the profile's login as this sync read it
+    /// (Claude only). With the failed turn's hash it decides what an
+    /// authentication failure means; see [`classify_authentication_failure`].
+    pub current_access_token: Option<String>,
     /// The snapshot that initially matched the failing session without any
     /// credential mutation. Refusal evidence must refer to this observation,
     /// never to a later reading of the profile's login.
@@ -883,6 +943,24 @@ pub struct CredentialSyncResult {
 }
 
 impl CredentialSyncResult {
+    /// What the triggering authentication failure meant, from the profile's
+    /// login as this sync read it. `None` when the sync was not triggered by
+    /// an authentication failure or did not reach the triggering session.
+    pub fn authentication_verdict(&self) -> Option<AuthenticationVerdict> {
+        let cause = self.trigger.as_ref()?;
+        if cause.reason != CredentialSyncReason::AuthenticationFailure {
+            return None;
+        }
+        let reached = self
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id)?;
+        Some(classify_authentication_failure(
+            cause.login_fingerprint.as_deref(),
+            reached.current_access_token.as_deref(),
+        ))
+    }
+
     pub fn pushed_to(&self, session_id: &str) -> bool {
         self.outcomes.iter().any(|outcome| {
             outcome.session_id == session_id
@@ -974,13 +1052,24 @@ impl CredentialSyncResult {
 ///
 /// The credential sync is what learns it: a session reported an auth failure,
 /// the sync reached that session, and the profile's copy was no fresher than
-/// the session's, so there was nothing to push that could help. Each entry
-/// keeps the fingerprint observed by that sync, rather than a later read, and
-/// holds only while the file is unchanged, so `mj login`, or a fresher copy
-/// pulled from another session, ends it.
+/// the session's, so there was nothing to push that could help.
+///
+/// A Claude refusal is recorded for exactly one access token: the failed
+/// turn's token, and only when it is still the profile's current token
+/// ([`classify_authentication_failure`]). It ends when the profile's token
+/// differs, so a renewal, `mj login`, or a fresher copy pulled from another
+/// session clears it, and a failure of an older token never records one.
+/// Other harnesses report no token identity, so their refusal still holds
+/// while the whole login file is unchanged.
 #[derive(Debug, Default)]
 pub struct RejectedLogins {
-    profiles: std::collections::BTreeMap<String, (PathBuf, String)>,
+    profiles: std::collections::BTreeMap<String, (PathBuf, RefusedLogin)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RefusedLogin {
+    AccessToken(String),
+    File(String),
 }
 
 impl RejectedLogins {
@@ -1006,6 +1095,7 @@ impl RejectedLogins {
         let Some(CredentialSyncOutcome {
             outcome: Ok(actions),
             unchanged_login: Some(snapshot),
+            current_access_token,
             step_failures,
             ..
         }) = reached
@@ -1028,29 +1118,50 @@ impl RejectedLogins {
             // profile's; either way the next turn may succeed.
             return;
         }
-        if snapshot.present {
-            tracing::info!(
-                profile_id = %result.profile_id,
-                session_id = %cause.session_id,
-                "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
-            );
-            self.profiles.insert(
-                result.profile_id.clone(),
-                (
-                    profile.authentication_marker(),
-                    snapshot.fingerprint.clone(),
-                ),
-            );
+        if !snapshot.present {
+            return;
         }
+        let refused = if profile.kind == HarnessKind::Claude {
+            // Only the failed turn's own token can show that the provider
+            // refused the current login. An unknown token proves nothing.
+            match classify_authentication_failure(
+                cause.login_fingerprint.as_deref(),
+                current_access_token.as_deref(),
+            ) {
+                AuthenticationVerdict::CurrentLoginRefused => {
+                    RefusedLogin::AccessToken(cause.login_fingerprint.clone().unwrap_or_default())
+                }
+                AuthenticationVerdict::LoginRenewed | AuthenticationVerdict::Unknown => return,
+            }
+        } else {
+            RefusedLogin::File(snapshot.fingerprint.clone())
+        };
+        let entry = (profile.authentication_marker(), refused);
+        // The same login refused again (another session, or a repeated
+        // signal) is already known; it is recorded and reported once.
+        if self.profiles.get(&result.profile_id) == Some(&entry) {
+            return;
+        }
+        tracing::info!(
+            profile_id = %result.profile_id,
+            session_id = %cause.session_id,
+            "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+        );
+        self.profiles.insert(result.profile_id.clone(), entry);
     }
 
     /// Why a new session on this profile would fail to sign in, while its
-    /// login file is still the one the provider refused.
+    /// login is still the one the provider refused.
     pub fn refusal(&self, profile_id: &str) -> Option<String> {
         let (marker, refused) = self.profiles.get(profile_id)?;
         let current = std::fs::read(marker).ok()?;
-        (credential_fingerprint(&current) == *refused)
-            .then(|| crate::subagent::login_invalid_reason(profile_id))
+        let still_refused = match refused {
+            RefusedLogin::AccessToken(token) => {
+                claude_access_token_fingerprint(&current).as_deref() == Some(token.as_str())
+            }
+            RefusedLogin::File(fingerprint) => credential_fingerprint(&current) == *fingerprint,
+        };
+        still_refused.then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 

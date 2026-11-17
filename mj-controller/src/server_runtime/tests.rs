@@ -731,6 +731,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
+        authentication_retry_waiting: None,
         activity_turn_started_at_ms: None,
         session_id: "session-1".into(),
         store_id: None,
@@ -1472,6 +1473,7 @@ fn golden_phone_session_snapshot() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
         (
@@ -2268,6 +2270,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                 error: None,
                 refreshed_at_epoch_seconds: now - age.as_secs(),
                 rate_limited_until_epoch_seconds: Some(now + 600),
+                next_check_at_epoch_seconds: Some(now + 600),
             },
         )]);
         let projected = viewer_snapshot(

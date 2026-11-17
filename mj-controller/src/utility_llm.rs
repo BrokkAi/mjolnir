@@ -895,6 +895,7 @@ mod tests {
             error: None,
             refreshed_at_epoch_seconds: now_seconds().saturating_sub(QUOTA_FRESH_SECONDS + 1),
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let identity = quota_request("grok", &profile).cache_identity();
         let fresh = ProfileQuota {
@@ -1122,6 +1123,7 @@ mod tests {
             error: None,
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         assert_eq!(
             classify_quota(&report),

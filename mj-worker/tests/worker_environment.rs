@@ -599,7 +599,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
         )
         .unwrap(),
     );
-    let executable = root.path().join("hel");
+    let executable = worker_root.join("hel");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), &executable).unwrap();
     let config = root.path().join("launch.json");
     std::fs::write(
@@ -706,6 +706,8 @@ fn container_worker_token_after_start(
         .unwrap(),
     )
     .unwrap();
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mj-worker"), worker_root.join("hel")).unwrap();
     let mut command = CommandSpec::new(
         env!("CARGO_BIN_EXE_mj-worker"),
         [

@@ -754,6 +754,12 @@ pub struct RelayOperationalState {
     pub capacity_retry: Option<CapacityRetry>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
+    /// Worker-published (process-local): the access-token hash of the failed
+    /// turn this worker will resubmit once a login with a different token is
+    /// installed. Present exactly while the worker's own retry rule allows
+    /// that; absent from older workers, which never resubmit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_retry_waiting: Option<String>,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1606,6 +1612,9 @@ pub struct RelaySnapshot {
     /// the next prompt is accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_liveness: Option<crate::work_facts::WorkLiveness>,
+    /// Facts of the latest autonomous harness turn of a managed child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_turn_work: Option<HarnessTurnWork>,
     #[serde(default)]
     pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
@@ -1762,6 +1771,22 @@ pub struct RelaySnapshot {
 pub struct SettledHarnessTurn {
     pub start_ordinal: u64,
     pub stop_reason: String,
+    /// What a managed child's worker observed when this turn ended, as for a
+    /// prompt's outcome. Absent for other sessions and in older journals,
+    /// which keeps their digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<Box<crate::work_facts::WorkFacts>>,
+}
+
+/// The facts a managed child's worker observed when its latest autonomous
+/// harness turn ended. A prompted turn's facts live in its handled command;
+/// this is the same record for a turn no prompt of ours started, so the
+/// worker's liveness watcher can recount its processes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTurnWork {
+    /// The settle event's ordinal: the `completed_ordinal` of the turn.
+    pub completed_ordinal: u64,
+    pub facts: crate::work_facts::WorkFacts,
 }
 
 impl RelaySnapshot {
@@ -1772,7 +1797,7 @@ impl RelaySnapshot {
     pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
         self.assessment_context
             .as_deref()
-            .map(crate::assessment::ContextHistory::without_generated_prompts)
+            .map(crate::assessment::ContextHistory::reader_view)
     }
 
     /// The open turn that began without a prompt.
@@ -1786,6 +1811,7 @@ impl RelaySnapshot {
             completed_reply_message: None,
             managed_subagent: false,
             work_liveness: None,
+            harness_turn_work: None,
             assessment: None,
             request: None,
             person_input_through: 0,
@@ -1921,6 +1947,7 @@ impl RelaySnapshot {
                     crate::assessment::Status::Pending | crate::assessment::Status::Failed
                 )
             }) || self.retry_assessment.is_some(),
+            authentication_retry_waiting: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

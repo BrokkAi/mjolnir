@@ -10,10 +10,7 @@ pub(crate) use mj_core::clock::epoch_seconds;
 
 use mj_client::review::RuntimeReviewView;
 
-use crate::render::{
-    CAPACITY_SAMPLE_STALE_AFTER_SECONDS, checkpoint_age, quota_reset_cells, refresh_age,
-    session_display_clock,
-};
+use crate::render::{checkpoint_age, quota_reset_cells, refresh_age, session_display_clock};
 use crate::{DashboardState, Mode, SupportPane};
 
 /// The values that were visible when the last frame was drawn.
@@ -224,9 +221,9 @@ impl DashboardState {
         self.capacity_details
             .iter()
             .filter_map(|(id, detail)| {
-                let sampled_at = detail.sampled_at_epoch_seconds?;
-                if detail.probe_error.is_some()
-                    || now.saturating_sub(sampled_at) <= CAPACITY_SAMPLE_STALE_AFTER_SECONDS
+                let sampled_at = detail.state.sampled_at_epoch_seconds?;
+                if detail.state.probe_error.is_some()
+                    || !mj_core::targets::capacity_sample_is_stale(sampled_at, now)
                 {
                     return None;
                 }

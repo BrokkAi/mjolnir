@@ -1119,54 +1119,6 @@ fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
     assert_eq!(probe.to_string(), "the worker exited: panic");
 }
 
-/// A running worker is found by the process for its root, and a root with
-/// no records yet reads as a running worker that recorded nothing.
-#[test]
-#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
-fn probing_a_running_worker_reports_its_process() {
-    struct Child(std::process::Child);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("hel worker");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = root.to_str().unwrap();
-    // The trailing `:` keeps `sh` from replacing itself with `sleep`, so its
-    // command line keeps the worker's arguments.
-    let worker = Child(
-        std::process::Command::new("sh")
-            .args([
-                "-c",
-                "sleep 60; :",
-                &format!("hel worker run --root {root}"),
-            ])
-            .spawn()
-            .unwrap(),
-    );
-    std::fs::write(
-        std::path::Path::new(root).join(mj_core::relay::WORKER_PID_FILE),
-        worker.0.id().to_string(),
-    )
-    .unwrap();
-    let locator = targets::TargetLocator::LocalBare {
-        worker_root: root.into(),
-    };
-
-    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
-
-    assert_eq!(probe.pids, vec![worker.0.id()]);
-    assert_eq!(probe.step(), None);
-    assert_eq!(
-        probe.to_string(),
-        "the worker is running and recorded no startup step"
-    );
-}
-
 /// Output that is not the probe's document is an error, not a worker with
 /// nothing to report.
 #[test]
@@ -1384,21 +1336,14 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     let script = commands[0]
         .args
         .iter()
-        .find(|argument| argument.contains("worker run --root"))
+        .find(|argument| argument.contains("worker stop --root"))
         .unwrap_or_else(|| panic!("stop script missing from {commands:?}"));
     assert!(
-        script.contains("hel_match=\"hel worker run --root $hel_root\""),
-        "stop must match only this session's worker: {script}"
-    );
-    assert!(
-        script.contains("hel_match_home=\"hel worker run --root $HOME/$hel_root\""),
-        "stop must also match a login-home-absolute --root: {script}"
-    );
-    assert!(
-        !script.contains("grep -F"),
-        "leftover detection must not grep the match string: {script}"
+        script.contains("worker stop --root"),
+        "stop must go through the installed worker binary: {script}"
     );
 }
+
 #[test]
 fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     struct RecordingExecutor {

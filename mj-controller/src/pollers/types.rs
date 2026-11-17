@@ -126,6 +126,10 @@ pub struct CapacityPollUpdate {
     pub target_id: String,
     pub result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
     pub sampled_at_epoch_seconds: u64,
+    /// The newest refresh request taken before the probe that produced
+    /// `result` started. The probe measured the host after that request, so
+    /// the result answers it; a request taken later is not answered.
+    pub refresh_generation: u64,
 }
 
 pub fn projected_queued_prompts(

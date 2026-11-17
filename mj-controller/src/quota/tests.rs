@@ -189,6 +189,7 @@ fn golden_quota_compact_row() {
             error: error.map(str::to_owned),
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         }
     }
     fn row(report: &ProfileQuota) -> String {
@@ -1238,6 +1239,7 @@ fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
         error: remaining.is_none().then(|| "unavailable".to_owned()),
         refreshed_at_epoch_seconds: refreshed_at,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 

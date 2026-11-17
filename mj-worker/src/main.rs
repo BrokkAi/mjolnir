@@ -47,6 +47,29 @@ enum WorkerCommand {
     /// Move-only inventory and disk-backed workspace transfer utilities.
     #[command(hide = true)]
     MoveWorkspace,
+    /// Print `alive`, `starting` or `dead` for the worker that owns a root,
+    /// decided by the lock on its `worker.lock`.
+    #[command(hide = true)]
+    Liveness {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Print the pid of the worker holding a root's lock, or nothing.
+    #[command(hide = true)]
+    Holder {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Stop the worker that owns a root and every process it started, and
+    /// return only when its lock is free and none of them is left.
+    #[command(hide = true)]
+    Stop {
+        #[arg(long)]
+        root: PathBuf,
+        /// Kill at once instead of allowing the TERM grace.
+        #[arg(long)]
+        kill: bool,
+    },
     /// Print this worker's compatibility identity. The controller asks an
     /// image's worker this before linking a session to it.
     #[command(hide = true)]
@@ -579,6 +602,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", mj_worker::move_workspace::execute(command)?);
             Ok(())
         }
+        WorkerCommand::Liveness { root } => {
+            println!("{}", mj_worker::worker_stop::liveness(&root)?.token());
+            Ok(())
+        }
+        WorkerCommand::Holder { root } => {
+            if let Some(pid) = mj_worker::worker_stop::holder(&root)? {
+                println!("{pid}");
+            }
+            Ok(())
+        }
+        WorkerCommand::Stop { root, kill } => mj_worker::worker_stop::stop(
+            &root,
+            if kill {
+                std::time::Duration::ZERO
+            } else {
+                mj_worker::worker_stop::TERM_GRACE
+            },
+        ),
         WorkerCommand::BuildId => {
             println!("{}", mj_core::worker_build::WORKER_BUILD_ID);
             Ok(())

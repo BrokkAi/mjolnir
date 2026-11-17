@@ -288,6 +288,12 @@ pub struct DurableRelay {
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
+    /// Work facts the coordinator observed for the runtime event it is about to
+    /// apply (see [`Self::event_settles_autonomous_turn`]). Only a settlement
+    /// of a turn the harness started on its own takes them; every event
+    /// application replaces them, so a stale observation never reaches a later
+    /// turn.
+    pending_settle_facts: Option<mj_core::work_facts::WorkFacts>,
     /// Claude tasks whose stop this process requested and the adapter has not
     /// yet acknowledged. The adapter answers a stop with a plain agent chunk
     /// and no model cycle, so no result would settle a harness turn opened
@@ -453,6 +459,15 @@ impl DurableRelay {
             {
                 turn.autonomous =
                     snapshot.continuation.autonomous_turn_started == Some(turn.first_ordinal);
+            }
+            // An older worker recorded a withdrawn continuation only as the
+            // quota flag, so a retry stays blocked for a session already in
+            // that state at upgrade.
+            if snapshot.format_version < 25
+                && snapshot.continuation.quota_suppressed
+                && snapshot.continuation.withdrawn_ordinal.is_none()
+            {
+                snapshot.continuation.withdrawn_ordinal = Some(snapshot.latest_ordinal);
             }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
@@ -653,6 +668,7 @@ impl DurableRelay {
             login_identity: Default::default(),
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
+            pending_settle_facts: None,
             claude_pending_stops: BTreeMap::new(),
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
@@ -937,6 +953,11 @@ impl DurableRelay {
         state.task_settled_at_ms = facts.task_settled_at_ms;
         state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
+        // The worker alone decides whether it will resubmit a failed turn once
+        // its login changes; the daemon only reads the answer.
+        state.authentication_retry_waiting = self
+            .authentication_retry_identity()
+            .map(|(_, rejected)| rejected.to_owned());
         state
     }
 
@@ -1177,16 +1198,23 @@ impl DurableRelay {
             .turn_completion
             .as_ref()
             .filter(|turn| turn.completed_ordinal == liveness.completed_ordinal)?;
-        let Some(RelayCommandOutcome::Prompt {
-            work_facts: Some(facts),
-            ..
-        }) = self
+        // A prompted turn's facts are in its handled command; an autonomous
+        // harness turn's are on its settlement.
+        let facts = match self
             .snapshot
             .handled_commands
             .get(&completion.command_id)
             .and_then(|handled| handled.outcome.as_ref())
-        else {
-            return None;
+        {
+            Some(RelayCommandOutcome::Prompt { work_facts, .. }) => work_facts.as_deref()?,
+            _ => {
+                &self
+                    .snapshot
+                    .harness_turn_work
+                    .as_ref()
+                    .filter(|work| work.completed_ordinal == liveness.completed_ordinal)?
+                    .facts
+            }
         };
         match &facts.processes {
             Observed::Known(processes) => Some((liveness.clone(), processes.identities.clone())),
@@ -1469,20 +1497,60 @@ impl DurableRelay {
         Ok(ordinal)
     }
 
+    /// Whether a Claude cycle result ends the open harness turn. Since
+    /// claude-agent-acp 0.101.1 (#1455), an announced task owns its boundary:
+    /// raw results can precede its final output or belong to a previous cycle,
+    /// and only that task's terminal edge may release its turn.
+    fn claude_result_settles_turn(&self) -> bool {
+        self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && self.snapshot.active_prompt.is_none()
+            && self.snapshot.harness_turn.is_some()
+            && !self.announced_harness_turn()
+    }
+
+    /// Whether applying `event` would end a turn the harness started on its
+    /// own. The coordinator asks before it applies the event, so it can observe
+    /// the worker's processes first and hand the facts over with
+    /// [`Self::offer_settle_facts`]: the same observation, taken at the same
+    /// point, as for a prompt that is finishing. Each arm names the condition
+    /// its settling site tests.
+    pub fn event_settles_autonomous_turn(&self, event: &mj_core::acp::RuntimeEvent) -> bool {
+        use mj_core::acp::RuntimeEvent;
+        if self.snapshot.active_prompt.is_some()
+            || self.snapshot.autonomous_harness_turn().is_none()
+        {
+            return false;
+        }
+        match event {
+            RuntimeEvent::ClaudeTurnResult(_) => self.claude_result_settles_turn(),
+            RuntimeEvent::AirTaskChanged { session_id, update } => {
+                self.air_update_settles_turn(session_id, update)
+            }
+            RuntimeEvent::SessionUpdate { update } => {
+                self.harness_turns == HarnessTurnPolicy::CodexAdapter
+                    && self.snapshot.goal.running()
+                    && serde_json::from_value::<SessionUpdate>(update.clone())
+                        .ok()
+                        .is_some_and(|update| {
+                            let mut after = self.snapshot.goal.clone();
+                            after.apply(&update).is_ok() && !after.running()
+                        })
+            }
+            _ => false,
+        }
+    }
+
+    /// Hand the facts observed for the event about to be applied to the relay.
+    /// Replaces whatever an earlier event was given.
+    pub fn offer_settle_facts(&mut self, facts: Option<mj_core::work_facts::WorkFacts>) {
+        self.pending_settle_facts = facts;
+    }
+
     /// Claude Code ended a model cycle that did not end one of Mjolnir's
     /// prompts. If a turn Claude Code started on its own is open, this result
     /// is its boundary, whatever started the cycle.
     pub fn claude_turn_result(&mut self, result: &mj_core::acp::ClaudeTurnResult) -> Result<()> {
-        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter
-            || self.snapshot.active_prompt.is_some()
-            || self.snapshot.harness_turn.is_none()
-        {
-            return Ok(());
-        }
-        // Since claude-agent-acp 0.101.1 (#1455), an announced task owns its
-        // boundary. Raw results can precede its final output or belong to a
-        // previous cycle; only that task's terminal edge may release its turn.
-        if self.announced_harness_turn() {
+        if !self.claude_result_settles_turn() {
             return Ok(());
         }
         self.settle_harness_turn(
@@ -1561,6 +1629,7 @@ impl DurableRelay {
 
     fn settle_harness_turn(&mut self, origin: Option<String>, stop_reason: &str) -> Result<()> {
         let settled_ordinal = self.snapshot.harness_turn.map(|turn| turn.first_ordinal);
+        let work_facts = self.pending_settle_facts.take().map(Box::new);
         self.append_relay_event(
             None,
             RelayObservation::HarnessTurnSettled {
@@ -1584,6 +1653,7 @@ impl DurableRelay {
                         } else {
                             stop_reason.into()
                         },
+                        work_facts,
                     }),
                 origin,
                 // The projection cannot see `active_prompt`, so the event has
