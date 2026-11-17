@@ -525,6 +525,8 @@ mod tests {
         }
     }
 
+    // Only the Unix case below runs a probe script.
+    #[cfg(unix)]
     fn run_script(script: &str) -> (i32, String) {
         let output = std::process::Command::new("sh")
             .arg("-c")
