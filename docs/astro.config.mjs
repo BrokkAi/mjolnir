@@ -110,6 +110,7 @@ export default defineConfig({
             { label: 'Apple container', slug: 'apple-container' },
             { label: 'SSH and SSH Podman', slug: 'ssh' },
             { label: 'AWS EC2', slug: 'aws' },
+            { label: 'Project environments', slug: 'project-environments' },
             { label: 'Custom images', slug: 'custom-images' },
           ],
         },
