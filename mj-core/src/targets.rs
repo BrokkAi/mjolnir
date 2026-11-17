@@ -1427,10 +1427,6 @@ fn stream_command_with_stdin(
     gate: Option<&Arc<StartGate>>,
     observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
-    let progress = command.observer.as_ref().map(|observer| {
-        observer.report(CommandActivity::StdinStarted);
-        ObservedStdin(observer)
-    });
     let started = Instant::now();
     if is_cancelled() {
         bail!("operation cancelled");
@@ -1465,13 +1461,6 @@ fn stream_command_with_stdin(
         // Keep the writer off the supervising thread so cancellation can kill
         // the process group and thereby close the blocked pipe.
         let input_writer = scope.spawn(move || -> Result<bool> {
-            // Close stdin before ending its progress report. The child can
-            // keep working after EOF, under the surrounding command stage.
-            let _progress = progress;
-            let mut stdin = ProgressWriter {
-                stdin,
-                observer: command.observer.as_ref(),
-            };
             if let Some(gate) = gate {
                 match gate.wait_blocking(is_cancelled) {
                     StartWait::Started => {}
@@ -1481,6 +1470,17 @@ fn stream_command_with_stdin(
                     StartWait::Cancelled => bail!("operation cancelled"),
                 }
             }
+            // The command stage owns SSH startup and post-EOF work. Start
+            // the transfer clock once the writer can send and close stdin
+            // before dropping the progress guard.
+            let _progress = command.observer.as_ref().map(|observer| {
+                observer.report(CommandActivity::StdinStarted);
+                ObservedStdin(observer)
+            });
+            let mut stdin = ProgressWriter {
+                stdin,
+                observer: command.observer.as_ref(),
+            };
             // Owning `stdin` here is what closes the pipe's write end once the
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
@@ -4410,15 +4410,11 @@ mod executor_tests {
             let activity = activity.lock().unwrap();
             let [
                 CommandActivity::StdinStarted,
-                CommandActivity::StdinFinished,
-                CommandActivity::StdinStarted,
-                CommandActivity::StdinFinished,
-                CommandActivity::StdinStarted,
                 writes @ ..,
                 CommandActivity::StdinFinished,
             ] = &activity[..]
             else {
-                panic!("only the admitted attempt should report bytes");
+                panic!("only the admitted attempt should report stdin activity");
             };
             let bytes: usize = writes
                 .iter()
