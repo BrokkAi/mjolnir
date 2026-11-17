@@ -101,7 +101,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
       requests.push({ url, body });
       const answer = answers.get(body ? `${body.action}:${body.session_id}` : url.split('?')[0]);
       if (answer instanceof Error) throw answer;
-      if (typeof answer === 'function') return answer();
+      if (typeof answer === 'function') return answer(url);
       return answer ?? null;
     },
   });
@@ -112,7 +112,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
   vm.runInContext(sourceBetween('const ID = ', '/// Go to a route.'), context);
   vm.runInContext(sourceBetween('function newCommandId(', '/// Guard against sending twice.'), context);
   vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
-  vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
+  vm.runInContext(sourceBetween('function publishedNotificationDismissal(', '/// Notifications, unread output'), context);
   vm.runInContext(sourceBetween('// The notifications screen\n', 'function renderSessions() {'), context);
   const read = expression => vm.runInContext(expression, context);
   read('renderInbox()'); // the screen is drawn before anyone can press a button
@@ -132,6 +132,115 @@ const row = (id, attention, at, extra = {}) => ({
 });
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+const message = (completed_ordinal, kind, message) => ({ completed_ordinal, kind, message });
+const stack = (badge, revision, entries, extra = {}) => ({
+  badge, entries, dismissal: { stack: { revision } }, holder: null, form: null, ...extra,
+});
+
+test('published stacks own visibility, paging, and whole-stack Clear', async () => {
+  const first = message(11, 'important', 'none');
+  const second = message(22, 'needs_input', { found: 'agent:2 & more' });
+  const session = row('a', 'working', 4, {
+    notification_card: stack('needs_input', 32, [first, second]),
+    subagent_parent_id: 'p',
+    notifications_ignored: true,
+  });
+  const path = '/api/sessions/a/notification-message';
+  const view = screen([session, row('b', 'needs_input', 10, { notification_card: null }),
+    row('c', 'important', 8, { notification_card: stack('important', 6, [first]) }),
+    row('d', 'failed', 7, { notification_card: null })], {
+    texts: { [path]: url => ({ text: new URL(url, 'https://viewer.test').searchParams.values().next().value }) },
+  });
+  const { previous, next, position, body, clear } = view.nodes;
+  assert.deepEqual(view.ids(), ['a', 'c', 'd']);
+  assert.equal(view.nodes.glyph.textContent, '?');
+  assert.equal(position.textContent, '2 of 2');
+  assert.equal(next.disabled, true);
+  await settle();
+  assert.equal(body.textContent, 'agent:2 & more');
+
+  previous.onclick();
+  assert.equal(position.textContent, '1 of 2');
+  assert.equal(previous.disabled, true);
+  await settle();
+  assert.equal(body.textContent, '11');
+  next.onclick();
+  assert.equal(position.textContent, '2 of 2');
+  assert.equal(body.textContent, 'agent:2 & more');
+  assert.deepEqual(view.requests.map(({ url }) => Object.fromEntries(new URL(url, 'https://viewer.test').searchParams)),
+    [{ message_id: 'agent:2 & more' }, { through: '11' }]);
+
+  previous.onclick();
+  session.notification_card = stack('needs_input', 40, [first, second, message(36, 'needs_input', 'locating')]);
+  view.render();
+  assert.equal(position.textContent, '3 of 3');
+  await settle();
+  assert.equal(view.requests.at(-1).url, `${path}?through=36`);
+  previous.onclick();
+  clear.onclick();
+  await settle();
+  assert.deepEqual(view.requests.find(request => request.body)?.body,
+    { action: 'dismiss-notification', session_id: 'a', target: { stack: { revision: 40 } } });
+  assert.deepEqual(view.ids(), ['c', 'd']);
+});
+
+test('paging past a pending read drops its late reply and allows a fresh read on return', async () => {
+  const session = row('a', 'working', 4, {
+    notification_card: stack('important', 4, [message(1, 'important', 'none'), message(2, 'important', 'none')]),
+  });
+  let finish;
+  const path = '/api/sessions/a/notification-message';
+  const view = screen([session], {
+    texts: { [path]: () => new Promise(resolve => { finish = resolve; }) },
+  });
+  view.answers.set(path, { text: 'older' });
+  view.nodes.previous.onclick();
+  await settle();
+  finish({ text: 'late' });
+  await settle();
+  assert.equal(view.nodes.body.textContent, 'older');
+  view.answers.set(path, { text: 'newest' });
+  view.nodes.next.onclick();
+  assert.equal(view.nodes.body.textContent, 'loading…');
+  await settle();
+  assert.equal(view.nodes.body.textContent, 'newest');
+});
+
+test('publication retires pending and accepted dismissals, even if the same target returns', async () => {
+  for (const target of [{ stack: { revision: 4 } }, { read_through: 2 }]) {
+    for (const publishFirst of [true, false]) {
+      const badge = target.stack ? 'needs_input' : 'important';
+      const card = stack(badge, 4, [message(2, badge, 'none')], { dismissal: target });
+      const session = row('a', badge, 4, { notification_card: card });
+      let accept;
+      const view = screen([session], {
+        texts: { 'dismiss-notification:a': () => new Promise(resolve => { accept = resolve; }) },
+      });
+      const publish = card => {
+        session.notification_card = card;
+        view.read('reconcileNotificationDismissals(); renderInbox()');
+      };
+      view.nodes.clear.onclick();
+      assert.equal(view.context.dismissedNotifications.get('a')?.accepted, false);
+      if (publishFirst) {
+        publish(null);
+        assert.equal(view.context.dismissedNotifications.has('a'), false);
+        publish(card);
+      }
+      accept(null);
+      await settle();
+      if (!publishFirst) {
+        assert.deepEqual(view.ids(), []);
+        const next = target.stack ? { stack: { revision: 5 } } : { read_through: 3 };
+        publish({ ...card, dismissal: next });
+        publish(card);
+      }
+      assert.equal(view.context.dismissedNotifications.has('a'), false);
+      assert.deepEqual(view.ids(), ['a']);
+    }
+  }
+});
 
 test('cards run ? before !, newest first, one per session, without sub-agents or ignored sessions', () => {
   const view = screen([
@@ -179,13 +288,20 @@ test('Clear & Next dismisses the identity captured when it starts and shows a st
 });
 
 test('Clear all ! dismisses only ! cards and leaves ? cards', async () => {
-  const view = screen([row('q', 'needs_input', 9), row('i1', 'important', 5), row('i2', 'important', 4)]);
+  const view = screen([
+    row('q', 'important', 9, { notification_card: stack('needs_input', 7, [message(1, 'needs_input', 'none')]) }),
+    row('i1', 'working', 5, {
+      notification_card: stack('important', 5, [message(2, 'important', 'none')], { dismissal: { read_through: 2 } }),
+    }),
+    row('i2', 'important', 4),
+  ]);
   view.render();
   assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (2)');
   view.nodes.clearAll.onclick();
   await settle();
-  const dismissed = view.requests.filter(r => r.body?.action === 'dismiss-notification').map(r => r.body.session_id).sort();
-  assert.deepEqual(dismissed, ['i1', 'i2']);
+  const dismissed = view.requests.filter(r => r.body?.action === 'dismiss-notification');
+  assert.deepEqual(Object.fromEntries(dismissed.map(({ body }) => [body.session_id, body.target])),
+    { i1: { read_through: 2 }, i2: { read_through: 4 } });
   assert.deepEqual(view.ids(), ['q']);
   view.render();
   assert.equal(view.nodes.clearAll.hidden, true);
@@ -286,9 +402,17 @@ test('quick reply builds the composer\'s own action: ! runs a shell command and 
 });
 
 test('Go to Session opens a pending form\'s holder and returns here on Back', () => {
-  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' }),
+  const view = screen([row('parent', 'needs_input', 3, {
+    notification_card: stack('needs_input', 4, [message(2, 'important', 'none')], {
+      holder: 'child', form: { request_id: 'r1', message: 'Pick an option' }, dismissal: null,
+    }),
+  }),
     row('child', 'working', 1, { subagent_parent_id: 'parent' })]);
-  view.render();
+  assert.equal(view.nodes.body.textContent, 'Pick an option');
+  assert.equal(view.nodes.position.textContent, '2 of 2');
+  assert.deepEqual(view.requests, [], 'the card already carries the form text');
+  view.nodes.previous.onclick();
+  assert.equal(view.requests.at(-1).url, '/api/sessions/parent/notification-message?through=2');
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
   // Both the history entry and the viewer's own back control follow the route.
@@ -647,7 +771,9 @@ const noticeCard = view => view.read('inboxNoticeCards()')[0];
 const noticeButton = (view, label) => noticeCard(view)?.children.find(node => node.textContent === label);
 
 test('a refusal after Clear is reported with the full text and handed to an empty composer', async () => {
-  const view = await refusedReply(v => { v.context.dismissedNotifications.set('a', JSON.stringify({ question: { turn_id: 'a' } })); });
+  const view = await refusedReply(v => {
+    v.context.dismissedNotifications.set('a', { target: JSON.stringify({ question: { turn_id: 'a' } }), card: false, accepted: true });
+  });
   assert.deepEqual(view.ids(), ['b'], 'the card is gone');
   const [notice] = notices(view);
   assert.equal(notice.destination, 'a');
@@ -687,7 +813,7 @@ test('a refusal after the notification changed is reported, and an occupied comp
 test('when a card disappears, the refusal stays copyable and can be handed to an empty conversation', async () => {
   const view = await refusedReply(() => {}, { draft: 'already there' });
   const restore = noticeButton(view, 'Restore to Quick reply');
-  view.context.dismissedNotifications.set('a', JSON.stringify({ question: { turn_id: 'a' } }));
+  view.context.dismissedNotifications.set('a', { target: JSON.stringify({ question: { turn_id: 'a' } }), card: false, accepted: true });
   restore.onclick();
   assert.equal(noticeButton(view, 'Restore to Quick reply'), undefined);
   assert.equal(noticeCard(view).children[1].textContent, 'my reply, in full');

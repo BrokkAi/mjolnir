@@ -284,6 +284,7 @@ test('SSE open does not reset retry backoff until a runtime frame applies', () =
     runtimeCursorText: () => null,
     setConnection: () => {},
     presentSnapshot: () => {},
+    reconcileNotificationDismissals: () => {},
     setTimeout: (callback, delay) => {
       timers.push({ callback, delay });
       return timers.length;
@@ -1502,6 +1503,7 @@ test('review settings action renders a button that sends its action id', () => {
   context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
   context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
   context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function publishedNotificationDismissal(', '\nfunction matchesNotificationDismissal('), context);
   vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
   vm.runInContext('renderNotificationDismissal(container, session, null)', context);
   assert.equal(controls.length, 0, 'no dismissal control without capability');
@@ -1579,10 +1581,25 @@ test('conversation receipts require a visible focused caught-up conversation and
   assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
   finish();
   await loaded;
+  context.session.notification_card = { entries: [
+    { kind: 'important', completed_ordinal: 55 },
+    { kind: 'important', completed_ordinal: 53 },
+    { kind: 'needs_input', completed_ordinal: 60 },
+  ] };
+  const readStack = vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent[3][1], 55, 'receipt includes the largest Important completion beyond the loaded and unread frontiers');
+  context.session.notification_card.entries.push({ kind: 'important', completed_ordinal: 57 });
+  finish();
+  await readStack;
+  assert.equal(frames.length, 1, 'a newer Important completion published in flight schedules the next receipt');
+  frames.shift()();
+  assert.equal(sent[4][1], 57);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
   context.cursor = 51;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 3, 'closed conversations do not read');
+  assert.equal(sent.length, 5, 'closed conversations do not read');
 });
 
 
