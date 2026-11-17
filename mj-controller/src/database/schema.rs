@@ -2540,6 +2540,26 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
         transaction.commit()?;
     }
+    // Compatible: adds a table that records unfinished session creations.
+    // Older daemons never read or write it and leave its rows intact when they
+    // rewrite session rows; an older daemon that meets a provisioning session
+    // fails it exactly as before, and the new daemon discards a leftover row
+    // whose session is no longer creating. The compatibility floor stays.
+    if version < 134 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS session_create_intents (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL,
+                 remember_launch_choices INTEGER NOT NULL CHECK(remember_launch_choices IN (0, 1)),
+                 created_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (134, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 134;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4740,6 +4760,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 134 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS session_create_intents;")
+                .unwrap();
+        }
         if version < 133
             && legacy_schema::table_has_column(
                 &connection,
@@ -5389,7 +5414,7 @@ mod reader_tests {
         drop(old);
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
-        assert_eq!(schema.revision, 133);
+        assert_eq!(schema.revision, SCHEMA_VERSION);
         assert_eq!(schema.minimum_compatible, Some(132));
         assert!(schema.ensure_supported_by(132).is_ok());
         let intent = |session: &str| {
@@ -5417,6 +5442,76 @@ mod reader_tests {
         // cancellation invalidates the previous request in the same transaction.
         writer.execute("UPDATE session_moves SET operation_json=json_set(operation_json,'$.cancellation_requested',json('false')) WHERE session_id='source'", []).unwrap();
         assert_eq!(intent("source"), None);
+    }
+
+    #[test]
+    fn create_intent_migration_keeps_older_writers_working_and_settles_with_the_session() {
+        const NAME: &str =
+            "create_intent_migration_keeps_older_writers_working_and_settles_with_the_session";
+        const CHILD: &str = "MJ_TEST_CREATE_INTENT_MIGRATION";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+            return;
+        }
+        use mj_core::state::SessionState;
+        let path = mj_core::config::data_dir().join("create-intent-compat.sqlite3");
+        let mut existing = super::super::tests::session("existing", "project");
+        existing.state = SessionState::Provisioning;
+        save_session_to(&path, &existing).unwrap();
+        stamp_schema_version(&path, 133);
+        // A revision-133 daemon fails the provisioning session and rewrites the row.
+        let old = Connection::open(&path).unwrap();
+        old.execute(
+            "UPDATE sessions SET state='error' WHERE session_id='existing'",
+            [],
+        )
+        .unwrap();
+        drop(old);
+        let writer = open_writer(&path).unwrap();
+        assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_state(&writer).unwrap().minimum_compatible,
+            Some(132)
+        );
+        drop(writer);
+        let intents = |path: &Path| -> Vec<String> {
+            let connection = Connection::open(path).unwrap();
+            let mut statement = connection
+                .prepare("SELECT session_id FROM session_create_intents ORDER BY session_id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert!(intents(&path).is_empty());
+        let mut created = super::super::tests::session("created", "project");
+        created.state = SessionState::Provisioning;
+        super::super::save_new_session_to(&path, &created, None, true, false).unwrap();
+        assert_eq!(intents(&path), ["created"]);
+        // Provisioning writes keep it, including the move to Disconnected.
+        created.state = SessionState::Disconnected;
+        save_session_to(&path, &created).unwrap();
+        super::super::sessions::save_lifecycle_session_to(&path, &created).unwrap();
+        assert_eq!(intents(&path), ["created"]);
+        // Committing or failing for good settles it with the same write.
+        created.state = SessionState::Running;
+        super::super::sessions::mark_session_worker_connected_to(&path, "created", None, "now")
+            .unwrap();
+        assert!(intents(&path).is_empty());
+        let mut failed = super::super::tests::session("failed", "project");
+        failed.state = SessionState::Provisioning;
+        super::super::save_new_session_to(&path, &failed, None, false, false).unwrap();
+        failed.state = SessionState::Error;
+        super::super::sessions::save_lifecycle_session_to(&path, &failed).unwrap();
+        assert!(intents(&path).is_empty());
     }
 
     #[test]

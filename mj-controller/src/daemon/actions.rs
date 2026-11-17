@@ -1104,8 +1104,10 @@ pub(super) async fn handle_action(
             state.start_create_session(request).await?,
         ))),
         DaemonAction::WaitCreateSession { session_id } => {
-            state.wait_create_session(&session_id).await?;
-            Ok(DaemonReply::Done)
+            match state.wait_create_outcome(&session_id).await {
+                crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
+                crate::daemon::create::CreateWait::Failed(error) => Err(error),
+            }
         }
         DaemonAction::ResumeSession(request) => {
             state.resume_session(request).await?;
@@ -1237,6 +1239,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Identity
             | DaemonAction::Configuration
             | DaemonAction::WaitSessionLifecycle(_)
+            // Answered from durable state, so it holds no daemon work and a
+            // handoff does not wait for it; the client asks again.
+            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

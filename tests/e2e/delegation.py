@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--instance", required=True)
     parser.add_argument("--mailbox-regression-only", action="store_true")
     parser.add_argument("--restart-regression-only", action="store_true")
+    parser.add_argument("--create-restart-only", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
@@ -168,6 +169,10 @@ def main():
         )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
+        if args.create_restart_only:
+            # Holds a child launch before its worker starts, so the daemon
+            # restart lands in the middle of the create.
+            lab.hook_name = "subagent_create_before_worker_start"
         env = lab.environment()
         env.update(
             MJ_INSTANCE=args.instance, MJ_WORKER_BINARY=str(args.worker.resolve())
@@ -601,6 +606,48 @@ def main():
                 "result": "passed",
                 "mailbox_delivery": ["tool_boundary", "turn_boundary"],
             }), flush=True)
+            return
+
+        # A child being created when the daemon restarts is finished by the next
+        # daemon: no failure, and the parent's spawn is not asked to repeat.
+        if args.create_restart_only:
+            spawned = tool(parent, "spawn", {
+                "task_name": "create-restart-child",
+                "task_type": "straightforward",
+                "instructions": "Return a short fixture report.",
+            })
+            child = spawned["child_session_id"]
+            hook = lab.hooks / "subagent_create_before_worker_start"
+            deadline = time.monotonic() + WAIT_SECONDS
+            while not hook.with_suffix(".reached").exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("the child's create never reached its hook")
+                time.sleep(0.05)
+            restart = subprocess.Popen(
+                [str(args.mj.resolve()), "--instance", args.instance, "daemon", "restart"],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            time.sleep(1.0)
+            hook.with_suffix(".continue").touch()
+            stdout, stderr = restart.communicate(timeout=WAIT_SECONDS)
+            assert restart.returncode == 0, (stdout, stderr)
+            deadline = time.monotonic() + WAIT_SECONDS
+            while True:
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    row = database.execute(
+                        "SELECT state, last_error FROM sessions WHERE session_id=?", (child,)
+                    ).fetchone()
+                    intents = database.execute(
+                        "SELECT count(*) FROM session_create_intents WHERE session_id=?", (child,)
+                    ).fetchone()[0]
+                assert row and row[0].lower() != "error", row
+                if row[0].lower() == "running" and not intents:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"the recovered child never ran: {row}, intents={intents}")
+                time.sleep(0.1)
+            print(json.dumps({"instance": args.instance, "artifacts": str(lab.root),
+                              "result": "passed", "child": child}), flush=True)
             return
 
         # Hard-won: #1535: a Restart re-sent a finished sub-agent's assignment and froze its view.
