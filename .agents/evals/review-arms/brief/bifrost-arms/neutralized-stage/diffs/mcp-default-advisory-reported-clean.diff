@@ -1,0 +1,11 @@
+--- mcp-default-advisory-reported-clean/brief-in.md
++++ mcp-default-advisory-reported-clean/raw-editor-brief.md
+@@ -8,7 +8,7 @@
+ - The action appends the strict-mode argument at `.github/actions/policy-scan/action.yml:499`, executes the assembled arguments at `.github/actions/policy-scan/action.yml:516`, and passes the captured analyzer status to the always-running gate (`.github/actions/policy-scan/action.yml:683`).
+ - Policies receiving the revised unqualified-base diagnostic (`crates/bifrost-policy/src/coordinator.rs:4080`) bypass diff attachment in `apply_policy_diff` (`crates/bifrost-policy/src/coordinator.rs:5747`); the finding threshold includes findings with no diff attachment (`crates/bifrost-policy/src/coordinator.rs:4233`).
+ - Base evaluation inherits the head's inconclusive option (`crates/bifrost-policy/src/coordinator.rs:5205`); its resulting exit status determines `aggregate_unreliable` in the baseline (`crates/bifrost-policy/src/coordinator.rs:5273`).
+-- Head publication also computes aggregate reliability using the option (`crates/bifrost-policy/src/coordinator.rs:5408`); publication stores that aggregate in the evaluation row (`crates/bifrost-policy/src/coordinator.rs:5524`), providing another source of persisted base evidence.
++- Head publication also computes aggregate reliability using the option (`crates/bifrost-policy/src/coordinator.rs:5408`); publication stores that aggregate in the evaluation row (`crates/bifrost-policy/src/coordinator.rs:5524`); that evaluation row is another source of persisted base evidence.
+ - `scan` dispatches directly to its separate argument parser (`src/bin/bifrost.rs:270`) and constructs a policy request with the default inconclusive option (`src/bin/bifrost.rs:1884`); the general policy parser reads the explicit flag (`src/bin/bifrost.rs:1113`).
+ 
+ ## Value flow
