@@ -915,23 +915,39 @@ pub trait CommandExecutor {
     /// [`Self::cancellation_requested`] as the no-deadline methods see it: a
     /// deadline that has passed is not a cancellation.
     fn cancellation_requested_without_deadline(&self) -> bool;
+
+    /// Exclude this scope's wall time from the operation deadline. Required:
+    /// wrappers forward to their owner; executors with per-command deadlines
+    /// or no deadline return an empty guard. Cancellation remains active.
+    fn pause_deadline(&self) -> DeadlinePause;
 }
 
 /// An executor whose commands run without the wrapped executor's deadline but
 /// still stop when its supervisor cancels. Staging work that precedes a
 /// timeout-bound command runs on this, so the timeout covers only the command
-/// it names.
-pub struct WithoutDeadline<'a, E: ?Sized>(&'a E);
+/// it names. Its lifetime also pauses that deadline, including gate waits and
+/// other staging work that runs no command.
+pub struct WithoutDeadline<'a, E: ?Sized> {
+    executor: &'a E,
+    _pause: DeadlinePause,
+}
 
 impl<'a, E: CommandExecutor + ?Sized> WithoutDeadline<'a, E> {
     pub fn new(executor: &'a E) -> Self {
-        Self(executor)
+        Self {
+            executor,
+            _pause: executor.pause_deadline(),
+        }
     }
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
-        self.0.cancellation_requested_without_deadline()
+        self.executor.cancellation_requested_without_deadline()
     }
 
     fn execute_without_deadline(
@@ -950,11 +966,11 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.0.execute_without_deadline(command)
+        self.executor.execute_without_deadline(command)
     }
 
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.0.execute_cleanup(command)
+        self.executor.execute_cleanup(command)
     }
 
     fn execute_cleanup_with_timeout(
@@ -962,37 +978,37 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
         command: &CommandSpec,
         timeout: Duration,
     ) -> Result<CommandOutput> {
-        self.0.execute_cleanup_with_timeout(command, timeout)
+        self.executor.execute_cleanup_with_timeout(command, timeout)
     }
 
     // The wrapper's whole purpose is to ignore the wrapped deadline, so a
     // passed deadline must not read as a cancellation here either.
     fn cancellation_requested(&self) -> bool {
-        self.0.cancellation_requested_without_deadline()
+        self.executor.cancellation_requested_without_deadline()
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
-        self.0.stage_started(stage);
+        self.executor.stage_started(stage);
     }
 
     fn stage_finished(&self, stage: ProvisionStage) {
-        self.0.stage_finished(stage);
+        self.executor.stage_finished(stage);
     }
 
     fn notify_notice(&self, notice: &str) {
-        self.0.notify_notice(notice);
+        self.executor.notify_notice(notice);
     }
 
     fn begin_resumable_work(&self) -> Result<()> {
-        self.0.begin_resumable_work()
+        self.executor.begin_resumable_work()
     }
 
     fn shutdown_interrupted(&self) -> bool {
-        self.0.shutdown_interrupted()
+        self.executor.shutdown_interrupted()
     }
 
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
-        self.0.end_resumable_work(label)
+        self.executor.end_resumable_work(label)
     }
 
     fn execute_with_stdin(
@@ -1000,7 +1016,8 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        self.0.execute_with_stdin_without_deadline(command, input)
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
     }
 }
 
@@ -1175,6 +1192,10 @@ impl ProcessExecutor {
 // must not hold one of the runtime's async worker threads for the length of a
 // target command.
 impl CommandExecutor for ProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1401,7 +1422,66 @@ pub struct CancellableProcessExecutor {
     token: Option<tokio_util::sync::CancellationToken>,
     #[cfg(unix)]
     foreground_terminal: bool,
-    deadline: Option<(Instant, Duration)>,
+    deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>,
+}
+
+/// One shared clock owns both deadline checks and nested pause accounting.
+struct ProcessDeadline {
+    expires: Instant,
+    timeout: Duration,
+    paused: Option<(Instant, usize)>,
+}
+
+impl ProcessDeadline {
+    fn new(timeout: Duration) -> Arc<std::sync::Mutex<Self>> {
+        Arc::new(std::sync::Mutex::new(Self {
+            expires: Instant::now() + timeout,
+            timeout,
+            paused: None,
+        }))
+    }
+
+    fn expired(&self) -> bool {
+        self.paused.map_or_else(Instant::now, |(start, _)| start) >= self.expires
+    }
+}
+
+/// Excludes a scope from its owner's deadline, including work between commands.
+/// Nested or overlapping scopes count their union rather than adding time twice.
+#[must_use]
+pub struct DeadlinePause(Option<Arc<std::sync::Mutex<ProcessDeadline>>>);
+
+impl DeadlinePause {
+    /// Executors with no operation-wide deadline have nothing to pause.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    fn new(deadline: Option<Arc<std::sync::Mutex<ProcessDeadline>>>) -> Self {
+        if let Some(deadline) = &deadline {
+            let mut deadline = deadline.lock().unwrap();
+            match &mut deadline.paused {
+                Some((_, depth)) => *depth += 1,
+                paused @ None => *paused = Some((Instant::now(), 1)),
+            }
+        }
+        Self(deadline)
+    }
+}
+
+impl Drop for DeadlinePause {
+    fn drop(&mut self) {
+        if let Some(deadline) = &self.0 {
+            let mut deadline = deadline.lock().unwrap();
+            let (start, depth) = deadline.paused.as_mut().expect("a held deadline pause");
+            *depth -= 1;
+            if *depth == 0 {
+                let elapsed = start.elapsed();
+                deadline.expires += elapsed;
+                deadline.paused = None;
+            }
+        }
+    }
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1449,7 +1529,8 @@ impl CancellableProcessExecutor {
             || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
-                .is_some_and(|(deadline, _)| Instant::now() >= deadline)
+                .as_ref()
+                .is_some_and(|deadline| deadline.lock().unwrap().expired())
     }
 
     /// Whether the supervisor, not the deadline, has asked to stop.
@@ -1466,14 +1547,14 @@ impl CancellableProcessExecutor {
             token: None,
             #[cfg(unix)]
             foreground_terminal: false,
-            deadline: Some((Instant::now() + timeout, timeout)),
+            deadline: Some(ProcessDeadline::new(timeout)),
         }
     }
 
     /// Bounds an existing flag-based executor with a deadline, so a wedged
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
-        self.deadline = Some((Instant::now() + timeout, timeout));
+        self.deadline = Some(ProcessDeadline::new(timeout));
         self
     }
 
@@ -1483,12 +1564,13 @@ impl CancellableProcessExecutor {
                 .token
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled())
-            && let Some((deadline, timeout)) = self.deadline
-            && Instant::now() >= deadline
+            && let Some(deadline) = &self.deadline
+            && let deadline = deadline.lock().unwrap()
+            && deadline.expired()
         {
             return format!(
                 "timed out after {} s while {purpose}",
-                timeout.as_secs_f64()
+                deadline.timeout.as_secs_f64()
             );
         }
         format!("operation cancelled while {purpose}")
@@ -1905,6 +1987,10 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::new(self.deadline.clone())
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.is_cancelled_without_deadline()
     }
@@ -2039,6 +2125,10 @@ impl BoundedProcessExecutor {
 }
 
 impl CommandExecutor for BoundedProcessExecutor {
+    fn pause_deadline(&self) -> DeadlinePause {
+        DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -3824,6 +3914,10 @@ mod executor_tests {
     }
 
     impl CommandExecutor for MasterKilledOnce {
+        fn pause_deadline(&self) -> DeadlinePause {
+            DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

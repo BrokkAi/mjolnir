@@ -126,6 +126,10 @@ impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.inner.cancellation_requested_without_deadline()
     }

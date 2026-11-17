@@ -399,6 +399,10 @@ mod tests {
     }
 
     impl CommandExecutor for RacingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -512,6 +516,10 @@ mod tests {
     }
 
     impl CommandExecutor for WakeTarget {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

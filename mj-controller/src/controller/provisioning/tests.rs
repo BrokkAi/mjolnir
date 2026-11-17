@@ -39,6 +39,10 @@ impl ProbeExecutor {
 }
 
 impl CommandExecutor for ProbeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -159,6 +163,10 @@ fn ssh_docker_registration_config() -> Config {
 struct DockerDesktopExecutor;
 
 impl CommandExecutor for DockerDesktopExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -730,6 +738,10 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
 
 struct CancelledLaunch;
 impl CommandExecutor for CancelledLaunch {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1057,6 +1069,10 @@ struct DurableStateAtCleanup {
 }
 
 impl CommandExecutor for DurableStateAtCleanup {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1216,6 +1232,10 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
 
     struct RefuseStop(Mutex<usize>);
     impl CommandExecutor for RefuseStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1646,6 +1666,10 @@ impl RecordingExecutor {
 }
 
 impl CommandExecutor for RecordingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1880,6 +1904,10 @@ fn only_a_worker_that_never_started_is_retried() {
 
 struct RawRegistrationExecutor;
 impl CommandExecutor for RawRegistrationExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1924,6 +1952,10 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     }
 
     impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1998,6 +2030,10 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     }
 
     impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -2112,6 +2148,10 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
 struct CgroupExecutor(serde_json::Value);
 
 impl CommandExecutor for CgroupExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2259,6 +2299,10 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: PathBuf,
     }
     impl CommandExecutor for OverlapExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

@@ -372,6 +372,10 @@ mod tests {
     }
 
     impl CommandExecutor for FakeGh {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -399,6 +403,10 @@ mod tests {
 
     struct NoCommands;
     impl CommandExecutor for NoCommands {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -524,6 +532,10 @@ mod tests {
     fn directory_scan_observes_the_callers_cancellation() {
         struct CancelDuringScan(Cell<usize>);
         impl CommandExecutor for CancelDuringScan {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }

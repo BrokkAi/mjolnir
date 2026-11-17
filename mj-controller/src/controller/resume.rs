@@ -2709,6 +2709,10 @@ struct CrossHarnessProvisionExecutor<'a, E: CommandExecutor + ?Sized> {
 }
 
 impl<E: CommandExecutor + ?Sized> CommandExecutor for CrossHarnessProvisionExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation.is_cancelled() || self.inner.cancellation_requested_without_deadline()
     }

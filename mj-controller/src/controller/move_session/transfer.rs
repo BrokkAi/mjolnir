@@ -1455,6 +1455,10 @@ mod tests {
     fn shared_filesystem_capacity_counts_allocations_once_and_changes_with_selection() {
         struct Disk;
         impl CommandExecutor for Disk {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -1543,6 +1547,10 @@ mod tests {
         }
         #[cfg(unix)]
         impl CommandExecutor for RemoteGit {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -2032,6 +2040,10 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         struct Executor(std::sync::atomic::AtomicBool);
         impl CommandExecutor for Executor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }

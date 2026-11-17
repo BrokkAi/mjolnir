@@ -1607,6 +1607,10 @@ mod mbx_shim_tests {
     fn legacy_detection_errors_are_returned_to_the_caller() {
         struct FailedInspection;
         impl crate::targets::CommandExecutor for FailedInspection {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -1691,6 +1695,10 @@ mod profile_archive_tests {
         }
     }
     impl CommandExecutor for SystemTar {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

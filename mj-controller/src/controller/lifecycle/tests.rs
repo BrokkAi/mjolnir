@@ -72,6 +72,10 @@ struct DeferredCleanupExecutor {
 }
 
 impl CommandExecutor for DeferredCleanupExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -245,6 +249,10 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -375,6 +383,10 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         restarted: Mutex<bool>,
     }
     impl CommandExecutor for PausedRecovery {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -519,6 +531,10 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1011,6 +1027,10 @@ struct RootProbeExecutor {
 }
 
 impl CommandExecutor for RootProbeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1442,6 +1462,10 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1524,6 +1548,10 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1612,6 +1640,10 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     }
 
     impl CommandExecutor for AlreadyRemovedExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1743,6 +1775,10 @@ fn interrupted_close_error_preserves_destroying_phase() {
 struct FailingExecutor;
 
 impl CommandExecutor for FailingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2167,6 +2203,10 @@ struct RealTargetsRecordedRelease {
 
 #[cfg(unix)]
 impl CommandExecutor for RealTargetsRecordedRelease {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2241,6 +2281,10 @@ impl RecordingTargets {
 }
 
 impl CommandExecutor for RecordingTargets {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2818,6 +2862,10 @@ fn report_removal_failure_does_not_fail_child_destroy() {
     }
     struct ReportFailureExecutor;
     impl CommandExecutor for ReportFailureExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

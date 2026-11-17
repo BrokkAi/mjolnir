@@ -2626,6 +2626,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -3434,6 +3438,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for JoinsNewMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -3683,6 +3691,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FakeMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -4121,6 +4133,10 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RacingMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -4402,6 +4418,10 @@ mod tests {
     struct NoMaster;
 
     impl CommandExecutor for NoMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

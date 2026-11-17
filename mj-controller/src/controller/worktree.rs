@@ -498,6 +498,10 @@ impl<E: CommandExecutor> RemoteGitExecutor<'_, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.executor.cancellation_requested_without_deadline()
     }

@@ -698,6 +698,10 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
 struct NoticeExecutor(std::sync::Mutex<Vec<String>>);
 
 impl CommandExecutor for NoticeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -1952,6 +1956,10 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
         calls: std::sync::atomic::AtomicUsize,
     }
     impl CommandExecutor for StopFails {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -2072,6 +2080,10 @@ struct GitWithPodmanPreflightExecutor {
 }
 
 impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2239,6 +2251,10 @@ struct RecordedMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordedMoveRestore {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2470,6 +2486,10 @@ struct LocalMoveRestore {
 
 #[cfg(unix)]
 impl CommandExecutor for LocalMoveRestore {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2644,6 +2664,10 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
 struct RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor);
 
 impl CommandExecutor for RsyncWithoutPartialDir {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2856,6 +2880,10 @@ impl RecordingProcessExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordingProcessExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -6307,6 +6335,10 @@ struct Ec2PreviewExecutor(GitWithPodmanPreflightExecutor);
 
 #[cfg(unix)]
 impl CommandExecutor for Ec2PreviewExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }

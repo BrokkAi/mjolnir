@@ -1425,6 +1425,10 @@ mod tests {
 
     struct FailReplacementRun;
     impl CommandExecutor for FailReplacementRun {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1457,6 +1461,10 @@ mod tests {
     }
 
     impl CommandExecutor for RetainedInspectionExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -1975,6 +1983,10 @@ mod tests {
     }
 
     impl CommandExecutor for FakeNitroEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

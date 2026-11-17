@@ -417,6 +417,10 @@ pub(super) struct FixtureRemoteExecutor {
 }
 
 impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -481,6 +485,10 @@ impl Git231Executor {
 }
 
 impl crate::targets::CommandExecutor for Git231Executor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -577,6 +585,10 @@ fn managed_checkout_session(
 pub(crate) struct RefusingExecutor(pub(crate) &'static str);
 
 impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }

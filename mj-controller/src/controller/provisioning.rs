@@ -1831,6 +1831,10 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for StagedExecutor<'_, E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.inner.cancellation_requested_without_deadline()
     }

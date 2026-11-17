@@ -65,7 +65,8 @@ fn run_owned_worker_stop(
 /// executor, deadline included. The install, meaning publication of the build
 /// to the store plus the link (and any wait behind another publication of the
 /// same digest), runs without the caller's deadline and keeps its cancellation,
-/// because it is the work a stop's timeout does not name.
+/// because it is the work a stop's timeout does not name. The untimed scope
+/// pauses that deadline so the following control command retains its budget.
 pub(crate) fn ensure_control_worker(
     caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,

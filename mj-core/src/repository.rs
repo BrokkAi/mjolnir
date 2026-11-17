@@ -485,6 +485,10 @@ mod tests {
         // error: a repository that cannot be read is not a plain folder.
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -579,6 +583,10 @@ mod tests {
         // A plain local session must not require the Git executable itself.
         struct MissingGit;
         impl CommandExecutor for MissingGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -620,6 +628,10 @@ mod tests {
         // sessions, so a plain folder is refused there.
         struct PlainRemoteFolder;
         impl CommandExecutor for PlainRemoteFolder {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -666,6 +678,10 @@ mod tests {
 
         struct RefusedGit;
         impl CommandExecutor for RefusedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -719,6 +735,10 @@ mod tests {
             diagnostic: &'static str,
         }
         impl CommandExecutor for FailedGit {
+            fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+                crate::targets::DeadlinePause::none()
+            }
+
             fn cancellation_requested_without_deadline(&self) -> bool {
                 self.cancellation_requested()
             }
@@ -803,6 +823,10 @@ mod tests {
     }
 
     impl CommandExecutor for GitRootsExecutor {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }

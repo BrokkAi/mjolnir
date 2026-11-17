@@ -502,6 +502,10 @@ impl ExportExecutor {
     }
 }
 impl CommandExecutor for ExportExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -2694,6 +2698,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -3072,6 +3080,10 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     }
 
     impl CommandExecutor for StagingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -3676,6 +3688,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         purposes: std::sync::Mutex<Vec<String>>,
     }
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -3807,6 +3823,10 @@ struct SucceedingExecutor;
 
 #[cfg(unix)]
 impl CommandExecutor for SucceedingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -3858,6 +3878,10 @@ impl RestartCheckpointExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RestartCheckpointExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
     fn cancellation_requested_without_deadline(&self) -> bool {
         self.cancellation_requested()
     }
@@ -4108,6 +4132,10 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     #[derive(Default)]
     struct RefuseExport(std::sync::Mutex<Option<bool>>);
     impl CommandExecutor for RefuseExport {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
@@ -4269,6 +4297,10 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         name: String,
     }
     impl CommandExecutor for BusyEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
         fn cancellation_requested_without_deadline(&self) -> bool {
             self.cancellation_requested()
         }
