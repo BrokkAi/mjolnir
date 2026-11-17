@@ -841,10 +841,36 @@ confound. Terra's writer image `a13305cd304b…` was recorded for every job but
 is no longer available locally for package inspection. The evidence concerns
 these Mjolnir diffs, not a general comparison across repositories.
 
-The blinded decisive-fact containment comparison is **pending**. Its one
-Carbon session waits for V2's reserved census sessions to finish and requires
-at least 3% of the Gemini quota week remaining. If that quota is unavailable,
-containment will be reported as not measured, without switching models.
+The blinded decisive-fact containment diagnostic ran in one Sol/high session
+on codex4. A one-line plan amendment, committed as `5a00ed102` before the
+run, moved it from Carbon when the Gemini weekly pool was closed after
+census use. The stage-A rule and all 44 brief texts were unchanged;
+the writer key stayed outside the uploaded inputs.
+
+| Set | Writer | Full fact (`yes`) | Weaker/different relation (`partial`) | `no` |
+| --- | --- | ---: | ---: | ---: |
+| Primary (18) | Sol/high | 7 | 8 | 3 |
+| Primary (18) | Terra/high | 1 | 13 | 4 |
+| Secondary (4) | Sol/high | 2 | 1 | 1 |
+| Secondary (4) | Terra/high | 1 | 3 | 0 |
+
+On the primary diffs, six pairs contained the full fact only in Sol's brief,
+one in both, none only in Terra's, and eleven in neither. Across those six
+Sol-only pairs, mean reviewer catch share was 66.7% for BT and 22.2% for TT.
+The one primary diff where both contained the full fact,
+`web-feed-self-deadlock`, was caught by all reviewers in both arms. This
+points to weaker fact coverage as one explanation for TT's deficit; most
+Terra briefs anchored a relevant location without stating the full relation.
+These are descriptive comparisons from a single blinded judge, separate from
+the registered reading. **The Sol-writes decision is unchanged.**
+
+All 44 output IDs, brief hashes and quoted matching items were validated.
+The diagnostic used 815,370 reported tokens, an estimated API price of
+$0.2861, and 178.3 seconds from recorded prompt to completion. Session
+configuration confirmed high effort; the usage attribution's effort field
+was null. Details, per-brief labels and quoted evidence are in
+[`contains-summary.json`](results/brief-writer-terra/contains-summary.json)
+and [`contains.jsonl`](results/brief-writer-terra/contains.jsonl).
 
 Results: [`summary.json`](results/brief-writer-terra/summary.json),
 [`per-diff.json`](results/brief-writer-terra/per-diff.json),
