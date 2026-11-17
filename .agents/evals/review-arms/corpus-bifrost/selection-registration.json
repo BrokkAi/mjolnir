@@ -1,0 +1,33 @@
+{
+  "status": "tracing; corpus and census not frozen",
+  "repository": "BrokkAi/bifrost-dev",
+  "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
+  "cutoff": "2026-11-01T00:00:00 (local committer time under corpus SPEC)",
+  "bug_issue_seed": 20261117,
+  "ordinary_seed": 20261117,
+  "ordinary_count": 40,
+  "known_bug_target": 30,
+  "tracing_model": "gpt-6.1-sol",
+  "tracing_effort": "medium",
+  "census_models": [
+    {
+      "model": "gemini-4-carbon",
+      "effort": "high",
+      "profile": "gemini2",
+      "target": "morannon-podman"
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    }
+  ],
+  "input_sha256": {
+    ".agents/evals/review-arms/corpus/SPEC.md": "516665e762842984f26ba868865972327e89753a745b96197fffce3724cffb45",
+    ".agents/evals/review-arms/label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502",
+    ".agents/evals/review-arms/label/SPEC-pass2.md": "c98c16434f506cbe1fbfd85011d6e8e0b8c55e7f8d9f8e251a38ba0c977b4117",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md": "bd7e80aca9854a9c5e7b273624aca3134ed100dc0f8eb32d260079d6fa89e4c5",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-pool.jsonl": "69ed25d6d7477fdaecf788c995796d3fd9f7b128cd5f07c04843eff03a6dd730",
+    "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-order.jsonl": "b9fcee93f4c4f05feeee97bb7a39635185f15e5fd5b3d97fc7f28c26431b2c0b"
+  }
+}
