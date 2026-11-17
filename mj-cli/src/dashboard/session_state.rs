@@ -119,9 +119,9 @@ impl DashboardContext {
             .cloned()
             .collect();
         self.dashboard.sync_transcript_hydration(&pending);
-        let loading = item.as_ref().is_some_and(|(session_id, stable_id)| {
-            self.summary_reads.item_loading(session_id, stable_id)
-        });
+        let loading = item
+            .as_ref()
+            .is_some_and(|request| self.summary_reads.item_loading(request));
         self.dashboard.sync_notification_message_read(item, loading);
     }
 

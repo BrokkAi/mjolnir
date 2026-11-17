@@ -648,10 +648,11 @@ fn render_combined_themed(
         area.width
     };
     let notification_entries = dashboard.notification_entries();
+    dashboard.sync_notification_selection(notification_entries.first());
     let notification_text = notification_entries
         .first()
         .map_or_else(String::new, |entry| {
-            dashboard.notification_card_text(&entry.session_id, entry.level)
+            dashboard.selected_notification_text(entry)
         });
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
         let lines = Paragraph::new(notification_text.as_str())
