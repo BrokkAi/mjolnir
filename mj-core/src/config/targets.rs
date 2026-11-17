@@ -684,6 +684,13 @@ impl TargetTemplate {
         }
     }
 
+    /// Whether this target runs with `permissions = "yolo"`. Container
+    /// runtimes are unconstrained inside their boundary but have no
+    /// permission mode, so they are not YOLO targets.
+    pub const fn is_yolo(&self) -> bool {
+        matches!(self.permission_mode(), Some(PermissionMode::Yolo))
+    }
+
     pub(super) fn validate(&self, id: &str) -> Result<()> {
         validate_id("target template", id)?;
         match self {

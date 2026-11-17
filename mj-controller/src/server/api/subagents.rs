@@ -32,11 +32,15 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
+    let yolo = backend
+        .session_is_yolo_target(parent_session_id.clone())
+        .await?;
     let selection = resolve_subagent_policy_selection(
         &backend,
         &parent.profile_id,
         &parent.subagents,
         request.task_type.unwrap_or_default(),
+        yolo,
     )
     .await?;
 
@@ -106,6 +110,7 @@ pub(crate) async fn resolve_subagent_policy_selection(
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
     task_type: mj_core::subagent::SubagentTaskType,
+    yolo: bool,
 ) -> Result<SubagentSelection, ApiFailure> {
     if task_type == mj_core::subagent::SubagentTaskType::Oracle {
         return Err(ApiFailure::bad_request(
@@ -118,24 +123,34 @@ pub(crate) async fn resolve_subagent_policy_selection(
         ));
     }
     let config = backend.subagent_config().await?;
-    let choice = config.effective_choice(policy, task_type).ok_or_else(|| {
-        // A parent launched while subtle was configured can still ask for it.
-        if task_type == mj_core::subagent::SubagentTaskType::Subtle
-            && config
-                .effective_choice(policy, mj_core::subagent::SubagentTaskType::Straightforward)
-                .is_some()
-        {
-            ApiFailure::conflict(
-                "The user configured only the straightforward task type; spawn this child with task_type `straightforward`",
-            )
-        } else {
-            ApiFailure::conflict(format!(
-                "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
-                task_type.id(),
-                task_type.id()
-            ))
-        }
-    })?;
+    let choice = config
+        .effective_choice_for(policy, task_type, yolo)
+        .ok_or_else(|| {
+            // A parent launched while subtle was configured can still ask for it.
+            if task_type == mj_core::subagent::SubagentTaskType::Subtle
+                && config
+                    .effective_choice_for(
+                        policy,
+                        mj_core::subagent::SubagentTaskType::Straightforward,
+                        yolo,
+                    )
+                    .is_some()
+            {
+                ApiFailure::conflict(
+                    "The user configured only the straightforward task type; spawn this child with task_type `straightforward`",
+                )
+            } else {
+                let key = if yolo {
+                    format!("[subagents.yolo.{}]", task_type.id())
+                } else {
+                    format!("[subagents.{}]", task_type.id())
+                };
+                ApiFailure::conflict(format!(
+                    "Configure {key} or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
+                    task_type.id()
+                ))
+            }
+        })?;
     if choice.effort.as_deref() == Some("adaptive") {
         return Err(ApiFailure::bad_request(
             "adaptive sub-agent effort is not supported",
@@ -157,6 +172,8 @@ pub(crate) async fn resolve_subagent_policy_selection(
     .map_err(|error| {
         let context = if policy.override_choice(task_type).is_some() {
             format!("session --subagent-{} override", task_type.id())
+        } else if yolo {
+            format!("[subagents.yolo.{}]", task_type.id())
         } else {
             format!("[subagents.{}]", task_type.id())
         };
@@ -1787,6 +1804,7 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Straightforward,
+            false,
         )
         .await
         .unwrap_err();
@@ -2232,6 +2250,7 @@ mod tests {
                     subtle: None,
                 },
                 SubagentTaskType::Straightforward,
+                false,
             )
             .await
             .unwrap();
@@ -2240,6 +2259,59 @@ mod tests {
                 (expected, value)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn yolo_spawn_uses_the_yolo_task_choice_instead_of_the_shared_one() {
+        use mj_core::config::{SubagentChoice, SubagentChoices, SubagentConfig};
+        use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
+        let choice = |model: &str| SubagentChoice {
+            model: model.into(),
+            effort: None,
+        };
+        let config = SubagentConfig {
+            straightforward: Some(choice("shared")),
+            yolo: SubagentChoices {
+                straightforward: Some(choice("yolo")),
+                ..Default::default()
+            },
+            use_same_on_all_targets: false,
+            ..Default::default()
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: None,
+            discovery_fails: false,
+            config,
+            candidates: SubagentCandidates {
+                offered: vec![candidate("parent", Some(50), &["shared", "yolo"])],
+                unavailable: vec![],
+            },
+        });
+        let policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        let yolo = resolve_subagent_policy_selection(
+            &backend,
+            "parent",
+            &policy,
+            SubagentTaskType::Straightforward,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(yolo.model, "yolo");
+        let shared = resolve_subagent_policy_selection(
+            &backend,
+            "parent",
+            &policy,
+            SubagentTaskType::Straightforward,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(shared.model, "shared");
     }
 
     #[tokio::test]
@@ -2285,6 +2357,7 @@ mod tests {
                     subtle: None,
                 },
                 task_type,
+                false,
             )
             .await
             .unwrap();
@@ -2333,6 +2406,7 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
+            false,
         )
         .await
         .unwrap();
@@ -2342,6 +2416,7 @@ mod tests {
             "parent",
             &any_policy,
             SubagentTaskType::Subtle,
+            false,
         )
         .await
         .unwrap_err();
@@ -2370,10 +2445,15 @@ mod tests {
             (SubagentTaskType::Straightforward, "no-effort", None),
             (SubagentTaskType::Subtle, "fixed", Some("high")),
         ] {
-            let selected =
-                resolve_subagent_policy_selection(&backend, "parent", &mixed_policy, task_type)
-                    .await
-                    .unwrap();
+            let selected = resolve_subagent_policy_selection(
+                &backend,
+                "parent",
+                &mixed_policy,
+                task_type,
+                false,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 (
                     selected.profile_id.as_str(),
@@ -2391,6 +2471,7 @@ mod tests {
                 subtle: None,
             },
             SubagentTaskType::Subtle,
+            false,
         )
         .await
         .unwrap_err();
@@ -2424,6 +2505,7 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Subtle,
+            false,
         )
         .await
         .unwrap_err();
@@ -2437,6 +2519,7 @@ mod tests {
             "parent",
             &policy,
             SubagentTaskType::Straightforward,
+            false,
         )
         .await
         .unwrap();

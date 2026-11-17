@@ -1346,6 +1346,11 @@ impl Controller {
         }
         let profile_id = selection.profile_id.as_deref().unwrap();
         let target_id = selection.target_template_id.as_deref().unwrap();
+        let yolo_target = self
+            .config
+            .targets
+            .get(target_id)
+            .is_some_and(mj_core::config::TargetTemplate::is_yolo);
         let profile = self.config.named_profile(profile_id)?;
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
@@ -1355,7 +1360,11 @@ impl Controller {
                 .oracle_choice
                 .as_ref()
                 .or(source.oracle_choice.as_deref())
-                .or(self.config.subagents.oracle.as_ref())
+                .or_else(|| {
+                    self.config
+                        .subagents
+                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
+                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
         {
             selection.oracle = Some(false);
@@ -1363,16 +1372,21 @@ impl Controller {
             executor.notify_notice(mj_core::state::ORACLE_UNAVAILABLE_NOTICE);
         }
         let policy = move_subagent_policy(source, &selection);
-        // An unchanged delegation policy has already been admitted. Changing
-        // credentials for the same harness does not change its eligible models.
+        // An unchanged delegation policy on the same target mode has already
+        // been admitted. Changing credentials for the same harness does not
+        // change its eligible models, but a YOLO destination reads a different
+        // set of choices and must be checked.
+        let source_yolo = source.is_yolo_target(&self.config);
         if profile.kind != source.harness_kind
             || policy != source.subagents.clone().unwrap_or_default()
+            || yolo_target != source_yolo
         {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
                 &self.config,
                 profile_id,
                 &policy,
+                target_id,
             )
             .await?;
         }
