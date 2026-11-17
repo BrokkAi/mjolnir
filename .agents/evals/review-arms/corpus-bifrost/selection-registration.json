@@ -1,5 +1,5 @@
 {
-  "status": "canonical group draw fixed; source-order tracing in progress; corpus/census not frozen",
+  "status": "30 known-bug diffs and40 ordinary controls frozen; census not started",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
@@ -105,5 +105,62 @@
     "order_sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
     "method": "random.Random(20261118).shuffle over lexical group_key order; 1-based positions assigned after draw",
     "seed_commit": "a04256027"
-  }
+  },
+  "selection_freeze": {
+    "frozen_at": "2026-11-17T02:04:18.118713+00:00",
+    "repository": "BrokkAi/bifrost-dev",
+    "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+    "known_bugs": 30,
+    "ordinary_controls": 40,
+    "attribution_confidence": {
+      "confirmed": 30
+    },
+    "source": {
+      "hard-won": 30,
+      "bug-issue": 0
+    },
+    "group_seed": 20261118,
+    "last_selected_group_position": 127,
+    "feature_families": 24,
+    "max_per_family": 2,
+    "spread_only_exclusion": {
+      "position": 122,
+      "reason": "Third inverse-usage candidate-file routing case; earlier77/117 retained."
+    },
+    "ordinary_seed": 20261117,
+    "ordinary_eligible": 8269,
+    "traced_intro_exclusions": 429,
+    "corpus_sha256": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "ordinary_sha256": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
+    "exclusions_sha256": "49ec8753edae333d9a05d9f315cce7db0787ca397ee9801df3a177da71a6db77",
+    "source_order_sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
+    "source_pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+    "plan_snapshot_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5",
+    "primary_census": {
+      "model": "gemini-4-carbon",
+      "effort": "high",
+      "relation_rule": "kind != none"
+    },
+    "independent_census": {
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "census_status": "not started",
+    "selection_on_labels": false,
+    "known_bug_changed_lines": {
+      "median": 827.0,
+      "min": 109,
+      "max": 2936
+    },
+    "ordinary_changed_lines": {
+      "median": 191.5,
+      "min": 95,
+      "max": 1400
+    },
+    "found_by_status": {
+      "known": 18,
+      "unknown": 12
+    }
+  },
+  "census_roles_plan_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5"
 }
