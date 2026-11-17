@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-11-17T03:21:04.968360+00:00",
+  "milestone": "M1 corpus and quota-amended census only",
+  "repository": "BrokkAi/bifrost-dev",
+  "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+  "known_bug_diffs": 30,
+  "ordinary_controls": 40,
+  "confirmed_attributions": 30,
+  "primary_model": "gpt-6.1-sol/high",
+  "primary_labels": 30,
+  "primary_relation_labels": 17,
+  "replication_model": "gemini-4-carbon/high",
+  "replication_labels": 5,
+  "relation_agreement": {
+    "agree": 4,
+    "n": 5
+  },
+  "kind_agreement": {
+    "agree": 4,
+    "n": 5
+  },
+  "labels_adjudicated": false,
+  "selection_on_labels": false,
+  "study_brief_reviewer_judge_runs": 0,
+  "comparison_limit": "Primary labeller differs from mjolnir census; relation shares of the codebases are not directly comparable. Replication agreement covers only5/30, not the full corpus.",
+  "data_root": "/mnt/optane/review-arms-bifrost-20261116",
+  "files": {
+    "corpus/corpus.jsonl": {
+      "sha256": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+      "bytes": 139280
+    },
+    "corpus/diffs.jsonl": {
+      "sha256": "5417b82b4426b2e8e640f6b9c91f99c1e7e2b407b180ce63ecc44aae7f6d2328",
+      "bytes": 11641
+    },
+    "corpus/selection-freeze.json": {
+      "sha256": "95dbe2ff38023e80d65c359db7cce2b6f1ad07bac3d5174e4c37c1a40f3bf661",
+      "bytes": 1709
+    },
+    "census-results/missing-facts.jsonl": {
+      "sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+      "bytes": 66784
+    },
+    "census-results/missing-facts-second.jsonl": {
+      "sha256": "f6c98e750a84f9654db8b531f49cbe131458a5fbd5c8dd1d68c4684a99e23e0c",
+      "bytes": 12118
+    },
+    "census-results/relations.jsonl": {
+      "sha256": "a5e9a2d5d4f731cbc95cd30a5cdd2b385a79212b07e6a03258b217743a4a6efa",
+      "bytes": 18353
+    },
+    "census-results/summary.json": {
+      "sha256": "3350e31d71572292c466ddc1bb2dc36b2fa1ddb53ecebba7e1b31c807af262ec",
+      "bytes": 4440
+    },
+    "registration/PLAN-bifrost-bugs.md": {
+      "sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5",
+      "bytes": 5602
+    },
+    "registration/PLAN-bifrost-bugs-after-quota-amendment.md": {
+      "sha256": "1e35c37b33595083925132dbc07f8527420f1d9fb72d3453e06edb55bd9cdbf3",
+      "bytes": 6369
+    },
+    "registration/census-role-amendment.json": {
+      "sha256": "9341ca7f1a94933a18bf67ef9619945fe1ad81465453e62af0993e82fd700a3e",
+      "bytes": 1731
+    },
+    "census-carbon-inputs.sha256.json": {
+      "sha256": "4c8598d4db0dd3c5bbb981b9b703c2c0cea921abf53360715ec6cd0c5ecb323c",
+      "bytes": 2148
+    },
+    "census-sol-inputs.sha256.json": {
+      "sha256": "a4954d4d0eab22eb4da47b6d61f92dcf239ec5481147b2a70a60c218be363417",
+      "bytes": 2140
+    },
+    "corpus-build/ordinary-draw.json": {
+      "sha256": "4b5b25ab42b953d62ae3e2e1450a2b96de2b4dc9fe98240da72fe4ac57a82e5f",
+      "bytes": 1037
+    },
+    "corpus-build/hardwon-draw.json": {
+      "sha256": "4b0320829553d72574eb76e82a763e379f26ae6ee99f78ddc3e03884e0e264f5",
+      "bytes": 377
+    },
+    "corpus-build/traced-intros-all.jsonl": {
+      "sha256": "49ec8753edae333d9a05d9f315cce7db0787ca397ee9801df3a177da71a6db77",
+      "bytes": 65879
+    },
+    "corpus-build/hard-won/canonical-groups-pool.jsonl": {
+      "sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+      "bytes": 4044070
+    },
+    "corpus-build/hardwon-groups-order.jsonl": {
+      "sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
+      "bytes": 4159667
+    },
+    "corpus-build/yield-report.json": {
+      "sha256": "728675bd27f194f03b2312ecdf4aaa1a44af46255cfd1dc065b363fab2dbebb6",
+      "bytes": 458166
+    },
+    "corpus-build/yield-report.md": {
+      "sha256": "a5ea6b9faa5391d1b7e5720a27e47c6d1f73bd765785e6c691235fddc9c166cf",
+      "bytes": 107658
+    },
+    "corpus-build/parent-acceptance.json": {
+      "sha256": "e907acad54757b3dee1240e1c77f31fc1f6fdadc8d128907b634a2663ccaed9e",
+      "bytes": 30525
+    },
+    "accounting/final-cost-summary.json": {
+      "sha256": "e87a97690921ae08ac3b88dac7bc9fb84f5ed3547489aa21071aa027c12fe491",
+      "bytes": 43565
+    },
+    "accounting/carbon-final-manifest.json": {
+      "sha256": "a976c3da5a2f2acd823b7be154a72392a512ad35f663d97a6af909d54556ab55",
+      "bytes": 2595
+    },
+    "accounting/carbon-final-usage-00.json": {
+      "sha256": "d5dcb5c93d2bb1eb29c8cc579d75c8f918c38671f6f540241009f59c08490e66",
+      "bytes": 1200
+    },
+    "accounting/carbon-final-quota.json": {
+      "sha256": "58b783d13efa7c73334e3d55502a3dab3411ec6fb6108bf8d5e144521da42a5a",
+      "bytes": 1753
+    },
+    "census-sol-driver/completion.json": {
+      "sha256": "3179bc661ea76044dc1711caa8496b60cec3a2c1e73bc91795a4051183b4ccc9",
+      "bytes": 6925
+    },
+    "source-helper-reports-index.json": {
+      "sha256": "ead68cb2b845403d1af44a509d0f7ff411b879d25783a8db91984ceffda68d71",
+      "bytes": 77407
+    },
+    "REPORT.md": {
+      "sha256": "a2f21fed2fe53e0aa7dac092802afecaa56ee0ea2ec0b73d5553e8011ec439b0",
+      "bytes": 5690
+    }
+  },
+  "shared_harness_code": {
+    "select_diffs.py": "c3e927a6bbaf5f43bac53ee37687d5b1efdb32880e359c786e076bc5b92787cd",
+    "label_facts.py": "d042b4b811c12ff8e7b81fb56619ec9400a7cd496f1439aceab92292d1ba90e7",
+    "verify_driver.py": "02cbc987249ef925be732b46f0caf255475f6cc947566a7961d657fd21da5afc",
+    "corpus/SPEC.md": "516665e762842984f26ba868865972327e89753a745b96197fffce3724cffb45",
+    "label/SPEC.md": "1da9eb2c40b2a42905a12c870d1facf109d816c391c39f247013b3079e0f2502"
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "collected_at": "2026-11-17T03:11:08.404188+00:00",
+  "method": "Shared label_facts.py collect/collect-second; declared Carbon subset of original frozen batch-00; no label edits/adjudication/selection on outcomes.",
+  "primary": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "n": 30,
+    "relation": 17,
+    "kinds": {
+      "value flow": 10,
+      "none": 13,
+      "path": 3,
+      "affected callers": 4
+    },
+    "none_reasons": {
+      "in_diff": 11,
+      "external": 2
+    },
+    "confidence": {
+      "high": 27,
+      "medium": 3
+    },
+    "defect_not_confirmed": [
+      {
+        "id": "mcp-timed-out-progress-survives-response",
+        "defect_check": "not confirmed: the intro proves that a 25 ms timeout abandons the notification wait and the handler returns without a delivery drain, but rmcp enqueue-before-delivery and cancellation behavior cannot be independently verified from the repository at intro. The named fix explicitly describes that dependency behavior."
+      }
+    ]
+  },
+  "partial_replication": {
+    "model": "gemini-4-carbon",
+    "effort": "high",
+    "n": 5,
+    "relation": 0,
+    "kinds": {
+      "none": 5
+    },
+    "none_reasons": {
+      "in_diff": 5
+    },
+    "confidence": {
+      "high": 4,
+      "medium": 1
+    },
+    "defect_not_confirmed": []
+  },
+  "agreement": {
+    "n": 5,
+    "relation_agree": 4,
+    "kind_agree": 4,
+    "disagreements": [
+      {
+        "id": "kotlin-value-class-this-loses-underlying-projection",
+        "primary": "value flow",
+        "replication": "none"
+      }
+    ]
+  },
+  "by_source": {
+    "hard-won": {
+      "n": 30,
+      "relation": 17,
+      "kinds": {
+        "value flow": 10,
+        "path": 3,
+        "affected callers": 4,
+        "none": 13
+      },
+      "none_reasons": {
+        "in_diff": 11,
+        "external": 2
+      },
+      "confidence": {
+        "high": 27,
+        "medium": 3
+      },
+      "defect_not_confirmed": [
+        {
+          "id": "mcp-timed-out-progress-survives-response",
+          "defect_check": "not confirmed: the intro proves that a 25 ms timeout abandons the notification wait and the handler returns without a delivery drain, but rmcp enqueue-before-delivery and cancellation behavior cannot be independently verified from the repository at intro. The named fix explicitly describes that dependency behavior."
+        }
+      ]
+    }
+  },
+  "by_found_by": {
+    "no recorded found-by label": {
+      "n": 17,
+      "relation": 11,
+      "kinds": {
+        "value flow": 6,
+        "path": 2,
+        "affected callers": 3,
+        "none": 6
+      },
+      "none_reasons": {
+        "in_diff": 5,
+        "external": 1
+      },
+      "confidence": {
+        "high": 15,
+        "medium": 2
+      },
+      "defect_not_confirmed": [
+        {
+          "id": "mcp-timed-out-progress-survives-response",
+          "defect_check": "not confirmed: the intro proves that a 25 ms timeout abandons the notification wait and the handler returns without a delivery drain, but rmcp enqueue-before-delivery and cancellation behavior cannot be independently verified from the repository at intro. The named fix explicitly describes that dependency behavior."
+        }
+      ]
+    },
+    "unknown": {
+      "n": 12,
+      "relation": 5,
+      "kinds": {
+        "value flow": 4,
+        "none": 7,
+        "affected callers": 1
+      },
+      "none_reasons": {
+        "external": 1,
+        "in_diff": 6
+      },
+      "confidence": {
+        "high": 11,
+        "medium": 1
+      },
+      "defect_not_confirmed": []
+    },
+    "found-by:policy-oracle": {
+      "n": 1,
+      "relation": 1,
+      "kinds": {
+        "path": 1
+      },
+      "none_reasons": {},
+      "confidence": {
+        "high": 1
+      },
+      "defect_not_confirmed": []
+    }
+  },
+  "role_amendment": "registration/census-role-amendment.json",
+  "comparison_limit": "Primary labeller differs from mjolnir census; relation shares of the codebases are not directly comparable. Replication agreement covers only5/30, not the full corpus.",
+  "ordinary_controls_labelled": 0,
+  "corpus_sha256": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+  "primary_sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+  "replication_sha256": "f6c98e750a84f9654db8b531f49cbe131458a5fbd5c8dd1d68c4684a99e23e0c",
+  "relations_sha256": "a5e9a2d5d4f731cbc95cd30a5cdd2b385a79212b07e6a03258b217743a4a6efa"
+}

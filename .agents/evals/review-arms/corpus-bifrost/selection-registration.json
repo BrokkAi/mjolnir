@@ -1,5 +1,5 @@
 {
-  "status": "30 known-bug diffs and40 ordinary controls frozen; census not started",
+  "status": "Milestone1 complete under quota amendment: Sol primary30, Carbon partial5; labels and relation set frozen before any brief/review",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
@@ -162,5 +162,14 @@
       "unknown": 12
     }
   },
-  "census_roles_plan_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5"
+  "census_roles_plan_sha256": "9f6c1acbb53d9f8736f1bd0382a95d4d715b2d0071fd0efe1620dd982bd612b5",
+  "final_census_roles": {
+    "primary": "gpt-6.1-sol/high",
+    "primary_n": 30,
+    "replication": "gemini-4-carbon/high",
+    "replication_n": 5,
+    "relation_rule": "primary kind != none",
+    "agreement_n": 5,
+    "role_amendment_sha256": "9341ca7f1a94933a18bf67ef9619945fe1ad81465453e62af0993e82fd700a3e"
+  }
 }
