@@ -1,0 +1,70 @@
+bug,group,verdict,severity,confidence,summary
+diff-bb39a5fd49,diff-bb39a5fd49/g1,confirmed,medium,high,An external alias inside a generic argument incorrectly blocks navigation to the workspace generic type.
+diff-bb39a5fd49,diff-bb39a5fd49/g2,rejected,,high,"Comments between an anonymous-object member name and its equals token bypass declaration-name classification, but this failure predates the diff."
+diff-a75a035026,diff-a75a035026/g1,confirmed,high,high,"A same-package panic declaration in another file is misclassified as the builtin, eliminating the actual call and its normal continuation."
+diff-fdcd0552e9,diff-fdcd0552e9/g1,confirmed,medium,high,Replaying an incomplete hierarchy support read now deep-clones its cached reason array before cooperative polling.
+diff-27a65d6991,diff-27a65d6991/g1,confirmed,medium,high,Position-free index digests miss changes to definition selection caused by cross-file byte-offset ordering.
+diff-27a65d6991,diff-27a65d6991/g2,confirmed,medium,high,Per-call dispatch certificates use range-wide quality and coverage that do not match individual-call replay.
+diff-27a65d6991,diff-27a65d6991/g3,confirmed,high,high,The new dispatch-read decoder rejects old persisted class-set reads without invalidating their cache families.
+diff-0041fe831a,diff-0041fe831a/g1,confirmed,medium,high,Retained ICFG dispatch syntax is outside the query retained-memory accounting.
+diff-0041fe831a,diff-0041fe831a/g2,rejected,,high,Reusing a dispatch session freezes the caller source rather than revalidating it per call.
+diff-b607037341,diff-b607037341/g1,confirmed,medium,high,Overloaded subscript receivers are incorrectly typed as their container.
+diff-b607037341,diff-b607037341/g2,rejected,,high,"Field type agreement ignores pointer depth, but the reported arbitrary selection predates this change."
+diff-22207e44f0,diff-22207e44f0/g1,confirmed,medium,high,The constructor-kind guard prevents JavaScript function constructors from receiving their allocated this object.
+diff-6f9a2656f3,diff-6f9a2656f3/g1,confirmed,high,high,Reverse-index construction retains all importers' resolved declaration sets simultaneously outside the memo-cache budget.
+diff-6f9a2656f3,diff-6f9a2656f3/g2,rejected,,high,The claimed newly quadratic Go cold lookup already occurred through the old filter's full-resolution fallback.
+diff-6f9a2656f3,diff-6f9a2656f3/g3,rejected,,high,JavaScript's higher first-lookup work is the explicit tradeoff of the reusable whole-project reverse index.
+diff-695a400f18,diff-695a400f18/g1,confirmed,medium,high,Explicitly anchored paths lose the type continuation needed for enum variants and associated items.
+diff-95655a5e97,diff-95655a5e97/g1,confirmed,medium,high,Generated-accessor source lookup accepts static fields for class-level Lombok getter annotations.
+diff-95655a5e97,diff-95655a5e97/g2,confirmed,medium,high,C# metadata selectors discard generic arity and can resolve declarations with a different arity.
+diff-95655a5e97,diff-95655a5e97/g3,confirmed,medium,high,Lombok source lookup applies one owner annotation to same-FQN fields from other files.
+diff-95655a5e97,diff-95655a5e97/g4,confirmed,medium,high,An anchored Lombok lookup rejects globally ambiguous owner names before applying its file anchor.
+diff-95655a5e97,diff-95655a5e97/g5,confirmed,medium,high,Java parent lookup now scans workspace-wide child collections for each uncached usage context.
+diff-7e35e90ce9,diff-7e35e90ce9/g1,confirmed,medium,high,Changed Scala resolution completeness can reuse persisted products under unchanged provider identities.
+diff-378bd893ed,diff-378bd893ed/g1,confirmed,medium,high,Go package-variable dispatch runs a workspace census outside the semantic request's cancellation and work limits.
+diff-378bd893ed,diff-378bd893ed/g2,confirmed,medium,high,A truncated usage census can incorrectly prove that a mutable Go package function variable has only its initializer target.
+diff-378bd893ed,diff-378bd893ed/g3,confirmed,medium,high,Dispatch cache weights omit the newly retained package-variable census arrays.
+diff-1c0f689be1,diff-1c0f689be1/g1,confirmed,high,high,"An unconditionally registered C# demand test requires root-reference halves that its producer does not emit, causing ordinary tools test runs to fail."
+diff-1cfbe59c5b,diff-1cfbe59c5b/g1,confirmed,medium,high,Solver budget exhaustion or cancellation falsely changes complete semantic input into partial semantic evidence in the published reason.
+diff-1cfbe59c5b,diff-1cfbe59c5b/g2,rejected,,high,Unavailable absent-member witnesses retain unproven/partial evidence rather than null dimensions.
+diff-1cfbe59c5b,diff-1cfbe59c5b/g3,rejected,,high,Untruncated partial or unproven flow and taint witnesses omit explanatory reasons.
+diff-57069dc4f7,diff-57069dc4f7/g4,rejected,,high,The new stage property-gap unique index omits kind and source-site distinctions.
+diff-57069dc4f7,diff-57069dc4f7/g5,rejected,,high,The new stage deferred-owner unique index permits only one owner fact per definition.
+diff-0dc1b2afef,diff-0dc1b2afef/g1,confirmed,medium,high,Deferred method selection discards uncertainty from earlier value lookup.
+diff-0dc1b2afef,diff-0dc1b2afef/g2,confirmed,medium,high,A complete direct trait-method binding bypasses its concrete impl override for method values.
+diff-b58235b247,diff-b58235b247/g1,confirmed,medium,high,Function-local importlib reassignment is ignored when validating a dynamic import receiver.
+diff-b58235b247,diff-b58235b247/g2,confirmed,medium,high,Breadth-first inherited-member lookup can discard the member selected by Python C3 order.
+diff-b58235b247,diff-b58235b247/g3,confirmed,medium,high,Dynamic imports validate importlib at the later reference instead of at the import call.
+diff-b58235b247,diff-b58235b247/g4,confirmed,medium,high,Compound-statement and destructuring writes fail to invalidate a prior literal module assignment.
+diff-b58235b247,diff-b58235b247/g5,confirmed,medium,high,An outer function import incorrectly overrides an inner function declaration.
+diff-b58235b247,diff-b58235b247/g6,confirmed,medium,high,A later import in an inner function fails to prevent selection of an enclosing import.
+diff-b58235b247,diff-b58235b247/g7,confirmed,medium,high,Unaliased function-local dotted imports resolve the bound root to the submodule.
+diff-b58235b247,diff-b58235b247/g8,confirmed,medium,high,Writes before a reference within its containing compound statement are skipped.
+diff-b58235b247,diff-b58235b247/g9,rejected,,high,"A local import replacing a parameter remains unresolved, but the failure predates this diff."
+diff-5e17ecf53c,diff-5e17ecf53c/g1,confirmed,medium,medium,Macro recovery incorrectly consumes identifiers in unrelated erroneous declarations immediately following a completed function-like macro.
+diff-9dad3f2c71,diff-9dad3f2c71/g1,confirmed,medium,high,Production Go requests accumulate new resolution metrics but discard them without exposing or reporting them.
+diff-9dad3f2c71,diff-9dad3f2c71/g2,confirmed,high,high,SQL trace teardown can unregister another pooled reader and free a context still referenced by the traced connection.
+diff-43553e0d35,diff-43553e0d35/g1,confirmed,high,high,"The new required sink_files field is missing from the production candidate plan initializer, preventing compilation."
+diff-5053bc5bea,diff-5053bc5bea/g1,rejected,,high,Deleting the shared scan-budget regression test reduces coverage but does not introduce the claimed incorrect query result.
+diff-5053bc5bea,diff-5053bc5bea/g2,confirmed,medium,high,Test deletions leave incorrectly indented module closures and blank lines that fail the CI formatting check.
+diff-5053bc5bea,diff-5053bc5bea/g3,rejected,,high,Deleting the retry-deadline test reduces coverage but leaves the deadline enforcement intact.
+diff-4a12c7dafa,diff-4a12c7dafa/g1,confirmed,medium,high,Discarding base-side deletion ownership excludes surviving procedures when deletions land at their start or beyond their shortened end.
+diff-4a12c7dafa,diff-4a12c7dafa/g2,confirmed,medium,high,The whole-program span of a synthetic JavaScript/TypeScript initializer admits unrelated top-level sinks for edits inside functions or comments.
+diff-2eaec0a7ad,diff-2eaec0a7ad/g1,rejected,,high,Structural facts intentionally use the indexed source and matching indexed coordinates rather than raw working-file bytes.
+diff-2eaec0a7ad,diff-2eaec0a7ad/g2,confirmed,medium,high,Location scans compare a point computed from indexed LF source against module ranges projected onto CRLF working source.
+diff-c2e0ac6264,diff-c2e0ac6264/g1,confirmed,low,high,The restored C# receiver regression contains an extra closing brace and therefore tests malformed source.
+diff-a3b59a9183,diff-a3b59a9183/g1,confirmed,medium,high,Complete-empty Java supertype answers lose their implicit nominal fallback during hierarchy traversal.
+diff-b4dc5c62d0,diff-b4dc5c62d0/g1,confirmed,medium,high,Repeated calls with equal syntax are incorrectly classified as tautological self-comparisons.
+diff-b4dc5c62d0,diff-b4dc5c62d0/g2,confirmed,medium,high,Parenthesized assertion operands lose constant-truth and equality smell classifications.
+diff-b4dc5c62d0,diff-b4dc5c62d0/g3,confirmed,medium,high,Assertions invoked through chai.assert are dropped and can produce false no-assertions reports.
+diff-5febdb1c44,diff-5febdb1c44/g1,confirmed,medium,high,Qualified template-parameter pointees are not substituted in operator-arrow return types.
+diff-5febdb1c44,diff-5febdb1c44/g2,confirmed,medium,high,Pointer typedef return types are rejected before alias resolution can establish pointer indirection.
+diff-5febdb1c44,diff-5febdb1c44/g3,confirmed,medium,high,Omitted template arguments are not filled from defaults before operator-arrow return substitution.
+diff-5febdb1c44,diff-5febdb1c44/g4,confirmed,medium,high,Class-valued operator-arrow results are rejected instead of following the proxy arrow chain.
+diff-5febdb1c44,diff-5febdb1c44/g5,rejected,,high,"Chained aliases lose the underlying wrapper template arguments, but this limitation predates the diff."
+diff-5febdb1c44,diff-5febdb1c44/g6,confirmed,medium,high,Failed overloaded-arrow resolution falls back to wrapper members and returns false definitions.
+diff-d3b5598051,diff-d3b5598051/g1,confirmed,medium,high,Persisted Rust import routes can suppress unresolved aliases in an edited mounted blob through coinciding blob-local import identities.
+diff-62d65b4fab,diff-62d65b4fab/g1,rejected,,high,Earlier Scala imports in enclosing lexical scopes are not composed into nested import routes.
+diff-62d65b4fab,diff-62d65b4fab/g2,confirmed,medium,high,Scala relative import resolution can skip unresolved owner segments and bind an unrelated package member.
+diff-62d65b4fab,diff-62d65b4fab/g3,confirmed,medium,high,A successful package-relative Scala import retains an erroneous owner-open completeness gap.
+diff-62d65b4fab,diff-62d65b4fab/g4,confirmed,medium,high,The new earlier-import composition consumes Scala imports in candidate order instead of source order.

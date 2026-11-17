@@ -1,0 +1,131 @@
+{
+  "commits": [
+    {
+      "intro": "b4dc5c62d066dbfcfa1d4cdf3b1d0e007b791ba1",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-50188d8c",
+            "f-d61349f8",
+            "f-862ab892",
+            "f-ae1d16b2",
+            "f-ccd225b5",
+            "f-863c053f"
+          ],
+          "summary": "Repeated calls with equal syntax are incorrectly classified as tautological self-comparisons.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-js-ts/src/test_detection.rs:215-226 admits expect(counter.next()).toBe(counter.next()); :234-239 selects its operands. The structural comparison at :339-363 finds identical call trees, and :264-270 emits SelfComparison because a call is not a literal. Separate counter.next() invocations can return different values. crates/bifrost-core/src/analyzer/test_assertions.rs:38-42 assigns the tautology weight, and :131-144 emits the false finding. At base, the expect equality regex at crates/bifrost-js-ts/src/test_detection.rs:13-17 excluded parentheses in the actual operand and did not recognize this assertion. The structural call comparison remains in the pinned checkout; no later corrective change was identified.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-b842ab34",
+            "f-f2969674"
+          ],
+          "summary": "Parenthesized assertion operands lose constant-truth and equality smell classifications.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-js-ts/src/test_detection.rs:223-229 passes argument nodes through without unwrapping. assert.ok((true)) supplies a parenthesized_expression, fails the true-kind check at :241-245, and falls to Meaningful at :260. assert.strictEqual((value), value) reaches :265, but :342-343 rejects parenthesized_expression versus identifier. Meaningful has score zero, so crates/bifrost-core/src/analyzer/test_assertions.rs:131-134 suppresses the findings. Base assert regexes at crates/bifrost-js-ts/src/test_detection.rs:37-45 accepted these inputs, and normalize_js_ts_expr called normalize_assertion_expression, whose parentheses stripping remains visible at intro in crates/bifrost-core/src/analyzer/test_assertions.rs:60-66. Both symptoms need consistent unwrapping of grouping nodes before classification/comparison.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-5fa6a3e0"
+          ],
+          "summary": "Assertions invoked through chai.assert are dropped and can produce false no-assertions reports.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, chai.assert.equal(value, expected) has chai.assert as the matcher object. crates/bifrost-js-ts/src/test_detection.rs:203-206 sees its property assert, which is not not/resolves/rejects, and returns None. No separate assert.equal call exists among the child nodes. Thus :180-183 collects no assertion when this is the only assertion, and crates/bifrost-core/src/analyzer/test_assertions.rs:116-128 emits no-assertions. Base unanchored assert equality/truth regexes at crates/bifrost-js-ts/src/test_detection.rs:37-45 matched the assert.equal or assert.isTrue substring. Later 01dbb79095fd02413292517524515b1e741a54d3 added other chai styles; it does not establish a fix for this namespaced assert form.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "5febdb1c440fbec63a6d3df1b7bb1e54bec37c1e",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-250d6990",
+            "f-106a4c00",
+            "f-9dfe82d5",
+            "f-9a77edbc",
+            "f-e2814021",
+            "f-f7b00111"
+          ],
+          "summary": "Qualified template-parameter pointees are not substituted in operator-arrow return types.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, local P p with using P = Wrapper<Node> is seeded with wrapper unit and alias P at src/analyzer/usages/get_definition.rs:7168-7177; arrow access routes through :6411-6425. For const T* operator->(), :7360-7369 produces const T. The exact parameter-name comparison at :7385-7392 cannot match T to const T, so :7370-7377 resolves the unsubstituted text. The imported normalizer (src/analyzer/usages/cpp_graph/resolver.rs:782-790) removes const only during that later resolution, leaving T rather than Node. With no concrete class named T, lookup fails and :6429 falls back to Wrapper, losing members present only on Node. The base helper at :7345-7355 resolved the alias first argument Node regardless of the return qualifier. The same substitution limitation remains in the pinned checkout.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-aab94fc1"
+          ],
+          "summary": "Pointer typedef return types are rejected before alias resolution can establish pointer indirection.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for template<class T> struct Wrapper with using pointer = T*; pointer operator->(); and using P = Wrapper<Node>, src/analyzer/usages/get_definition.rs:7357-7360 finds the operator and reads pointer. :7362-7363 rejects it because cpp_type_text_pointer_depth (:6141-6152) only counts literal stars; it never resolves the pointer typedef first. :6423-6429 supplies Wrapper as the member owner, and a member present only on Node cannot be found at :5737-5741. The base first-template-argument helper (:7345-7355 at base) selected Node. The literal pointer-depth gate remains in the pinned checkout.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-62ae70b1",
+            "f-2c542349",
+            "f-77cef644"
+          ],
+          "summary": "Omitted template arguments are not filled from defaults before operator-arrow return substitution.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for template<class T, class U = T> struct Wrapper with U* operator->() and alias Wrapper<Node>, src/analyzer/usages/get_definition.rs:7346-7347 collects only explicit argument Node. :7397-7408 extracts names T and U while discarding defaults. :7365-7370 yields U, whose parameter index is 1; :7389-7392 finds no args[1] and leaves U unchanged. :7372-7377 cannot resolve Node through U and falls back to Wrapper at :6429, losing Node-only members. The base helper (:7345-7355 at base) resolved the explicit first argument Node for this input. The pinned implementation still substitutes only explicit argument entries.",
+          "confidence": "high"
+        },
+        {
+          "group": "g4",
+          "findings": [
+            "f-8e10c1f3",
+            "f-fc81c966",
+            "f-bede1a70"
+          ],
+          "summary": "Class-valued operator-arrow results are rejected instead of following the proxy arrow chain.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, for using P = Wrapper<Node>, Wrapper::operator-> returning Proxy<Node>, and Proxy::operator-> returning Node*, src/analyzer/usages/get_definition.rs:7357-7360 finds the first operator but :7362-7363 returns None because its return has no top-level star. No second operator lookup is attempted. :6423-6429 falls back to Wrapper, so :5737-5741 cannot find a Node-only member. C++ recursively applies overloaded operator-> to class-valued results, so the access is valid. The base first-argument helper (:7345-7355 at base) reached Node for this shape. The pointer-only gate remains in the pinned checkout.",
+          "confidence": "high"
+        },
+        {
+          "group": "g5",
+          "findings": [
+            "f-a84760e9",
+            "f-733a89c2"
+          ],
+          "summary": "Chained aliases lose the underlying wrapper template arguments, but this limitation predates the diff.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, src/analyzer/usages/get_definition.rs:7345-7355 reads only the outer alias RHS: using Alias = Ptr collects no arguments even though :7241-7269 and :7324-7335 can follow Ptr to Wrapper. However, base src/analyzer/usages/get_definition.rs:7345-7355 also passed only the outer RHS Ptr to cpp_template_first_argument; base :7382-7385 immediately returned None because Ptr contains no angle group. Base :6429-6436 therefore already fell back to Wrapper instead of selecting Node. Alias-chain member resolution was already broken; this diff did not introduce or newly expose that failure.",
+          "confidence": "high"
+        },
+        {
+          "group": "g6",
+          "findings": [
+            "f-6477d9cb",
+            "f-3018b628",
+            "f-ceb73de7"
+          ],
+          "summary": "Failed overloaded-arrow resolution falls back to wrapper members and returns false definitions.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, consider template<class T> struct Container with size() and no operator->; using X = Container<Node>; X x; x->size(), where Node has no size. src/analyzer/usages/get_definition.rs:7168-7177 stores Container as the unit and X as the alias. :6411-6425 attempts arrow resolution; :7357-7359 finds no operator and returns None. :6429 nevertheless returns Container, and :5737-5744 plus :5890-5898 find Container::size and return it as the definition of the invalid arrow access. Base :7345-7355 selected Node from the alias and did not return Container::size. The commit explicitly intends to stop unwrapping containers without operator->, but returning a confident wrapper member is not a conservative unresolved result. The same fallback remains in the pinned checkout.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

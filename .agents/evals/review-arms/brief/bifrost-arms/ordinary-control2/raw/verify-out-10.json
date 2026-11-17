@@ -1,0 +1,65 @@
+{
+  "commits": [
+    {
+      "intro": "0041fe831aa2758c07076386c37401666075717b",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-dd1d1aa9"
+          ],
+          "summary": "Retained ICFG dispatch syntax is outside the query retained-memory accounting.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-rql/src/structural/search/semantic.rs:1597-1613 supplies a lease-window collector to concurrency summary projection. crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:1452-1453 disables outcome caching for that collector, but :1477-1496 still obtains a retained dispatch session; :610-629 stores every session in the provider-wide map without a memory reservation or eviction. workspace_oracle/dispatch.rs:153-169,207-229 retains the source and lazy parser, and usages/call_relations.rs:173-177,674-683 identifies their additional retained footprint. No caller of retained_bytes or lease reservation exists on this ICFG path. Artifact leases account for semantic rows and lease metadata (semantic/leases.rs:66-85), not this separately retained syntax. Thus visiting multiple artifacts accumulates live syntax without consuming lease-window capacity, whereas the previous oracle.resolve_call created a one-shot session. Scalar source-work charges do not account for physical retained bytes.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-8e5f7492"
+          ],
+          "summary": "Reusing a dispatch session freezes the caller source rather than revalidating it per call.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "This is an explicit prepared-session contract at intro, not an accidental omission: crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:147-152 documents reuse of the exact source snapshot, and :5028-5102 tests overlay mutation after the first call, requires the retained session to keep its frozen second-call answer, and requires a fresh session to reject the stale artifact. The comment at :5075-5078 explicitly states that downstream declarations are not frozen. icfg.rs:610-629 deliberately extends that session to the query-local provider. Later cc37465b1bfc402e974694084dc1b1e8d1479e24 restores one-shot direct dispatch for transaction ownership reasons while retaining session reuse for transfers/snapshots; it does not establish a per-call revalidation requirement for retained sessions.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "b607037341ce1af66354cf4d45b02a3c3644d5d3",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-f2a42546",
+            "f-1c7553a3",
+            "f-c5ffe06a",
+            "f-020f022e",
+            "f-82f4c62f",
+            "f-bdc191d7"
+          ],
+          "summary": "Overloaded subscript receivers are incorrectly typed as their container.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8012-8019 unconditionally unwraps a subscript to its argument. For a local Container c whose operator[] returns Item&, c[0].compute() therefore enters the identifier arm (:7908-7928), obtains Container through cpp_identifier_value_type and cpp_receiver_unit_for_access (:8104-8107,8169-8181), and never consults operator[]. Member navigation then searches those owners at :6000-6017 and returns any Container::compute candidate at :6056-6060, even when Item::compute is the actual target. Before the diff the subscript kind fell through to an empty owner set, so the newly introduced wrong target is attributable to this change. No later fix identified.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-824b5398",
+            "f-240385f1",
+            "f-c2c1b518"
+          ],
+          "summary": "Field type agreement ignores pointer depth, but the reported arbitrary selection predates this change.",
+          "verdict": "rejected",
+          "severity": null,
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/get_definition/cpp.rs:8038-8056 indeed compares only the underlying unit/name and retains the first CppType, ignoring its indirection from :7889-7896. However, base e1161ee54c64f255389114aad68842f310c6887c already selected the first resolved field type unconditionally in cpp_field_expression_type (:7872-7875) and cpp_enclosing_member_field_type (:8583-8586). Inherited T versus T* fields therefore already produced the same arbitrary type and overload selection. The new qualified receiver arm at intro :7993-8006 feeds its result to cpp_receiver_unit_for_access (:8169-8181), which returns the common unit regardless of indirection; it does not expose the alleged pointer-dependent overload selection. This helper incompletely improves the prior agreement check, but the described concrete inherited-field failure was not introduced by the diff.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

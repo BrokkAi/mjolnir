@@ -1,0 +1,70 @@
+[
+ {
+  "intro": "bb39a5fd493f91f3e9f0ec0e6670fb60a557894c",
+  "base": "d112084d980f1401cf511b551c71ae5c41d76f5a",
+  "findings": [
+   {
+    "id": "f-d577508b",
+    "text": "- [P2] Limit alias boundary checks to the referenced type's qualifier \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-562. When a workspace generic type is referenced as `Container<ext::ExternalType>`, the lookup for `Container` promotes the whole generic name, and the boundary helper searches its type arguments too. An external alias in an argument therefore causes the lookup for the indexed `Container` itself to return `unresolvable_import_boundary` instead of its definition. The qualifier check needs to distinguish the referenced type's own name from aliases nested in its generic arguments."
+   },
+   {
+    "id": "f-610bf37d",
+    "text": "- [P2] Restrict alias boundary detection to the referenced type name \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-563. When a workspace type has an external alias-qualified generic argument, such as `Container<pb::Message>`, looking up `Container` incorrectly returns an import-boundary result. The boundary helper walks every descendant of the generic name, so it treats the argument's alias as evidence that the outer type itself is external, before attempting to resolve the indexed `Container`."
+   },
+   {
+    "id": "f-5b8df756",
+    "text": "- [P2] Limit the alias boundary check to the referenced type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-562\n  When a workspace generic type has an external alias-qualified type argument, such as `Container<ext::Item>`, looking up `Container` traverses the entire generic syntax and finds `ext::Item`. The new check then returns an import-boundary diagnostic instead of resolving the indexed `Container` declaration. The alias boundary belongs to the type argument, not the generic type being queried."
+   },
+   {
+    "id": "f-b0863c8c",
+    "text": "- [P2] Skip comments before the anonymous member assignment token \u2014 crates/bifrost-csharp/src/graph/extractor.rs:1091-1094. In valid code such as `new { Name /* comment */ = value }`, the comment is the identifier's next sibling, so `Name` is not recognized as a declaration. Definition lookup and usage extraction can consequently treat the output name as a reference to an unrelated in-scope `Name`."
+   },
+   {
+    "id": "f-9e52e0ac",
+    "text": "- [P2] Restrict the alias boundary check to the referenced type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-568. For a workspace generic type such as `Container<ext::ExternalType>`, looking up `Container` passes the entire generic node to the boundary check, which traverses into its type arguments and finds the external alias. The lookup therefore reports an import boundary instead of resolving the indexed `Container`, even though the alias belongs to a different reference."
+   },
+   {
+    "id": "f-4460c7ba",
+    "text": "- [P2] Skip comments when identifying anonymous-object member names \u2014 crates/bifrost-csharp/src/graph/extractor.rs:1092-1095. In valid C# such as `new { Name /* comment */ = value }`, the comment is the identifier's next sibling, so the declared output name is not recognized and can be resolved as an unrelated workspace reference. The check needs to account for extra nodes between the name and the equals token."
+   },
+   {
+    "id": "f-c8216128",
+    "text": "- [P2] Restrict alias boundary checks to the referenced type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-566. When a workspace type has an external alias-qualified generic argument, such as `Container<ext::Item>`, navigating to `Container` now returns an external import boundary instead of its workspace definition. The predicate traverses every descendant of the generic type node, so it mistakes the argument's alias for a qualifier on the outer type."
+   },
+   {
+    "id": "f-df823f94",
+    "text": "- [P2] Ignore aliases inside generic type arguments when checking the outer type \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/csharp.rs:562-562. For a reference such as `Box<ext::Widget>` where `Box` is a workspace type and `ext` aliases an external namespace, looking up `Box` now returns an import-boundary diagnostic. The boundary helper walks all descendants of the `generic_name`, so it mistakes the alias in the type argument for the qualifier of `Box` and exits before resolving the actual requested type."
+   }
+  ]
+ },
+ {
+  "intro": "a75a035026aedb57d18b9f4332e6d0a2d475b344",
+  "base": "a759d64749447aac3f939650b966f2037df07af3",
+  "findings": [
+   {
+    "id": "f-b6963d38",
+    "text": "- [P1] Account for package-level panic declarations in other files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1179-1188. When another file in the same Go package declares `func panic(v int)`, a call to `panic(x)` in this file invokes that function, but the shadowing inventory is built only from the current file. This guard therefore treats the call as the builtin, removes its call site and normal continuation, and emits a throw instead, losing the callee's behavior and all subsequently reachable code."
+   },
+   {
+    "id": "f-e4e4cec2",
+    "text": "- [P1] Account for package-level panic declarations in other files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1178-1180\n  When another file in the same Go package declares `func panic(v any)`, calls to `panic(v)` in this file invoke that function, but `package_shadowing` is collected only from the current file. This guard therefore lowers the call as a builtin throw, removes its normal continuation and call site, and can make subsequent reachable code and its data flows disappear from the analysis."
+   },
+   {
+    "id": "f-544f0a98",
+    "text": "- [P1] Resolve package-level panic bindings across files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1179-1185. When another file in the same Go package declares `func panic(v int)` or a package variable named `panic`, this check does not see that binding: `predeclared_shadowed` is collected only from the current file and `binding_value` covers local bindings. A call to that function is consequently lowered as an unconditional throw with no normal continuation or call site, making subsequent code unreachable and losing its call semantics. Package-scope bindings must be considered across all files before treating the identifier as the builtin."
+   },
+   {
+    "id": "f-7b1a6d0b",
+    "text": "- [P1] Resolve package-level panic bindings across files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1179-1185. When another file in the same Go package declares `func panic(...)` or a package variable named `panic`, this file's procedure inventory cannot see that binding, so a call to it is incorrectly lowered as an unconditional builtin throw. This removes the call site and makes the rest of the procedure unreachable, producing incorrect control-flow and taint results for valid multi-file packages."
+   },
+   {
+    "id": "f-33df6f04",
+    "text": "- [P1] Account for package-level panic declarations in other files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1179-1180\n\n  When another file in the same Go package declares `func panic(v any)`, this file's `package_shadowing` does not see that declaration because it is collected only from the current syntax tree. A call to that function is therefore lowered as the builtin throw, removing its normal continuation and call site and producing incorrect control-flow and taint results for valid multi-file packages."
+   },
+   {
+    "id": "f-b3920a64",
+    "text": "- [P1] Account for package-level panic declarations in other files \u2014 crates/bifrost-analysis/src/analyzer/go/semantic.rs:1179-1185. When another file in the same Go package declares `func panic(...)` or a package variable named `panic`, this file's procedure enumeration does not see that binding, so a call to it is incorrectly lowered as the builtin throw. The actual callee and its normal continuation disappear, which can hide both its side effects and all subsequent reachable behavior."
+   }
+  ]
+ }
+]

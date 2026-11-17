@@ -1,0 +1,74 @@
+[
+ {
+  "intro": "695a400f18549624bbcc23f51e65b987160b6f28",
+  "base": "011492f3315f38d19779a95aade9f6e126d453e0",
+  "findings": [
+   {
+    "id": "f-0703aa39",
+    "text": "- [P2] Preserve type continuation for explicitly anchored enum paths \u2014 crates/bifrost-rust/src/resolution.rs:1114-1115\n  When an enum variant is referenced through an explicit anchor, such as `crate::State::Unit` or `self::module::State::Unit`, this condition no longer creates the typed continuation from `State` to the variant. The remaining root route treats the enum as a module, but enum type-body members are not module exports, so these previously supported anchored variant references cannot resolve, including when used as method receivers. The visibility correction needs to preserve type continuation when the final prefix resolves to a type."
+   },
+   {
+    "id": "f-6faa9d18",
+    "text": "- [P2] Preserve typed continuations for explicitly anchored enum paths \u2014 crates/bifrost-rust/src/resolution.rs:1114-1115\n  For paths such as `crate::State::Unit` or `self::State::Tuple`, the new condition suppresses the typed continuation from `State` to the variant. The remaining root route treats `State` as a module, but enum variants live in the enum's type-member scope, so these paths lose the variant binding that the previous continuation provided. This also prevents the newly supported direct receiver forms from resolving when the enum path has an explicit anchor."
+   },
+   {
+    "id": "f-5521d498",
+    "text": "- [P2] Preserve type continuation for explicitly anchored enum paths \u2014 crates/bifrost-rust/src/resolution.rs:1114-1115: When a path such as `crate::State::Unit` or `self::State::Unit` names an enum variant, this condition no longer connects `State`'s type identity to the terminal reference. The remaining root route treats `State` as a module, but enum members live in the enum's type body rather than module exports, so these previously supported anchored variant references and their receiver method lookups no longer resolve. The visibility fix needs to retain typed continuation when an anchored path crosses into a type."
+   },
+   {
+    "id": "f-8b56d0c6",
+    "text": "- [P2] Preserve type continuation for explicitly anchored enum paths \u2014 crates/bifrost-rust/src/resolution.rs:1114-1115\n  When a variant or associated item is referenced through an explicit anchor, such as `crate::State::Unit` or `self::State::Tuple(...)`, `bare_qualified_route` is false, so this change removes the final type-prefix continuation and treats `State` as a module segment. Enum members live in the type's member scope rather than module exports, so these paths no longer resolve to their constructors and their receiver methods cannot be resolved either. This also regresses explicitly anchored associated-item paths that previously used the same continuation."
+   }
+  ]
+ },
+ {
+  "intro": "95655a5e97784ceaa702a0d069b7853aa6dd2d27",
+  "base": "102b6a0ce77abbc6b6e2b4aa2857837c20b024ca",
+  "findings": [
+   {
+    "id": "f-e155b123",
+    "text": "- [P2] Exclude fields for which Lombok generates no accessor \u2014 src/searchtools.rs:2413-2419: For a class annotated with `@Data`, this reuse of the accessor helper treats every field as having both a getter and a setter. Lombok does not generate setters for final fields or accessors for static fields, so requests such as `Example.setId` for a final `id` now return a backing field as though the nonexistent method were generated, instead of reporting it missing."
+   },
+   {
+    "id": "f-bc0c1ecc",
+    "text": "- [P2] Validate C# generic arity before resolving a selector \u2014 src/analyzer/symbol_lookup.rs:400-407. When a metadata selector specifies an arity that does not match the declaration, such as `Foo`2` for `class Foo<T>` or `Foo`1` for a non-generic `Foo`, stripping the suffix resolves it to that unrelated declaration. This also makes differently aritied declarations indistinguishable when they coexist, so metadata selectors can return incorrect or ambiguous results instead of selecting the requested declaration."
+   },
+   {
+    "id": "f-6f17034e",
+    "text": "- [P2] Preserve C# generic arity when resolving selectors \u2014 src/analyzer/symbol_lookup.rs:400-406. A metadata selector such as `Widget`2` is normalized to `Widget` regardless of the declaration's actual type-parameter count, so a workspace containing only `Widget<T>` returns that unrelated declaration instead of reporting the selector as missing. The same issue affects generic methods and can make selectors for different arities resolve to the same source."
+   },
+   {
+    "id": "f-34fe4ce8",
+    "text": "- [P2] Preserve generic arity when matching C# selectors \u2014 src/analyzer/symbol_lookup.rs:400-406\n  When a selector specifies an arity that differs from the declaration, such as `Widget`2` for `Widget<T>`, stripping the suffix resolves the wrong type instead of reporting no match. The same problem affects generic methods and can also conflate types with different numbers of type parameters; the metadata arity needs to participate in matching against the declaration."
+   },
+   {
+    "id": "f-9e09ed68",
+    "text": "- [P2] Preserve C# generic arity when matching selectors \u2014 src/analyzer/symbol_lookup.rs:402-405. When a selector specifies a different arity from the declaration, such as `N.Foo`2` for `class Foo<T>`, stripping the numeric suffix makes it resolve to that unrelated declaration. C# permits types and methods with the same name and different generic arities, so these selectors can also resolve to the wrong overload or report ambiguity instead of identifying the requested declaration; validate the arity against the structured declaration before treating the names as equivalent."
+   },
+   {
+    "id": "f-d1d7a9a0",
+    "text": "- [P2] Restrict Lombok fields to the annotated owner \u2014 src/searchtools.rs:2411-2421. When two source roots contain the same Java class FQN and only one class has a Lombok annotation, the accessor helper retrieves fields by FQN across both files and accepts them based on the annotated owner. Consequently an anchor to the unannotated file can return its field as the source of a nonexistent generated accessor, while an unanchored lookup can return both fields as a successful match."
+   },
+   {
+    "id": "f-f0ed883d",
+    "text": "- [P2] Exclude fields for which Lombok does not generate accessors \u2014 src/searchtools.rs:2412-2419 \u2014 For a class annotated with `@Data`, requesting a setter for a final field or an accessor for a static field now returns that field as the generated method's source, although Lombok generates neither accessor in those cases. The shared candidate helper does not filter those field modifiers, so this new source lookup reports nonexistent methods as found."
+   },
+   {
+    "id": "f-b3f81311",
+    "text": "- [P2] Apply the file anchor before rejecting ambiguous Lombok owners \u2014 src/searchtools.rs:2404-2406\n  If two packages contain an annotated `Widget` and the request is `path/to/Widget.java#Widget.getName`, owner lookup finds both fully qualified names and returns no source before the anchor can narrow the candidates. Consequently a valid file-qualified generated accessor fails precisely when the anchor is needed to distinguish owners; filter owners by the anchor before testing their uniqueness."
+   },
+   {
+    "id": "f-b5a0a39f",
+    "text": "- [P2] Avoid a workspace-wide scan for every Java parent lookup \u2014 src/analyzer/java/mod.rs:273\n  `structural_parent_of` linearly scans the analyzer's entire children map (and potentially all module declarations), whereas Java parent lookup is invoked for each enclosing usage context. Scanning usages in a large Java workspace therefore multiplies the number of references by the number of declarations, causing a substantial regression on a hot path; structural parents need an indexed lookup."
+   },
+   {
+    "id": "f-50ddb406",
+    "text": "- [P2] Preserve generic arity when resolving C# selectors \u2014 src/analyzer/symbol_lookup.rs:401-406 \u2014 A selector such as `Widget`2` also resolves a declaration `Widget<T>`, because the numeric arity is discarded without checking the declaration. This can return the wrong source or definition when a caller supplies a metadata name for a different generic type or method; matching must retain and validate the requested arity."
+   },
+   {
+    "id": "f-0487ab34",
+    "text": "- [P2] Preserve C# generic arity when resolving selectors \u2014 src/analyzer/symbol_lookup.rs:401-406: When a selector specifies an arity that does not match a declaration, such as `Example.Widget`2` for `Widget<T>` or a non-generic `Widget`, stripping the suffix makes that declaration resolve successfully. C# permits types and methods with the same name and different generic arities, so this also loses the information needed to select the requested overload and can return the wrong source or an unnecessary ambiguity."
+   }
+  ]
+ }
+]

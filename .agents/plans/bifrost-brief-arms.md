@@ -23,7 +23,9 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Complete paired non-relation catch judging and all 28 required handchecks. Independent parent review and one blinded Sol/high proposal agree; final decisions were sealed before arm attribution. Secondary reading: A13/39 versus BT15/39, +5.1 points (95% paired interval 0.0 to +12.8).
 - [x] Complete and freeze all 40 ordinary blind writers: zero lint repairs, clean inventories, all writers suspended. Four audit hits are literal quoted-heredoc brief writes; capture limitations retained.
 - [x] Complete and freeze all 80 ordinary A/BT jobs and 240 original Terra/high handbacks; every carrier is suspended. One readback transport failure was recovered using the same accepted IDs, with zero reviewer role/cell retries or replacements.
-- [ ] Complete the registered single pooled group-and-verify pass; handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
+- [x] Complete ONE pooled verification pass: 15 Sol/high sessions, all suspended; 192 findings/29 nonempty diffs grouped into 54 confirmed and 15 rejected groups, with all 240 reviewer sessions retained.
+- [x] Parent-read all eight broad-match rejected findings and six briefs; mark seven as semantically relying on an item, one as overlap only. Final Control2 passes: 110.3% confirmed-group retention and seven reliance findings within the limit of eight. No extra assessor or verification pass.
+- [ ] Freeze the final combined readout/accounting/audit limitations, report all final local SHAs, and finish cleanup.
 
 ## Surprises & Discoveries
 
