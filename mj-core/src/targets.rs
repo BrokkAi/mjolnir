@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -780,6 +780,9 @@ pub trait CommandExecutor {
     fn shutdown_interrupted(&self) -> bool {
         false
     }
+    /// Bound the work that follows `end_resumable_work`: it holds daemon
+    /// admission, so a hung command must not stall a handoff.
+    fn bound_admitted_work(&self, _timeout: Duration) {}
     /// Reacquire named control admission before leaving resumable work.
     fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
         Ok(())
@@ -1132,6 +1135,8 @@ fn stream_command_with_stdin(
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
     deadline: Option<(Instant, Duration)>,
+    /// A deadline armed later by `bound_admitted_work`, shared by clones.
+    armed: Arc<Mutex<Option<(Instant, Duration)>>>,
 }
 
 /// Cancels synchronous executor work when its supervising async wait is dropped.
@@ -1152,13 +1157,26 @@ impl CancellableProcessExecutor {
         Self {
             cancelled,
             deadline: None,
+            armed: Arc::default(),
         }
+    }
+
+    /// The earliest deadline that applies, whether set at creation or armed.
+    fn effective_deadline(&self) -> Option<(Instant, Duration)> {
+        let armed = *self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        [self.deadline, armed]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(at, _)| *at)
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
             || self
-                .deadline
+                .effective_deadline()
                 .is_some_and(|(deadline, _)| Instant::now() >= deadline)
     }
 
@@ -1166,6 +1184,7 @@ impl CancellableProcessExecutor {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: Some((Instant::now() + timeout, timeout)),
+            armed: Arc::default(),
         }
     }
 
@@ -1173,12 +1192,14 @@ impl CancellableProcessExecutor {
     /// child becomes a reported failure instead of running forever.
     pub fn with_deadline(mut self, timeout: Duration) -> Self {
         self.deadline = Some((Instant::now() + timeout, timeout));
+        // A clone made for cleanup must not inherit a deadline already spent.
+        self.armed = Arc::default();
         self
     }
 
     fn cancellation_message(&self, purpose: &str) -> String {
         if !self.cancelled.load(Ordering::Acquire)
-            && let Some((deadline, timeout)) = self.deadline
+            && let Some((deadline, timeout)) = self.effective_deadline()
             && Instant::now() >= deadline
         {
             return format!(
@@ -1451,6 +1472,14 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn bound_admitted_work(&self, timeout: Duration) {
+        *self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Instant::now() + timeout, timeout));
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.clone()
             .with_deadline(Duration::from_secs(15))
@@ -2762,6 +2791,21 @@ mod executor_tests {
             error.to_string(),
             "operation cancelled while stage a worker"
         );
+    }
+
+    #[test]
+    fn admitted_work_bound_applies_only_after_it_is_armed_and_not_to_cleanup() {
+        let command = CommandSpec::new("sh", ["-c", "sleep 30"]).purpose("launch a worker");
+        let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
+        assert!(!executor.is_cancelled(), "no deadline before arming");
+        executor.bound_admitted_work(Duration::ZERO);
+        assert_eq!(
+            executor.execute(&command).unwrap_err().to_string(),
+            "timed out after 0 s while launch a worker"
+        );
+        // Cleanup runs on a clone with its own deadline, not the spent one.
+        let cleanup = CommandSpec::new("true", Vec::<String>::new());
+        executor.execute_cleanup(&cleanup).unwrap();
     }
 
     #[test]

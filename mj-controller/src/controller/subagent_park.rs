@@ -89,6 +89,10 @@ pub(super) fn explain_process_exhaustion(
     anyhow::anyhow!(targets::process_exhaustion_message(usage.as_ref(), &error))
 }
 
+/// How long the admitted launch of a woken sub-agent may run; the same bound
+/// as a park, the other short admitted worker operation.
+const ADMITTED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
+
 impl Controller {
     /// Stop a running sub-agent's worker while it is idle, and record it as
     /// parked.
@@ -279,6 +283,9 @@ impl Controller {
                 "sub-agent wake cancelled"
             );
             executor.end_resumable_work("subagent unpark launch")?;
+            // The launch holds handoff admission, so it is bounded; the slow
+            // profile transfer before it is not (#1571).
+            executor.bound_admitted_work(ADMITTED_LAUNCH_TIMEOUT);
             let target = session
                 .target
                 .as_ref()
