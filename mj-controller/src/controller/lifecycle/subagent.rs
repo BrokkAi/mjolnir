@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::controller::checkpoint::{
-    BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
+    BarrierBusyPolicy, BarrierRecovery, CHECKPOINT_BARRIER_TIMEOUT,
+    CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART, adopt_restarted_checkpoint_relay,
     connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
 use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
@@ -125,34 +126,67 @@ impl Controller {
                     snapshot.operational.execution,
                     RelayExecutionState::Closing | RelayExecutionState::Closed
                 ) {
-                    let command_id =
-                        if let Some(existing) = snapshot.operational.checkpoint_barrier.clone() {
+                    let mut restarted_worker = false;
+                    let (command_id, ready) = loop {
+                        let snapshot = relay.connection_mut().sync().await?;
+                        let command_id = if let Some(existing) =
+                            snapshot.operational.checkpoint_barrier.clone()
+                        {
                             existing
                         } else {
                             let id = new_command_id("child-close-barrier")?;
                             relay
-                            .connection_mut()
-                            .submit(
-                                id.clone(),
-                                RelayCommand::BeginCheckpoint {
-                                    reason: Some(
-                                        "close sub-agent without archiving its parent's workspace"
-                                            .into(),
-                                    ),
-                                },
-                            )
-                            .await?;
+                                .connection_mut()
+                                .submit(
+                                    id.clone(),
+                                    RelayCommand::BeginCheckpoint {
+                                        reason: Some(
+                                            "close sub-agent without archiving its parent's workspace"
+                                                .into(),
+                                        ),
+                                    },
+                                )
+                                .await?;
                             id
                         };
-                    let ready = wait_for_checkpoint_barrier(
-                        relay.connection_mut(),
-                        session_id,
-                        &command_id,
-                        CHECKPOINT_BARRIER_TIMEOUT,
-                        BarrierBusyPolicy::InterruptWhileRunning,
-                        previous.harness_kind,
-                    )
-                    .await?;
+                        let ready = wait_for_checkpoint_barrier(
+                            relay.connection_mut(),
+                            session_id,
+                            &command_id,
+                            if restarted_worker {
+                                CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART
+                            } else {
+                                CHECKPOINT_BARRIER_TIMEOUT
+                            },
+                            BarrierBusyPolicy::InterruptWhileRunning,
+                            previous.harness_kind,
+                        )
+                        .await;
+                        match ready {
+                            Ok(ready) => break (command_id, ready),
+                            Err(error) if !restarted_worker => {
+                                let (backend, worker_root) = self.worker_placement(session_id)?;
+                                let reconnect = targets::reconnect_plan(&backend, session_id)?
+                                    .commands
+                                    .into_iter()
+                                    .next()
+                                    .context("reconnect plan is empty")?;
+                                self.recover_checkpoint_barrier(
+                                    session_id,
+                                    executor,
+                                    relay,
+                                    &backend,
+                                    &worker_root,
+                                    &reconnect,
+                                    BarrierRecovery::ChildClose,
+                                    error,
+                                )
+                                .await?;
+                                restarted_worker = true;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
                     let cursor = ready
                         .operational
                         .checkpoint_ready

@@ -2918,3 +2918,184 @@ fn persist_controller_fixture(controller: &Controller) {
         crate::database::save_session(session).unwrap();
     }
 }
+
+// Hard-won: #1565: a sub-agent whose turn never settled after cancellation could not be suspended and was left in error with its worker running
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation() {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
+    use std::os::unix::fs::PermissionsExt;
+    const NAME: &str = "closing_a_child_recovers_a_turn_that_never_settles_after_cancellation";
+    const CHILD: &str = "MJ_TEST_UNSETTLED_CHILD_CLOSE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            NAME,
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "child-close-unsettled")
+        .env("MJ_WORKER_BINARY", {
+            let source = directory.path().join("worker-source");
+            std::fs::write(
+                &source,
+                mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes(),
+            )
+            .unwrap();
+            source
+        })
+        .env("MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE", "notification")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let data = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    std::fs::create_dir_all(data.join("relay")).unwrap();
+    std::fs::write(data.join("relay/unsettled-cancellation"), b"keep running").unwrap();
+    let (mut controller, channels, handle) =
+        close_cut_controller_with(SessionState::Running, true).await;
+    controller
+        .config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    controller.state.subagents.insert(
+        LATCH_RELAY_SESSION.into(),
+        failed_subagent_relation(LATCH_RELAY_SESSION).into(),
+    );
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .checkpoint = None;
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .project_directory = Some(data.join("project"));
+    seed_child_reports(&mut controller, LATCH_RELAY_SESSION, &data);
+    persist_controller_fixture(&controller);
+    let worker_root = data.join("workers").join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("private"), b"keep until synced").unwrap();
+    // Reconnect uses the existing relay fake in checkpoint-only mode, reading
+    // the same durable journal after the old connection is stopped.
+    let launcher = format!(
+        "#!/bin/sh\nexport MJ_TEST_LATCH_RELAY_ROOT={}\nexport MJ_TEST_LATCH_CHECKPOINT_ONLY=1\n{} --exact controller::checkpoint::tests::latch_relay_child_serves_stdio --nocapture | grep --line-buffered '^{{'\n",
+        mj_core::targets::posix_quote(&data.join("relay").to_string_lossy()),
+        mj_core::targets::posix_quote(&std::env::current_exe().unwrap().to_string_lossy()),
+    );
+    std::fs::write(worker_root.join("hel"), launcher).unwrap();
+    std::fs::set_permissions(
+        worker_root.join("hel"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    #[derive(Default)]
+    struct ClosingExecutor {
+        purposes: std::sync::Mutex<Vec<String>>,
+        notices: std::sync::Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for ClosingExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            if command.purpose == "detect target platform" {
+                return ProcessExecutor.execute(command);
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"present\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            std::io::copy(input, &mut std::io::sink())?;
+            self.execute(command)
+        }
+        fn notify_notice(&self, message: &str) {
+            self.notices.lock().unwrap().push(message.into());
+        }
+    }
+    let executor = ClosingExecutor::default();
+    let log = crate::test_log::CapturedLog::default();
+    let _subscriber = tracing::subscriber::set_default(log.clone());
+    controller
+        .suspend_subagent_controlled(
+            LATCH_RELAY_SESSION,
+            &executor,
+            Some(&channels.control),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(data.join("relay/cancellation-accepted").exists());
+    let closed = crate::database::load_session_record(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        history.execution,
+        mj_core::state::MaterializedExecutionState::Closed
+    );
+    {
+        let purposes = executor.purposes.lock().unwrap();
+        let first_stop = purposes
+            .iter()
+            .position(|p| p == "stop Mjolnir worker daemon")
+            .unwrap();
+        let start = purposes
+            .iter()
+            .position(|p| p == "start detached Mjolnir worker")
+            .unwrap();
+        let final_stop = purposes
+            .iter()
+            .rposition(|p| p == "stop Mjolnir worker daemon")
+            .unwrap();
+        assert!(
+            first_stop < start && start < final_stop,
+            "stop the wedged worker before recovery, then stop the sealed worker: {purposes:?}"
+        );
+    }
+    assert!(
+        executor
+            .notices
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n.contains("unresponsive worker"))
+    );
+    assert!(
+        log.at(tracing::Level::WARN)
+            .iter()
+            .any(|message| message.contains("checkpoint requires a worker restart"))
+    );
+    drop(handle);
+    channels.shutdown.shutdown().await.unwrap();
+}

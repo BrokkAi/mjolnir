@@ -85,7 +85,8 @@ pub(in crate::controller) const CHECKPOINT_BARRIER_TIMEOUT: Duration = Duration:
 const CHECKPOINT_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a wedged ACP forces a worker restart, wait as long as native-session
 /// startup: session/load of a long kimi transcript can outlast 30s.
-const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(300);
+pub(in crate::controller) const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration =
+    Duration::from_secs(300);
 
 /// Whether a checkpoint whose worker restart failed should start the worker
 /// once more without its harness. That restart only fails this way when the
@@ -111,6 +112,7 @@ pub use lease::*;
 mod barrier;
 mod capture;
 mod latched;
+pub(in crate::controller) use latched::BarrierRecovery;
 mod layout;
 mod persist;
 mod relay;

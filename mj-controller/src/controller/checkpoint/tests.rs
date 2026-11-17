@@ -1492,6 +1492,11 @@ fn latch_relay_child_serves_stdio() {
                             RelayCommandOutcome::Cancelled,
                         )
                         .expect("complete the cancellation");
+                    if Path::new(&root).join("unsettled-cancellation").exists() {
+                        std::fs::write(Path::new(&root).join("cancellation-accepted"), b"accepted")
+                            .unwrap();
+                        continue;
+                    }
                     relay
                         .record_command_completed(
                             &prompt_id,
@@ -3968,7 +3973,7 @@ pub(crate) async fn close_cut_controller(
 /// [`close_cut_controller`], with the stand-in worker holding a running turn
 /// when `running`.
 #[cfg(unix)]
-async fn close_cut_controller_with(
+pub(crate) async fn close_cut_controller_with(
     state: SessionState,
     running: bool,
 ) -> (
