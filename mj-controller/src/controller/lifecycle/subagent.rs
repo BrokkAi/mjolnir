@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::controller::checkpoint::{
-    BarrierBusyPolicy, BarrierRecovery, CHECKPOINT_BARRIER_TIMEOUT,
-    CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART, adopt_restarted_checkpoint_relay,
-    connect_checkpoint_relay, wait_for_checkpoint_barrier,
+    BarrierBusyPolicy, BarrierRecovery, BarrierRecoveryOutcome, CHECKPOINT_BARRIER_TIMEOUT,
+    CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART, ControllerRelayLease,
+    adopt_restarted_checkpoint_relay, connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
 use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
 
@@ -17,7 +17,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
-        before_close: Option<BeforeClose>,
+        mut before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let close = crate::worker_lifecycle::run(session_id, "close sub-agent", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -171,17 +171,26 @@ impl Controller {
                                     .into_iter()
                                     .next()
                                     .context("reconnect plan is empty")?;
-                                self.recover_checkpoint_barrier(
-                                    session_id,
-                                    executor,
-                                    relay,
-                                    &backend,
-                                    &worker_root,
-                                    &reconnect,
-                                    BarrierRecovery::ChildClose,
-                                    error,
-                                )
-                                .await?;
+                                let recovery = self
+                                    .recover_checkpoint_barrier(
+                                        session_id,
+                                        executor,
+                                        relay,
+                                        &backend,
+                                        &worker_root,
+                                        &reconnect,
+                                        BarrierRecovery::ChildClose,
+                                        before_close.take(),
+                                        error,
+                                    )
+                                    .await?;
+                                if let BarrierRecoveryOutcome::CloseRejected(error) = recovery {
+                                    self.restore_child_after_uncommitted_close(
+                                        session_id, &previous, relay,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
                                 restarted_worker = true;
                             }
                             Err(error) => return Err(error),
@@ -198,21 +207,11 @@ impl Controller {
             if let Some(before_close) = before_close
                 && let Err(error) = before_close.await
             {
-                if barrier.is_some() {
-                    if let Some(relay) = &mut relay {
-                        relay.cancel_abandoned_barrier().await.context(
-                            "release the barrier of a sub-agent whose close did not commit",
-                        )?;
-                    }
-                    let closing = self.state.sessions[session_id].clone();
-                    let record = self.state.sessions.get_mut(session_id).unwrap();
-                    record.state = state_after_unsealed_close(&previous);
-                    record.updated_at = now();
-                    self.persist_session_transition_or_restore(
-                        session_id,
-                        &closing,
-                        "restore a sub-agent whose close did not commit",
-                    )?;
+                if barrier.is_some()
+                    && let Some(relay) = &mut relay
+                {
+                    self.restore_child_after_uncommitted_close(session_id, &previous, relay)
+                        .await?;
                 }
                 return Err(error);
             }
@@ -278,5 +277,26 @@ impl Controller {
                 }
             }
         }
+    }
+
+    async fn restore_child_after_uncommitted_close(
+        &mut self,
+        session_id: &str,
+        previous: &SessionRecord,
+        relay: &mut ControllerRelayLease,
+    ) -> Result<()> {
+        relay
+            .cancel_abandoned_barrier()
+            .await
+            .context("release the barrier of a sub-agent whose close did not commit")?;
+        let closing = self.state.sessions[session_id].clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.state = state_after_unsealed_close(previous);
+        record.updated_at = now();
+        self.persist_session_transition_or_restore(
+            session_id,
+            &closing,
+            "restore a sub-agent whose close did not commit",
+        )
     }
 }

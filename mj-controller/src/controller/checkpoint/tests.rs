@@ -1233,7 +1233,9 @@ fn latch_relay_child_serves_stdio() {
             })).unwrap()).unwrap();
             }
             #[cfg(unix)]
-            if running && relay.operational_state().active_prompt.is_none() {
+            if running && relay.operational_state().active_prompt.is_none()
+                && !Path::new(&root).join("cancellation-accepted").exists()
+            {
                 let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
                     request_id: "seed-running-request".into(),
                     protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,

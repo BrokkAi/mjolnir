@@ -112,7 +112,7 @@ pub use lease::*;
 mod barrier;
 mod capture;
 mod latched;
-pub(in crate::controller) use latched::BarrierRecovery;
+pub(in crate::controller) use latched::{BarrierRecovery, BarrierRecoveryOutcome};
 mod layout;
 mod persist;
 mod relay;

@@ -2925,28 +2925,34 @@ fn persist_controller_fixture(controller: &Controller) {
 async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation() {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_SESSION, close_cut_controller_with};
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     const NAME: &str = "closing_a_child_recovers_a_turn_that_never_settles_after_cancellation";
     const CHILD: &str = "MJ_TEST_UNSETTLED_CHILD_CLOSE";
     if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(crate::controller::test_support::test_name(
-            module_path!(),
-            NAME,
-        ))
-        .env(CHILD, "1")
-        .env("MJ_INSTANCE", "child-close-unsettled")
-        .env("MJ_WORKER_BINARY", {
-            let source = directory.path().join("worker-source");
-            std::fs::write(
-                &source,
-                mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes(),
-            )
-            .unwrap();
-            source
-        })
-        .env("MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE", "notification")
-        .isolated_store(directory.path())
-        .run();
+        for case in ["reject", "commit"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(crate::controller::test_support::test_name(
+                module_path!(),
+                NAME,
+            ))
+            .env(CHILD, case)
+            .env("MJ_INSTANCE", "child-close-unsettled")
+            .env("MJ_WORKER_BINARY", {
+                let source = directory.path().join("worker-source");
+                std::fs::write(
+                    &source,
+                    mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes(),
+                )
+                .unwrap();
+                source
+            })
+            .env("MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE", "notification")
+            .isolated_store(directory.path())
+            .run();
+        }
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2987,7 +2993,7 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
         mj_core::targets::posix_quote(&data.join("relay").to_string_lossy()),
         mj_core::targets::posix_quote(&std::env::current_exe().unwrap().to_string_lossy()),
     );
-    std::fs::write(worker_root.join("hel"), launcher).unwrap();
+    std::fs::write(worker_root.join("hel"), &launcher).unwrap();
     std::fs::set_permissions(
         worker_root.join("hel"),
         std::fs::Permissions::from_mode(0o755),
@@ -3039,19 +3045,88 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
             self.notices.lock().unwrap().push(message.into());
         }
     }
-    let executor = ClosingExecutor::default();
+    let executor = Arc::new(ClosingExecutor::default());
+    let before_close_calls = Arc::new(AtomicUsize::new(0));
+    let reject_close = std::env::var(CHILD).unwrap() == "reject";
+    let before_close: BeforeClose = Box::pin({
+        let executor = executor.clone();
+        let calls = before_close_calls.clone();
+        let data = data.clone();
+        async move {
+            assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
+            assert!(data.join("relay/cancellation-accepted").exists());
+            assert!(
+                !executor
+                    .purposes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|purpose| purpose == "stop Mjolnir worker daemon"),
+                "close must commit before any worker stop"
+            );
+            if reject_close {
+                anyhow::bail!("close rejected before escalation");
+            }
+            Ok(())
+        }
+    });
+    let original_target = controller.state.sessions[LATCH_RELAY_SESSION]
+        .target
+        .clone();
     let log = crate::test_log::CapturedLog::default();
     let _subscriber = tracing::subscriber::set_default(log.clone());
-    controller
+    let outcome = controller
         .suspend_subagent_controlled(
             LATCH_RELAY_SESSION,
-            &executor,
+            executor.as_ref(),
             Some(&channels.control),
-            None,
+            Some(before_close),
         )
-        .await
-        .unwrap();
+        .await;
+    assert_eq!(before_close_calls.load(Ordering::SeqCst), 1);
     assert!(data.join("relay/cancellation-accepted").exists());
+    if reject_close {
+        assert!(format!("{:#}", outcome.unwrap_err()).contains("close rejected before escalation"));
+        let live = crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.state, SessionState::Running);
+        assert_eq!(live.target, original_target);
+        crate::controller::checkpoint::tests::wait_until_the_actor_serves_again(&handle).await;
+        let snapshot = handle.view().snapshot.unwrap();
+        assert!(
+            snapshot.operational.checkpoint_barrier.is_none(),
+            "aborted close retained its barrier"
+        );
+        assert!(!snapshot.operational.checkpoint_only);
+        assert!(snapshot.operational.native_session_is_ready());
+        assert_eq!(
+            snapshot.operational.native_session_id.as_deref(),
+            Some("native-session")
+        );
+        assert!(
+            executor.purposes.lock().unwrap().is_empty(),
+            "rejected close must not stop, reinstall or start its original worker"
+        );
+        assert_eq!(
+            std::fs::read(worker_root.join("hel")).unwrap(),
+            launcher.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(worker_root.join("private")).unwrap(),
+            b"keep until synced"
+        );
+        assert!(executor.notices.lock().unwrap().is_empty());
+        assert!(
+            !log.at(tracing::Level::WARN)
+                .iter()
+                .any(|message| message.contains("checkpoint requires a worker restart"))
+        );
+        drop(handle);
+        channels.shutdown.shutdown().await.unwrap();
+        return;
+    }
+    outcome.unwrap();
     let closed = crate::database::load_session_record(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();

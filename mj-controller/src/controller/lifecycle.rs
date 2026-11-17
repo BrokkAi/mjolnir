@@ -90,6 +90,8 @@ pub(super) enum SourceTargetDisposition {
 /// close's point of no return. A daemon suspend commits its lifecycle here,
 /// so a cancel that arrives later is refused, and stops the session's
 /// sub-agents, so a close that fails at its checkpoint leaves them running.
+/// An explicit child close whose barrier cannot settle runs this before
+/// stopping its worker for checkpoint-only recovery.
 /// When this fails, the close does not proceed: the session returns to its
 /// previous state with its relay unsealed.
 pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;

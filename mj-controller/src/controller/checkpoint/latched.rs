@@ -396,7 +396,7 @@ impl Controller {
                 Ok(barrier) => break (barrier, barrier_command_id),
                 Err(error) if !restarted_worker && exclusivity.close_purpose().is_none() =>
                 {
-                    self.recover_checkpoint_barrier(
+                    let recovery = self.recover_checkpoint_barrier(
                         session_id,
                         executor,
                         &mut relay,
@@ -404,8 +404,12 @@ impl Controller {
                         &worker_root,
                         &reconnect,
                         BarrierRecovery::Checkpoint(exclusivity),
+                        None,
                         error,
                     ).await?;
+                    if let BarrierRecoveryOutcome::CloseRejected(error) = recovery {
+                        return Err(error);
+                    }
                     restarted_worker = true;
                 }
                 Err(error) => return Err(error),
@@ -930,6 +934,13 @@ pub(in crate::controller) enum BarrierRecovery {
     ChildClose,
 }
 
+/// A rejected close leaves the original worker untouched. Restart errors are
+/// separate: they may have already stopped it and must retain recovery intent.
+pub(in crate::controller) enum BarrierRecoveryOutcome {
+    Restarted,
+    CloseRejected(anyhow::Error),
+}
+
 impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn recover_checkpoint_barrier(
@@ -941,8 +952,9 @@ impl Controller {
         worker_root: &str,
         reconnect: &targets::CommandSpec,
         recovery: BarrierRecovery,
+        before_escalating: Option<super::super::lifecycle::BeforeClose>,
         error: anyhow::Error,
-    ) -> Result<()> {
+    ) -> Result<BarrierRecoveryOutcome> {
         if !checkpoint_barrier_needs_worker_restart(&error) {
             return Err(error);
         }
@@ -961,6 +973,13 @@ impl Controller {
                     return Err(error.context(CheckpointDeferred::background_work()));
                 }
             }
+        }
+        // Commit the explicit stop before replacing a live harness with a
+        // checkpoint-only worker. An aborted close must never need rollback.
+        if let Some(before_escalating) = before_escalating
+            && let Err(error) = before_escalating.await
+        {
+            return Ok(BarrierRecoveryOutcome::CloseRejected(error));
         }
         tracing::warn!(
             session_id,
@@ -1021,7 +1040,7 @@ impl Controller {
             }
         };
         relay.replace_connection(connection);
-        Ok(())
+        Ok(BarrierRecoveryOutcome::Restarted)
     }
 }
 
