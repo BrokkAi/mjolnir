@@ -836,8 +836,13 @@ fn kept_daemon_notice(message: String) {
 
 /// What the running daemon, if any, is to this client.
 enum ExistingDaemon {
-    /// None answers, so one has to be started.
+    /// None runs, so one has to be started.
     Absent,
+    /// One is recorded and may still run, but it did not answer. A busy
+    /// daemon answers late, and a container daemon's store lock is not on
+    /// this host, so only [`recorded_daemon_is_gone`] may turn this into
+    /// [`ExistingDaemon::Absent`].
+    Unanswered(DaemonMetadata),
     /// It answers and this client may use it.
     Use(DaemonClient),
     /// It answers but has to be replaced first. `notice` is what to tell the
@@ -935,6 +940,16 @@ async fn ensure_supported_or_gone(metadata: &DaemonMetadata) -> Result<bool> {
     }
 }
 
+/// A recorded daemon that did not answer is absent only once it has provably
+/// exited.
+async fn unanswered(metadata: DaemonMetadata) -> Result<ExistingDaemon> {
+    Ok(if recorded_daemon_is_gone(&metadata).await? {
+        ExistingDaemon::Absent
+    } else {
+        ExistingDaemon::Unanswered(metadata)
+    })
+}
+
 async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let metadata = tokio::task::spawn_blocking(read_metadata_any)
         .await
@@ -970,10 +985,10 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
         });
     }
     let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     };
     if ping_daemon(&mut client).await.is_err() {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     }
     // This protocol reports its own placement. A failed discovery cannot safely
     // decide whether to use or replace it, and may have interrupted the connection.
@@ -1070,23 +1085,47 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
 
 /// Act on [`decide_existing_daemon`] while holding the startup lock
 /// exclusively: use the running daemon, or replace it and report that none is
-/// running yet.
+/// running yet. A recorded daemon that does not answer is waited for until it
+/// answers or provably exits; starting another beside it could leave two
+/// daemons serving one instance.
 async fn prepare_existing_daemon(_startup: &DaemonStartGuard) -> Result<Option<DaemonClient>> {
-    match decide_existing_daemon().await? {
-        ExistingDaemon::Absent => Ok(None),
-        ExistingDaemon::Use(client) => Ok(Some(client)),
-        ExistingDaemon::Replace { metadata, notice } => {
-            match notice {
-                Some(notice) => startup_notice(notice),
-                None => tracing::info!(
-                    daemon_protocol = metadata.protocol_version,
-                    client_protocol = PROTOCOL_VERSION,
-                    daemon_build = %metadata.build_version,
-                    "the daemon is an older protocol or release, or its store needs a migration; replacing it"
-                ),
+    let asked = Instant::now();
+    let mut notice_at = asked + START_NOTICE_DELAY;
+    loop {
+        match decide_existing_daemon().await? {
+            ExistingDaemon::Absent => return Ok(None),
+            ExistingDaemon::Use(client) => return Ok(Some(client)),
+            ExistingDaemon::Replace { metadata, notice } => {
+                match notice {
+                    Some(notice) => startup_notice(notice),
+                    None => tracing::info!(
+                        daemon_protocol = metadata.protocol_version,
+                        client_protocol = PROTOCOL_VERSION,
+                        daemon_build = %metadata.build_version,
+                        "the daemon is an older protocol or release, or its store needs a migration; replacing it"
+                    ),
+                }
+                replace_daemon(&metadata).await?;
+                return Ok(None);
             }
-            replace_daemon(&metadata).await?;
-            Ok(None)
+            ExistingDaemon::Unanswered(metadata) => {
+                if Instant::now() >= notice_at {
+                    let waited = asked.elapsed().as_secs();
+                    tracing::info!(
+                        pid = metadata.pid,
+                        address = %metadata.address,
+                        waited_s = waited,
+                        "the recorded daemon has not answered and has not exited"
+                    );
+                    startup_notice(format!(
+                        "The Mjolnir daemon at {} has not answered for {waited}s and is still \
+                         running; waiting for it to answer or exit.",
+                        metadata.address
+                    ));
+                    notice_at = Instant::now() + startup_notice_interval();
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
     }
 }
