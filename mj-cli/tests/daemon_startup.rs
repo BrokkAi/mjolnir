@@ -597,8 +597,17 @@ fn old_daemon_fixture() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let protocol_version: u32 = std::env::var("MJ_TEST_OLD_PROTOCOL").unwrap().parse().unwrap();
+        // Every daemon of the current protocol answers `Identity`, and clients
+        // treat a failed one as a failure. A daemon of an older protocol is
+        // never asked.
+        let identity = (protocol_version == PROTOCOL_VERSION).then(|| DaemonIdentity {
+            instance_id: format!("upgrade-fixture-{}", std::process::id()),
+            build_version: version.clone(),
+            placement: DaemonPlacement::Host,
+        });
         let metadata = DaemonMetadata {
-            protocol_version: std::env::var("MJ_TEST_OLD_PROTOCOL").unwrap().parse().unwrap(),
+            protocol_version,
             pid: std::process::id(),
             address: listener.local_addr().unwrap(),
             token: "isolated-upgrade-fixture".into(),
@@ -617,6 +626,7 @@ fn old_daemon_fixture() {
                 accepted = listener.accept() => {
                     let (mut stream, _) = accepted.unwrap();
                     let stop = stop.clone();
+                    let identity = identity.clone();
                     connections.spawn(async move {
                         while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
                             let busy = std::env::var_os("MJ_TEST_UPGRADE_BUSY_FILE")
@@ -644,12 +654,15 @@ fn old_daemon_fixture() {
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
-                                // A daemon from before `Identity` or
-                                // `Configuration` cannot decode the frame: it
-                                // drops the connection. Clients must treat
-                                // that as an unknown answer, not as a reason to
-                                // keep asking.
-                                DaemonAction::Identity | DaemonAction::Configuration => break,
+                                DaemonAction::Identity => match &identity {
+                                    Some(identity) => DaemonReply::Identity(identity.clone()),
+                                    None => break,
+                                },
+                                // A daemon from before `Configuration` cannot
+                                // decode the frame: it drops the connection.
+                                // Clients must treat that as an unknown
+                                // answer, not as a reason to keep asking.
+                                DaemonAction::Configuration => break,
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {
