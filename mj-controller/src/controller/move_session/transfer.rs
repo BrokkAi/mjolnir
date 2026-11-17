@@ -1391,6 +1391,22 @@ impl Controller {
             &transfer.controller_stage,
             true,
         )?;
+        // The restore's helper installs into the session's worker root, which
+        // nothing else creates before the worker is installed.
+        super::super::execute_checked(
+            executor,
+            targets::command_on_locator(
+                SshTrafficClass::Control,
+                &layout.backend,
+                id,
+                vec![
+                    "mkdir".into(),
+                    "-p".into(),
+                    targets::worker_root(&layout.backend, id)?,
+                ],
+                "create destination worker root",
+            )?,
+        )?;
         let stage = match &destination.container {
             Some(container) => {
                 load_container_stage(executor, &destination, container)?;
