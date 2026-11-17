@@ -2139,24 +2139,6 @@ impl AuthScheme {
 const OPENCODE_PROVIDER_ENVIRONMENT: &str =
     include_str!("../../assets/opencode-provider-environment.txt");
 
-/// Parse the configuration with the same JSONC dialect as OpenCode:
-/// comments and trailing commas are allowed.
-pub fn parse_opencode_configuration(text: &str) -> Option<serde_json::Value> {
-    let options = jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        allow_loose_object_property_names: false,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: false,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-        allow_bare_decimal_point_numbers: false,
-        allow_non_finite_numbers: false,
-        allow_extended_string_escapes: false,
-    };
-    jsonc_parser::parse_to_serde_value(text, &options).ok()
-}
-
 /// What an OpenCode home reads from its environment, as OpenCode 2 does.
 ///
 /// OpenCode signs in to a provider when one of the provider's key variables
@@ -2192,7 +2174,23 @@ impl OpenCodeEnvironment {
     }
 
     fn add_configuration(&mut self, text: &str) {
-        let Some(configuration) = parse_opencode_configuration(text) else {
+        // OpenCode parses with Microsoft's jsonc-parser, which accepts
+        // comments and trailing commas and nothing else beyond JSON.
+        let options = jsonc_parser::ParseOptions {
+            allow_comments: true,
+            allow_trailing_commas: true,
+            allow_loose_object_property_names: false,
+            allow_missing_commas: false,
+            allow_single_quoted_strings: false,
+            allow_hexadecimal_numbers: false,
+            allow_unary_plus_numbers: false,
+            allow_bare_decimal_point_numbers: false,
+            allow_non_finite_numbers: false,
+            allow_extended_string_escapes: false,
+        };
+        let Ok(configuration) =
+            jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &options)
+        else {
             return;
         };
         static REFERENCE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

@@ -724,7 +724,7 @@ pub(super) struct StagedWorkerProfile<'a> {
     pub ownership: &'a Path,
     pub profile: &'a Path,
     pub shared_login: Option<&'a SharedLogin>,
-    pub shared_paths: &'a [&'a str],
+    pub shared_paths: &'a [&'a Path],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -739,7 +739,7 @@ pub(super) fn install_worker_files(
     ownership: &Path,
     profile_stage: &Path,
     shared_login: Option<&SharedLogin>,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
@@ -1161,7 +1161,7 @@ pub(super) fn install_worker_over_ssh(
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
     execute_checked(
         executor,
@@ -1508,12 +1508,12 @@ struct ProfileArchiveEntry {
 
 fn profile_archive_entries(
     source: &Path,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<Vec<ProfileArchiveEntry>> {
     fn visit(
         source: &Path,
         path: &Path,
-        shared_paths: &[&str],
+        shared_paths: &[&Path],
         entries: &mut Vec<ProfileArchiveEntry>,
     ) -> Result<()> {
         let absolute = source.join(path);
@@ -1521,6 +1521,11 @@ fn profile_archive_entries(
         let metadata = std::fs::metadata(&absolute)?;
         let directory = metadata.is_dir();
         let key = if !directory && shared_paths.iter().any(|shared| path.starts_with(shared)) {
+            ensure!(
+                metadata.is_file(),
+                "profile entry is not a regular file: {}",
+                path.display()
+            );
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
             let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
@@ -1633,9 +1638,9 @@ fn upload_profile_archive(
     ssh: &SshTarget,
     source: &Path,
     destination: &str,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
-    let manifest = ProfileContentManifest::from_staged(source)?;
+    let manifest = ProfileContentManifest::from_staged(source, shared_paths)?;
     if manifest.try_transfer(executor, ssh, Some(destination))? {
         Ok(())
     } else {
@@ -1652,16 +1657,9 @@ fn upload_legacy_profile_archive(
     ssh: &SshTarget,
     source: &Path,
     destination: &str,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
-    let mut entries = profile_archive_entries(source, shared_paths)?;
-    for entry in &mut entries {
-        if entry.key.is_some()
-            && profile_transfer::private_profile_file(&entry.path, &source.join(&entry.path))?
-        {
-            entry.key = None;
-        }
-    }
+    let entries = profile_archive_entries(source, shared_paths)?;
     let keys: HashSet<_> = entries
         .iter()
         .filter_map(|entry| entry.key.clone())
@@ -2290,7 +2288,7 @@ mod profile_archive_tests {
                     ssh_ref,
                     first_ref,
                     home.join("held").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 assert!(held.tar.uploads.borrow()[0].len() > 64 * 1024);
@@ -2304,7 +2302,7 @@ mod profile_archive_tests {
                     ssh_ref,
                     &second,
                     home.join("independent").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 done_tx.send(()).unwrap();
@@ -2316,7 +2314,7 @@ mod profile_archive_tests {
                     &ssh,
                     &first,
                     home.join("same").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 let archives = tar.uploads.borrow();
@@ -2359,7 +2357,7 @@ mod profile_archive_tests {
                     ssh_ref,
                     first_ref,
                     home.join("cached-held").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
             });
@@ -2372,7 +2370,7 @@ mod profile_archive_tests {
                     ssh_ref,
                     first_ref,
                     home.join("cached-parallel").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 done_tx.send(()).unwrap();
@@ -2794,7 +2792,7 @@ mod profile_archive_tests {
             .file_name()
             .unwrap()
             .to_owned();
-        let entries = profile_archive_entries(&source, &["plugins"]).unwrap();
+        let entries = profile_archive_entries(&source, &[Path::new("plugins")]).unwrap();
         let mut archive = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
         fs::remove_file(executor.store().join(&key)).unwrap();
         let destination = temp.path().join("missing");

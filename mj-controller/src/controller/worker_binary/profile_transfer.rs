@@ -29,8 +29,13 @@ pub(in crate::controller) struct ProfileContentManifest {
 }
 
 impl ProfileContentManifest {
-    pub(in crate::controller) fn from_staged(source: &Path) -> Result<Self> {
-        let entries = profile_archive_entries(source, &[])?;
+    /// Use only roots declared by the profile stager. Unknown entries travel
+    /// in the private bundle and are never offered to the receiver.
+    pub(in crate::controller) fn from_staged(
+        source: &Path,
+        shared_paths: &[&Path],
+    ) -> Result<Self> {
+        let entries = profile_archive_entries(source, shared_paths)?;
         let mut manifest = Self {
             source: source.to_owned(),
             entries: Vec::new(),
@@ -40,28 +45,23 @@ impl ProfileContentManifest {
         for entry in entries {
             let path = entry.path;
             let absolute = source.join(&path);
-            if !entry.directory && private_profile_file(&path, &absolute)? {
+            if !entry.directory && entry.key.is_none() {
                 manifest.private.push(path);
                 continue;
             }
             let metadata = std::fs::metadata(&absolute)?;
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
-            let key = if entry.directory {
-                None
-            } else {
-                ensure!(
-                    metadata.is_file(),
-                    "profile entry is not a regular file: {}",
-                    path.display()
-                );
-                let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
+            let key = entry.key.map(|key| {
+                // The legacy store's executable suffix belongs to placement,
+                // while negotiated content identity is the digest alone.
+                let key = key.strip_suffix(".x").unwrap_or(&key).to_owned();
                 manifest
                     .objects
-                    .entry(digest.clone())
+                    .entry(key.clone())
                     .or_insert_with(|| (path.clone(), metadata.len()));
-                Some(digest)
-            };
+                key
+            });
             // Normalize separators at the wire boundary. A literal backslash
             // in a Unix filename remains part of that filename.
             let wire_path = path
@@ -149,105 +149,6 @@ fn archive(
     archive.into_inner()?.finish()?;
     file.rewind()?;
     Ok(file)
-}
-
-// Native logins and generated AWS credential metadata have explicit paths.
-// A profile author can also put inline credentials into harness configuration.
-pub(super) fn private_profile_file(path: &Path, absolute: &Path) -> Result<bool> {
-    if HarnessKind::ALL
-        .iter()
-        .any(|harness| path == Path::new(harness.credential_file_name()))
-        || mj_core::aws_credentials::FILES
-            .iter()
-            .any(|name| path == Path::new(name))
-        || path.components().any(|part| {
-            let name = part.as_os_str().to_string_lossy();
-            matches!(
-                name.as_ref(),
-                "auth.json" | ".credentials.json" | "credentials" | ".env" | ".netrc"
-            )
-        })
-    {
-        return Ok(true);
-    }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(false);
-    };
-    let parse: fn(&str) -> Option<serde_json::Value> = match name {
-        "config.toml" => |text| toml::from_str(text).ok(),
-        "settings.json" | ".claude.json" | "mcp.json" => |text| serde_json::from_str(text).ok(),
-        "opencode.json" | "opencode.jsonc" => mj_core::config::parse_opencode_configuration,
-        _ => return Ok(false),
-    };
-    let bytes = std::fs::read(absolute)?;
-    let parsed = std::str::from_utf8(&bytes).ok().and_then(parse);
-    // An opaque or malformed configuration cannot be classified as public.
-    Ok(parsed.as_ref().is_none_or(inline_credentials))
-}
-
-fn inline_credentials(value: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match value {
-        Value::Array(values) => values.iter().any(inline_credentials),
-        Value::Object(fields) => fields.iter().any(|(name, value)| {
-            if secret_field(name) && value.as_str().is_some_and(literal_string) {
-                return true;
-            }
-            if matches!(name.as_str(), "headers" | "http_headers")
-                && value.as_object().is_some_and(|headers| {
-                    headers
-                        .values()
-                        .any(|value| value.as_str().is_some_and(literal_string))
-                })
-            {
-                return true;
-            }
-            inline_credentials(value)
-        }),
-        Value::String(text) => url::Url::parse(text).is_ok_and(|url| {
-            !url.username().is_empty()
-                || url.password().is_some()
-                || url
-                    .query_pairs()
-                    .any(|(key, value)| secret_field(&key) && literal_string(&value))
-        }),
-        _ => false,
-    }
-}
-
-fn literal_string(text: &str) -> bool {
-    let is_reference = text
-        .strip_prefix("${")
-        .or_else(|| text.strip_prefix("{env:"))
-        .and_then(|name| name.strip_suffix('}'))
-        .is_some_and(|name| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        });
-    !text.is_empty() && !is_reference
-}
-
-fn secret_field(text: &str) -> bool {
-    let start = text
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect::<String>();
-    [
-        "authorization",
-        "apikey",
-        "accesskey",
-        "bearer",
-        "credential",
-        "password",
-        "secret",
-        "token",
-        "privatekey",
-    ]
-    .iter()
-    .any(|suffix| start.ends_with(suffix))
 }
 
 #[derive(Default)]
@@ -580,11 +481,12 @@ mod tests {
         ssh: &SshTarget,
         source: &Path,
         destination: &str,
+        shared_paths: &[&Path],
     ) -> Result<()> {
         transfer(
             executor,
             ssh,
-            &ProfileContentManifest::from_staged(source)?,
+            &ProfileContentManifest::from_staged(source, shared_paths)?,
             Some(destination),
         )
     }
@@ -612,6 +514,7 @@ mod tests {
             std::fs::write(profile.join("common"), b"both profiles").unwrap();
             std::fs::write(profile.join("unique"), unique).unwrap();
         }
+        let roots = ["common", "unique", "recover"].map(Path::new);
         let first_done = AtomicBool::new(false);
         let second_done = AtomicBool::new(false);
         let owner = LocalReceiver::new(home);
@@ -621,12 +524,12 @@ mod tests {
         *owner.hold.lock().unwrap() = Some((reached, held));
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                upload(&owner, &dummy_ssh(), &first, "first-out").unwrap();
+                upload(&owner, &dummy_ssh(), &first, "first-out", &roots).unwrap();
                 first_done.store(true, Ordering::Release);
             });
             ready.recv_timeout(Duration::from_secs(10)).unwrap();
             scope.spawn(|| {
-                upload(&contender, &dummy_ssh(), &second, "second-out").unwrap();
+                upload(&contender, &dummy_ssh(), &second, "second-out", &roots).unwrap();
                 second_done.store(true, Ordering::Release);
             });
             let disjoint = home
@@ -665,7 +568,8 @@ mod tests {
         let (release, held) = mpsc::channel();
         *failed.hold.lock().unwrap() = Some((reached, held));
         std::thread::scope(|scope| {
-            let original = scope.spawn(|| upload(&failed, &dummy_ssh(), &first, "dead-out"));
+            let original =
+                scope.spawn(|| upload(&failed, &dummy_ssh(), &first, "dead-out", &roots));
             ready.recv_timeout(Duration::from_secs(10)).unwrap();
             let pid = std::fs::read_to_string(&pid).unwrap();
             execute_checked(
@@ -677,7 +581,7 @@ mod tests {
             assert!(original.join().unwrap().is_err());
         });
         let retry = LocalReceiver::new(home);
-        upload(&retry, &dummy_ssh(), &first, "recovered").unwrap();
+        upload(&retry, &dummy_ssh(), &first, "recovered", &roots).unwrap();
         assert_eq!(
             retry.claimed_objects(),
             [BTreeSet::from([digest(b"dead owner bytes")])]
@@ -703,16 +607,14 @@ mod tests {
         )
         .unwrap();
         let receiver = LocalReceiver::new(home);
-        let manifest = ProfileContentManifest::from_staged(&source).unwrap();
+        let roots = ["replica", "baseline"].map(Path::new);
+        let manifest = ProfileContentManifest::from_staged(&source, &roots).unwrap();
         transfer(&receiver, &dummy_ssh(), &manifest, None).unwrap();
         assert!(!home.join("warm").exists());
-        upload(&receiver, &dummy_ssh(), &source, "warm").unwrap();
+        upload(&receiver, &dummy_ssh(), &source, "warm", &roots).unwrap();
         assert_eq!(
             receiver.claimed_objects(),
-            [
-                BTreeSet::from([digest(&bytes), digest(b"{\"enabled\":true}")]),
-                BTreeSet::new(),
-            ]
+            [BTreeSet::from([digest(&bytes)]), BTreeSet::new(),]
         );
         assert!(receiver.batches.lock().unwrap()[0].len() > 64 * 1024);
         for file in [
@@ -734,5 +636,41 @@ mod tests {
                 .join(digest(b"experimental_bearer_token = 'a literal secret'"))
                 .exists()
         );
+    }
+    // Hard-won: 75f2a04dd: opaque configuration arguments could enter the shared store.
+    #[test]
+    fn unclassified_profile_entries_stay_private() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let source = home.join("source");
+        std::fs::create_dir_all(source.join("plugins")).unwrap();
+        let plugin = b"declared plugin asset";
+        std::fs::write(source.join("plugins/asset"), plugin).unwrap();
+        let entries = [
+            ("future-harness-entry", b"unknown staged entry".as_slice()),
+            ("mcp.json", br#"{"mcpServers":{"example":{"command":"example","args":["--token","synthetic-argument-secret"]}}}"#.as_slice()),
+        ];
+        for (name, bytes) in entries {
+            std::fs::write(source.join(name), bytes).unwrap();
+        }
+        let receiver = LocalReceiver::new(home);
+        let roots = shared_profile_paths(HarnessKind::Kimi);
+        upload(&receiver, &dummy_ssh(), &source, "installed", &roots).unwrap();
+        assert_eq!(
+            receiver.claimed_objects(),
+            [BTreeSet::from([digest(plugin)])]
+        );
+        for (name, bytes) in entries {
+            assert_eq!(
+                std::fs::read(home.join("installed").join(name)).unwrap(),
+                bytes
+            );
+            assert!(
+                !home
+                    .join(PROFILE_CONTENT_STORE)
+                    .join(digest(bytes))
+                    .exists()
+            );
+        }
     }
 }
