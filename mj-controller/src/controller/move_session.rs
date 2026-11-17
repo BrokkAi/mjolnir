@@ -565,15 +565,20 @@ pub(in crate::controller) fn quota_move_recovery(
 
 /// Observe preparation state without taking the worker's mutation permit.
 /// Confirmed execution leases and refreshes the source before interruption.
+///
+/// A session without a relay actor has no worker to observe: a Move that is
+/// restoring it on its destination, or a worker that never came up, leaves
+/// the record `Disconnected` with no actor. That is the answer (`None`, an
+/// unavailable source), not something to wait for: preparing the retry of a
+/// Move that is still running must reach the Move that owns the session.
 pub async fn refresh_move_source(
     manager: &SessionManagerControl,
     id: &str,
 ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
     Ok(manager
-        .wait_for_session(id, std::time::Duration::from_secs(5))
+        .find_session(id)
         .await?
-        .view()
-        .snapshot)
+        .and_then(|handle| handle.view().snapshot))
 }
 
 /// A Move's hold on its source's relay connection, from the confirmation

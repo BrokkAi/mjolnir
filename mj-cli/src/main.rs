@@ -1472,7 +1472,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     });
     let mut operation = Box::pin(daemon.move_session(request));
     let outcome = tokio::select! {
-        result = &mut operation => result?,
+        result = &mut operation => result.map_err(with_daemon_handoff_move_hint)?,
         _ = &mut notice_poll => bail!("launch notice polling stopped unexpectedly"),
         signal = tokio::signal::ctrl_c() => {
             signal.context("listen for Ctrl-C while moving session")?;
@@ -1522,6 +1522,18 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A Move outlives the daemon that accepted it: a handoff cancels its file
+/// copy and the next daemon resumes it from the durable record. A client that
+/// loses its connection mid-Move cannot tell that from a failure, so say so
+/// instead of leaving the bare transport error.
+fn with_daemon_handoff_move_hint(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<mj_client::daemon::DaemonTransportLost>() {
+        error.context("the daemon connection ended while the Move was running, usually a daemon upgrade or restart; an accepted Move continues under the next daemon, so do not start another one: watch the session, and run `mj move` again with the same options only if it stays disconnected")
+    } else {
+        error
+    }
 }
 
 /// Names the flags that resolve a refusal only when the refusal is about
