@@ -733,6 +733,7 @@ pub(crate) fn session_admission(session_id: &str) -> crate::recovery_gate::Sessi
         futures::executor::block_on(gate.enter_foreground(
             session_id,
             "test lifecycle",
+            crate::recovery_gate::LifecycleOrigin::Person,
             &std::sync::atomic::AtomicBool::new(false),
             &crate::targets::ProcessExecutor,
         ))

@@ -1,0 +1,66 @@
+{
+  "commits": [
+    {
+      "intro": "fdcd0552e9a57c8dfb91ab03b26d2d0ee08df36d",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-e661c0e4",
+            "f-4d9e10bd",
+            "f-4f1e090f",
+            "f-4b1490c1",
+            "f-28b3789e",
+            "f-414c539a"
+          ],
+          "summary": "Replaying an incomplete hierarchy support read now deep-clones its cached reason array before cooperative polling.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, fact_resolution.rs:4677 changes cancellation_support_completions from Rc<ResolutionCompletion> to owned ResolutionCompletion. Exhausted session reads enter observe_hierarchy_support_completion through fact_resolution.rs:12783-12790 and :14234-14240. Reusing a support identity reaches get(&identity).cloned() at :14252-14257 before the per-reason ledger polls at :14266-14268. ResolutionCompletion derives Clone over Incomplete(Box<[ResolutionIncompleteReason]>) in crates/bifrost-analysis/src/analyzer/resolution/model.rs:935-938; reasons contain arbitrary semantic/path identities (:903-915), so their count is not bounded by the number of enum variants. A repeated large incomplete support result therefore incurs an additional proportional allocation and unpolled copy that was an Rc increment at base. Later fix 81bb278c4b0f2120de171c21df9af6638929ed01 removes this cloned() and retains shared evidence with cooperative equality. All fact_resolution.rs references are under crates/bifrost-analysis/src/analyzer/resolution/ at intro.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "27a65d69912b50de7a83fba15ebc039e347f61b8",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-38cd971b",
+            "f-f23fcff0"
+          ],
+          "summary": "Position-free index digests miss changes to definition selection caused by cross-file byte-offset ordering.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-store/src/analyzer/store/mod.rs:13088-13104 reads range rows but no longer hashes them. Meanwhile crates/bifrost-analysis/src/analyzer/tree_sitter_analyzer.rs:13343-13368 sorts definitions by (priority, first_start_byte, source, ...). Two same-priority definitions in separate files can exchange order when padding moves one declaration across the other file's start offset without changing either file's declaration rank or semantic fields. The lookup sorts at :13567 and, for duplicate module definitions, retains only the first at :13570-13580, making this a changed selected answer rather than merely cosmetic ordering. Index reads can still verify against unchanged digests, permitting stale reuse. Later fix 27f067bb6de9a4690598e41e3bb2de0b8894b08a moves source before first_start_byte in the sort tuple.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-fbe1260d",
+            "f-a3120b46"
+          ],
+          "summary": "Per-call dispatch certificates use range-wide quality and coverage that do not match individual-call replay.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/source.rs:208-247 combines the qualities and coverage of all selected calls. resolve_at_source_recorded then gives each observation the aggregate coverage (:119-122) and aggregate outcome quality (:126-128). procedure_dispatch_answer_digest hashes both quality and coverage (:742-754). In contrast, crates/bifrost-analysis/src/analyzer/read_verification.rs:1322-1331 resolves one located call and invokes one_call_dispatch_answer_digest; source.rs:708-729 derives quality and projected coverage solely from that call. Multiple selected calls are explicitly supported (source.rs:648-653). An exhaustive complete call alongside an open/unresolved available call yields a different recorded digest for the complete call than replay on the same workspace, preventing reuse. Later fix 27f067bb6de9a4690598e41e3bb2de0b8894b08a stores each observation's own quality and projected coverage.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-e8bc830d",
+            "f-19edb72e"
+          ],
+          "summary": "The new dispatch-read decoder rejects old persisted class-set reads without invalidating their cache families.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "The base encoder in crates/bifrost-store/src/analyzer/store/read_keys.rs:129-138 persists ProcedureDispatch start/end byte offsets and a separate ordinal. At intro, the same decoder accepts these columns only when start == end and any ordinal also equals that rank (:361-386), so an ordinary nonempty old call range fails decoding. Class-set surface loading calls this decoder at class_set_procedure_surfaces.rs:1218-1229 and summary loading at class_set_summaries.rs:1825-1832. Surface families remain reachable: their SQL keys on lineage/path/language/schema/local structure/behavior (class_set_procedure_surfaces.rs:469-475), constructed in crates/bifrost-flow/src/type_flow/summary.rs:1285-1309; SUMMARY_SCHEMA_VERSION remains 11 in crates/bifrost-flow/src/dataflow/reusable_summary.rs:36 and the diff changes neither the summary identity constants nor these constructors. The policy epoch bump does not invalidate these surface families. Loading an old surface records a query failure in summary.rs:1363-1372, not a cache miss; demanded old summary failures similarly stop reuse at :3510-3517. Publication also decodes existing rows before replacement (class_set_summaries.rs:909-925), so it cannot simply repair an affected existing lookup. This breaks analysis flows using previously persisted class-set dispatch reads after upgrade. No specific later encoding migration was identified. Unqualified store filenames above are under crates/bifrost-store/src/analyzer/store/ at intro.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

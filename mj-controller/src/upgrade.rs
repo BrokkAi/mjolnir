@@ -13,7 +13,7 @@
 //! the owner of that fact stays the only place that records it.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long draining lasts after the most recent handoff attempt. The
@@ -39,7 +39,7 @@ pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-pub(crate) struct Gate(Mutex<State>, tokio::sync::Notify);
+pub(crate) struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
 
 #[derive(Default)]
 struct State {
@@ -58,6 +58,9 @@ struct State {
     /// Each hold by label, keyed by admission order.
     active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
     next_hold: u64,
+    // Test synchronization only; never part of admission policy.
+    #[cfg(test)]
+    resumable_waiters: usize,
 }
 
 struct Hold {
@@ -274,6 +277,65 @@ struct Registration {
 }
 
 impl Gate {
+    fn publish(&self) {
+        self.1.notify_waiters();
+        self.2.notify_all();
+    }
+
+    /// Resumable work owns no admission while handoff drains. The same lock
+    /// decides whether to resume control or yield to a closed daemon.
+    pub(crate) fn enter_after_draining(
+        self: &Arc<Self>,
+        label: &'static str,
+    ) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        loop {
+            anyhow::ensure!(
+                !state.closed,
+                mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                    .with_code(HANDOFF_REFUSAL_CODE)
+            );
+            if !state.draining() {
+                return Ok(self.register_as(&mut state, label, None, None));
+            }
+            // This is the owner's existing lapse deadline, not a polling
+            // interval or a bound on the resumable operation.
+            let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
+            #[cfg(test)]
+            {
+                state.resumable_waiters += 1;
+                self.1.notify_waiters();
+            }
+            (state, _) = self
+                .2
+                .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            {
+                state.resumable_waiters -= 1;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock().resumable_waiters > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_drain_for_test(&self) {
+        self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        self.publish();
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         !self.lock().closed
     }
@@ -289,7 +351,7 @@ impl Gate {
     /// unaccepted requests release their outer client hold when this wakes.
     pub(crate) fn begin_draining(&self) {
         self.lock().drain_requested = Some(Instant::now());
-        self.1.notify_waiters();
+        self.publish();
     }
 
     pub(crate) async fn wait_until_draining(&self) {
@@ -426,7 +488,7 @@ impl Gate {
         state.drain_requested = Some(Instant::now());
         let holds = state.destroy_wait_holds();
         drop(state);
-        self.1.notify_waiters();
+        self.publish();
         holds
     }
 
@@ -462,7 +524,7 @@ impl Gate {
             let report = state.refused_handoff_report();
             state.drain_requested = Some(Instant::now());
             drop(state);
-            self.1.notify_waiters();
+            self.publish();
             if let Some(report) = report {
                 report.log();
             }
@@ -479,7 +541,7 @@ impl Gate {
         );
         state.closed = true;
         drop(state);
-        self.1.notify_waiters();
+        self.publish();
         true
     }
 }
@@ -696,7 +758,7 @@ mod tests {
         let gate = Arc::new(Gate::default());
         let running = gate.enter("session lifecycle").unwrap();
         assert!(!gate.try_close());
-        gate.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
+        gate.expire_drain_for_test();
         assert!(!gate.is_draining());
         assert!(gate.enter_unless_draining("worker swap").is_ok());
         drop(running);

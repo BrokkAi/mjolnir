@@ -1,0 +1,2 @@
+# Preserve generated CSV bytes so frozen hashes survive checkout.
+*.csv -text

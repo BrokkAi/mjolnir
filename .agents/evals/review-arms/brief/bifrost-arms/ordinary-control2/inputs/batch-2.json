@@ -1,0 +1,50 @@
+[
+ {
+  "intro": "1cfbe59c5b4458d3536821893d4568507cbbbbf6",
+  "base": "0f997b56a2d1a5afca95e66c20eba971c68e96c0",
+  "findings": [
+   {
+    "id": "f-902a61e1",
+    "text": "- [P2] Do not describe incomplete results as incomplete semantic input \u2014 crates/bifrost-rql/src/structural/search/value_flow.rs:701-707. When semantic input is complete but the overall result is incomplete and the solver exhausts its budget or is cancelled, this maps the semantic input to `partial`; `combine_solver_and_semantic_reason` then publishes `semantic status partial` even though the original semantic status was `complete`. This gives consumers a false cause for the incomplete result and loses the distinction the new status/reason pair is meant to preserve."
+   },
+   {
+    "id": "f-3c8ce226",
+    "text": "- [P2] Represent unavailable witness evidence as unknown, not unproven \u2014 crates/bifrost-rql/src/structural/search/witness_projection.rs:75-79. When witness retrieval fails, this default is returned with an unavailable reason even though no witness was inspected. The published `proof: \"unproven\"` and `completeness: \"partial\"` therefore assert outcomes the analysis could not establish; the requested evidence contract requires unavailable dimensions to be null. Consumers cannot distinguish a genuinely unproven partial witness from one whose evidence could not be retrieved."
+   },
+   {
+    "id": "f-1352eb1f",
+    "text": "- [P2] Preserve complete semantic input when the solver stops early \u2014 crates/bifrost-rql/src/structural/search/value_flow.rs:701-707. When semantic input is complete but the solver exhausts its budget or is cancelled, `result.is_complete()` is false because it includes solver termination. This maps the semantic input to `partial`, so the final solver status reason falsely reports incomplete semantic evidence and loses the previously published `semantic_status: complete`. Derive the semantic status independently of solver completion before combining the outcomes."
+   },
+   {
+    "id": "f-abb5db43",
+    "text": "- [P2] Explain incomplete and unproven flow evidence \u2014 crates/bifrost-rql/src/structural/search/value_flow.rs:1099-1104. When a retained flow path is unproven or partial without witness truncation, this always omits `reason`, so both endpoint path qualities and flow witnesses expose degraded evidence without explaining its capability or limit. The same omission occurs for untruncated taint witnesses in `public_taint_quality`, leaving clients unable to understand why those results are uncertain."
+   },
+   {
+    "id": "f-d9cf89d4",
+    "text": "- [P2] Represent unavailable witness evidence as unknown \u2014 crates/bifrost-rql/src/structural/search/witness_projection.rs:75-79 When witness reconstruction fails, this row retains `unproven` and `partial` even though the witness is unavailable and neither axis was established. Consumers therefore cannot distinguish unavailable evidence from an observed unproven, partial witness; the requested evidence contract requires unknown dimensions to be null with a reason."
+   },
+   {
+    "id": "f-90426ec3",
+    "text": "- [P2] Represent unavailable witness evidence as unknown crates/bifrost-rql/src/structural/search/witness_projection.rs:75-78: When retained witness construction fails, this row has no witness from which to establish proof or completeness, yet it publishes `unproven` and `partial` as established values. The requested contract requires unavailable dimensions to be null with a reason; consumers currently cannot distinguish an unavailable witness from one whose evidence was actually assessed as unproven and partial. The evidence types and client models also need to permit those null values."
+   },
+   {
+    "id": "f-1259d7e6",
+    "text": "- [P2] Preserve unavailable evidence dimensions as null \u2014 crates/bifrost-rql/src/structural/search/witness_projection.rs:75-78. When an absent-member witness cannot be retrieved, this initializer is returned with `proof: \"unproven\"` and `completeness: \"partial\"` even though neither dimension was established; the error branch only adds a reason. Consumers therefore cannot distinguish unavailable evidence from an actually unproven, partial witness, contrary to the requested null-dimension contract. The evidence type and client models also need to permit null for this case."
+   }
+  ]
+ },
+ {
+  "intro": "57069dc4f77fbc6d06ad07c2aa8831807751336e",
+  "base": "4f6a2134a949216bf76898ff421673d2431a10ee",
+  "findings": [
+   {
+    "id": "f-2ba7ce5c",
+    "text": "- [P2] Preserve distinct property gaps with the same reason and frontier \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:142-142. When a definition has property gaps that share a reason and frontier but differ in kind or source site, lowering treats them as distinct rows, while this unique index collapses those distinctions and rejects the second row. Include the remaining gap identity fields so all valid lowered gaps can be projected."
+   },
+   {
+    "id": "f-71200974",
+    "text": "- [P2] Allow multiple deferred owners for one definition \u2014 crates/bifrost-analysis/src/analyzer/store/resolution_stage/rows.rs:119-119. When a definition has distinct deferred member-owner facts, lowering retains each fact and the persistent table stores them under separate sequence numbers, but this unique key permits only one row per definition and will reject the second during projection. The identity needs to distinguish the individual owner facts."
+   }
+  ]
+ }
+]

@@ -1,0 +1,30 @@
+{
+  "recorded_at": "2026-11-17T11:48:13.527543+00:00",
+  "full_study_complete": true,
+  "registered_reading": "Does not generalize",
+  "files": {
+    "READOUT.md": "2e8f5ca44a6bdb38433026ddfd61a7e188e293c2077e7d3a7f45d537e934e00e",
+    "accounting-final.json": "4a09e33cd7b639a6a6dbd415457a1b0f932e231d4c1b481610467cd87eebae48",
+    "control2-final.json": "7a28748767bce2551daf3f29c469f23f912919782f8b77d3f7b72cf903ab8507",
+    "summary.json": "a3a5262a5b169b9c64fb25eb1346b0e82bb1db269570848cfaf513b5fc7809dd"
+  },
+  "stage_source_hashes": {
+    "arms/relation-results/FREEZE.json": "002d37e8c3bb7eb62d1fc860f0f8f418c8eee5957d2398ba43605bfcf596c520",
+    "arms/nonrelation-results/FREEZE.json": "5434f51a540aac62b69b881eeb731f4d5f00256ae9c71bb7888fef31eaec4b56",
+    "arms/primary-diagnostics/FREEZE.json": "892bb9e7125d1e7297a5df158ad3ae8a061a766cafd748788a6a9ba66cf370d6",
+    "arms/template-applicability/FREEZE.json": "fecfea7a0591cada565a24716386bea199e7f54f98ac2dc0e747a2b17fdcb4ab",
+    "arms/ordinary-writer-stage/FREEZE.json": "1bfe5457d770f22bd1450c8c909ec0aa98e9c0d2f23e72c136a67d1a14e9b2a2",
+    "arms/ordinary-review-stage/FREEZE.json": "c534848f39896ecf03211e2a20783c0b4b0e6af45561dbada152d9255b8f66ba",
+    "arms/ordinary-control2/FREEZE.json": "d63133eede47ed14ca9370136363f1f636cc5d238084db4b0218a209139dffb9",
+    "arms/final-accounting/FREEZE.json": "db31f6d7c6bf048f6c63ee71650f126b30767cb454b3bf9ea6488de725393acb",
+    "corpus/corpus.jsonl": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "corpus/diffs.jsonl": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "census-results/relations.jsonl": "a5e9a2d5d4f731cbc95cd30a5cdd2b385a79212b07e6a03258b217743a4a6efa",
+    "registration/census-role-amendment.json": "9341ca7f1a94933a18bf67ef9619945fe1ad81465453e62af0993e82fd700a3e",
+    "FINAL-READOUT.md": "dd35ff479ddc3945598795574be07ef60e94c88c839f1c01874667acdcb1c000"
+  },
+  "all_case_membership_original": true,
+  "all_raw_judgments_preserved": true,
+  "accepted_background_work_remaining": 0,
+  "raw_private_key_files_remain_under_ROOT_private": true
+}

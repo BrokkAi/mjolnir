@@ -26,12 +26,14 @@ A brief writer is an optional extra step before the reviewers start. It is off u
 
 ```toml
 [review]
-brief_writer = { enabled = true, model = "gpt-6.10-sol", effort = "high" }
+brief_writer = { enabled = true, model = "gpt-6.1-sol", effort = "high" }
 ```
 
 With the writer enabled, a hidden writer session reads the change and the rest of the repository, then hands back a short list of relations between the changed code and its surroundings: who calls it, what else reads or writes the same state, and which other paths reach it. Each item carries `file:line` anchors. Every reviewer's prompt then includes the list under "Relations computed from the repository", labelled as relations and not findings. `model` is required while the writer is enabled, and it is resolved to an enabled profile like a reviewer model.
 
 The writer never blocks a review. If it cannot start, ends without handing back, or is cancelled with the review, the reviewers start without a brief and the requester sees a notice saying so. The writer's usage counts toward the requesting session like a reviewer's, and the session is closed when the writer is done. A session's own `--reviewer` choice does not change the writer.
+
+The writer is off by default because its effect depends on the codebase. On Mjolnir's own bugs whose cause lies outside the changed code, a GPT-6.1 Sol/high writer raised GPT-6.1 Terra/high reviewers' catch rate from about 20% to about 56%. On another large Rust codebase it lowered that rate, from 17.6% to 7.8%, because its briefs usually missed the relation that mattered. On ordinary changes there, it did not reduce the findings reviewers confirmed. A Terra-written brief carried much less of the lift than a Sol-written one, so use a Sol-class model for the writer. A Sol/high brief costs about $0.20 at API prices and adds the writer's run time before the reviewers start. The measurements are in the repository's review evaluation notes.
 
 ### Per-session settings
 

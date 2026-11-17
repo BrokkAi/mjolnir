@@ -1,0 +1,44 @@
+{
+  "at": "2026-11-17T10:16:03.728148+00:00",
+  "done_jobs": 61,
+  "unlaunched_jobs": 19,
+  "reviewers": [
+    {
+      "child": "c8757173aac60ff861754ba851e318f9",
+      "slot": 0,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true,
+      "output_sha256": "1d5a3618356a05225db71963bf19cba25350c5ea8cb87859fc699f3e48f47456",
+      "usage_sha256": "9af7e0c3c947e2cc4c29f6e127c19502d522abf8ac4f1bd8f7c79001e40e1e3b"
+    },
+    {
+      "child": "2be51eba653cb3939b13ecda2083bc56",
+      "slot": 1,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true,
+      "output_sha256": "09c82dd02203defe4973525c166f260a164ff88677d6e129de0608233396aa56",
+      "usage_sha256": "3b58319510ef099f5b0ae5ec5f50a3ad76487c1833c91ff57bf0de54c715a227"
+    },
+    {
+      "child": "3eefdcce61d77b652364d43d0485728c",
+      "slot": 2,
+      "profile": "codex4",
+      "model": "gpt-6.1-terra",
+      "effort": "high",
+      "has_output": true,
+      "handback": true,
+      "output_sha256": "9e97bc225efd514ffff10cb3277af2f9c5e90bad94812000f6fc6ae9019e8e38",
+      "usage_sha256": "48a0e1714c9b72c75092a8ee4d59a86b0a4bf2c4cac845afd8be7be951890746"
+    }
+  ],
+  "prior_artifacts_unchanged": 3631,
+  "original_error_preserved": true,
+  "partial_stored_unchanged": true,
+  "inventory_problems": []
+}

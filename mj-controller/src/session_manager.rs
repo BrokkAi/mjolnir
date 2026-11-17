@@ -83,7 +83,7 @@ mod subagent_queue;
 pub use standalone::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 mod model_policy;
 use model_policy::SessionModelPolicy;

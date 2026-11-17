@@ -371,6 +371,7 @@ impl RuntimeState {
                 .enter_foreground(
                     session_id,
                     "checkpoint",
+                    crate::recovery_gate::LifecycleOrigin::Person,
                     &AtomicBool::new(false),
                     &ProcessExecutor,
                 )
