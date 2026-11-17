@@ -5558,12 +5558,13 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     std::fs::create_dir(&root).unwrap();
     // The root has a `hel`, so a worker could have run there.
     std::fs::write(root.join("hel"), "").unwrap();
-    // The staged control worker is what answers, and its probe fails.
+    // The staged control worker is what answers: it proves it serves the
+    // subcommand (`--help`), then its probe fails.
     let control = std::path::PathBuf::from(control_worker_path(root.to_str().unwrap()));
     std::fs::create_dir_all(control.parent().unwrap()).unwrap();
     std::fs::write(
         &control,
-        "#!/bin/sh\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
+        "#!/bin/sh\ncase \"$*\" in *--help*) exit 0 ;; esac\nprintf 'cannot open the worker lock\\n' >&2\nexit 71\n",
     )
     .unwrap();
     std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();

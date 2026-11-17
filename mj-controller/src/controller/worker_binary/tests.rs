@@ -259,29 +259,27 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     let root_text = root.to_string_lossy().into_owned();
     let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
     assert!(!control.exists(), "nothing is staged yet");
-    // Simulate another build's control file as a link to this worker store
-    // entry. Installing this build must release the old link.
-    let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
-        &root_text,
-        "another-build",
-    ));
-    assert_ne!(other, control, "builds get separate files");
-    assert_eq!(other.parent(), control.parent());
     let locator = targets::TargetLocator::LocalBare {
         worker_root: root_text.clone(),
     };
     let plan = targets::close_plan(&locator, SESSION).unwrap();
     assert!(plan.stages_control_worker());
-    // A caller's deadline bounds the check that precedes its command: with the
-    // deadline already past, nothing is staged and nothing is removed.
+    // A caller's deadline bounds the command itself: with the deadline already
+    // past, nothing runs, nothing is staged and nothing is removed.
     let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
     let error = plan.execute(&expired).unwrap_err();
     assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     assert!(!control.exists(), "the check ignored the caller's deadline");
     assert!(root.exists(), "the timed-out close removed nothing");
-    // Install this build's control worker once so its store entry exists, then
-    // add a stand-in for an older build's control file linked to that entry.
-    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    // Stage once so the store entry exists, then install a `hel` that carries
+    // the interface: the root's control worker has nothing left to do, and its
+    // link must not pin the store entry.
+    let stop = stop_worker_command(&locator, &root_text).unstaged_command();
+    run_control_command(&ProcessExecutor, &locator, SESSION, &stop).unwrap();
+    assert!(control.exists());
+    // A control file staged under an earlier release's hashed name goes too.
+    let legacy = root.join("hel-control-0123456789abcdef");
+    std::fs::hard_link(&control, &legacy).unwrap();
     let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
         &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
     ))
@@ -290,14 +288,17 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
         .unwrap()
         .join(digest)
         .join("hel");
-    std::fs::hard_link(&entry, &other).unwrap();
     assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 3);
-    std::fs::remove_file(&control).unwrap();
-    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
-    assert!(control.exists());
-    assert!(!other.exists(), "the superseded control file is removed");
-    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 2);
-    assert_eq!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
+    let worker = WorkerInstall::for_target(&locator, &ProcessExecutor).unwrap();
+    store::install_worker_binary(&ProcessExecutor, &locator, SESSION, &worker, "hel").unwrap();
+    assert!(!control.exists() && !legacy.exists());
+    assert_eq!(
+        std::fs::metadata(&entry).unwrap().nlink(),
+        2,
+        "the store entry and the root's hel"
+    );
+    assert_ne!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
+    // With the interface in `hel`, closing needs no staging at all.
     plan.execute(&ProcessExecutor).unwrap();
     assert!(!root.exists());
 }
@@ -385,7 +386,7 @@ fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it
     let root_text = root.to_string_lossy().into_owned();
     let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: root_text,
+        worker_root: root_text.clone(),
     };
     let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
         &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
@@ -410,7 +411,15 @@ fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it
     let waiter = {
         let executor = executor.clone();
         let locator = locator.clone();
-        std::thread::spawn(move || ensure_control_worker(&*executor, &locator, SESSION))
+        let root_text = root_text.clone();
+        std::thread::spawn(move || {
+            run_control_command(
+                &*executor,
+                &locator,
+                SESSION,
+                &stop_worker_command(&locator, &root_text).unstaged_command(),
+            )
+        })
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     while executor.held.load(Ordering::SeqCst) {
@@ -436,10 +445,172 @@ fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it
     drop(other_upload);
     cancelled.store(false, Ordering::SeqCst);
     executor.held.store(true, Ordering::SeqCst);
-    ensure_control_worker(&*executor, &locator, SESSION).unwrap();
+    let output = run_control_command(
+        &*executor,
+        &locator,
+        SESSION,
+        &stop_worker_command(&locator, &root_text).unstaged_command(),
+    )
+    .unwrap();
+    assert_eq!(output.status, 0);
     assert!(control.exists());
     assert_eq!(executor.reacquired.load(Ordering::SeqCst), 1);
     assert!(executor.held.load(Ordering::SeqCst));
+}
+
+/// Counts the commands a control run executes.
+#[cfg(unix)]
+struct CountingExecutor(std::cell::Cell<usize>);
+
+#[cfg(unix)]
+impl CommandExecutor for CountingExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+        self.0.set(self.0.get() + 1);
+        ProcessExecutor.execute(command)
+    }
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        ProcessExecutor.pause_deadline()
+    }
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        false
+    }
+    fn execute_without_deadline(
+        &self,
+        command: &CommandSpec,
+    ) -> Result<mj_core::targets::CommandOutput> {
+        ProcessExecutor.execute_without_deadline(command)
+    }
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<mj_core::targets::CommandOutput> {
+        ProcessExecutor.execute_with_stdin_without_deadline(command, input)
+    }
+}
+
+/// Run `body` in a child process whose worker store is isolated and whose
+/// current worker is a stamped shell script of `worker_script`. The parent
+/// returns `true` after the child passes.
+#[cfg(unix)]
+fn in_isolated_store_with_worker(test: &str, worker_script: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_CONTROL_STAGING_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return false;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let current = directory.path().join("current-worker");
+    let mut body = format!("#!/bin/sh\n{worker_script}\n").into_bytes();
+    body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+    std::fs::write(&current, body).unwrap();
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+    IsolatedTest::new(test_name(module_path!(), test))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "control-staging")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current)
+        .run();
+    true
+}
+
+// A root whose own `hel` serves the subcommand runs it there: one command,
+// and nothing is published to the store or staged in the root.
+#[cfg(unix)]
+#[test]
+fn a_root_whose_hel_serves_the_command_stops_without_staging() {
+    const SESSION: &str = "21212121212121212121212121212121";
+    if in_isolated_store_with_worker(
+        "a_root_whose_hel_serves_the_command_stops_without_staging",
+        "exit 0",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    let hel = root.join("hel");
+    std::fs::write(&hel, "#!/bin/sh\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let root_text = root.to_string_lossy().into_owned();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text.clone(),
+    };
+    let executor = CountingExecutor(std::cell::Cell::new(0));
+    let owner = crate::controller::test_support::worker_test_permit(SESSION, "test stop")
+        .unwrap()
+        .unwrap();
+    stop_worker(&owner, &executor, &locator, &root_text).unwrap();
+    probe_worker_liveness(&executor, &locator, SESSION, &root_text).unwrap();
+    assert_eq!(executor.0.get(), 2, "each control command ran exactly once");
+    assert_eq!(
+        std::fs::read_dir(&root).unwrap().count(),
+        1,
+        "the root gained a file"
+    );
+    assert!(
+        !directory.path().join("workers/worker-binaries").exists(),
+        "a build was published to the store"
+    );
+}
+
+// A root nothing in serves gets the control worker staged on the 78, and the
+// command rerun exactly once. When the staged build still does not serve, the
+// second 78 is an error rather than a loop.
+#[cfg(unix)]
+#[test]
+fn status_78_stages_the_control_worker_and_reruns_once() {
+    const SESSION: &str = "22222222222222222222222222222222";
+    for serves in [true, false] {
+        let test = "status_78_stages_the_control_worker_and_reruns_once";
+        // The staged build answers `--help` with 0, or rejects it as clap does.
+        let worker = if serves { "exit 0" } else { "exit 2" };
+        const SERVES: &str = "MJ_CONTROL_STAGING_SERVES";
+        if std::env::var_os("MJ_CONTROL_STAGING_CHILD").is_none() {
+            // Parent: run the whole body once per worker behaviour.
+            let directory = tempfile::tempdir().unwrap();
+            let current = directory.path().join("current-worker");
+            let mut body = format!("#!/bin/sh\n{worker}\n").into_bytes();
+            body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+            std::fs::write(&current, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+            IsolatedTest::new(test_name(module_path!(), test))
+                .isolated_store(directory.path())
+                .env("MJ_INSTANCE", "control-staging-78")
+                .env("MJ_CONTROL_STAGING_CHILD", "1")
+                .env(SERVES, if serves { "1" } else { "0" })
+                .env("MJ_WORKER_BINARY", current)
+                .run();
+            continue;
+        }
+        if std::env::var(SERVES).as_deref() != Ok(if serves { "1" } else { "0" }) {
+            continue;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("workers").join(SESSION);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: root_text.clone(),
+        };
+        let executor = CountingExecutor(std::cell::Cell::new(0));
+        let command = stop_worker_command(&locator, &root_text).unstaged_command();
+        let result = run_control_command(&executor, &locator, SESSION, &command);
+        assert_eq!(executor.0.get(), 2, "one run, the staging, one rerun");
+        assert!(control.exists());
+        if serves {
+            assert_eq!(result.unwrap().status, 0);
+        } else {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains("does not serve"), "{error}");
+        }
+    }
 }
 
 // A diagnosis reports and installs nothing: a root with no control worker for
@@ -461,9 +632,7 @@ fn a_diagnosis_reports_a_missing_control_worker_and_installs_nothing() {
         .count();
     let error = diagnose_worker_read_only(&ProcessExecutor, &locator, &root_text).unwrap_err();
     assert!(
-        format!("{error:#}").contains(&format!(
-            "control worker for this build not installed in {root_text}"
-        )),
+        format!("{error:#}").contains(&format!("no worker in {root_text} serves 'worker holder'")),
         "{error:#}"
     );
     assert!(!std::path::Path::new(&targets::control_worker_path(&root_text)).exists());
@@ -1819,18 +1988,17 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
     .unwrap();
 
     let commands = executor.commands.borrow();
-    // The staged control worker is checked first, then the stop runs it.
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "check the control worker");
-    assert_eq!(commands[1].purpose, "stop Mjolnir worker daemon");
+    // One command: the script itself picks the binary on the target.
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
     assert!(
-        commands[1]
+        commands[0]
             .args
             .last()
             .is_some_and(|remote| unwrapped_remote_line(remote).starts_with("'sh' '-c' ")),
         "raw SSH worker management must not source login profiles: {commands:?}"
     );
-    let script = commands[1]
+    let script = commands[0]
         .args
         .iter()
         .find(|argument| argument.contains("worker stop --root"))
@@ -1950,7 +2118,6 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
             "inspect Mjolnir session container",
             "start stopped Mjolnir session container",
             "inspect Mjolnir session container",
-            "check the control worker",
             "stop Mjolnir worker daemon",
         ]
     );

@@ -10918,7 +10918,6 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
-                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };

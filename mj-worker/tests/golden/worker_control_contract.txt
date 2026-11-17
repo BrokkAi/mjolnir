@@ -1,0 +1,152 @@
+== script: liveness
+hel_root='<ROOT>'
+if [ -e "$hel_root/hel" ]; then
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/hel-control*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker liveness --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker liveness'" >&2
+        exit 78
+    fi
+    "$hel_bin" worker liveness --root "$hel_root" || exit $?
+else
+    printf 'dead\n'
+fi
+
+== script: holder
+hel_root='<ROOT>'
+if [ -e "$hel_root/hel" ]; then
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/hel-control*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker holder --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker holder'" >&2
+        exit 78
+    fi
+    "$hel_bin" worker holder --root "$hel_root" || exit $?
+else
+    :
+fi
+
+== script: stop
+hel_root='<ROOT>'
+if [ -e "$hel_root/hel" ]; then
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/hel-control*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker stop --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker stop'" >&2
+        exit 78
+    fi
+    "$hel_bin" worker stop --root "$hel_root" || exit $?
+else
+    :
+fi
+
+== script: stop --kill
+hel_root='<ROOT>'
+if [ -e "$hel_root/hel" ]; then
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/hel-control*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker stop --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker stop'" >&2
+        exit 78
+    fi
+    "$hel_bin" worker stop --kill --root "$hel_root" || exit $?
+else
+    :
+fi
+
+== run: hel worker liveness --help
+status: 0
+stdout: ""
+stderr: "exit 0\n"
+== run: hel worker holder --help
+status: 0
+stdout: ""
+stderr: "exit 0\n"
+== run: hel worker stop --help
+status: 0
+stdout: ""
+stderr: "exit 0\n"
+== run: no hel: liveness
+status: 0
+stdout: "dead\n"
+stderr: ""
+== run: no hel: holder
+status: 0
+stdout: ""
+stderr: ""
+== run: no hel: stop
+status: 0
+stdout: ""
+stderr: ""
+== run: no hel: stop --kill
+status: 0
+stdout: ""
+stderr: ""
+== run: current hel, dead: liveness
+status: 0
+stdout: "dead\n"
+stderr: ""
+== run: current hel, dead: holder
+status: 0
+stdout: ""
+stderr: ""
+== run: current hel, dead: stop
+status: 0
+stdout: ""
+stderr: ""
+== run: current hel, dead: stop --kill
+status: 0
+stdout: ""
+stderr: ""
+== run: old hel: liveness
+status: 78
+stdout: ""
+stderr: "no worker in <ROOT> serves 'worker liveness'\n"
+== run: old hel: holder
+status: 78
+stdout: ""
+stderr: "no worker in <ROOT> serves 'worker holder'\n"
+== run: old hel: stop
+status: 78
+stdout: ""
+stderr: "no worker in <ROOT> serves 'worker stop'\n"
+== run: old hel: stop --kill
+status: 78
+stdout: ""
+stderr: "no worker in <ROOT> serves 'worker stop'\n"
+== run: held lock: liveness
+status: 0
+stdout: "starting"
+== run: held lock: holder
+status: 0
+stdout: "<PID>"
+== run: held lock: stop
+status: 0
+stdout: ""
+== run: after stop: liveness
+status: 0
+stdout: "dead"

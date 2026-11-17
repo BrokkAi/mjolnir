@@ -83,7 +83,7 @@ mod upgrade;
 pub(crate) use upgrade::*;
 mod process;
 pub(super) use process::*;
-pub(crate) use process::{ensure_control_worker, recorded_exit_reason};
+pub(crate) use process::{recorded_exit_reason, run_control_command};
 
 #[cfg(test)]
 mod tests;

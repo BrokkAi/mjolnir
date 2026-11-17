@@ -931,8 +931,8 @@ mod tests {
         );
         assert_eq!(
             executor.operations.lock().unwrap().len(),
-            6,
-            "no deletion after a stop failure (each stop follows its control-worker check)"
+            3,
+            "no deletion after a stop failure"
         );
         executor.operations.lock().unwrap().clear();
         executor
@@ -946,30 +946,13 @@ mod tests {
             executor.as_ref(),
         )
         .unwrap();
-        // The three workers stop concurrently, so their checks and kills may
-        // interleave in either order. What must hold: one check and one kill
-        // per worker, and no kill before a check has run for it.
+        // The three workers stop concurrently: one kill per worker.
         let operations = executor.operations.lock().unwrap().clone();
-        let count = |purpose: &str| operations.iter().filter(|op| *op == purpose).count();
-        assert_eq!(count("check the control worker"), 3, "{operations:?}");
         assert_eq!(
-            count("kill retired Mjolnir worker daemon"),
-            3,
+            operations,
+            vec!["kill retired Mjolnir worker daemon"; 3],
             "{operations:?}"
         );
-        assert_eq!(operations.len(), 6, "{operations:?}");
-        let mut checks_ahead = 0_i32;
-        for operation in &operations {
-            checks_ahead += if operation == "check the control worker" {
-                1
-            } else {
-                -1
-            };
-            assert!(
-                checks_ahead >= 0,
-                "a kill ran before its check: {operations:?}"
-            );
-        }
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();
         assert!(
