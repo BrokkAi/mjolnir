@@ -133,10 +133,7 @@ fn load_with(
         (UsageAgentRole::Reviewer, BTreeMap::new()),
     ]);
     let mut roles = BTreeMap::new();
-    let mut kinds = tx.prepare(
-        "SELECT COALESCE(json_extract(record_json, '$.kind'), 'worker')
-         FROM subagent_sessions WHERE child_session_id=?1",
-    )?;
+    let mut kinds = tx.prepare("SELECT kind FROM subagent_accounting WHERE child_session_id=?1")?;
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
     let rows = turns.query_map(params![since_ms, now_ms, wanted], |row| {
         Ok((
@@ -169,8 +166,7 @@ fn load_with(
                             UsageAgentRole::Primary
                         } else {
                             let kind = kinds
-                                .query_row([&member], |row| row.get::<_, String>(0))
-                                .optional()?;
+                                .query_row([&member], |row| row.get::<_, Option<String>>(0))?;
                             match kind.as_deref() {
                                 Some("worker" | "oracle") => UsageAgentRole::Subagent,
                                 Some("reviewer") => UsageAgentRole::Reviewer,
@@ -372,6 +368,71 @@ mod tests {
         Ok(())
     }
 
+    // Hard-won: #1559: the accounting schema lost reviewer kinds on destruction.
+    #[test]
+    fn usage_kind_migration_backfills_live_children_and_preserves_legacy_writes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("usage-kind.sqlite");
+        for id in [
+            "root",
+            "reviewer",
+            "worker",
+            "oracle",
+            "destroyed",
+            "legacy",
+        ] {
+            save_session_to(&path, &super::super::tests::session(id, "project"))?;
+        }
+        let connection = open(&path)?;
+        connection.execute_batch(
+            "ALTER TABLE subagent_accounting DROP COLUMN kind;
+             DELETE FROM schema_migrations WHERE version=135;
+             PRAGMA user_version=134;
+             INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('reviewer','root','review'),('worker','root','work'),
+                     ('oracle','root','consult'),('destroyed','root','old');
+             INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES ('reviewer','root','review','{\"kind\":\"reviewer\"}'),
+                     ('worker','root','work','{}'),
+                     ('oracle','root','consult','{\"kind\":\"oracle\"}');",
+        )?;
+        let floor = schema::read_schema_state(&connection)?.minimum_compatible;
+        schema::migrate_schema(&connection)?;
+        assert_eq!(
+            schema::read_schema_state(&connection)?.minimum_compatible,
+            floor
+        );
+        schema::read_schema_state(&connection)?.ensure_supported_by(134)?;
+        // An old daemon's conflict path must not erase the new accounting fact.
+        connection.execute_batch(
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('reviewer','root','review') ON CONFLICT(child_session_id) DO NOTHING;
+             INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
+                 VALUES ('legacy','root','legacy');",
+        )?;
+        drop(connection);
+        delete_session_from(&path, "reviewer")?;
+        let connection = open(&path)?;
+        let retained: Vec<(String, Option<String>)> = connection
+            .prepare(
+                "SELECT child_session_id,kind FROM subagent_accounting ORDER BY child_session_id",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            retained,
+            vec![
+                ("destroyed".into(), None),
+                ("legacy".into(), None),
+                ("oracle".into(), Some("oracle".into())),
+                ("reviewer".into(), Some("reviewer".into())),
+                ("worker".into(), Some("worker".into())),
+            ]
+        );
+        Ok(())
+    }
+
+    // Hard-won: #1559: destroying reviewers erased their cost classification.
     // Store/schema integration: retained descendants, inclusive time boundaries,
     // model switches and incomplete reports must agree with the report reader.
     #[test]
@@ -397,7 +458,7 @@ mod tests {
         }
         save_state_to(&path, &state)?;
         let connection = open(&path)?;
-        connection.execute_batch("INSERT INTO subagent_accounting VALUES ('child','root','child'),('grandchild','child','grandchild')")?;
+        connection.execute_batch("INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('child','root','child'),('grandchild','child','grandchild')")?;
         for (child, parent, kind) in [
             ("child", "root", mj_core::subagent::SubagentKind::Worker),
             (
@@ -423,6 +484,7 @@ mod tests {
                 reported_finish: None,
                 handback_tool: false,
             };
+            super::super::usage::record_child_accounting(&connection, &record)?;
             connection.execute(
                 "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
                  VALUES (?1,?2,?3,?4)",
@@ -614,12 +676,7 @@ mod tests {
             role_cost(&hourly, UsageAgentRole::Primary),
             Ok(1_050_000_000)
         );
-        assert_eq!(role_cost(&hourly, UsageAgentRole::Subagent), Ok(0));
-        assert_eq!(role_cost(&hourly, UsageAgentRole::Reviewer), Ok(0));
-        assert_eq!(
-            role_cost(&hourly, UsageAgentRole::UnclassifiedSubagent),
-            Err(UnknownCost)
-        );
+        assert_eq!(hourly.agent_usage, before_destroy.agent_usage);
 
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.
@@ -707,6 +764,23 @@ mod tests {
             on("codex-two", UsagePeriod::Hourly)?.sessions,
             codex2.sessions
         );
+        // A child destroyed before kind retention cannot be classified from
+        // its task name. Keep its usage without guessing that it was a worker.
+        open(&path)?.execute(
+            "UPDATE subagent_accounting SET kind=NULL WHERE child_session_id='grandchild'",
+            [],
+        )?;
+        let historical = load_from(&path, &SessionUsageQuery::default(), now)?;
+        let mut unclassified = before_destroy
+            .agent_usage
+            .iter()
+            .find(|group| group.role == UsageAgentRole::Reviewer)
+            .unwrap()
+            .clone();
+        unclassified.role = UsageAgentRole::UnclassifiedSubagent;
+        assert!(historical.agent_usage.contains(&unclassified));
+        assert_eq!(role_cost(&historical, UsageAgentRole::Reviewer), Ok(0));
+        assert_eq!(historical.sessions, hourly.sessions);
         Ok(())
     }
 

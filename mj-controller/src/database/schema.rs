@@ -2560,6 +2560,26 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: old accounting writers name columns and preserve retained kinds.
+    // Leave kinds unknown when the authoritative launch record is gone.
+    if version < 135 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "subagent_accounting", "kind")? {
+            transaction.execute_batch("ALTER TABLE subagent_accounting ADD COLUMN kind TEXT;")?;
+        }
+        transaction.execute_batch(
+            "UPDATE subagent_accounting SET kind=(
+                 SELECT COALESCE(json_extract(s.record_json, '$.kind'), 'worker')
+                 FROM subagent_sessions s
+                 WHERE s.child_session_id=subagent_accounting.child_session_id)
+             WHERE kind IS NULL;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (135, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=135;",
+        )?;
+        transaction.commit()?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

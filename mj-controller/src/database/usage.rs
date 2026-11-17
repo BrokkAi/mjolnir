@@ -8,12 +8,15 @@ pub(super) fn record_child_accounting(
     child: &SubagentRecord,
 ) -> Result<()> {
     connection.execute(
-        "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name)
-        VALUES (?1, ?2, ?3) ON CONFLICT(child_session_id) DO NOTHING",
+        "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name, kind)
+        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(child_session_id) DO UPDATE SET kind=excluded.kind",
         params![
             child.child_session_id,
             child.parent_session_id,
-            child.task_name
+            child.task_name,
+            serde_json::to_value(child.kind)?
+                .as_str()
+                .context("child kind is not a string")?
         ],
     )?;
     let stored: (String, String) = connection.query_row(
@@ -550,7 +553,7 @@ mod tests {
         save_session_to(&path, &super::super::tests::session("child", "project"))?;
         let connection = open(&path)?;
         connection.execute(
-            "INSERT INTO subagent_accounting VALUES ('child','root','investigate')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('child','root','investigate')",
             [],
         )?;
         drop(connection);
@@ -660,7 +663,7 @@ mod tests {
         // Operational children cannot delegate today; retained accounting
         // still traverses deeper historical/imported relationships.
         open(&path)?.execute(
-            "INSERT INTO subagent_accounting VALUES ('grandchild','child','nested')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('grandchild','child','nested')",
             [],
         )?;
         let before = load_usage_tree_from(&path, "root")?.unwrap();
