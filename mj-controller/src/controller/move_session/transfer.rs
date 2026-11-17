@@ -306,7 +306,7 @@ fn load_container_stage(
         r#"set -euo pipefail
 {engine} exec "$2" rm -rf -- "$3"
 {engine} exec "$2" mkdir -p -- "$3"
-tar cf - -C "$1" . | {engine} exec -i "$2" tar xf - --no-same-owner -C "$3"
+tar cf - -C "$1" . | {engine} exec -i "$2" tar xpf - --no-same-owner -C "$3"
 "#
     );
     super::super::execute_checked(
@@ -436,6 +436,9 @@ const RSYNC_TRANSFER_OPTIONS: [&str; 5] = [
 
 const RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
 permissions, timestamps and partial files (including --partial-dir); install rsync";
+
+const DESTINATION_HOST_RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
+permissions, timestamps and partial files (including --partial-dir) on the destination host; install rsync there";
 
 const CONTAINER_RSYNC_REQUIREMENT: &str = "Move needs rsync with support for recursive transfers, \
 permissions, timestamps and partial files (including --partial-dir); add rsync to the container image";
@@ -1043,45 +1046,61 @@ impl Controller {
             mj_core::config::TargetTemplate::SshBare { ssh, .. } => (Some(ssh), None, None),
             _ => (None, None, None),
         };
-        let mut arguments =
-            if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
-                let mut arguments = vec![
+        // The copy lands on the destination host (rsync, and bash for loading
+        // a container from it); a container image only has to carry tar.
+        let at_destination_host = |arguments: Vec<String>| {
+            if let Some(ssh) = destination_ssh {
+                targets::ssh_command_owned(
+                    SshTrafficClass::Control,
+                    &targets::SshTarget::from(ssh),
+                    arguments,
+                )
+            } else {
+                let mut arguments = arguments;
+                let program = arguments.remove(0);
+                CommandSpec::new(program, arguments)
+            }
+        };
+        let mut destination_checks = vec![(
+            at_destination_host(rsync_probe()).purpose("check destination Move transport"),
+            if destination_engine.is_some() {
+                DESTINATION_HOST_RSYNC_REQUIREMENT
+            } else {
+                RSYNC_REQUIREMENT
+            },
+        )];
+        if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
+            destination_checks.push((
+                at_destination_host(vec!["sh".into(), "-c".into(), "command -v bash".into()])
+                    .purpose("check destination Move shell"),
+                "Move needs bash on the destination host to load its container",
+            ));
+            destination_checks.push((
+                at_destination_host(vec![
                     engine.into(),
                     "run".into(),
                     "--rm".into(),
                     "--entrypoint".into(),
-                    "rsync".into(),
+                    "sh".into(),
                     image.into(),
-                ];
-                arguments.extend(rsync_probe_arguments());
-                arguments
-            } else {
-                rsync_probe()
-            };
-        let command = if let Some(ssh) = destination_ssh {
-            targets::ssh_command_owned(
-                SshTrafficClass::Control,
-                &targets::SshTarget::from(ssh),
-                arguments,
-            )
-        } else {
-            let program = arguments.remove(0);
-            CommandSpec::new(program, arguments)
-        };
-        match executor.execute(&command.purpose("check destination Move transport")) {
-            Ok(output) if output.status == 0 => {}
-            Ok(output) => assessment.blockers.push(format!(
-                "Destination: {}. Update the target image or install rsync there: {}",
-                if destination_engine.is_some() {
-                    CONTAINER_RSYNC_REQUIREMENT
-                } else {
-                    RSYNC_REQUIREMENT
-                },
-                String::from_utf8_lossy(&output.stderr)
-            )),
-            Err(error) => assessment
-                .blockers
-                .push(format!("Destination transport check failed: {error:#}")),
+                    "-c".into(),
+                    "command -v tar".into(),
+                ])
+                .purpose("check destination Move container image"),
+                "Move needs tar in the container image; add tar to the image",
+            ));
+        }
+        for (command, requirement) in destination_checks {
+            match executor.execute(&command) {
+                Ok(output) if output.status == 0 => {}
+                Ok(output) => assessment.blockers.push(format!(
+                    "Destination: {requirement}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )),
+                Err(error) => assessment
+                    .blockers
+                    .push(format!("{}: {error:#}", command.purpose)),
+            }
         }
         let destination_ssh = destination_ssh.map(targets::SshTarget::from);
         if let mj_core::config::TargetTemplate::LocalPodman { container }
@@ -1131,6 +1150,22 @@ impl Controller {
                     &mut assessment,
                 );
             }
+            // The resumable copy waits on the host's state directory until
+            // the container holds its own.
+            let staging_root = if destination_ssh.is_some() {
+                PathBuf::from(".")
+            } else {
+                mj_core::config::data_dir()
+            };
+            storage_probe(
+                executor,
+                at_host(destination_ssh.as_ref(), storage_arguments(&staging_root))
+                    .purpose("check destination host staging space"),
+                "Destination host staging",
+                "destination",
+                1,
+                &mut assessment,
+            );
         } else {
             let path = match target {
                 mj_core::config::TargetTemplate::SshBare {

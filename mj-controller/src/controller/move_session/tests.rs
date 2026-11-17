@@ -2826,8 +2826,9 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
                 .iter()
                 .any(|blocker| blocker.contains(side)
                     && blocker.contains("--partial-dir")
-                    // Container rsync must be supplied by the image.
-                    && blocker.contains("container image") == (side == "Destination")),
+                    // The destination's rsync runs on its host, never in the image.
+                    && !blocker.contains("container image")
+                    && blocker.contains("destination host") == (side == "Destination")),
             "{side} rsync is not reported: {:?}",
             assessment.blockers
         );
