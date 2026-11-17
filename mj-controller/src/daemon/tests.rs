@@ -12062,11 +12062,13 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     }
     let _writer = crate::database::install_isolated_test_writer();
     let state = test_runtime_state();
+    let (started, stopping) = tokio::sync::oneshot::channel();
     let result = state
         .start_or_join_lifecycle(
             "failed-startup".into(),
             LifecycleKind::StartupCleanup,
-            |_state, _id, _cancelled| async {
+            |_state, _id, _cancelled| async move {
+                started.send(()).unwrap();
                 // A process-tree stop exceeds the former one-second join window.
                 tokio::time::sleep(Duration::from_millis(1100)).await;
                 Ok(DaemonLifecycleResult::Done)
@@ -12074,6 +12076,9 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
         )
         .await
         .unwrap();
+    // Shutdown interrupts a teardown that still waits for its session, and
+    // the next daemon runs it. This one is already stopping the process tree.
+    stopping.await.unwrap();
     state.cancel_and_wait_lifecycles().await.unwrap();
     assert!(matches!(
         RuntimeState::wait_lifecycle_result(result).await.unwrap(),
