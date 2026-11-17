@@ -61,7 +61,6 @@ ARMS = {
     "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
-WORKSPACE = json.loads((INSTANCE / "workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
 CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           if (SCRIPTS / "corpus" / name).exists()
@@ -80,6 +79,15 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              "QT": ["gpt-6.1-terra:high"] * 3, "QS": ["gpt-6.1-sol:high"] * 3,
              # Writer model (brief/PLAN-writer-terra.md): stage B's blind brief written by Terra/high.
              "TT": ["gpt-6.1-terra:high"] * 3})
+
+
+def workspace_id():
+    """Read the selected instance's workspace only when a new session is launched."""
+    path = INSTANCE / "workspace.json"
+    try:
+        return json.loads(path.read_text())["workspace"]["id"]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read workspace id from {path}; create the workspace with mjx and save its JSON there") from exc
 
 
 def save(path, value):
@@ -332,11 +340,12 @@ def run_job(job, gate):
         hold = quota_hold()
     if hold:
         return "held: " + hold  # nothing recorded; the job starts on a later run
+    workspace = workspace_id()
     save(d / "launch-intent.json", identity)
     # Neutral title: reviewers must not see the bug id.
     title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
     with gate:
-        launch = mj("new", "--workspace-id", WORKSPACE, "--profile", "carrier", "--target", "podman",
+        launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
                     "--bundle", "mjolnir", "--at", bug["intro_commit"], "--base", bug["base_commit"],
                     "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
                     "--no-project-memory", "--no-github-events", "--no-github-credentials",

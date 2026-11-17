@@ -60,6 +60,9 @@ p.add_argument("--bundle")
 # which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
 p.add_argument("--repo-commit", default="3c3fa4b13")
 a = p.parse_args()
+instance = os.environ.get("REVIEW_ARMS_INSTANCE", "default")
+if instance != "default":
+    p.error("verify_driver supports only REVIEW_ARMS_INSTANCE=default; the private instance is retired and existing verifier IDs belong to the default daemon")
 if a.kind == "task" and not a.output:
     p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
@@ -80,10 +83,12 @@ for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
-if not (ROOT / "verify/workspace.json").exists():  # creates the workspace, or selects one with this name
+WORKSPACE_RECORD = ROOT / "default-instance/verify/workspace.json"
+if not WORKSPACE_RECORD.exists():  # creates the workspace, or selects one with this name
+    WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
-    (ROOT / "verify/workspace.json").write_bytes(r.stdout)
-WORKSPACE = json.loads((ROOT / "verify/workspace.json").read_text())["workspace"]["id"]
+    WORKSPACE_RECORD.write_bytes(r.stdout)
+WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
 def mj(*args, timeout=300):

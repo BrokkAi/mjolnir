@@ -3,7 +3,7 @@
 Usage: python3 brief_driver.py <diff id> ... [--concurrency N]
        python3 brief_driver.py --lint <diff id> ...   # lint existing briefs only
 
-Each writer is a session in the private instance with the reviewers'
+Each writer is a session with the reviewers'
 isolation: carrier-style checkout at the introducing commit with
 --no-later-history on the Podman target, no project memory, GitHub or helper
 agents. It gets brief/WRITER.md with the base commit and the commit message
@@ -140,10 +140,11 @@ def run(bug_id, gate):
             hold = driver.quota_hold()
         if hold:
             return "held: " + hold  # nothing recorded; the writer starts on a later run
+        workspace = driver.workspace_id()
         save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
                                         "profile": WRITER_PROFILE, "time_ns": time.time_ns()})
         with gate:
-            launch = mj("new", "--workspace-id", driver.WORKSPACE, "--target", "podman", "--bundle", "mjolnir",
+            launch = mj("new", "--workspace-id", workspace, "--target", "podman", "--bundle", "mjolnir",
                         "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
                         # mj new takes a profile or a model, not both; a pinned writer gets its
                         # model below, before its first prompt, as verify_driver.py does.

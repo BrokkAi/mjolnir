@@ -857,19 +857,26 @@ that data root's `private/key-brief-judge-j.json`.
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
-under `REVIEW_ARMS_DIR`. To set up a fresh data directory:
+under `REVIEW_ARMS_DIR`. Runs use the installed mj on the default instance;
+the earlier private instance is retired. The default instance needs the
+experiment's `carrier` profile and reviewer profiles before launching jobs.
+To initialize a fresh experiment's reviewer workspace record:
 
 ```sh
 export REVIEW_ARMS_DIR=/mnt/optane/review-arms-<date>
-mkdir -p $REVIEW_ARMS_DIR/instance/{config,data,carrier-dsh}
-# Edit the carrier `home` and the Podman image ID first; both are specific to the first run.
-cp instance-config.toml $REVIEW_ARMS_DIR/instance/config/config.toml
-cp carrier-AGENTS.md $REVIEW_ARMS_DIR/instance/carrier-dsh/AGENTS.md
-grep '^DEEPSEEK_API_KEY' ~/.config/mjolnir/secrets.toml > $REVIEW_ARMS_DIR/instance/config/secrets.toml
-chmod 600 $REVIEW_ARMS_DIR/instance/config/secrets.toml
+export REVIEW_ARMS_INSTANCE=default
+mkdir -p "$REVIEW_ARMS_DIR/default-instance"
 ./mjx doctor --json
-./mjx workspaces create "Review arms" --json > $REVIEW_ARMS_DIR/instance/workspace.json
+./mjx workspaces create "Review arms" --json > "$REVIEW_ARMS_DIR/default-instance/workspace.json"
 ```
+
+Scorers and imports do not require a reviewer workspace record. Writer and
+reviewer drivers read it only when launching a session. The verifier creates
+its own record at `default-instance/verify/workspace.json` and needs no
+reviewer workspace; the Git-only checkout at `verify/repo` is shared data,
+not daemon state. Existing verifier session records refer to the default
+daemon. Verifier runs explicitly reject `REVIEW_ARMS_INSTANCE=private`
+before doing any work, rather than sending those IDs to the retired daemon.
 
 Then:
 
