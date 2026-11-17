@@ -661,9 +661,11 @@ pub fn unattended_git_environment(command: &mut CommandSpec) {
     command
         .env
         .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    command
-        .env
-        .insert("GIT_SSH_COMMAND".to_owned(), git_ssh_command());
+    if let Some(default) = local_git_ssh_command() {
+        command
+            .env
+            .insert("GIT_SSH_COMMAND".to_owned(), default.to_owned());
+    }
 }
 
 /// SSH asks about an unknown host key itself, which `GIT_TERMINAL_PROMPT` does
@@ -671,22 +673,31 @@ pub fn unattended_git_environment(command: &mut CommandSpec) {
 pub const NON_INTERACTIVE_GIT_SSH_COMMAND: &str =
     "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
 
-/// The command every Git process Mjolnir starts uses to reach an SSH remote,
-/// on the controller and on the target and cache hosts it runs Git on: the
+/// How Git that Mjolnir starts on this machine reaches an SSH remote: the
 /// operator's `GIT_SSH_COMMAND` when it is set, otherwise
-/// [`NON_INTERACTIVE_GIT_SSH_COMMAND`]. This is the only place that decides,
-/// so one host-key rule covers them all (#1466).
-///
-/// An empty value counts as unset, as it does for Git, which would otherwise
-/// run a plain `ssh` that can prompt. A value that is not UTF-8 is kept, made
-/// lossy, rather than quietly replaced by the default.
-pub fn git_ssh_command() -> String {
+/// [`NON_INTERACTIVE_GIT_SSH_COMMAND`]. `None` means the operator's command
+/// applies and the child inherits it byte for byte; `Some` is the default to
+/// set. [`remote_git_ssh_command`] is the same decision for Git Mjolnir runs
+/// on another machine, and these two are the only places it is made (#1466).
+pub fn local_git_ssh_command() -> Option<&'static str> {
     std::env::var_os("GIT_SSH_COMMAND")
-        .filter(|command| !command.is_empty())
-        .map_or_else(
-            || NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned(),
-            |command| command.to_string_lossy().into_owned(),
-        )
+        .is_none()
+        .then_some(NON_INTERACTIVE_GIT_SSH_COMMAND)
+}
+
+/// [`local_git_ssh_command`]'s decision as text, for Git Mjolnir runs on
+/// another machine, such as a clone-cache host. An operator command that is not
+/// UTF-8 cannot travel as text and is refused rather than altered.
+pub fn remote_git_ssh_command() -> anyhow::Result<String> {
+    match std::env::var_os("GIT_SSH_COMMAND") {
+        None => Ok(NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()),
+        Some(command) => command.into_string().map_err(|_| {
+            anyhow::anyhow!(
+                "GIT_SSH_COMMAND is not valid UTF-8, so Mjolnir cannot send it to the machine \
+                 that runs this Git command; set it to a UTF-8 command"
+            )
+        }),
+    }
 }
 
 fn git_output(

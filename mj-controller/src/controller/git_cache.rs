@@ -394,7 +394,7 @@ fn prepare_repository(
         source.to_owned(),
         snapshot.to_string_lossy().into_owned(),
         u8::from(token).to_string(),
-        mj_core::local_git::git_ssh_command(),
+        mj_core::local_git::remote_git_ssh_command()?,
     ];
     if let Some(cutoff) = cutoff {
         cutoff.validate()?;

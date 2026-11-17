@@ -47,7 +47,9 @@ impl GitCommandRunner for SystemGit {
         for (name, value) in &command.env {
             process.env(name, value);
         }
-        process.env("GIT_SSH_COMMAND", mj_core::local_git::git_ssh_command());
+        if let Some(default) = mj_core::local_git::local_git_ssh_command() {
+            process.env("GIT_SSH_COMMAND", default);
+        }
         let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
             .with_context(|| format!("run git in {}", repository.display()))?;
         Ok(GitOutput {

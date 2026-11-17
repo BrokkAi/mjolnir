@@ -810,7 +810,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `SLOPCOP_TOKEN` / `SLOPCOP_SERVICE` | slopcop login synced into every live target except a bare runtime on this machine. They outrank the login `slopcop login` stored, as they do for slopcop itself. |
-| `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |
+| `GIT_SSH_COMMAND` | SSH command for the Git commands the daemon runs, on the controller and on the SSH machines that hold its clone cache or a moved session's repository. Unset, they use a non-interactive command that trusts a new host key on first use. |
 | `RUST_LOG` | Controller logging filter. |
 
 Setting `MJ_WORKER_URL` requires `MJ_WORKER_SHA256`; an unverified downloaded worker is not accepted. A digest set without a URL is ignored.

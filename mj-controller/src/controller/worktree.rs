@@ -805,7 +805,7 @@ fn source_fetch_lock(
 /// A Git command that contacts the remote, which must fail rather than wait
 /// for credentials no one is present to give. Over SSH the far side has no
 /// terminal, so Git cannot prompt there.
-fn managed_network_git_command(
+pub(super) fn managed_network_git_command(
     class: SshTrafficClass,
     target: &ManagedWorktreeTarget,
     directory: &Path,
@@ -1509,7 +1509,7 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             .collect();
         environment.push((
             "GIT_SSH_COMMAND".into(),
-            mj_core::local_git::git_ssh_command(),
+            mj_core::local_git::remote_git_ssh_command()?,
         ));
         let mut args = vec![
             "git".into(),
@@ -1597,7 +1597,7 @@ fn origin_refs_available(executor: &impl CommandExecutor, checkout: &Path) -> Re
     }
     // A checkout that has never fetched has no origin refs yet. Try once; a
     // remote that cannot be reached leaves the count unreported, not failed.
-    let fetch = managed_git_command(
+    let fetch = managed_network_git_command(
         SshTrafficClass::Bulk,
         &ManagedWorktreeTarget::Local,
         checkout,
