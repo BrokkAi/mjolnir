@@ -245,7 +245,7 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("workers").join(SESSION);
+    let root = directory.path().join("worker's space").join(SESSION);
     std::fs::create_dir_all(&root).unwrap();
     let hel = root.join("hel");
     std::fs::write(&hel, "#!/bin/sh\nexit 2\n").unwrap();
@@ -280,9 +280,8 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
         &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
     ))
     .unwrap();
-    let entry = directory
-        .path()
-        .join("workers/worker-binaries")
+    let entry = store::store_root(&locator, SESSION)
+        .unwrap()
         .join(digest)
         .join("hel");
     std::fs::hard_link(&entry, &other).unwrap();
@@ -2230,7 +2229,13 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
             exit_record: None,
-            liveness_probe: worker_liveness_command(&locator, &root).into(),
+            liveness_probe: targets::WorkerControlPlan::new(
+                "probe liveness",
+                vec![worker_liveness_command(&locator, &root)],
+                &locator,
+                &session,
+            )
+            .unwrap(),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
             restart: CommandPlan {
@@ -2451,7 +2456,10 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         })?;
         // The daemon identifies its worker by `hel worker run --root`; the
         // link keeps that name on the process started through it.
-        let liveness = execute_checked(&ProcessExecutor, worker_liveness_command(&locator, &root))?;
+        let liveness = execute_checked(
+            &ProcessExecutor,
+            worker_liveness_command(&locator, &root).unstaged_command(),
+        )?;
         ensure!(
             String::from_utf8_lossy(&liveness.stdout).trim() == "alive",
             "the worker started through the link must be recognized as alive, got {:?}",

@@ -5559,7 +5559,10 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     .unwrap();
     std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root.to_str().unwrap())])
+        .args([
+            "-c",
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
+        ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(71));
@@ -5568,7 +5571,10 @@ fn worker_liveness_does_not_report_death_when_the_probe_fails() {
     // A control worker that was never staged is reported, never read as death.
     std::fs::remove_file(&control).unwrap();
     let output = std::process::Command::new("sh")
-        .args(["-c", &worker_daemon_liveness_script(root.to_str().unwrap())])
+        .args([
+            "-c",
+            worker_daemon_liveness_script(root.to_str().unwrap()).unstaged_script(),
+        ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(WORKER_CONTROL_UNSTAGED_STATUS));

@@ -24,8 +24,10 @@ pub(in crate::controller) fn kill_retired_worker(
 ) -> Result<()> {
     run_owned_worker_stop(owner, executor, locator, worker_root, |locator, root| {
         let script = targets::kill_worker_daemon_script(root);
-        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("kill retired Mjolnir worker daemon")
+        script.into_command(|script| {
+            targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+                .purpose("kill retired Mjolnir worker daemon")
+        })
     })
 }
 
@@ -34,14 +36,14 @@ fn run_owned_worker_stop(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
-    command: impl FnOnce(&targets::TargetLocator, &str) -> CommandSpec,
+    command: impl FnOnce(&targets::TargetLocator, &str) -> targets::ControlCommand,
 ) -> Result<()> {
     ensure!(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
     ensure_control_worker(executor, locator, owner.session_id())?;
-    execute_checked(executor, command(locator, worker_root))?;
+    execute_checked(executor, command(locator, worker_root).unstaged_command())?;
     Ok(())
 }
 
@@ -80,7 +82,9 @@ pub(crate) fn ensure_control_worker(
             vec![
                 "sh".into(),
                 "-c".into(),
-                targets::control_worker_state_script(&root),
+                targets::control_worker_state_script(&root)
+                    .unstaged_script()
+                    .to_owned(),
             ],
         )
         .purpose("check the control worker"),
@@ -125,7 +129,7 @@ pub(in crate::controller) fn probe_worker_liveness(
     worker_root: &str,
 ) -> Result<mj_core::targets::CommandOutput> {
     ensure_control_worker(executor, locator, session_id)?;
-    executor.execute(&worker_liveness_command(locator, worker_root))
+    executor.execute(&worker_liveness_command(locator, worker_root).unstaged_command())
 }
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint
@@ -146,19 +150,23 @@ pub(in crate::controller) fn stop_worker_after_target_recovery(
 pub(super) fn stop_worker_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> CommandSpec {
+) -> targets::ControlCommand {
     let script = targets::stop_worker_daemon_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("stop Mjolnir worker daemon")
+    script.into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("stop Mjolnir worker daemon")
+    })
 }
 
 pub(in crate::controller) fn worker_liveness_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> CommandSpec {
+) -> targets::ControlCommand {
     let script = targets::worker_daemon_liveness_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("probe Mjolnir worker daemon liveness")
+    script.into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("probe Mjolnir worker daemon liveness")
+    })
 }
 
 /// Whether a session's worker root holds anything a worker could recover.
@@ -721,11 +729,9 @@ pub(in crate::controller) fn probe_worker(
     session_id: &str,
     worker_root: &str,
 ) -> Result<WorkerProbe> {
-    let output = targets::WorkerControlPlan::declare(
-        CommandPlan {
-            description: "probe worker state".into(),
-            commands: vec![worker_probe_command(locator, worker_root)],
-        },
+    let output = targets::WorkerControlPlan::new(
+        "probe worker state",
+        vec![worker_probe_command(locator, worker_root)],
         locator,
         session_id,
     )?
@@ -744,7 +750,7 @@ pub(in crate::controller) fn diagnose_worker_read_only(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<WorkerProbe> {
-    let command = worker_probe_command(locator, worker_root);
+    let command = worker_probe_command(locator, worker_root).unstaged_command();
     let output = executor.execute(&command)?;
     ensure!(
         output.status != targets::WORKER_CONTROL_UNSTAGED_STATUS,
@@ -760,12 +766,14 @@ pub(in crate::controller) fn diagnose_worker_read_only(
     parse_worker_probe(&output)
 }
 
-fn worker_probe_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
-    targets::locator_command(
-        locator,
-        vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
-    )
-    .purpose("probe worker state")
+fn worker_probe_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> targets::ControlCommand {
+    worker_probe_script(worker_root).into_command(|script| {
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("probe worker state")
+    })
 }
 
 fn parse_worker_probe(output: &mj_core::targets::CommandOutput) -> Result<WorkerProbe> {
@@ -781,9 +789,10 @@ fn parse_worker_probe(output: &mj_core::targets::CommandOutput) -> Result<Worker
 /// so they are inserted as they are; everything else it prints is a number.
 /// The live pid is the holder of the worker lock, the same fact the liveness
 /// probe reports.
-fn worker_probe_script(worker_root: &str) -> String {
-    format!(
-        r#"hel_root={root}
+fn worker_probe_script(worker_root: &str) -> targets::ControlScript {
+    targets::worker_daemon_holder_script(worker_root).map_script(|holder| {
+        format!(
+            r#"hel_root={root}
 hel_record() {{
     if [ -s "$1" ]; then cat "$1"; else printf null; fi
 }}
@@ -795,11 +804,11 @@ printf ',"pids":['
 {holder}
 printf ']}}\n'
 "#,
-        root = targets::posix_quote(worker_root),
-        holder = targets::worker_daemon_holder_script(worker_root),
-        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
-        exit_file = mj_core::relay::WORKER_EXIT_FILE,
-    )
+            root = targets::posix_quote(worker_root),
+            startup_file = mj_core::relay::WORKER_STARTUP_FILE,
+            exit_file = mj_core::relay::WORKER_EXIT_FILE,
+        )
+    })
 }
 
 /// A failure on one line, for a session's error field: the first line of each

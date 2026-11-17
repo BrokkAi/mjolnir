@@ -600,25 +600,21 @@ impl Controller {
                 .context("session target is missing")?,
             target: targets::target_recovery_plan(&backend, session_id)?,
             workspace,
-            liveness_probe: targets::WorkerControlPlan::declare(
-                CommandPlan {
-                    description: format!("probe the worker of session {session_id}"),
-                    commands: vec![worker_liveness_command(&backend, &worker_root)],
-                },
+            liveness_probe: targets::WorkerControlPlan::new(
+                format!("probe the worker of session {session_id}"),
+                vec![worker_liveness_command(&backend, &worker_root)],
                 &backend,
                 session_id,
             )?,
             exit_record: Some(worker_exit_record_command(&backend, &worker_root)),
             binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
             launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
-            restart: targets::WorkerControlPlan::declare(
-                CommandPlan {
-                    description: format!("restart Mjolnir worker for session {session_id}"),
-                    commands: vec![
-                        stop_worker_command(&backend, &worker_root),
-                        start_worker_command(&backend, &worker_root),
-                    ],
-                },
+            restart: targets::WorkerControlPlan::new(
+                format!("restart Mjolnir worker for session {session_id}"),
+                vec![
+                    stop_worker_command(&backend, &worker_root),
+                    start_worker_command(&backend, &worker_root).into(),
+                ],
                 &backend,
                 session_id,
             )?,
