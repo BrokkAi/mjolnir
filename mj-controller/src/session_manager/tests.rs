@@ -3009,6 +3009,27 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         "an active replacement owner retains its intent"
     );
     drop(owner);
+    // Hard-won: 8443db6c9: a recovery copy holding the session deferred an unreachable worker's failure as if it owned the boot.
+    {
+        let copy = gate
+            .try_start(
+                LEASED_RELAY_SESSION,
+                crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            )
+            .unwrap();
+        std::fs::write(
+            relay_root.join("worker-unreachable"),
+            b"worker vanished during the copy",
+        )
+        .unwrap();
+        let mut fresh = None;
+        let error = sync_actor_connection(&gate, &target, &mut fresh)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<RelayJobDeferred>(), "{error:#}");
+        std::fs::remove_file(relay_root.join("worker-unreachable")).unwrap();
+        drop(copy);
+    }
     sync_actor_connection(
         &crate::controller::test_support::worker_test_gate(),
         &target,

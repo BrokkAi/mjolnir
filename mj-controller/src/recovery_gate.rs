@@ -167,6 +167,10 @@ impl BackgroundWork {
 pub struct Refusal {
     pub cause: RefusalCause,
     pub holders: Vec<&'static str>,
+    /// A holder that starts or replaces this session's worker (a foreground
+    /// lifecycle or a worker replacement) is among the holders, so that holder
+    /// observes the worker's boot and reports its failure.
+    pub worker_owned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,6 +495,7 @@ impl RecoveryGate {
             return Err(Refusal {
                 cause: RefusalCause::DaemonDraining,
                 holders: vec!["daemon handoff"],
+                worker_owned: false,
             });
         }
         let mut state = self
@@ -619,6 +624,18 @@ impl RecoveryGate {
             if state.closed {
                 holders.push("daemon shutdown");
             }
+            let worker_owned = state
+                .reservations
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| holder.kind == ReservationKind::Foreground)
+                || state
+                    .busy
+                    .get(session_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|holder| holder.work == BackgroundWork::WorkerReplacement);
             return Some(Refusal {
                 cause: if state.closed {
                     RefusalCause::Closed
@@ -626,6 +643,7 @@ impl RecoveryGate {
                     RefusalCause::SessionHeld
                 },
                 holders,
+                worker_owned,
             });
         }
         None

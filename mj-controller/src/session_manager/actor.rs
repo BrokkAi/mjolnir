@@ -1793,12 +1793,10 @@ pub(super) async fn sync_actor_connection(
                 )),
                 Err(refusal) => {
                     tracing::debug!(session_id = id, holders = ?refusal.holders, "worker readiness settlement deferred");
-                    // A lifecycle that holds the session owns this durable boot
-                    // and reports its launch failure.
-                    Ok((
-                        None,
-                        refusal.cause == crate::recovery_gate::RefusalCause::SessionHeld,
-                    ))
+                    // Only a holder that starts or replaces the worker owns
+                    // this durable boot and reports its launch failure; a copy
+                    // or credential sync does not.
+                    Ok((None, refusal.worker_owned))
                 }
             }
         })
