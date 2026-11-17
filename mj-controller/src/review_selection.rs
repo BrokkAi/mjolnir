@@ -92,6 +92,27 @@ pub(crate) async fn resolve(
     selections.into_iter().collect()
 }
 
+/// Resolves one model choice, such as the brief writer's, to a profile the
+/// way every reviewer is resolved.
+pub(crate) async fn resolve_choice(
+    backend: &Arc<dyn SubagentBackend>,
+    choice: SubagentChoice,
+) -> Result<ResolvedReviewSettings> {
+    let SubagentChoice { model, effort } = choice;
+    let selected = resolve_reviewer_model_profile_selection(backend, &model, effort.as_deref())
+        .await
+        .map_err(|error| anyhow::anyhow!("model {model:?}: {}", error.message))?;
+    Ok(ResolvedReviewSettings {
+        profile: selected.profile_id,
+        main: ReviewModelSettings {
+            model: Some(selected.model),
+            effort: selected.effort,
+            fast_mode: false,
+        },
+        autoconfigured: false,
+    })
+}
+
 async fn configured_choices(
     settings: ReviewConfig,
     config: &mj_core::config::Config,

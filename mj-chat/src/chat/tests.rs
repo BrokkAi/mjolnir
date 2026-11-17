@@ -68,6 +68,7 @@ fn review_status_omits_the_deprecated_tier() {
     let review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "gpt-6-terra".into(),
