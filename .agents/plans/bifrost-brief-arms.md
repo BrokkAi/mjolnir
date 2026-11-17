@@ -12,7 +12,7 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] (2026-11-17) Review cutoff correction committed c0fe5f378 before any brief or review: explicit strict UTC boundary, same-seed control redraw, all30 bug/census records unchanged, original mjolnir corpus audited only.
 - [x] Existing production-wrapper and stage B/round J mechanisms mapped; stage usage estimated from490 historical sessions and7 round J usage reports. Full-plan quota fit cannot be certified.
 - [x] Registered Sol leak/judge amendment and relation-first details before any brief; job-order seed20261119 recorded before34job shuffle.
-- [x] Shared harness source/scoring/leak integration reviewed;6runtime and13scoring/default offline tests pass. Real frozen-input import check confirms70records,17/13sets and3Terra/highA/BT cells.
+- [x] Shared harness source/scoring/leak integration reviewed and committedbe74a5cb9;6runtime and13scoring/default offline tests pass. Real frozen-input import check confirms70records,17/13sets and3Terra/highA/BT cells.
 - [x] Changed harness interfaces validated offline; owned production workspace35b2367fbd89852d91b79743c552c3e1 and verifier workspace7dbd0e675f40b2d0792dec118a7ffba4 prepared against the owned full-history Bifrost clone.
 - [ ] Freeze relation stage jobs, input/code hashes, launch quota and estimate; write17 blind Sol briefs, check leakage, run A/BT with3 Terra/high each, judge twice and hand-check required rows.
 - [ ] Report the relation reading, cost/coverage/limitations and stage commit; suspend own carriers/writers/judges. Reestimate remaining13+40 and wait for lead direction before continuing if full plan remains below-floor risk.
@@ -81,10 +81,14 @@ Respect existing launch-intent, launch, review-start, done and judge-key records
 
 ## Artifacts and Notes
 
-Detailed read-only reuse map: `.mj/agents/045bf52ed9425283f1ba1946c2b99eb2/stageB-reuse-map.md`. Usage evidence: ROOT/arms-preflight/usage-estimate.{md,json}. UTC archive: ROOT/utc-cutoff-correction/pre-correction. Current M1 freeze SHA8859219e907208ce5e7a23e88fbc5188dca0e31a434b7be779efd103d4c32754. All commits stay local; supervisor receives SHAs and controls publication.
+Detailed read-only reuse map: ROOT/arms/preparation-reports/045bf52ed9425283f1ba1946c2b99eb2/stageB-reuse-map.md. Usage evidence: ROOT/arms-preflight/usage-estimate.{md,json}. UTC archive: ROOT/utc-cutoff-correction/pre-correction. Current M1 freeze SHA8859219e907208ce5e7a23e88fbc5188dca0e31a434b7be779efd103d4c32754. All commits stay local; supervisor receives SHAs and controls publication.
 
 ## Interfaces and Dependencies
 
 Reuse installed mj through committed mjx and existing local Podman, Git and Python standard library. No new crate, scheduler, runner, credential path or transcript capture. The shared parameter contracts above are the only new source-selection interfaces. Shared files have one child owner; parent integrates after both handbacks and reruns only failures or checks invalidated by integration.
 
 Initial plan written2026-11-17 after UTC correction; no study arms launched. Update this note when scope or evidence changes.
+
+Pace update2026-11-17: lead requests concurrency3 for writers and reviewers with stop-on-failure and unchanged25percent floor. Apply through existing driver admission; preserve accepted writer work and durable command IDs.
+
+Writer milestone2026-11-17: all17 Sol/high codex4 briefs complete with0lintrepairs, clean inventories and17/17 tool transcript audits. One quoted-heredoc scanner hit reviewed as prose. All17 sessions suspended; priced API-equivalent estimate$3.5996476. Fresh post-run cached weekly quota36percent is after finaldone, shared account activity prevents attributing its delta to writers alone. Original texts/manifests frozen in ROOT/arms/writer-stage; paired Sol leak round0 is next.
