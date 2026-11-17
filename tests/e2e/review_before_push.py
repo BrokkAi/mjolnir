@@ -14,7 +14,6 @@ import time
 import uuid
 
 
-# Hard-won: 835967621: fast cleanup erased prompts and retry rounds mixed writer handbacks.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
