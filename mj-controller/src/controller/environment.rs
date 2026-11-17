@@ -605,6 +605,29 @@ mod tests {
         fail_stops: std::sync::atomic::AtomicBool,
     }
     impl CommandExecutor for ControlledExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.operations
                 .lock()
@@ -798,8 +821,8 @@ mod tests {
         );
         assert_eq!(
             executor.operations.lock().unwrap().len(),
-            2,
-            "no deletion after a stop failure"
+            4,
+            "no deletion after a stop failure (each stop follows its control-worker check)"
         );
         executor.operations.lock().unwrap().clear();
         executor
@@ -808,13 +831,30 @@ mod tests {
         let environment = database::session_environment(&parent.id).unwrap().unwrap();
         let authority =
             Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
+        // The two workers stop concurrently, so their checks and kills may
+        // interleave in either order. What must hold: one check and one kill
+        // per worker, and no kill before a check has run for it.
+        let operations = executor.operations.lock().unwrap().clone();
+        let count = |purpose: &str| operations.iter().filter(|op| *op == purpose).count();
+        assert_eq!(count("check the control worker"), 2, "{operations:?}");
         assert_eq!(
-            executor.operations.lock().unwrap().as_slice(),
-            [
-                "kill retired Mjolnir worker daemon",
-                "kill retired Mjolnir worker daemon"
-            ]
+            count("kill retired Mjolnir worker daemon"),
+            2,
+            "{operations:?}"
         );
+        assert_eq!(operations.len(), 4, "{operations:?}");
+        let mut checks_ahead = 0_i32;
+        for operation in &operations {
+            checks_ahead += if operation == "check the control worker" {
+                1
+            } else {
+                -1
+            };
+            assert!(
+                checks_ahead >= 0,
+                "a kill ran before its check: {operations:?}"
+            );
+        }
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();
         assert!(
@@ -1228,9 +1268,8 @@ pub(super) fn classify_resume_environment(
             TargetAvailability::Reachable => {}
         }
         start_retained_apple_for_resume(&backend, executor)?;
-        let output = executor.execute(&super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let output =
+            super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
         ensure!(
             output.status == 0,
             "worker liveness probe failed: {}",

@@ -2904,6 +2904,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
+        false,
     )
     .await
     .unwrap();
@@ -6109,6 +6110,9 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
             snapshot.targets.push(crate::server::ViewerTarget {
                 id: "docker".into(),
                 kind: "local-docker".into(),
+                permission_mode: None,
+                subagents_configured: false,
+                oracle_configured: false,
                 resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
                 requires_project_directory: false,
                 remembered_container_size: None,
@@ -6178,6 +6182,9 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
         snapshot.targets.push(crate::server::ViewerTarget {
             id: "docker".into(),
             kind: "local-docker".into(),
+            permission_mode: None,
+            subagents_configured: false,
+            oracle_configured: false,
             resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
             requires_project_directory: false,
             remembered_container_size: None,

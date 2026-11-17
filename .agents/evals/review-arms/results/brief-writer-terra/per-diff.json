@@ -1,0 +1,1722 @@
+{
+  "round": "brief-judge-j",
+  "reviewer_model": "gpt-6.1-terra",
+  "judge_consistency": [
+    {
+      "bug": "catalog-cache-key-collision",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "7ee27f7a1b051711d4b52bd419bcf2a2",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "50fe19cb95715b13",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "c086a27dc8ffb3c8",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "880777eb03bf1a4de73d00759edbd786",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "2c6009974a3df27d",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "1992af27be3b9726",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "b4c2468321d2e030c11437ba51178203",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7bbd59bd3a924575",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "0eaf3e5fa490a832",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "0709841063f2014c947a1c64ea7e8647",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "3ce0800c9b5b7520",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "cced2526970e14f0",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "91ecbfa6e618fa96470b3522621b4bcd",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "9cbf2d8620d7117f",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "96b1e66c117ab2e4",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "efcc0c502dd2e851877cd9d7939aff07",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "4591e62b3e7fd684",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "392fdb7b5352238a",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "child-model-wrong-efforts",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "10674a9246e6b6443210859cdd8c57a8",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7d50dc548fd571b1",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "f6681975c9321389",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "683591677cc77c20261f5047cc322336",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "ee9c9f0c3885fd17",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "dead6964f5cdadf3",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "f213f2c1e4ea52aeb233f9ba4527bc7a",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "3c5875ff0c91a696",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "74305a4466e0005c",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "0c17e62b8f1484a6f3d35d7c875c0040",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "2d6d75c5d44b9f49",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "40adb4fd325ccf23",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "cc8a61900d90a80c5a0a1fa48676a70f",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "d67bef0c73ea51f7",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "ad7851559bfb9a43",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "dfabdd82773ed877b305cd911324a7fe",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "d2772b6ea756ea53",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "fe8af00b0c9be5ab",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "codex-effort-alias-lost",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "41de22c92173e2f8a862cd07f18d1944",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "0fce58fe678dee4e",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "8dfdd700c31f6ec4",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "b567c8bad91b11fc863dea52d6cb0374",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "4fb00775fa2e9cbd",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "bec12844cde0c53c",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "cb7cec8a1cb5a517929f9a9b609f6f14",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "6055464be96a340e",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "b28ee1abd61d9983",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "064104627ba8b9af534c386fb4ce79ba",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "171482fd54e4ff35",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "0fbdceabf3874975",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "09f56ee0261f4faf6f297abe33c358b2",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "cc80d5e7e2dd6087",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "85543344ad493bd1",
+                  "label": "partial"
+                }
+              }
+            },
+            {
+              "session": "f251acbd3b1a1b27b0a6f9dc6a9c29bf",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "94108308d5a9ffed",
+                  "label": "partial"
+                },
+                "brief-judge-g": {
+                  "output_id": "a82281606d994113",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.6666666666666666,
+              "partial_rate": 0.3333333333333333
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.3333333333333333
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "held-prompt-ignores-interrupt",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "27b004c92deb0b8ffb186a35a77b1aae",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "e2a55b6d1ffd4ce3",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "b3de94de8c39b247",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "87e8f162c9118b7c3283b10039f4290d",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "1d5fd9a039f126ff",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "9f6bec94df971e3f",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "fb654eba40b557ee054b9899fe5b346e",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "0496f2b47166d271",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "914ddbca0346ab34",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 4,
+          "labels": [
+            {
+              "session": "56ef41314684c6d7f4aa089b57fc4f0e",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "4184202725d0bb0e",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "5e83c1cbf146c770",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "5d36dfff404b131974c3e939bbf7f0ef",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "9340bea1b150e561",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "afba6b4e80bdb80a",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "6c59618fed2c3bb555b9a3a8dbb963aa",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "0c274d8915ff61a1",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "d6c97b1b1f1405bd",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "bccda72971d9ca4bbe0ad7842a5e8b43",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "fdcae2fdb9f3a8bd",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "3934ac93360c7450",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "projection-mixed-sqlite-snapshots",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "1b2d95bbba55f77620ddc9b22c617846",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7e33d6fdf2e43932",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "369f5e53b4751cf5",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "6e15492a0425ba333eeb475efb63d36f",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "06f399159fe61691",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "687c14727262e817",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "f3dc133f308d9a3ccc0bdd91d6da532c",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "0ef0b1dcbccf71fc",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "c76b7745a414f5b1",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "912a7d3112575ec4b7de1852177efcb7",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "b9e017a41404b0b9",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "76ef331ea201cef6",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "a5e5df026c9df1e7455d93c1d63e1c1b",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7535678f6d7ccc31",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "c85d67ef8ce12d64",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "cfa0fcd4aeb08f56c80f1e2ff3611c2d",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "23129307489f0973",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "b48222dc03099dd6",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "stale-model-launch-spec",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "164716798124effedda4397464f623ae",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "86b9362298e9bee9",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "57193fb8841e08ab",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "3e5c628d296c3af39c85cd894d635462",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "2bed828e89d74630",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "9b191668189299c9",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "fae0875109e2e74a4bce0ac6a4175f5d",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "984077e7e6ddf4d4",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "62bdbf804cec561a",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 4,
+          "labels": [
+            {
+              "session": "2ab4257f93b3ae3dc3b09a8226ca7c7f",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "6b4dfef1de2debf3",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "2fb93d88cf2051db",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "7f7c393640a53b3fecfdbb0b02aee903",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "e1a530f467dc3554",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "b87c6e9879346f01",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "93b5135a3563e474177f2f9c780cdbbb",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "cee285527d7b5421",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "413e28d28b76827e",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "dd034b04d280831e65ff0da3a75287c6",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "5ac8e33b0bc90a33",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "83ebca79b403cea3",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "symbol-change-keeps-cached-transcript",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "a9715dd9525ba54d56797bd008dd8fed",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "a4f2b09a2bf4fad3",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "2583b4217b40cc93",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "cd7febda7e5146c3b033321b930a1c57",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "66fd4eae79948be6",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "6b448ae106467994",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "df8445c44305975b63003f2bebf2bc7f",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "5f20beb126d240d2",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "ca481a2e97932a6d",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "815f8e2a011faf4c83fbcf65887447d7",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "c52063ebb3d3ca7f",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "be9446a9ad44f7ca",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "852b904001f3aca9aa3104cd9435be76",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "242bde740a4d342b",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "465ecbc9f63ef441",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "eb163cb5856451bad5dd5c5c8324ffe5",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "d81af679e9640029",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "7107bf76a12a5ff8",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "terminal-id-reused",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "03f703bf210e21c40a3f5a4187f6e962",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "6663d8eea70de3df",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "65decce11d994cfc",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "0a8323ed7f58ddf090db01643b41a0df",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "d8ddfccd02c4c295",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "3fa40525bb108f6a",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "d607324446eab7762ec6a5113c63a1a7",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "5b57cd754dfe9ac5",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "e0ca0a232f494151",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 4,
+          "labels": [
+            {
+              "session": "50a573578f96d9556610e8aa1235ccac",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "267993238f6d8341",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "9a8cf305adf82be0",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "66b7e981e33167b383f6fa167eba4e85",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "cd893d2b9a0bc404",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "be2c78cb6eb363ad",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "893fc12344d8d6ed6c82e9aebaf4ffa8",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "ac9adf9f469614df",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "79f0ccc6d1318da2",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "abe75bfe29bd1a24519dae763bc40922",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "55320e5e742ed44a",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "d83285ca64e979c4",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "web-feed-self-deadlock",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "10cdd34b1960f4bb9b5e2725ec9cd2e3",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "2e37bc65dd86106d",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "9efc2338cdbd5884",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "31cd2cb9c7caee8fbf3fe7a209369e61",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "d07f66396f217e94",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "46d4d74bc9cfd377",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "3f4bdf0c115fa76da81e00e7910b6591",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7dac335fa8789e88",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "ce9682c6996d117d",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 1.0,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 4,
+          "labels": [
+            {
+              "session": "2e59dd79674c3e39b58805cdd29ec4d1",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "e928776e23ecbd5a",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "992eaa09b872c744",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "ab9dba92b56409891babea804c019722",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "42ac3e06448c8c90",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "bad661a33bb71182",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "bfbb29c3ab0254d6033201f3736fa940",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "bb2f9cc45ff5a434",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "93fc915b35611a44",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "ffeeaf9ec9aa1b99b81fa25191365933",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "0704e32a8229ccd9",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "eed0ae31f0a02da6",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.0,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "arms": {
+        "BT": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "0a14c2064dbcaa27b624d278de9d7ddd",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "e8822a5ec94e3312",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "7f41ebbc4d3eb12b",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "3a07db5761c73e163233d375ecf12726",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "f4d5014b7d55344a",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "2826a8d9016810f7",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "a6875ca7d2caaead31cdca0106775f82",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "07558cab1ecd965f",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "a3b70e4173f3fc44",
+                  "label": "caught"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.6666666666666666,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.6666666666666666,
+              "partial_rate": 0.0
+            }
+          }
+        },
+        "no-brief": {
+          "sessions": 3,
+          "labels": [
+            {
+              "session": "9e612287c3893713c52c3a7bc7878432",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "df5319d9c780d30b",
+                  "label": "caught"
+                },
+                "brief-judge-g": {
+                  "output_id": "b998c553d40ad9fe",
+                  "label": "caught"
+                }
+              }
+            },
+            {
+              "session": "c6281fce88bfe9c59a1878c5ed2c582d",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "a4b434a7839fc952",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "97d90c2f6c679778",
+                  "label": "missed"
+                }
+              }
+            },
+            {
+              "session": "fe653083678a3754b11ef5f39e4509df",
+              "outputs": {
+                "brief-judge-j": {
+                  "output_id": "7f1d4f438cc315e2",
+                  "label": "missed"
+                },
+                "brief-judge-g": {
+                  "output_id": "f3da8b3b09e38428",
+                  "label": "missed"
+                }
+              }
+            }
+          ],
+          "rates": {
+            "brief-judge-j": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            },
+            "brief-judge-g": {
+              "catch_rate": 0.3333333333333333,
+              "partial_rate": 0.0
+            }
+          }
+        }
+      }
+    }
+  ],
+  "sets": {
+    "P": [
+      {
+        "bug": "archive-resume-hint-without-prompt",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "catalog-cache-key-collision",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "child-model-wrong-efforts",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "codex-effort-alias-lost",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 1,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.3333333333333333
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "export-relative-read-root",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "github-token-in-container-argv",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "held-prompt-ignores-interrupt",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "journal-valid-json-corruption",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "path-completion-lost-on-step-redraw",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "pending-assessment-hidden-when-idle",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "projection-mixed-sqlite-snapshots",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "reserved-workspace-internal-error",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "restore-through-profile-symlink",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "stale-model-launch-spec",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "symbol-change-keeps-cached-transcript",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "terminal-id-reused",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "unused-thread-above-archive-floor",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "web-feed-self-deadlock",
+        "no-brief": {
+          "sessions": 4,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      }
+    ],
+    "S": [
+      {
+        "bug": "activity-recorder-kills-api",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "dropdown-click-hits-covered-field",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 3,
+          "partial": 0,
+          "catch_rate": 1.0,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "metadata-checkpoint-overwrites-checkout",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 1,
+          "partial": 0,
+          "catch_rate": 0.3333333333333333,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 2,
+          "partial": 0,
+          "catch_rate": 0.6666666666666666,
+          "partial_rate": 0.0
+        }
+      },
+      {
+        "bug": "shortcut-escape-opens-unvisited-manager",
+        "no-brief": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "BT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        },
+        "TT": {
+          "sessions": 3,
+          "caught": 0,
+          "partial": 0,
+          "catch_rate": 0.0,
+          "partial_rate": 0.0
+        }
+      }
+    ]
+  }
+}

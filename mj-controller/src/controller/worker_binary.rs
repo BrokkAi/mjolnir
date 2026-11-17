@@ -82,8 +82,8 @@ pub(crate) use microvm::ensure_microvm_engine;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;
-pub(crate) use process::recorded_exit_reason;
 pub(super) use process::*;
+pub(crate) use process::{ensure_control_worker, recorded_exit_reason};
 
 #[cfg(test)]
 mod tests;

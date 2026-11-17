@@ -198,6 +198,29 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(straightforwardEffort).toBeVisible();
   await straightforwardEffort.selectOption({ label: 'high' });
 
+  const useSame = page.getByRole('checkbox', { name: 'Use the same subagents on all targets' });
+  await expect(useSame).toBeChecked();
+  await useSame.uncheck();
+  const yoloGroup = page.locator('.settings-group').filter({
+    has: page.getByRole('heading', { name: 'YOLO Target Subagents' }),
+  });
+  await expect(yoloGroup).toBeVisible();
+  const yoloStraightforward = yoloGroup.getByRole('combobox', { name: 'Straightforward model', exact: true });
+  const yoloEffort = yoloGroup.getByRole('combobox', { name: 'Straightforward effort', exact: true });
+  await expect(yoloStraightforward.locator('option:checked')).toHaveText('None');
+  await yoloStraightforward.selectOption({ label: 'opus' });
+  await expect(yoloEffort).toBeVisible();
+  await yoloEffort.selectOption({ label: 'high' });
+  await capture('YOLO target choices start empty and are configured separately');
+
+  await useSame.check();
+  await expect(yoloGroup).toBeHidden();
+  await useSame.uncheck();
+  await expect(yoloGroup).toBeVisible();
+  await expect(yoloStraightforward.locator('option:checked')).toHaveText('opus');
+  await expect(yoloEffort.locator('option:checked')).toHaveText('high');
+  await capture('YOLO target choices survive hiding the group');
+
   await page.locator('#settings-save').click();
   await expect(page.locator('#settings-status')).toHaveText('Saved.');
   await capture('saving returns the saved draft');

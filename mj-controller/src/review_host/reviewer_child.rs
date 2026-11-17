@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::review::driver::{BRIEF_WRITER_ROLE, brief_writer_command_id};
 
 const HANDBACK_INSTRUCTION: &str = "\n\nReturn your plain-text findings, or exactly `No findings.` when there are none, as the complete text of a single handback call. Do not edit files or push. After calling handback, stop.";
 
@@ -115,14 +116,17 @@ impl HostState {
             return;
         }
         let request_key = registration.request_key.clone();
-        let Some(index) = group
-            .registrations
-            .iter()
-            .position(|item| item.role == role)
-        else {
-            return;
+        let writer = role == mj_core::review::driver::BRIEF_WRITER_ROLE;
+        let reviewer = if writer {
+            group.brief_writer.clone()
+        } else {
+            group
+                .registrations
+                .iter()
+                .position(|item| item.role == role)
+                .and_then(|index| group.reviewers.get(index).cloned())
         };
-        let Some(reviewer) = group.reviewers.get(index).cloned() else {
+        let Some(reviewer) = reviewer else {
             return;
         };
         // A push review covers one repository when it names a worktree, so
@@ -142,7 +146,17 @@ impl HostState {
                 register.register_child(
                     &owner,
                     &reviewer,
-                    format!("{prompt}{HANDBACK_INSTRUCTION}"),
+                    if writer {
+                        mj_core::worker_launch::ReviewChildRole::BriefWriter
+                    } else {
+                        mj_core::worker_launch::ReviewChildRole::Reviewer
+                    },
+                    // The writer's prompt carries its own handback instruction.
+                    if writer {
+                        prompt
+                    } else {
+                        format!("{prompt}{HANDBACK_INSTRUCTION}")
+                    },
                     request_key,
                     working_directory,
                 )
@@ -178,7 +192,11 @@ impl HostState {
             }
         };
         let Some(slot) = self.reviews.get_mut(&session_id).filter(|slot| {
-            slot.epoch == epoch && matches!(slot.driver.phase(), TurnReviewPhase::Running { .. })
+            slot.epoch == epoch
+                && matches!(
+                    slot.driver.phase(),
+                    TurnReviewPhase::Running { .. } | TurnReviewPhase::WritingBrief
+                )
         }) else {
             self.close_child(child);
             return;
@@ -209,23 +227,29 @@ impl HostState {
         let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
-        let Some(child) = slot
+        let Some(registration) = slot
             .state
             .active_group
             .as_ref()
             .and_then(|group| group.registrations.iter().find(|item| item.role == role))
-            .and_then(|registration| registration.child_session_id.clone())
         else {
             return;
         };
-        let Some(command_id) = slot
+        let Some(child) = registration.child_session_id.clone() else {
+            return;
+        };
+        if !slot
             .driver
             .awaited_commands()
-            .into_iter()
-            .find_map(|(name, command_id)| (name == role).then_some(command_id))
-        else {
+            .iter()
+            .any(|(name, _)| name == role)
+        {
             return;
-        };
+        }
+        // Startup owns the relay command ID; driver role keys only identify
+        // logical review work and are not the prompt the child answered.
+        let command_id =
+            crate::daemon::startup_followup::startup_step_id(&registration.request_key, "prompt");
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -469,7 +493,13 @@ impl HostState {
             return;
         };
         let prior = slot.driver.snapshot();
-        let requests = slot.driver.role_failed(role, child, reason);
+        // A brief writer that cannot run never fails the review: the
+        // reviewers start without a brief.
+        let requests = if role == mj_core::review::driver::BRIEF_WRITER_ROLE {
+            slot.driver.brief_failed(reason)
+        } else {
+            slot.driver.role_failed(role, child, reason)
+        };
         // A role that already has an outcome, or a review already finished,
         // is not failed again, and a repeated failure persists nothing.
         if slot.driver.snapshot() == prior {
@@ -506,13 +536,10 @@ impl HostState {
                     .registrations
                     .iter()
                     .find(|item| item.child_session_id.as_deref() == Some(child))?;
-                let command_id = group
-                    .driver
-                    .roles
-                    .iter()
-                    .find(|item| item.role == registration.role)?
-                    .command_id
-                    .clone();
+                let command_id = crate::daemon::startup_followup::startup_step_id(
+                    &registration.request_key,
+                    "prompt",
+                );
                 Some((
                     session_id.clone(),
                     slot.epoch,
@@ -600,12 +627,16 @@ impl HostState {
             .ended_while_queued
             .remove(&child_session_id)
             .map(|reason| (child_session_id.clone(), reason));
-        let command_id = group
-            .driver
-            .roles
-            .iter()
-            .find(|item| item.role == role)
-            .map(|item| item.command_id.clone());
+        let command_id = if role == BRIEF_WRITER_ROLE {
+            Some(brief_writer_command_id(&group.driver.review_id))
+        } else {
+            group
+                .driver
+                .roles
+                .iter()
+                .find(|item| item.role == role)
+                .map(|item| item.command_id.clone())
+        };
         let Some(command_id) = command_id else {
             let _ = reply.send(Err("review command is missing".into()));
             return;
@@ -613,6 +644,12 @@ impl HostState {
         let prior = slot.state.clone();
         let prior_driver = slot.driver.snapshot();
         let requests = match report {
+            ReviewerReport::Answer(answer) if role == BRIEF_WRITER_ROLE => {
+                slot.driver.brief_written(answer)
+            }
+            ReviewerReport::Failed(reason) if role == BRIEF_WRITER_ROLE => {
+                slot.driver.brief_failed(reason)
+            }
             ReviewerReport::Answer(answer) => {
                 slot.driver
                     .role_turn_completed(&command_id, &child_session_id, &answer)

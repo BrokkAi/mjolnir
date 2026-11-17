@@ -1243,7 +1243,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1568,7 +1568,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel("server shutdown");
+            control.stop_for_server_shutdown();
         }
         match failure {
             Some(failure) => Err(failure),

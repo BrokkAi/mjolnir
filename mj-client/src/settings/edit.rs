@@ -147,6 +147,9 @@ pub fn apply_value(
     if changed && path.len() == 3 && path[0] == "subagents" && key == "model" {
         draft["subagents"][&path[1]]["effort"] = Value::Null;
     }
+    if changed && path.len() == 4 && path[0] == "subagents" && path[1] == "yolo" && key == "model" {
+        draft["subagents"]["yolo"][&path[2]]["effort"] = Value::Null;
+    }
     if changed && path.len() == 4 && path[0] == "review" && path[1] == "reviewers" && key == "model"
     {
         draft["review"]["reviewers"][path[2].parse::<usize>().unwrap()]["effort"] = Value::Null;

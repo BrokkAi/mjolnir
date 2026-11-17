@@ -82,6 +82,7 @@ impl RuntimeReviewView {
                 self.phase,
                 TurnReviewPhase::CapturingDelta
                     | TurnReviewPhase::LaunchingReviewer
+                    | TurnReviewPhase::WritingBrief
                     | TurnReviewPhase::Running { .. }
             )
     }

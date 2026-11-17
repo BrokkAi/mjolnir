@@ -1,0 +1,104 @@
+{
+  "session_id": "a5adcac30a88976dd06ff83b406b0412",
+  "turns": [
+    {
+      "answered_through": 534,
+      "usage": {
+        "scope": "turn",
+        "total_tokens": 815370,
+        "input_tokens": 80882,
+        "output_tokens": 5144,
+        "thought_tokens": 1414,
+        "cached_read_tokens": 729344,
+        "cached_write_tokens": 0
+      },
+      "command_id": "review-arms-writer-contains-batch-unit-a5adcac30a88",
+      "accepted_ordinal": 302,
+      "turn_start_position": 303,
+      "completed_ordinal": 534,
+      "completed_at_ms": 1794884836702,
+      "outcome": {
+        "kind": "completed",
+        "stop_reason": "EndTurn"
+      }
+    }
+  ],
+  "next_after_seq": 534,
+  "latest_seq": 534,
+  "totals": {
+    "cached_read_tokens": {
+      "tokens": 729344,
+      "reported_turns": 1
+    },
+    "cached_write_tokens": {
+      "tokens": 0,
+      "reported_turns": 1
+    },
+    "input_tokens": {
+      "tokens": 80882,
+      "reported_turns": 1
+    },
+    "output_tokens": {
+      "tokens": 5144,
+      "reported_turns": 1
+    },
+    "thought_tokens": {
+      "tokens": 1414,
+      "reported_turns": 1
+    },
+    "total_tokens": {
+      "tokens": 815370,
+      "reported_turns": 1
+    }
+  },
+  "coverage": {
+    "recorded_turns": 1,
+    "full_turn_reports": 1,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 1,
+    "missing_cost_turns": 0
+  },
+  "turn_cost_usd_ticks": 2861384000,
+  "turn_selections": {
+    "review-arms-writer-contains-batch-unit-a5adcac30a88": {
+      "model": "gpt-6.1-sol",
+      "effort": null
+    }
+  },
+  "by_model": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": null,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 729344,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 80882,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 5144,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 1414,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 815370,
+          "reported_turns": 1
+        }
+      }
+    }
+  ]
+}

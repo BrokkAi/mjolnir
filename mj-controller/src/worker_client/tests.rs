@@ -3180,6 +3180,29 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     use mj_core::targets::{CommandExecutor, CommandOutput};
     struct ShortLived;
     impl CommandExecutor for ShortLived {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
                 "../../tests/fixtures/aws-sts-assume-role.json"

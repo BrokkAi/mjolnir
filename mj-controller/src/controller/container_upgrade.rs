@@ -12,7 +12,7 @@ impl Controller {
     ) -> Result<bool> {
         crate::worker_lifecycle::run(session_id, "observe legacy Restart worker", executor, async {
             let (backend, root) = self.worker_placement(session_id)?;
-            let output = executor.execute(&super::worker_binary::worker_liveness_command(&backend, &root))?;
+            let output = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &root)?;
             ensure!(output.status == 0, "cannot establish legacy worker liveness; retaining its checkpoint and environment");
             if String::from_utf8_lossy(&output.stdout).trim() == "dead" { return Ok(false); }
             executor.begin_resumable_work()?;
@@ -39,9 +39,9 @@ impl Controller {
         commit: impl Fn() -> Result<bool> + Send + Sync,
     ) -> Result<()> {
         use super::worker_binary::{
-            WorkerInstall, install_staged_worker_binary, replace_installed_worker_launch_config,
-            stage_worker_binary_for_upgrade, start_worker_durably,
-            stop_worker_after_target_recovery, worker_liveness_command,
+            WorkerInstall, install_staged_worker_binary, probe_worker_liveness,
+            replace_installed_worker_launch_config, stage_worker_binary_for_upgrade,
+            start_worker_durably, stop_worker_after_target_recovery,
         };
         let record = self
             .state
@@ -75,7 +75,7 @@ impl Controller {
                             let recovery = targets::target_recovery_plan(&backend, session_id)?;
                             targets::ensure_recovery_target_running(executor, recovery.as_ref())?;
                         }
-                        let liveness = executor.execute(&worker_liveness_command(&backend, &root))?;
+                        let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                         ensure!(liveness.status == 0, "cannot establish source worker liveness; container retained");
                         if String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                             ensure!(recovering, "the source worker is unavailable; Restart agent before requesting a container upgrade");
@@ -103,7 +103,7 @@ impl Controller {
                     executor.end_resumable_work("replace session container")?;
                     plan.replace(session_id, executor)?;
                     executor.begin_resumable_work()?;
-                    let liveness = executor.execute(&worker_liveness_command(&backend, &root))?;
+                    let liveness = probe_worker_liveness(executor, &backend, session_id, &root)?;
                     ensure!(liveness.status == 0, "cannot establish replacement worker liveness; environment retained");
                     let dead = String::from_utf8_lossy(&liveness.stdout).trim() == "dead";
                     if !plan.control_state_restored {
