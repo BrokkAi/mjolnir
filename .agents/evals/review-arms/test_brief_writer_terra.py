@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 
@@ -63,6 +64,70 @@ def write_round(key, merged, decisions):
 
 
 class ReadoutChecks(unittest.TestCase):
+    # Hard-won:67efbd6f4: Terra-only brief arms made generic scoring assert on unplanned Sol cells.
+    def test_generic_scorer_terra_only_plan_and_incomplete_planned_cells(self):
+        data = ROOT / 'generic-scorer'
+        (data / 'default-instance').mkdir(parents=True, exist_ok=True)
+        (data / 'default-instance/workspace.json').write_text('{"workspace":{"id":"fixture"}}')
+        (data / 'private').mkdir(exist_ok=True)
+        round_dir = data / 'brief-judge-j'
+        round_dir.mkdir(exist_ok=True)
+        bugs = GROUPS['P'][:2]
+        key, merged, decisions = {}, [], {}
+        for bug in bugs:
+            for arm, cond, model in [('A', 'no-brief', w.REVIEW_MODEL),
+                                     ('D', 'no-brief', 'gpt-6.1-sol'),
+                                     ('BT', 'blind', w.REVIEW_MODEL),
+                                     ('TT', 'blind-terra', w.REVIEW_MODEL)]:
+                for n, label in enumerate(('caught', 'partial', 'missed')):
+                    oid = f'{bug}/{arm}/{n}'
+                    key[oid] = dict(bug=bug, arm=arm, condition=cond, model=model,
+                                    session=oid, total_tokens=100, latency_s=None, tool_calls=None)
+                    merged.append(dict(output_id=oid, bug=bug, labels=[label, label]))
+                    if label != 'missed':
+                        decisions[oid] = label
+        key_path = data / 'private/key-brief-judge-j.json'
+        saved = dict(arms=['TT', 'BT'], bugs=bugs, outputs=key)
+        key_path.write_text(json.dumps(saved))
+        (round_dir / 'merged.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in merged))
+        (round_dir / 'handcheck-decisions.json').write_text(json.dumps(decisions))
+        env = {**os.environ, 'REVIEW_ARMS_DIR': str(data), 'PYTHONDONTWRITEBYTECODE': '1'}
+        command = [sys.executable, str(SCRIPTS / 'brief_score.py'), 'score', '--name', 'brief-judge-j']
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = round_dir / 'score.json'
+        report = json.loads(output.read_text())
+        for section in ('rates', 'per_arm', 'expected_catches_of_30', 'effects'):
+            self.assertFalse(any(r['model'] == 'gpt-6.1-sol' and r.get('condition', r.get('brief')) != 'no-brief'
+                                 for r in report[section]), section)
+        self.assertTrue(any(r['model'] == 'gpt-6.1-sol' and r['condition'] == 'no-brief'
+                            for r in report['per_arm']))
+        tt = next(r for r in report['rates'] if r['condition'] == 'blind-terra')
+        self.assertEqual(tt['catch_rate'], .333)
+        self.assertEqual(tt['partial_rate'], .333)
+        for mode in ('missing-terra-brief', 'missing-sol-baseline', 'planned-sol-brief', 'unexpected-sol-brief'):
+            with self.subTest(mode=mode):
+                changed = dict(key)
+                arms = ['TT', 'BT']
+                if mode == 'unexpected-sol-brief':
+                    oid = f'{bugs[0]}/BS/extra'
+                    changed[oid] = {**key[f'{bugs[0]}/BT/0'], 'model': 'gpt-6.1-sol',
+                                    'arm': 'BS', 'session': oid}
+                elif mode == 'planned-sol-brief':
+                    arms.append('BS')
+                else:
+                    arm = 'TT' if mode == 'missing-terra-brief' else 'D'
+                    # Remove the entire planned cell, not just one observation.
+                    changed = {oid: k for oid, k in changed.items() if not (k['bug'] == bugs[0] and k['arm'] == arm)}
+                key_path.write_text(json.dumps({**saved, 'arms': arms, 'outputs': changed}))
+                output.unlink(missing_ok=True)
+                result = subprocess.run(command, env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('incomplete sample; not scoring a subset', result.stderr)
+                if mode == 'unexpected-sol-brief':
+                    self.assertIn('gpt-6.1-sol: 1 in an unplanned cell (expected 0)', result.stderr)
+                self.assertFalse(output.exists())
+
     def test_serialized_round_pairing_partial_and_secondary_exclusion(self):
         key, merged, decisions = fixture()
         write_round(key, merged, decisions)
