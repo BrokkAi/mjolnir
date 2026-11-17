@@ -35,9 +35,14 @@ if os.environ.get("REVIEW_ARMS_INSTANCE", "default") == "private":
 else:
     INSTANCE = ROOT / "default-instance"
     STORE = pathlib.Path.home() / ".local/share/mjolnir/mj.sqlite3"
-# The mjolnir checkout that supplies commit messages; defaults to the one holding these scripts.
+# The host checkout that supplies commit messages; defaults to the one holding these scripts.
 REPO = os.environ.get("REVIEW_ARMS_REPO") or subprocess.check_output(
     ["git", "-C", str(SCRIPTS), "rev-parse", "--show-toplevel"]).decode().strip()
+# Source settings shared by writers, reviewers and scoring preparation.
+CORPUS_PATH = pathlib.Path(os.environ.get("REVIEW_ARMS_CORPUS", SCRIPTS / "corpus/candidates-all.jsonl")).resolve()
+DIFFS_PATH = pathlib.Path(os.environ.get("REVIEW_ARMS_DIFFS", SCRIPTS / "corpus/diffs.jsonl")).resolve()
+BUNDLE = os.environ.get("REVIEW_ARMS_BUNDLE", "mjolnir")
+REPO_DIR = os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 # Reviewer sessions are independent, so setups are composed afterwards from
 # sessions; a review only groups up to three sessions of one launch.
 ARMS = {
@@ -62,9 +67,10 @@ ARMS = {
     "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
 # Hard-won candidates and the sampled ordinary diffs share one id space.
-CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
-          if (SCRIPTS / "corpus" / name).exists()
-          for c in map(json.loads, (SCRIPTS / "corpus" / name).read_text().splitlines())}
+CORPUS = {c["id"]: c for path, setting in ((CORPUS_PATH, "REVIEW_ARMS_CORPUS"),
+                                        (DIFFS_PATH, "REVIEW_ARMS_DIFFS"))
+          if setting in os.environ or path.exists()
+          for c in map(json.loads, path.read_text().splitlines())}
 # Relation-brief arms (brief/PLAN.md), kept apart from ARMS above.
 ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              "BT": ["gpt-6.1-terra:high"] * 3, "BS": ["gpt-6.1-sol:high"] * 3,
@@ -156,7 +162,7 @@ def container(sid):
     mounts = json.loads(subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{json .Mounts}}"]))
     # The default instance's Podman target follows agent-dev:latest, so record the image per job.
     image = subprocess.check_output(["podman", "inspect", ids[0], "--format", "{{.Image}}"]).decode().strip()
-    return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/mjolnir",
+    return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/{REPO_DIR}",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
 
@@ -346,7 +352,7 @@ def run_job(job, gate):
     title = "review-arms " + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:8]
     with gate:
         launch = mj("new", "--workspace-id", workspace, "--profile", "carrier", "--target", "podman",
-                    "--bundle", "mjolnir", "--at", bug["intro_commit"], "--base", bug["base_commit"],
+                    "--bundle", BUNDLE, "--at", bug["intro_commit"], "--base", bug["base_commit"],
                     "--no-later-history", *[v for r in ARMS[arm] for v in ["--reviewer", r]],
                     "--no-project-memory", "--no-github-events", "--no-github-credentials",
                     "--subagents", "none", "--title", title, timeout=900)

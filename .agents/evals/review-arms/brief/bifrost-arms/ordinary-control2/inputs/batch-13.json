@@ -1,0 +1,54 @@
+[
+ {
+  "intro": "7e35e90ce9c60c9be56cce34f0916f4e4083a090",
+  "base": "a8316c4aa6cef144ebed39ef9ee2b2cd8c25097c",
+  "findings": [
+   {
+    "id": "f-6e5e06f8",
+    "text": "- [P1] Invalidate persisted products when Scala resolution changes \u2014 crates/bifrost-store/src/analyzer/resolution/engine.rs:3444-3449. For unchanged Scala sources, this changes whether incomplete terminal evidence reaches resolution and downstream dispatch, but neither ICFG provider behavior domain is rotated in this change. Existing persisted finding-free results and reusable summaries can therefore be replayed under the old completeness assumptions after upgrading, masking the restored reasons. Rotate both provider domains as required by [.agents/docs/architecture-and-analyzer-store.md:298](.agents/docs/architecture-and-analyzer-store.md#L298)."
+   }
+  ]
+ },
+ {
+  "intro": "378bd893ed9b7f893d1aa153ebb058c04c549141",
+  "base": "0722dea6bcb52ef5335695a701631d157c31cbf4",
+  "findings": [
+   {
+    "id": "f-c0fe8a7c",
+    "text": "- [P2] Propagate cancellation and budget into the usage census \u2014 crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2101-2105\n  When a Go package function variable is encountered in a large workspace, this invokes a fresh workspace usage search for each dispatch after charging only one traversal, without passing the request's cancellation token or remaining budget. The Go usage search builds a graph and scans candidate files, so a cancelled or tightly budgeted semantic query can continue doing substantial work repeatedly for each call to the variable, making interactive analysis unresponsive and bypassing its work limits."
+   },
+   {
+    "id": "f-b4bad617",
+    "text": "- [P2] Propagate the semantic request budget and cancellation to the census \u2014 crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2101-2105. Each package-variable call launches a fresh workspace usage query with its own cancellation token and no source-byte budget after charging only one traversal unit. On a large workspace, repeated calls can each scan up to 1,000 files even when the semantic request has exhausted its budget or has been cancelled, causing unexpectedly long analyses and delayed cancellation."
+   },
+   {
+    "id": "f-1cd1527f",
+    "text": "- [P2] Apply the semantic request's budget and cancellation to the census \u2014 crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:2087-2087\n\n  For each call through a package variable, the single charged traversal can launch a fresh usage query that builds a Go graph and scans up to 1,000 files; it uses a new cancellation token and does not charge the request for that work. Consequently even a nearly exhausted or cancelled semantic request can continue doing substantial workspace-wide work, repeatedly for multiple call sites, and report a misleadingly small work total. Propagate the request limits and cancellation into this lookup."
+   },
+   {
+    "id": "f-942e848d",
+    "text": "- [P2] Bound and cancel the usage census during dispatch \u2014 crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:100-100: When a Go call resolves to a package function variable, this invokes a workspace usage search without passing the semantic request's cancellation or work budget. The search builds a Go graph and scans candidate files, and it is repeated for each such call; a small or cancelled dispatch request can therefore continue doing substantial workspace-wide work while reporting only the single traversal charged by its caller. Pass the request's limits and cancellation into the census and account for the work, leaving dispatch incomplete when those limits are reached."
+   },
+   {
+    "id": "f-f398cf49",
+    "text": "- [P2] Propagate the semantic request's cancellation and budget to the census \u2014 crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:105-105. When a package-function call is resolved in a large workspace, this invokes the public usage lookup with a fresh cancellation token and its own default limits, independently of the enclosing semantic request. Cancelling the request during the scan therefore cannot stop it, and the scan can read and process many files despite an exhausted or small semantic source/traversal budget; repeated calls can make a bounded analysis take substantially longer than requested. Pass the request's cancellation and remaining limits through the usage query and account for its work."
+   },
+   {
+    "id": "f-ad6a8fda",
+    "text": "- [P1] Reject a usage census when candidate files were truncated \u2014 crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:100-105\n\n  When more than 1,000 files are candidates, `find_usages` scans only the admitted files but returns the inner `FuzzyResult` without its separate `CandidateFilesBudgetExhausted` completion status. That result can still be `Success`, so an assignment or address escape in an omitted file is missed and dispatch incorrectly treats the initializer as the only target, potentially hiding race effects. Check the full query completion before accepting the census."
+   },
+   {
+    "id": "f-08dfea2c",
+    "text": "- [P1] Account for retained census references in dispatch cache weight \u2014 crates/bifrost-analysis/src/analyzer/semantic/oracle/dispatch.rs:998: Each resolved call stores a separate copy of every reference to the package variable, but `ValueFlowCache`'s `weigh_dispatch` counts only candidates and boundaries. A variable called hundreds of times therefore causes hundreds of cached copies of its census while charging almost none of that memory against the cache's byte limit; this can exceed the intended cap by orders of magnitude on large workspaces. The cache must account for the retained proof data to satisfy the bounded-cache requirement in [.agents/docs/architecture-and-analyzer-store.md:86](.agents/docs/architecture-and-analyzer-store.md#L86)."
+   },
+   {
+    "id": "f-a3f435c7",
+    "text": "- [P1] Reject censuses that exceeded the candidate-file limit \u2014 crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:98-99. When a variable has more than 1,000 candidate files, `find_usages` discards the query's `CandidateFilesBudgetExhausted` status and can return `Success` for only the admitted files. An assignment in an omitted file is then missed, so dispatch incorrectly treats the initializer as the exhaustive target and race analysis can omit effects of the assigned function. Use the query completion status when deciding whether the census is complete."
+   },
+   {
+    "id": "f-d6790eba",
+    "text": "- [P2] Charge and cancel the workspace census through the semantic request \u2014 crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:100: Every call through a package variable starts a fresh workspace usage scan and parses the files containing its references, but this lookup receives neither the dispatch request's cancellation token nor its work budget; its caller charges only one traversal before invoking it. Consequently a small-budget or cancelled semantic request can still perform up to a full 1,000-file census for each call site, causing unexpectedly long, uninterruptible analysis and reporting far less work than was performed."
+   }
+  ]
+ }
+]

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Where this build's control worker lives: `hel-control-<hash of the build>`
 /// in the session's own worker root, a hard link to this build's entry in the
@@ -314,7 +315,7 @@ pub fn clear_relay_state_plan(
                 .purpose("stop a leaked local Mjolnir worker and clear its relay state")
         })),
         TargetLocator::SshBare { ssh, .. } => Some(script.into_command(|script| {
-            ssh_command(ssh, ["sh", "-c", script.as_str()])
+            ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
                 .purpose("stop a leaked remote Mjolnir worker and clear its relay state")
         })),
         TargetLocator::LocalPodman { .. }
@@ -349,7 +350,12 @@ pub fn stop_worker_plan(
     WorkerControlPlan::new(
         purpose,
         vec![script.into_command(|script| {
-            locator_command(locator, vec!["sh".into(), "-c".into(), script]).purpose(purpose)
+            locator_command(
+                SshTrafficClass::Control,
+                locator,
+                vec!["sh".into(), "-c".into(), script],
+            )
+            .purpose(purpose)
         })],
         locator,
         session_id,
@@ -433,9 +439,13 @@ fn worker_reset_plan(
         script
     });
     let command = script.into_command(|script| {
-        locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("reset the worker root for an in-place harness replacement")
-            .stage(ProvisionStage::Syncing)
+        locator_command(
+            SshTrafficClass::Control,
+            locator,
+            vec!["sh".into(), "-c".into(), script],
+        )
+        .purpose("reset the worker root for an in-place harness replacement")
+        .stage(ProvisionStage::Syncing)
     });
     WorkerControlPlan::new("reset the worker root", vec![command], locator, session_id)
 }
@@ -471,7 +481,11 @@ mod tests {
                 unreachable!()
             };
             let command = script.into_command(|script| {
-                ssh_command_owned(ssh, vec!["sh".into(), "-c".into(), script])
+                ssh_command_owned(
+                    SshTrafficClass::Control,
+                    ssh,
+                    vec!["sh".into(), "-c".into(), script],
+                )
             });
             let plan =
                 WorkerControlPlan::new("quoted SSH control", vec![command], &locator, SESSION)
@@ -490,7 +504,13 @@ mod tests {
                 "liveness",
                 vec![
                     worker_daemon_liveness_script(expected.to_str().unwrap()).into_command(
-                        |script| locator_command(&locator, vec!["sh".into(), "-c".into(), script]),
+                        |script| {
+                            locator_command(
+                                SshTrafficClass::Control,
+                                &locator,
+                                vec!["sh".into(), "-c".into(), script],
+                            )
+                        },
                     ),
                 ],
                 &locator,
@@ -505,6 +525,8 @@ mod tests {
         }
     }
 
+    // Only the Unix case below runs a probe script.
+    #[cfg(unix)]
     fn run_script(script: &str) -> (i32, String) {
         let output = std::process::Command::new("sh")
             .arg("-c")

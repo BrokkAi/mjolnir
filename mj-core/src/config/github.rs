@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Optional GitHub integration settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GithubConfig {
     /// Share GitHub authentication with newly created sessions. Each session
     /// retains its accepted choice, and children inherit an opt-out.
@@ -63,7 +63,7 @@ impl GithubConfig {
 
 /// Configuration for the durable GitHub mailbox producer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GithubWatchConfig {
     /// Whether the watcher produces GitHub events. Jev must also be enabled.
     #[serde(
@@ -106,7 +106,6 @@ impl Default for GithubWatchConfig {
 
 /// Controller-host credentials for one GitHub App and its installations.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GithubAppConfig {
     /// Numeric identifier shown in the GitHub App settings page.
     pub app_id: u64,

@@ -1,0 +1,158 @@
+{
+  "recorded_epoch": 1794895269.0757852,
+  "status": "valid raw proposal; pending parent review, no final decisions/scoring",
+  "proposal_rows": 15,
+  "exact_coverage_and_label_bool_schema": "pass",
+  "required_why_for_changed_or_partial": "pass",
+  "proposed_label_counts": {
+    "partial": 2,
+    "caught": 13
+  },
+  "proposed_changes_from_judges": [
+    {
+      "output_id": "07f60e503e05d025",
+      "judges_labels": [
+        "caught",
+        "caught"
+      ],
+      "proposed_label": "partial",
+      "why": "The shared Java memo, missing failure receipt, and later false absence are correctly identified, but the finding explicitly attributes the failed build to a transient store or source-read failure. The match rule requires StructureUnavailable or equivalent stable source incompleteness; that mechanism is not established by this transient-only trigger. Under the required lower-label rule this is partial."
+    },
+    {
+      "output_id": "7d69459eea839714",
+      "judges_labels": [
+        "caught",
+        "caught"
+      ],
+      "proposed_label": "partial",
+      "why": "The first finding identifies the right Java memo and lost incompleteness across shared fills, but its concrete explanation is a declaration read recording a store failure, rather than StructureUnavailable or equivalent stable source incompleteness required by the match rule. The generic incomplete-read opening does not establish that stable-gap case. The separate generation-change finding is a different defect; partial is the lower supported label."
+    }
+  ],
+  "change_count": 2,
+  "raw_proposal_path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-handcheck-relation/handcheck/handcheck-proposal.json",
+  "raw_proposal_sha256": "2692318bbc9c441ed3f243fc0845455c820480538f329abe8600208c3d31ecb6",
+  "raw_copy_path": "/mnt/optane/review-arms-bifrost-20261116/arms/handcheck-driver/handcheck-proposal-raw.json",
+  "input_freeze_sha256": "32516c4a8dad1a45134351d45802f2eb8017043b462f41eb7d2d17132ad325ca",
+  "frozen_inputs_unchanged": true,
+  "runtime_code_unchanged": true,
+  "sid": "5af28520933f2c7da5981a642c60d9f9",
+  "actual_profile": "codex4",
+  "actual_config": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "collaboration_mode": "default",
+    "fast-mode": "off"
+  },
+  "lifecycle": "suspended",
+  "last_turn_outcome": {
+    "command_id": "review-arms-a4def39e6cd36578cbb302eb-5af28520933f",
+    "accepted_ordinal": 68,
+    "turn_start_position": 69,
+    "completed_ordinal": 452,
+    "completed_at_ms": 1794895188330,
+    "outcome": {
+      "kind": "completed",
+      "stop_reason": "EndTurn"
+    }
+  },
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794895194.412102
+  },
+  "transcript": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/handcheck-driver/transcript.json",
+    "sha256": "d05443ae22066acbe32c126a121ec87bcd2fa8ebb25c4d2b4a119c75ba802ac1",
+    "pages": 1,
+    "latest_seq": 446,
+    "next_after_seq": 446,
+    "tool_request_count": 22,
+    "tool_requests_path": "/mnt/optane/review-arms-bifrost-20261116/arms/handcheck-driver/tool-requests.json"
+  },
+  "usage_totals": {
+    "cached_read_tokens": {
+      "tokens": 565760,
+      "reported_turns": 1
+    },
+    "cached_write_tokens": {
+      "tokens": 0,
+      "reported_turns": 1
+    },
+    "input_tokens": {
+      "tokens": 60272,
+      "reported_turns": 1
+    },
+    "output_tokens": {
+      "tokens": 3825,
+      "reported_turns": 1
+    },
+    "thought_tokens": {
+      "tokens": 978,
+      "reported_turns": 1
+    },
+    "total_tokens": {
+      "tokens": 629857,
+      "reported_turns": 1
+    }
+  },
+  "usage_coverage": {
+    "recorded_turns": 1,
+    "full_turn_reports": 1,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 1,
+    "missing_cost_turns": 0
+  },
+  "usage_models": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": null,
+      "totals": {
+        "cached_read_tokens": {
+          "tokens": 565760,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 60272,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3825,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 978,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 629857,
+          "reported_turns": 1
+        }
+      }
+    }
+  ],
+  "root_cost_usd_ticks": 2153700000,
+  "estimated_api_cost_usd": 0.21537,
+  "usage_accounting": "One complete global root once for one SID, full-turn usage; no pagination double count; API estimate not subscription charge.",
+  "quota_before": {
+    "remaining_min_percent": 88,
+    "refreshed_epoch": 1794894772,
+    "age_seconds": 230.4370539188385
+  },
+  "quota_after": {
+    "remaining_percent": [
+      88
+    ],
+    "refreshed_epoch": 1794894772,
+    "age_seconds": 497.07621932029724,
+    "refresh_after_completion": false
+  },
+  "quota_note": "Shared cached quota; timestamp freshness recorded, delta not isolated task usage.",
+  "operator_scope": "One authorized handcheck task, no extra judge/review/writer roles or prompts; proposal not modified/finalized; no score/readout/laterstage/code/build/test/config/unrelatedsession edits/commits."
+}

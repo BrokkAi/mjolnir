@@ -1,0 +1,64 @@
+{
+  "commits": [
+    {
+      "intro": "7e35e90ce9c60c9be56cce34f0916f4e4083a090",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-6e5e06f8"
+          ],
+          "summary": "Changed Scala resolution completeness can reuse persisted products under unchanged provider identities.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-store/src/analyzer/resolution/engine.rs:3439-3484 retains incomplete terminals unless Scala has a unique complete affirmative survivor; crates/bifrost-store/src/analyzer/store/resolution_operation/jvm_demand.rs:3233-3244 also restores qualifier inventory boundaries. Neither salts nor provider domains change in this four-file diff. Provider identity is built from the unchanged domains and engine inputs in crates/bifrost-analysis/src/analyzer/semantic/icfg.rs:212-280, plus unchanged workspace content at :291-294. The persisted root key uses that identity and workspace content (crates/bifrost-rql/src/structural/search/type_flow.rs:2406-2436); an existing finding-free hit returns immediately without re-solving at :1536-1556. Thus upgrading an unchanged workspace can replay a result derived before the restored incompleteness. The explicit invalidation contract is .agents/docs/architecture-and-analyzer-store.md:298-302. Later fix e7f35f12f346cbccb9a2ccdd34baecbd47b6c556 rotates both ICFG domains and the policy substrate for #8665.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "intro": "378bd893ed9b7f893d1aa153ebb058c04c549141",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-c0fe8a7c",
+            "f-b4bad617",
+            "f-1cd1527f",
+            "f-942e848d",
+            "f-f398cf49",
+            "f-d6790eba"
+          ],
+          "summary": "Go package-variable dispatch runs a workspace census outside the semantic request's cancellation and work limits.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "The new Go field-call path invokes the proof per call at crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:1263-1289. Its helper charges one execution traversal and limits only the declaring-source read (:2087-2105), then passes no request into prove_stable_package_function_value. That proof calls find_usages (crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:100) and reparses each referenced file (:155-163). The convenience API creates UsageFinder::new() with default 1000-file/1000-hit limits (crates/bifrost-analysis/src/analyzer/usages/mod.rs:120-125; usages/finder.rs:65-66), whose cancellation token is newly allocated (finder.rs:138-145) and whose query has no source-byte limit (:182-191). Go then builds a graph and scans candidates with that independent token (usages/go_graph.rs:265-299, :469-477). Cancellation arriving during this work cannot stop it, and remaining semantic source/traversal allowance does not constrain or account for the census. Outer cancellation checks can stop subsequent work but do not interrupt this scan; distinct call sites repeat it.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-ad6a8fda",
+            "f-a3f435c7"
+          ],
+          "summary": "A truncated usage census can incorrectly prove that a mutable Go package function variable has only its initializer target.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/usages/finder.rs:336-359 truncates candidate files to the default limit of 1000 (:65), and :428-443 reports CandidateFilesBudgetExhausted separately from the graph's FuzzyResult. Its find_usages wrapper returns only .result (:380-388). Go reference scanning is restricted to admitted files (usages/go_graph.rs:469-477), so a write in an omitted file cannot appear in the hits, even if that file contributed package declarations to the graph. The new proof accepts FuzzyResult::Success with no unproven hits (analyzer/go/package_function_value.rs:100-128), checks only returned references (:138-171), and publishes the initializer proof (:174-184). With more than 1000 candidate files but fewer than 1000 admitted hits, all admitted hits can be direct calls while an omitted file assigns another function. Dispatch then installs the initializer candidate at analyzer/semantic/workspace_oracle/dispatch.rs:1273-1290 without the missing target or an incompleteness boundary. Later fix 7180522d6b47237e3eaae6a52b9aa4bd980172e3 switches the moved proof to query_usages and requires complete coverage before accepting it.",
+          "confidence": "high"
+        },
+        {
+          "group": "g3",
+          "findings": [
+            "f-08dfea2c"
+          ],
+          "summary": "Dispatch cache weights omit the newly retained package-variable census arrays.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, every successful proof creates an owned reference vector (crates/bifrost-analysis/src/analyzer/go/package_function_value.rs:138-178); workspace_oracle/dispatch.rs:2131-2135 boxes it into StablePackageValueProvenance. The provenance owns Box<[UsageHit]> (analyzer/semantic/oracle/dispatch.rs:994-999), and is retained in the final DispatchResult (workspace_oracle/dispatch.rs:1988-1994). ValueFlowCache keys include each distinct call site (crates/bifrost-flow/src/value_flow/provider.rs:280-300), so many calls to one variable retain separate census arrays. However weigh_dispatch (:391-406) charges only the fixed MemoizedDispatch size and candidate/boundary rows; the heap allocation for stable_package_values and its references is absent. The byte-bounded cache uses this weigher (:465-470), so hundreds of calls with hundreds of references retain quadratic proof data while charging essentially linear fixed-size entries. This is newly exposed by the added provenance, even though the prior weigher already omitted other dynamic allocations.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

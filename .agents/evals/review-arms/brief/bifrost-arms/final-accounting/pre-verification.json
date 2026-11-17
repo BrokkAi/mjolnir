@@ -1,0 +1,1042 @@
+{
+  "recorded_at": "2026-11-17T10:57:57.454151+00:00",
+  "scope": "completed campaign roles before Control2 verification; M1/corpus/census/tracing and parent/helper orchestration excluded",
+  "aggregate": {
+    "sessions": 654,
+    "noncarrier_sessions": 514,
+    "carrier_sessions": 140,
+    "fully_priced_sessions": 603,
+    "fully_priced_session_subtotal_usd_api_equivalent": 37.403001616,
+    "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 41.75274288,
+    "full_total_usd_api_equivalent": null,
+    "incomplete_session_ids": [
+      "4cb6f495095e423f10516d35a175970a",
+      "3a8acbe12b3ecb5a6224de083634ed2a",
+      "822311af2a74ce0974dddc8e187b7e82",
+      "5b2ce09caaa155d744563b1116ad0f5a",
+      "32f73a90a80fac48cc08df1fcc38367d",
+      "14a896d2710d2bed4662b434d36f3802",
+      "4b864da96d47a89be16b7642723c90b4",
+      "ffa457457887041141d3a004b065f601",
+      "4080a170ff288511c344a651bd5777b6",
+      "35cb2fb3ee9137936f229d8f0b4bee09",
+      "215c9b19d3daab9af5b22270817b8cba",
+      "a2140aa9ba69c2e2049e2e2b5e44e929",
+      "1371443c17a6231689d40ba9a469efe6",
+      "5c41deb224d6d25c0e3223c6a020e629",
+      "453d7aa89a3fbc4795445ca5343a7126",
+      "bc335459bbc38f66175a84b4ea739f32",
+      "1d939fc4d90c2bf1510e690f2123cbd0",
+      "0d10bae3567df373aeccfa3d08939d0d",
+      "dc9629e0f378894f61cb0b9c9155179e",
+      "5f46daac2323864972d7e980e821a80c",
+      "36735b760927cae2f6a9986117d48874",
+      "c6ef757963b6ec752a8208664cb5c51b",
+      "486d09e6a93f06c42d451d09c27e4616",
+      "a65d5bbdc25cee5796c65949f8ce49f3",
+      "3212263771fe8274ec3122cd49e48a15",
+      "72bdad94bfddd64f419deb5eb78b25f3",
+      "fae564fd61de045a1536787014f69776",
+      "389c843bbaf9afe0ab2e60747da2e169",
+      "461cc5de48e9445e0cfa48f60bee7f8f",
+      "658ca15351019a55635fe2f44abec759",
+      "17c1cea7a9ee478b97481e6114c29faf",
+      "0c5ee5762a08d110847e5ff979efd8e5",
+      "4356ee33f94f6f627f264397364064d4",
+      "9a33d3c06d86aee15024fb89539799df",
+      "281af6d46c2efba612dd029e87c864e6",
+      "32b12cbe9e65e670265af439091a5234",
+      "96109e16dfed9c4aae96ff4f2f99b59f",
+      "465a2a29122972002fbc9e1ffa185ba7",
+      "e9315c29c2ea9bc7678f766d0c970a53",
+      "dbdd995a11801b1933325bf791514f5d",
+      "f8687a777d22ec8f85833ae0f94e069a",
+      "cd64df8df2420fb5f3719473b77d8e88",
+      "00969b7bdf88ae6164112f644f422408",
+      "676d82ad44dd9ff8fe215add1c3d8ac2",
+      "cffc9bcd56550178afb81e7e257b9f38",
+      "b08f8b7e9ed79a8d1abef20e921a1f4f",
+      "ca0c58d4c2bd78803a46db7a2f2812f9",
+      "e0862fd7baf5d1ddc6c78c5312e54bf3",
+      "1997fd6f8771319f67bc122ae4aa2149",
+      "47827df6fc259aacccff85d66f664d12",
+      "f6476346b0802dea7c3ab0e4e904e710"
+    ],
+    "usage_coverage": {
+      "recorded_turns": 917,
+      "full_turn_reports": 893,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 24,
+      "unfinished_turns": 57,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 893,
+      "missing_cost_turns": 0
+    }
+  },
+  "cohorts": {
+    "primary": {
+      "sessions": 168,
+      "noncarrier_sessions": 134,
+      "carrier_sessions": 34,
+      "fully_priced_sessions": 151,
+      "fully_priced_session_subtotal_usd_api_equivalent": 10.632308272,
+      "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 11.692545648,
+      "full_total_usd_api_equivalent": null,
+      "incomplete_session_ids": [
+        "4cb6f495095e423f10516d35a175970a",
+        "3a8acbe12b3ecb5a6224de083634ed2a",
+        "822311af2a74ce0974dddc8e187b7e82",
+        "5b2ce09caaa155d744563b1116ad0f5a",
+        "32f73a90a80fac48cc08df1fcc38367d",
+        "14a896d2710d2bed4662b434d36f3802",
+        "4b864da96d47a89be16b7642723c90b4",
+        "ffa457457887041141d3a004b065f601",
+        "4080a170ff288511c344a651bd5777b6",
+        "35cb2fb3ee9137936f229d8f0b4bee09",
+        "215c9b19d3daab9af5b22270817b8cba",
+        "a2140aa9ba69c2e2049e2e2b5e44e929",
+        "1371443c17a6231689d40ba9a469efe6",
+        "5c41deb224d6d25c0e3223c6a020e629",
+        "453d7aa89a3fbc4795445ca5343a7126",
+        "bc335459bbc38f66175a84b4ea739f32",
+        "1d939fc4d90c2bf1510e690f2123cbd0"
+      ],
+      "usage_coverage": {
+        "recorded_turns": 227,
+        "full_turn_reports": 222,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 5,
+        "unfinished_turns": 22,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 222,
+        "missing_cost_turns": 0
+      }
+    },
+    "secondary": {
+      "sessions": 124,
+      "noncarrier_sessions": 98,
+      "carrier_sessions": 26,
+      "fully_priced_sessions": 115,
+      "fully_priced_session_subtotal_usd_api_equivalent": 7.696276368,
+      "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 8.232558928,
+      "full_total_usd_api_equivalent": null,
+      "incomplete_session_ids": [
+        "0d10bae3567df373aeccfa3d08939d0d",
+        "dc9629e0f378894f61cb0b9c9155179e",
+        "5f46daac2323864972d7e980e821a80c",
+        "36735b760927cae2f6a9986117d48874",
+        "c6ef757963b6ec752a8208664cb5c51b",
+        "486d09e6a93f06c42d451d09c27e4616",
+        "a65d5bbdc25cee5796c65949f8ce49f3",
+        "3212263771fe8274ec3122cd49e48a15",
+        "72bdad94bfddd64f419deb5eb78b25f3"
+      ],
+      "usage_coverage": {
+        "recorded_turns": 188,
+        "full_turn_reports": 183,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 5,
+        "unfinished_turns": 12,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 183,
+        "missing_cost_turns": 0
+      }
+    },
+    "ordinary-writers": {
+      "sessions": 40,
+      "noncarrier_sessions": 40,
+      "carrier_sessions": 0,
+      "fully_priced_sessions": 40,
+      "fully_priced_session_subtotal_usd_api_equivalent": 7.7348608,
+      "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 7.7348608,
+      "full_total_usd_api_equivalent": 7.7348608,
+      "incomplete_session_ids": [],
+      "usage_coverage": {
+        "recorded_turns": 40,
+        "full_turn_reports": 40,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 40,
+        "missing_cost_turns": 0
+      }
+    },
+    "ordinary-reviews": {
+      "sessions": 320,
+      "noncarrier_sessions": 240,
+      "carrier_sessions": 80,
+      "fully_priced_sessions": 295,
+      "fully_priced_session_subtotal_usd_api_equivalent": 11.069144176,
+      "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 13.822365504,
+      "full_total_usd_api_equivalent": null,
+      "incomplete_session_ids": [
+        "fae564fd61de045a1536787014f69776",
+        "389c843bbaf9afe0ab2e60747da2e169",
+        "461cc5de48e9445e0cfa48f60bee7f8f",
+        "658ca15351019a55635fe2f44abec759",
+        "17c1cea7a9ee478b97481e6114c29faf",
+        "0c5ee5762a08d110847e5ff979efd8e5",
+        "4356ee33f94f6f627f264397364064d4",
+        "9a33d3c06d86aee15024fb89539799df",
+        "281af6d46c2efba612dd029e87c864e6",
+        "32b12cbe9e65e670265af439091a5234",
+        "96109e16dfed9c4aae96ff4f2f99b59f",
+        "465a2a29122972002fbc9e1ffa185ba7",
+        "e9315c29c2ea9bc7678f766d0c970a53",
+        "dbdd995a11801b1933325bf791514f5d",
+        "f8687a777d22ec8f85833ae0f94e069a",
+        "cd64df8df2420fb5f3719473b77d8e88",
+        "00969b7bdf88ae6164112f644f422408",
+        "676d82ad44dd9ff8fe215add1c3d8ac2",
+        "cffc9bcd56550178afb81e7e257b9f38",
+        "b08f8b7e9ed79a8d1abef20e921a1f4f",
+        "ca0c58d4c2bd78803a46db7a2f2812f9",
+        "e0862fd7baf5d1ddc6c78c5312e54bf3",
+        "1997fd6f8771319f67bc122ae4aa2149",
+        "47827df6fc259aacccff85d66f664d12",
+        "f6476346b0802dea7c3ab0e4e904e710"
+      ],
+      "usage_coverage": {
+        "recorded_turns": 460,
+        "full_turn_reports": 446,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 14,
+        "unfinished_turns": 23,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 446,
+        "missing_cost_turns": 0
+      }
+    },
+    "auxiliary": {
+      "sessions": 2,
+      "noncarrier_sessions": 2,
+      "carrier_sessions": 0,
+      "fully_priced_sessions": 2,
+      "fully_priced_session_subtotal_usd_api_equivalent": 0.270412,
+      "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.270412,
+      "full_total_usd_api_equivalent": 0.270412,
+      "incomplete_session_ids": [],
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      }
+    }
+  },
+  "roles": {
+    "primary": {
+      "carrier": {
+        "sessions": 34,
+        "noncarrier_sessions": 0,
+        "carrier_sessions": 34,
+        "fully_priced_sessions": 17,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.735595872,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 1.795833248,
+        "full_total_usd_api_equivalent": null,
+        "incomplete_session_ids": [
+          "4cb6f495095e423f10516d35a175970a",
+          "3a8acbe12b3ecb5a6224de083634ed2a",
+          "822311af2a74ce0974dddc8e187b7e82",
+          "5b2ce09caaa155d744563b1116ad0f5a",
+          "32f73a90a80fac48cc08df1fcc38367d",
+          "14a896d2710d2bed4662b434d36f3802",
+          "4b864da96d47a89be16b7642723c90b4",
+          "ffa457457887041141d3a004b065f601",
+          "4080a170ff288511c344a651bd5777b6",
+          "35cb2fb3ee9137936f229d8f0b4bee09",
+          "215c9b19d3daab9af5b22270817b8cba",
+          "a2140aa9ba69c2e2049e2e2b5e44e929",
+          "1371443c17a6231689d40ba9a469efe6",
+          "5c41deb224d6d25c0e3223c6a020e629",
+          "453d7aa89a3fbc4795445ca5343a7126",
+          "bc335459bbc38f66175a84b4ea739f32",
+          "1d939fc4d90c2bf1510e690f2123cbd0"
+        ],
+        "usage_coverage": {
+          "recorded_turns": 93,
+          "full_turn_reports": 88,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 5,
+          "unfinished_turns": 22,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 88,
+          "missing_cost_turns": 0
+        }
+      },
+      "catch-judge": {
+        "sessions": 6,
+        "noncarrier_sessions": 6,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 6,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.670614,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.670614,
+        "full_total_usd_api_equivalent": 0.670614,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 6,
+          "full_turn_reports": 6,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 6,
+          "missing_cost_turns": 0
+        }
+      },
+      "editor": {
+        "sessions": 4,
+        "noncarrier_sessions": 4,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 4,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.2457864,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.2457864,
+        "full_total_usd_api_equivalent": 0.2457864,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        }
+      },
+      "handcheck": {
+        "sessions": 1,
+        "noncarrier_sessions": 1,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 1,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.21537,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.21537,
+        "full_total_usd_api_equivalent": 0.21537,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        }
+      },
+      "leak-round0": {
+        "sessions": 2,
+        "noncarrier_sessions": 2,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 2,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.35638,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.35638,
+        "full_total_usd_api_equivalent": 0.35638,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 2,
+          "full_turn_reports": 2,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 2,
+          "missing_cost_turns": 0
+        }
+      },
+      "leak-round1": {
+        "sessions": 2,
+        "noncarrier_sessions": 2,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 2,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.2037592,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.2037592,
+        "full_total_usd_api_equivalent": 0.2037592,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 2,
+          "full_turn_reports": 2,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 2,
+          "missing_cost_turns": 0
+        }
+      },
+      "reviewer": {
+        "sessions": 102,
+        "noncarrier_sessions": 102,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 102,
+        "fully_priced_session_subtotal_usd_api_equivalent": 4.6051552,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 4.6051552,
+        "full_total_usd_api_equivalent": 4.6051552,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 102,
+          "full_turn_reports": 102,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 102,
+          "missing_cost_turns": 0
+        }
+      },
+      "writer": {
+        "sessions": 17,
+        "noncarrier_sessions": 17,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 17,
+        "fully_priced_session_subtotal_usd_api_equivalent": 3.5996476,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 3.5996476,
+        "full_total_usd_api_equivalent": 3.5996476,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 17,
+          "full_turn_reports": 17,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 17,
+          "missing_cost_turns": 0
+        }
+      }
+    },
+    "secondary": {
+      "carrier": {
+        "sessions": 26,
+        "noncarrier_sessions": 0,
+        "carrier_sessions": 26,
+        "fully_priced_sessions": 17,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.231869968,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.768152528,
+        "full_total_usd_api_equivalent": null,
+        "incomplete_session_ids": [
+          "0d10bae3567df373aeccfa3d08939d0d",
+          "dc9629e0f378894f61cb0b9c9155179e",
+          "5f46daac2323864972d7e980e821a80c",
+          "36735b760927cae2f6a9986117d48874",
+          "c6ef757963b6ec752a8208664cb5c51b",
+          "486d09e6a93f06c42d451d09c27e4616",
+          "a65d5bbdc25cee5796c65949f8ce49f3",
+          "3212263771fe8274ec3122cd49e48a15",
+          "72bdad94bfddd64f419deb5eb78b25f3"
+        ],
+        "usage_coverage": {
+          "recorded_turns": 89,
+          "full_turn_reports": 84,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 5,
+          "unfinished_turns": 12,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 84,
+          "missing_cost_turns": 0
+        }
+      },
+      "catch-judge": {
+        "sessions": 4,
+        "noncarrier_sessions": 4,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 4,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.5597,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.5597,
+        "full_total_usd_api_equivalent": 0.5597,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 4,
+          "full_turn_reports": 4,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 4,
+          "missing_cost_turns": 0
+        }
+      },
+      "handcheck": {
+        "sessions": 1,
+        "noncarrier_sessions": 1,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 1,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.1574784,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.1574784,
+        "full_total_usd_api_equivalent": 0.1574784,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        }
+      },
+      "leak": {
+        "sessions": 2,
+        "noncarrier_sessions": 2,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 2,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.2585964,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.2585964,
+        "full_total_usd_api_equivalent": 0.2585964,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 2,
+          "full_turn_reports": 2,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 2,
+          "missing_cost_turns": 0
+        }
+      },
+      "reviewer": {
+        "sessions": 78,
+        "noncarrier_sessions": 78,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 78,
+        "fully_priced_session_subtotal_usd_api_equivalent": 3.2510356,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 3.2510356,
+        "full_total_usd_api_equivalent": 3.2510356,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 78,
+          "full_turn_reports": 78,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 78,
+          "missing_cost_turns": 0
+        }
+      },
+      "writer": {
+        "sessions": 13,
+        "noncarrier_sessions": 13,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 13,
+        "fully_priced_session_subtotal_usd_api_equivalent": 3.237596,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 3.237596,
+        "full_total_usd_api_equivalent": 3.237596,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 14,
+          "full_turn_reports": 14,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 14,
+          "missing_cost_turns": 0
+        }
+      }
+    },
+    "ordinary-writers": {
+      "writer": {
+        "sessions": 40,
+        "noncarrier_sessions": 40,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 40,
+        "fully_priced_session_subtotal_usd_api_equivalent": 7.7348608,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 7.7348608,
+        "full_total_usd_api_equivalent": 7.7348608,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 40,
+          "full_turn_reports": 40,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 40,
+          "missing_cost_turns": 0
+        }
+      }
+    },
+    "ordinary-reviews": {
+      "carrier": {
+        "sessions": 80,
+        "noncarrier_sessions": 0,
+        "carrier_sessions": 80,
+        "fully_priced_sessions": 55,
+        "fully_priced_session_subtotal_usd_api_equivalent": 1.059850176,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 3.813071504,
+        "full_total_usd_api_equivalent": null,
+        "incomplete_session_ids": [
+          "fae564fd61de045a1536787014f69776",
+          "389c843bbaf9afe0ab2e60747da2e169",
+          "461cc5de48e9445e0cfa48f60bee7f8f",
+          "658ca15351019a55635fe2f44abec759",
+          "17c1cea7a9ee478b97481e6114c29faf",
+          "0c5ee5762a08d110847e5ff979efd8e5",
+          "4356ee33f94f6f627f264397364064d4",
+          "9a33d3c06d86aee15024fb89539799df",
+          "281af6d46c2efba612dd029e87c864e6",
+          "32b12cbe9e65e670265af439091a5234",
+          "96109e16dfed9c4aae96ff4f2f99b59f",
+          "465a2a29122972002fbc9e1ffa185ba7",
+          "e9315c29c2ea9bc7678f766d0c970a53",
+          "dbdd995a11801b1933325bf791514f5d",
+          "f8687a777d22ec8f85833ae0f94e069a",
+          "cd64df8df2420fb5f3719473b77d8e88",
+          "00969b7bdf88ae6164112f644f422408",
+          "676d82ad44dd9ff8fe215add1c3d8ac2",
+          "cffc9bcd56550178afb81e7e257b9f38",
+          "b08f8b7e9ed79a8d1abef20e921a1f4f",
+          "ca0c58d4c2bd78803a46db7a2f2812f9",
+          "e0862fd7baf5d1ddc6c78c5312e54bf3",
+          "1997fd6f8771319f67bc122ae4aa2149",
+          "47827df6fc259aacccff85d66f664d12",
+          "f6476346b0802dea7c3ab0e4e904e710"
+        ],
+        "usage_coverage": {
+          "recorded_turns": 220,
+          "full_turn_reports": 206,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 14,
+          "unfinished_turns": 23,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 206,
+          "missing_cost_turns": 0
+        }
+      },
+      "reviewer": {
+        "sessions": 240,
+        "noncarrier_sessions": 240,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 240,
+        "fully_priced_session_subtotal_usd_api_equivalent": 10.009294,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 10.009294,
+        "full_total_usd_api_equivalent": 10.009294,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 240,
+          "full_turn_reports": 240,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 240,
+          "missing_cost_turns": 0
+        }
+      }
+    },
+    "auxiliary": {
+      "H6-applicability": {
+        "sessions": 1,
+        "noncarrier_sessions": 1,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 1,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.087068,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.087068,
+        "full_total_usd_api_equivalent": 0.087068,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        }
+      },
+      "contains": {
+        "sessions": 1,
+        "noncarrier_sessions": 1,
+        "carrier_sessions": 0,
+        "fully_priced_sessions": 1,
+        "fully_priced_session_subtotal_usd_api_equivalent": 0.183344,
+        "supported_recorded_priced_turn_subtotal_usd_api_equivalent": 0.183344,
+        "full_total_usd_api_equivalent": 0.183344,
+        "incomplete_session_ids": [],
+        "usage_coverage": {
+          "recorded_turns": 1,
+          "full_turn_reports": 1,
+          "last_request_reports": 0,
+          "unspecified_reports": 0,
+          "missing_reports": 0,
+          "unfinished_turns": 0,
+          "provider_cost_turns": 0,
+          "estimated_cost_turns": 1,
+          "missing_cost_turns": 0
+        }
+      }
+    }
+  },
+  "expected_bookkeeping_checks": {
+    "primary": {
+      "expected": 11.692545648,
+      "actual": 11.692545648,
+      "matches": true
+    },
+    "secondary": {
+      "expected": 8.232558928,
+      "actual": 8.232558928,
+      "matches": true
+    },
+    "ordinary-writers": {
+      "expected": 7.7348608,
+      "actual": 7.7348608,
+      "matches": true
+    },
+    "ordinary-reviews": {
+      "expected": 13.822365504,
+      "actual": 13.822365504,
+      "matches": true
+    },
+    "auxiliary": {
+      "expected": 0.270412,
+      "actual": 0.270412,
+      "matches": true
+    }
+  },
+  "unique_role_sids": 654,
+  "duplicate_sids": {},
+  "root_usage_policy": "one canonical saved root aggregate per unique role SID; manifest aliases checked but never summed; no pagination-turn or duplicate-root sums",
+  "manifest_alias_checks": [
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/writer-completion-manifest.json",
+      "cohort": "primary",
+      "role": "writer",
+      "sessions": 17,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/completion-manifest.json",
+      "cohort": "primary",
+      "role": "leak-round0",
+      "sessions": 2,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/completion-manifest.json",
+      "cohort": "primary",
+      "role": "editor",
+      "sessions": 4,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-driver/completion-manifest.json",
+      "cohort": "primary",
+      "role": "leak-round1",
+      "sessions": 2,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/completion-manifest.json",
+      "cohort": "primary",
+      "role": "reviewer",
+      "sessions": 102,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-accounting.json",
+      "cohort": "primary",
+      "role": "carrier",
+      "sessions": 34,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/completion-manifest.json",
+      "cohort": "secondary",
+      "role": "writer",
+      "sessions": 13,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/completion-manifest.json",
+      "cohort": "secondary",
+      "role": "leak",
+      "sessions": 2,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/completion-manifest.json",
+      "cohort": "secondary",
+      "role": "reviewer",
+      "sessions": 78,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/carrier-accounting.json",
+      "cohort": "secondary",
+      "role": "carrier",
+      "sessions": 26,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/completion-manifest.json",
+      "cohort": "ordinary-writers",
+      "role": "writer",
+      "sessions": 40,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/reviewer-accounting.json",
+      "cohort": "ordinary-reviews",
+      "role": "reviewer",
+      "sessions": 240,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-accounting.json",
+      "cohort": "ordinary-reviews",
+      "role": "carrier",
+      "sessions": 80,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/relation-results/handcheck-completion.json",
+      "cohort": "primary",
+      "role": "handcheck",
+      "sessions": 1,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/primary-diagnostics/contains-completion.json",
+      "cohort": "auxiliary",
+      "role": "contains",
+      "sessions": 1,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    },
+    {
+      "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-results/handcheck-completion.json",
+      "cohort": "secondary",
+      "role": "handcheck",
+      "sessions": 1,
+      "same_unique_sid_set": true,
+      "counted_again": false
+    }
+  ],
+  "carrier_reviewer_separation": {
+    "raw_carrier_roots_checked": 140,
+    "model_and_root_token_checks_all_pass": true,
+    "bounded_full_metadata_samples": 6,
+    "evidence": "carrier root session IDs distinct from all reviewer IDs; by_model and turn_selections contain DeepSeek only, root tokens equal model totals, sampled command IDs carrier/mailbox rather than reviewer-child. Reviewer roots separately contain Terra. Supported recorded carrier costs exclude recorded reviewer costs. Missing/unreported usage cannot be allocated or proven by these artifacts.",
+    "cost_scalar_scope_explicit_in_raw_schema": false,
+    "conclusion_strength": "Artifact-level corroboration: disjoint SID roots and DeepSeek-only carrier model/turn accounting exclude recorded Terra usage; raw scalar cost has no independent child-inclusion marker or by-model cost allocation. This check does not prove daemon cost-aggregation implementation.",
+    "recorded_cost_separation": "Supported by captured same-SID usage metadata; conditional on root cost scalar representing that reported same-SID usage. No evidence of duplicated reviewer cost found."
+  },
+  "readout_cost_fields": {
+    "relation-results/summary.json": {
+      "known_recorded_api_equivalent_subtotal": 11.692545648,
+      "complete_stage_total": null,
+      "reviewers_complete": 4.6051552,
+      "carrier_recorded_priced_turn_subtotal": 1.795833248,
+      "carrier_missing_usage_reports": 5,
+      "carrier_unfinished_usage_records": 22,
+      "not_live_carriers": true,
+      "aux_applicability_separate": 0.087068,
+      "excludes": "parent/helper orchestration and unpriced/missing carrier usage; estimates notsubscriptioncharges"
+    },
+    "nonrelation-results/summary.json": {
+      "stages": {
+        "writers": 3.237596,
+        "paired_leak": 0.2585964,
+        "reviews_known_recorded": 4.019188128,
+        "paired_catch": 0.5597,
+        "handcheck": 0.1574784
+      },
+      "known_recorded_subtotal_usd_api_equivalent": 8.232558928,
+      "full_stage_cost_usd_api_equivalent": null,
+      "incomplete_reason": "Nine complete carrier totals missing; five missing and twelve unfinished persisted carrier usage entries. All26 actual carriers suspended.",
+      "exclusions": "Parent/helper orchestration, M1 corpus/census and auxiliary H6/contains are separate. API-equivalent estimates are not subscription charges."
+    }
+  },
+  "contradictions": [],
+  "source_manifests": {
+    "/mnt/optane/review-arms-bifrost-20261116/arms/writer-stage/writer-completion-manifest.json": {
+      "sha256": "59afcfc67d610ae4e41df33ed3a33287d56dfdb97d424e1941da4589a175f532"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round0/completion-manifest.json": {
+      "sha256": "e15b144601b91a3639b608abafc0c52af43c3bb77879b72a98bd58bc67a072ad"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/neutralized-stage/editor-completion-manifest.json": {
+      "sha256": "17710f20ed887ae60f4a8608febd6e1e6ee5db333c95160a23448b1d31a3596f"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-stage/completion-manifest.json": {
+      "sha256": "95023ce249444e5e2486db21379ef971bce6a3e538ad74ea9e3c15fd50b7936f"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/review-stage/completion-manifest.json": {
+      "sha256": "91809550d65ebd8e441dc55a5855e334bf1ae9a2924eec5a94a1fff262d4fc71"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/completion-manifest.json": {
+      "sha256": "2ff30a3b07e71d4528bc3b7bc62cd256ac588ae9ea6f832fc84fc6355c2f917f"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/handcheck-driver/completion-manifest.json": {
+      "sha256": "a4acbe892ab56b94df5062b44d0db28cfda1c103f5b1187efa3809ee0e1a31dc"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/review-stage/carrier-accounting.json": {
+      "sha256": "b566fce5403f636f2a1c66e2cc4ad8466c985da0db19c5409552044166e98d28"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/operator/completion.json": {
+      "sha256": "e094073f60a95a2d525b01bf00f0b4a902c7bc4e92a6cf49642f7a06eac0947b"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/contains-driver/completion-manifest.json": {
+      "sha256": "a7ed6c8ebf9f305e919f9a634564063ac46ec3df5d515328a704f59720a9d5eb"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-stage/completion-manifest.json": {
+      "sha256": "06257a612c48799fcfac21a7c202c3ef13264fa140eb3bd95673504c99ed14c8"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-stage/completion-manifest.json": {
+      "sha256": "e135b46bf449728df7666332dd33f29205de901944b46258c9126ded15d6f49d"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-stage/completion-manifest.json": {
+      "sha256": "98c8bfe2e0c0ecc746dc9ab04a76d4e1caeb80a66d7a9920dc117bf350855ed3"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-catch-judge-driver/completion-manifest.json": {
+      "sha256": "05af184db1af5f3fed9e34b0a297b75674f5c9089841ace0a2d0d8b081c06c97"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-handcheck-driver/completion-manifest.json": {
+      "sha256": "c163e5a773e0dce0022c59af32094d03007390703ee1158688985bd277ad410b"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-stage/carrier-accounting.json": {
+      "sha256": "988b3d3fc8489a3f342ffbb957bc123a72c138951a2304c04001a7a6d62eee9e"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-stage/completion-manifest.json": {
+      "sha256": "6861a0e8100c7d36ae014b21d70c9df883f3d3ac826c491461217d163ac7177c"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-stage/reviewer-accounting.json": {
+      "sha256": "01fd44df3a92dfc0d5a94b9b3adb763f58edb8145a5d4abc57fe19ef3df03e91"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-stage/carrier-accounting.json": {
+      "sha256": "e3f5acafe0677ac228b68eca50f88135a1a079390fff7891197e56856fcfb420"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/writer-completion-manifest.json": {
+      "sha256": "59afcfc67d610ae4e41df33ed3a33287d56dfdb97d424e1941da4589a175f532"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/completion-manifest.json": {
+      "sha256": "e15b144601b91a3639b608abafc0c52af43c3bb77879b72a98bd58bc67a072ad"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/rewrite-driver/completion-manifest.json": {
+      "sha256": "17710f20ed887ae60f4a8608febd6e1e6ee5db333c95160a23448b1d31a3596f"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-driver/completion-manifest.json": {
+      "sha256": "95023ce249444e5e2486db21379ef971bce6a3e538ad74ea9e3c15fd50b7936f"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/completion-manifest.json": {
+      "sha256": "91809550d65ebd8e441dc55a5855e334bf1ae9a2924eec5a94a1fff262d4fc71"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-accounting.json": {
+      "sha256": "b566fce5403f636f2a1c66e2cc4ad8466c985da0db19c5409552044166e98d28"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/completion-manifest.json": {
+      "sha256": "06257a612c48799fcfac21a7c202c3ef13264fa140eb3bd95673504c99ed14c8"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-leak-driver/completion-manifest.json": {
+      "sha256": "e135b46bf449728df7666332dd33f29205de901944b46258c9126ded15d6f49d"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/completion-manifest.json": {
+      "sha256": "98c8bfe2e0c0ecc746dc9ab04a76d4e1caeb80a66d7a9920dc117bf350855ed3"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-review-driver/carrier-accounting.json": {
+      "sha256": "988b3d3fc8489a3f342ffbb957bc123a72c138951a2304c04001a7a6d62eee9e"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/completion-manifest.json": {
+      "sha256": "6861a0e8100c7d36ae014b21d70c9df883f3d3ac826c491461217d163ac7177c"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/reviewer-accounting.json": {
+      "sha256": "01fd44df3a92dfc0d5a94b9b3adb763f58edb8145a5d4abc57fe19ef3df03e91"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-accounting.json": {
+      "sha256": "e3f5acafe0677ac228b68eca50f88135a1a079390fff7891197e56856fcfb420"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/relation-results/summary.json": {
+      "sha256": "82b7b9a860f7e6121ce176826fdf85fec84176e4fb0ef7674f7968e634156db7"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-results/summary.json": {
+      "sha256": "718b40d43589aa6990209afa422d424fa6112a7839534dbf16a6ced7b4c3df9b"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/relation-results/handcheck-completion.json": {
+      "sha256": "a4acbe892ab56b94df5062b44d0db28cfda1c103f5b1187efa3809ee0e1a31dc"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/primary-diagnostics/contains-completion.json": {
+      "sha256": "a7ed6c8ebf9f305e919f9a634564063ac46ec3df5d515328a704f59720a9d5eb"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-results/handcheck-completion.json": {
+      "sha256": "c163e5a773e0dce0022c59af32094d03007390703ee1158688985bd277ad410b"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-stage/completion-manifest.json": {
+      "sha256": "9061bbba214e0d745f1884963de864125e75f8cc9034efc7ca41c362d7814d59"
+    },
+    "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/completion-manifest.json": {
+      "sha256": "9061bbba214e0d745f1884963de864125e75f8cc9034efc7ca41c362d7814d59"
+    }
+  },
+  "limits": [
+    "Full campaign and all three carrier cohort totals remain null because carrier reporting is incomplete.",
+    "API-equivalent estimates, not subscription charges; no quota-dollar conversion.",
+    "Excluded pending Control2 and active work; no outputs/keys from ordinary verification inspected.",
+    "Historical artifacts alone do not independently prove daemon implementation semantics for absent reports; model/turn/root metadata substantiate separation for recorded usage.",
+    "Carrier scalar-cost exclusion cannot be independently proved from cost-specific scope fields: raw schema supplies a scalar global cost but no by-model dollar allocation/child-inclusion flag. The disjoint SID/model/turn records strongly corroborate separation; no daemon/source/service audit was authorized."
+  ],
+  "selection_check": {
+    "all654_actual_role_models_profiles_efforts_match": true,
+    "noncarrier_model_counts": {
+      "gpt-6.1-sol": 94,
+      "gpt-6.1-terra": 420
+    },
+    "carrier_model_counts": {
+      "deepseek-v4-pro": 140
+    }
+  },
+  "manifest_alias_root_reconciliation": {
+    "rows_checked": 643,
+    "root_cost_fields_and_coverage_match": true,
+    "anomalies": []
+  },
+  "ledger_sha256": "1f7015bf47d9bf4ef5d85ed64f4d9369dac6f71d4fead6adbcccd705f3c8641c",
+  "carrier_root_samples_sha256": "7b7717f0f933456cf0f18af7842a9c79a2146e8275bc3e574fa36282c4fb14f0"
+}

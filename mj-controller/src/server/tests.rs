@@ -70,6 +70,7 @@ use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
@@ -1873,7 +1874,7 @@ fn a_tampered_cookie_is_refused() {
 #[tokio::test]
 async fn an_oversized_draft_is_refused_with_a_stable_code() {
     let (app, _, _, _, mut stored) = app();
-    let draft = "x".repeat(64 * 1024 + 1);
+    let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
     let response = app
         .oneshot(
             Request::put("/api/sessions/session-1/draft")
@@ -4890,7 +4891,7 @@ fn viewer_move_controls_use_global_availability_for_delegation() {
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ subagents_configured: false, profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 {source}
 const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};

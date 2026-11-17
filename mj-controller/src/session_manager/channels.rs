@@ -83,7 +83,7 @@ pub enum RemoteSessionRequest {
     },
     Sync {
         session_id: String,
-        reply: oneshot::Sender<std::result::Result<(), String>>,
+        reply: oneshot::Sender<Result<()>>,
     },
     RespondElicitation {
         session_id: String,
@@ -169,9 +169,10 @@ impl RemoteSessionRequest {
             Self::Submit { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned().into()));
             }
-            Self::Sync { reply, .. }
-            | Self::RespondElicitation { reply, .. }
-            | Self::StopBackgroundTask { reply, .. } => {
+            Self::Sync { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!(message.to_owned())));
+            }
+            Self::RespondElicitation { reply, .. } | Self::StopBackgroundTask { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned()));
             }
             Self::Reviewer { reply, .. } => {

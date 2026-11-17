@@ -6,6 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -237,6 +238,7 @@ impl Controller {
     /// working between an observation and this call.
     pub async fn upgrade_session_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -310,7 +312,7 @@ impl Controller {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
                 let Some(mut lease) =
-                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                    super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
@@ -550,6 +552,7 @@ impl Controller {
                     super::execute_checked(
                         executor,
                         targets::command_on_locator(
+                            SshTrafficClass::Control,
                             backend,
                             session_id,
                             vec![

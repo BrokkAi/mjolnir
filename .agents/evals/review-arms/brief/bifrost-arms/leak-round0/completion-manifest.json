@@ -1,0 +1,412 @@
+{
+  "recorded_epoch": 1794889617.7519536,
+  "scope": "round0 paired leak ONLY; no reviews, carriers, catch judges, rewrites or replacement prompts",
+  "launch_head": "be74a5cb9c5bae1fd0f6025e2cbf3c55b1652679",
+  "current_head": "70da26f718fc49941127dc158814a028eb3b010d",
+  "code_inputs_and17brief_bytes_unchanged": true,
+  "writers_manifest_sha256": "5a634bfc63c262c82b0b7b03deec92900014f09967d8f687be418d22ce886769",
+  "brief_count": 17,
+  "verdict_count": 34,
+  "label_counts": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1
+  },
+  "judge_label_counts": {
+    "A": {
+      "missed": 13,
+      "partial": 3,
+      "caught": 1
+    },
+    "B": {
+      "missed": 13,
+      "partial": 3,
+      "caught": 1
+    }
+  },
+  "needs_parent_rewrite_decision": [
+    "go-receiver-poisons-package-result-contract-discovery",
+    "mcp-default-advisory-reported-clean",
+    "python-module-binding-representative-after-event",
+    "unproven-override-family-certifies-empty"
+  ],
+  "labels": [
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "7d64698bed4679ac74d926cc1864705ceaf7104dddf892a82efc34f9394ecbf3"
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "6dd8a1b188e7fb9eb74ec72646499a6a50efd630891b22729848752438f8db97"
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "1cdec7f090f20dc9cd6b6f477ecd550135216fed591f9ba8e02e219dd631ec7c"
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "brief_sha256": "d3d5ab41659aec2e013db20b804b6db2104ef7124e2231ce07c849f9cc4dae47"
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "75aa589daf0f1a09fb1a50c6a579e4208cc5cf4469543dff25dc22ac918fcf39"
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "a8bbdf1ff7330471b1b8c64622b8786e00c8c6e97d160ae61925d5775714bff4"
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "7fcafd151e1f8f8d185e7fd44ab7cfc446107c33ed5a1b7c0f5219a266270f70"
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "743e007aaa81b8252cc83bd4fb9da5f23c9449f0b42dfaa531a719dda90fe145"
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "d36fcd30ab8544e8398541a034f34f3824f6ae6be23d83f341c5d75cd30dad0b"
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "5b50798aa48da2ef569cf623d2faf8cfba109e669ba50b8916730b05b9184a2d"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "brief_sha256": "58cbbab7c391af92b80c56994089e49bcd6f22fb2a3574fb965ed900cac82555"
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "d864ae77f88daeeb3e3066200706c1fcb8931b8262da17a7ddd852ecbc198993"
+    },
+    {
+      "id": "python-filescope-enclosing-tie",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "e177db0a803e68e3b94fb4ae387524ca704197db0336d6bde1fb7c2c2a3bb6f3"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "label": "partial",
+      "judge_labels": {
+        "A": "partial",
+        "B": "partial"
+      },
+      "brief_sha256": "f0a6730b61dd66e9698abc27fd487ad7a1dece75224ffb2d7f77985f4579bcc9"
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "29ea15013818656269f9d460976ae0057c4af7336de23f4d43419b3b6975a66f"
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "label": "missed",
+      "judge_labels": {
+        "A": "missed",
+        "B": "missed"
+      },
+      "brief_sha256": "94d2e5da82871b5ad6f0fc116a3f6b4d8177e2ab38ee1788231055583291598b"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "label": "caught",
+      "judge_labels": {
+        "A": "caught",
+        "B": "caught"
+      },
+      "brief_sha256": "1a8fcf5b391b01269b2a45339f2be60ada9a20541f39b2dd85995a2863ace629"
+    }
+  ],
+  "sessions": [
+    {
+      "judge": "A",
+      "sid": "f6fe805c46daa6ddedb22368882975a9",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-relation-leak-0-batch-0-A-f6fe805c46da",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 251,
+        "completed_at_ms": 1794889520656,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "prompted_ns": 1794889422741847452,
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 351104,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 52309,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2827,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 864,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 406240,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 351104,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 52309,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2827,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 864,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 406240,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1679984000,
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/usage-f6fe805c46daa6ddedb22368882975a9.json"
+    },
+    {
+      "judge": "B",
+      "sid": "c37f5fe30c9a78ff69db5152fd7adb3c",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-relation-leak-0-batch-0-B-c37f5fe30c9a",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 255,
+        "completed_at_ms": 1794889543400,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "prompted_ns": 1794889422737022262,
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 395136,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 57749,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3337,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 1125,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 456222,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 395136,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 57749,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3337,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 1125,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 456222,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1883816000,
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/usage-c37f5fe30c9a78ff69db5152fd7adb3c.json"
+    }
+  ],
+  "usage_accounting": "One global root cost per SID; no sum of paginated turns. Both usage pages complete, one full turn per SID; estimated API equivalents, not subscription charges.",
+  "estimated_api_cost_usd": 0.35638,
+  "usage_totals_sum": {
+    "cached_read_tokens": 746240,
+    "cached_write_tokens": 0,
+    "input_tokens": 110058,
+    "output_tokens": 6164,
+    "thought_tokens": 1989,
+    "total_tokens": 862462
+  },
+  "quota_before": {
+    "remaining_percent": 36,
+    "refreshed_epoch": 1794889372,
+    "age_at_read_seconds": 3.764934539794922,
+    "refresh_after_writers": true
+  },
+  "quota_after": {
+    "remaining_percent": 36,
+    "refreshed_epoch": 1794889372,
+    "age_at_read_seconds": 245.7549386024475,
+    "refresh_after_last_leak_completion": false
+  },
+  "quota_note": "Cached snapshot freshness recorded explicitly; shared profile delta is not isolated leak usage.",
+  "paths": {
+    "commands": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/commands.json",
+    "preflight": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/preflight.json",
+    "raw_combined_verdicts": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-leak-0/workflow-out.json",
+    "raw_per_judge_outputs": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-leak-0/out",
+    "driver_log": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/verify.log",
+    "collection_log": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-driver/collect.log",
+    "hash_bound_key": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-leak-0/key.json"
+  }
+}

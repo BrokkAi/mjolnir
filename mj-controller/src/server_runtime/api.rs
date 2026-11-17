@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,14 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn workspace_admission(
+        &self,
+        _session_id: String,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async { bail!("workspace admission is unavailable") })
+    }
+
     fn request_review(
         &self,
         _session_id: String,
@@ -254,6 +263,25 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn workspace_admission(
+        &self,
+        session_id: String,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async move {
+            self.session_gate()
+                .enter_foreground(
+                    &session_id,
+                    "workspace file upload",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &cancelled,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .map(crate::recovery_gate::SessionAdmission::Foreground)
+        })
+    }
+
     fn request_review(
         &self,
         session_id: String,
@@ -792,26 +820,19 @@ impl ApiBackend {
         })
         .await?;
         let prepared = if let Some((prepared, result)) = stored {
-            if let Some(mut result) = result {
+            if let Some(result) = result {
                 if matches!(
                     prepared.request.action,
                     mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                         | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
                 ) {
-                    blocking("retire legacy wait", {
+                    return blocking("retire legacy wait", {
                         let parent = parent.clone();
                         let id = request.request_id.clone();
                         move || crate::database::retire_legacy_wait(parent, id)
                     })
-                    .await?;
-                    // Retain the compatibility answer for every delivery retry.
-                    result.result.is_error = false;
-                    result.result.message = serde_json::json!({
-                        "status": "reports_arrive_as_messages",
-                        "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION
-                    })
-                    .to_string();
-                    result.reported_finishes.clear();
+                    .await?
+                    .context("legacy wait result disappeared before conversion");
                 }
                 return Ok(result);
             }
@@ -3415,6 +3436,10 @@ async fn write_workspace_file(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), ExportError> {
     use std::sync::atomic::Ordering;
+    let session_admission = exports
+        .workspace_admission(session_id.clone(), cancelled.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let record = exports
         .session_record(&session_id)
         .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
@@ -3429,9 +3454,13 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
-    let mut lease = crate::controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
-        .await
-        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let mut lease = crate::controller::IdleWorkspaceLease::acquire(
+        &session_admission,
+        &handle,
+        record.harness_kind,
+    )
+    .await
+    .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -3455,9 +3484,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -3526,7 +3560,13 @@ fn worker_command_spec(
     let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
-    targets::command_on_locator(&layout.backend, session, argv, purpose)
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {

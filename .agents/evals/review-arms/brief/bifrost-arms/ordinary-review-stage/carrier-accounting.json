@@ -1,0 +1,2936 @@
+{
+  "summary": {
+    "sessions": 80,
+    "priced_complete_sessions": 55,
+    "known_recorded_cost_usd_api_equivalent": 3.813071504,
+    "total_cost_usd_api_equivalent": null,
+    "missing_price_or_scope_sids": [
+      "fae564fd61de045a1536787014f69776",
+      "389c843bbaf9afe0ab2e60747da2e169",
+      "461cc5de48e9445e0cfa48f60bee7f8f",
+      "658ca15351019a55635fe2f44abec759",
+      "17c1cea7a9ee478b97481e6114c29faf",
+      "0c5ee5762a08d110847e5ff979efd8e5",
+      "4356ee33f94f6f627f264397364064d4",
+      "9a33d3c06d86aee15024fb89539799df",
+      "281af6d46c2efba612dd029e87c864e6",
+      "32b12cbe9e65e670265af439091a5234",
+      "96109e16dfed9c4aae96ff4f2f99b59f",
+      "465a2a29122972002fbc9e1ffa185ba7",
+      "e9315c29c2ea9bc7678f766d0c970a53",
+      "dbdd995a11801b1933325bf791514f5d",
+      "f8687a777d22ec8f85833ae0f94e069a",
+      "cd64df8df2420fb5f3719473b77d8e88",
+      "00969b7bdf88ae6164112f644f422408",
+      "676d82ad44dd9ff8fe215add1c3d8ac2",
+      "cffc9bcd56550178afb81e7e257b9f38",
+      "b08f8b7e9ed79a8d1abef20e921a1f4f",
+      "ca0c58d4c2bd78803a46db7a2f2812f9",
+      "e0862fd7baf5d1ddc6c78c5312e54bf3",
+      "1997fd6f8771319f67bc122ae4aa2149",
+      "47827df6fc259aacccff85d66f664d12",
+      "f6476346b0802dea7c3ab0e4e904e710"
+    ],
+    "aggregate_usage_coverage": {
+      "recorded_turns": 220,
+      "full_turn_reports": 206,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 14,
+      "unfinished_turns": 23,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 206,
+      "missing_cost_turns": 0
+    },
+    "aggregate_root_token_totals": {
+      "cached_read_tokens": 19115776,
+      "input_tokens": 20462759,
+      "output_tokens": 301505,
+      "total_tokens": 20764264
+    },
+    "source": "one root usage response per SID; no paginated sums",
+    "billing_note": "API-equivalent estimate; not subscription charge; incomplete/missing total stays null"
+  },
+  "sessions": [
+    {
+      "bug": "diff-b607037341",
+      "arm": "BT",
+      "sid": "29f3499d7467c5fe85f5564d6315df4e",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/29f3499d7467c5fe85f5564d6315df4e.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 23424,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 32713,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 194,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 32907,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 140603760
+    },
+    {
+      "bug": "diff-d3b5598051",
+      "arm": "A",
+      "sid": "f94dfb2f31897e2091334e91c52d454e",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/f94dfb2f31897e2091334e91c52d454e.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 10368,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 21109,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 135,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 21244,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 151689120
+    },
+    {
+      "bug": "diff-8a51f05e0a",
+      "arm": "A",
+      "sid": "7a379fbb1ca41786a03765e339b4aa60",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/7a379fbb1ca41786a03765e339b4aa60.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 11776,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 23351,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 1049,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 24400,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 199511840
+    },
+    {
+      "bug": "diff-4d3aaeb3d1",
+      "arm": "BT",
+      "sid": "b605e97dd07c790b554acd853773c3e2",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/b605e97dd07c790b554acd853773c3e2.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 6912,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 13943,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 117,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 14060,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 100483680
+    },
+    {
+      "bug": "diff-1cfbe59c5b",
+      "arm": "A",
+      "sid": "807c77713aa86efed4febb89b726f5d8",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/807c77713aa86efed4febb89b726f5d8.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 18432,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 25614,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 799,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 26413,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 134552880
+    },
+    {
+      "bug": "diff-9f61b39391",
+      "arm": "BT",
+      "sid": "f18c85f8436b7058d37d72f1b5c27acc",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/f18c85f8436b7058d37d72f1b5c27acc.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 10240,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 20625,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 220,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 20845,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 150299600
+    },
+    {
+      "bug": "diff-5febdb1c44",
+      "arm": "A",
+      "sid": "fae564fd61de045a1536787014f69776",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/fae564fd61de045a1536787014f69776.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 164608,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 180056,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 12225,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 192281,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 760451120
+    },
+    {
+      "bug": "diff-695a400f18",
+      "arm": "A",
+      "sid": "e3a8a99f88f19682347d3b5d95ae70b2",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e3a8a99f88f19682347d3b5d95ae70b2.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 17152,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 23921,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 434,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 24355,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 114084080
+    },
+    {
+      "bug": "diff-1c0f689be1",
+      "arm": "BT",
+      "sid": "cb20ecf3ef95ea03f86fda4cde57fb95",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/cb20ecf3ef95ea03f86fda4cde57fb95.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 41088,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 55860,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 47,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 55907,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 214930320
+    },
+    {
+      "bug": "diff-6449f901ba",
+      "arm": "A",
+      "sid": "495cefd09644f4a478f791c19205cfb4",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/495cefd09644f4a478f791c19205cfb4.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 4608,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 9510,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 265,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 9775,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 77227920
+    },
+    {
+      "bug": "diff-5053bc5bea",
+      "arm": "BT",
+      "sid": "389c843bbaf9afe0ab2e60747da2e169",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/389c843bbaf9afe0ab2e60747da2e169.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 424704,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 481449,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 20150,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 501599,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 1733843760
+    },
+    {
+      "bug": "diff-62d65b4fab",
+      "arm": "BT",
+      "sid": "3913b60213bba71417beeb42dc7d1c73",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/3913b60213bba71417beeb42dc7d1c73.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 16256,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 25387,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 120,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 25507,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 132433840
+    },
+    {
+      "bug": "diff-c2e0ac6264",
+      "arm": "BT",
+      "sid": "ab34f25235ba3622d77aa15f633fce82",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ab34f25235ba3622d77aa15f633fce82.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 27520,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 37699,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 289,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 37988,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 157916000
+    },
+    {
+      "bug": "diff-a3b59a9183",
+      "arm": "BT",
+      "sid": "461cc5de48e9445e0cfa48f60bee7f8f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/461cc5de48e9445e0cfa48f60bee7f8f.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24448,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 37898,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 196,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 38094,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 196058720
+    },
+    {
+      "bug": "diff-9dad3f2c71",
+      "arm": "A",
+      "sid": "9e071537f10e5815a0dbac0d63c1f0f9",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/9e071537f10e5815a0dbac0d63c1f0f9.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 25600,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 35229,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 561,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 35790,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 160582400
+    },
+    {
+      "bug": "diff-c9cd4a27f9",
+      "arm": "A",
+      "sid": "4245bd87476129732e25c7dfd8a24527",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/4245bd87476129732e25c7dfd8a24527.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 9344,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 18985,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 428,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 19413,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 148321360
+    },
+    {
+      "bug": "diff-5febdb1c44",
+      "arm": "BT",
+      "sid": "ac7eaa9b9c8f494e3bdb4339b23b23ad",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ac7eaa9b9c8f494e3bdb4339b23b23ad.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 16128,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 23580,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 157,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 23737,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 111679920
+    },
+    {
+      "bug": "diff-43553e0d35",
+      "arm": "BT",
+      "sid": "658ca15351019a55635fe2f44abec759",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/658ca15351019a55635fe2f44abec759.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 1944832,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 2009678,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 30599,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 2040277,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 2923413680
+    },
+    {
+      "bug": "diff-9dad3f2c71",
+      "arm": "BT",
+      "sid": "ae055edb34bea0738617e3a3c6859e9e",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ae055edb34bea0738617e3a3c6859e9e.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 19840,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 30822,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 290,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 31112,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 165176000
+    },
+    {
+      "bug": "diff-57069dc4f7",
+      "arm": "BT",
+      "sid": "ca4b89d8aa9b409d668ffa4ce84da729",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ca4b89d8aa9b409d668ffa4ce84da729.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 7168,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 14853,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 345,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 15198,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 118257920
+    },
+    {
+      "bug": "diff-4a12c7dafa",
+      "arm": "A",
+      "sid": "dff047e7031e69cfecdb3ed0e1aa3d85",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/dff047e7031e69cfecdb3ed0e1aa3d85.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 32256,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 44260,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 185,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 44445,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 179971440
+    },
+    {
+      "bug": "diff-0041fe831a",
+      "arm": "A",
+      "sid": "17c1cea7a9ee478b97481e6114c29faf",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/17c1cea7a9ee478b97481e6114c29faf.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 3471872,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 3547564,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 49363,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 3596927,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 4481532880
+    },
+    {
+      "bug": "diff-bb4addf48b",
+      "arm": "A",
+      "sid": "db1f149241fe37eb1b7b83594e4121db",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/db1f149241fe37eb1b7b83594e4121db.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 11776,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 23700,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 6057,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 29757,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 402435440
+    },
+    {
+      "bug": "diff-a3b59a9183",
+      "arm": "A",
+      "sid": "fa01b338a5c15b57806cab6615bbff1b",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/fa01b338a5c15b57806cab6615bbff1b.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 21632,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 33019,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 273,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 33292,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 170637280
+    },
+    {
+      "bug": "diff-43823779fb",
+      "arm": "BT",
+      "sid": "bca0297a489bcf534b1bda0d80e4d3eb",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/bca0297a489bcf534b1bda0d80e4d3eb.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 8064,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 16399,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 175,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 16574,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 120500160
+    },
+    {
+      "bug": "diff-c9cd4a27f9",
+      "arm": "BT",
+      "sid": "42fafa23bb11c86ff987b6c5f35d1dfe",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/42fafa23bb11c86ff987b6c5f35d1dfe.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 10880,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 21984,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 288,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 22272,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 162764800
+    },
+    {
+      "bug": "diff-4a12c7dafa",
+      "arm": "BT",
+      "sid": "0c5ee5762a08d110847e5ff979efd8e5",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/0c5ee5762a08d110847e5ff979efd8e5.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 36352,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 49459,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 231,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 49690,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 198154880
+    },
+    {
+      "bug": "diff-bb4addf48b",
+      "arm": "BT",
+      "sid": "b430537146f553913bea11b5bc8fe840",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/b430537146f553913bea11b5bc8fe840.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13056,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 26275,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 276,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 26551,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 191165040
+    },
+    {
+      "bug": "diff-22207e44f0",
+      "arm": "A",
+      "sid": "c8ed5bbe8ffcceceb6fc00fea8365af6",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/c8ed5bbe8ffcceceb6fc00fea8365af6.json",
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 5571,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 121,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 5692,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 78328800
+    },
+    {
+      "bug": "diff-22207e44f0",
+      "arm": "BT",
+      "sid": "4356ee33f94f6f627f264397364064d4",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/4356ee33f94f6f627f264397364064d4.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 6973,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 100,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 7073,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 96003600
+    },
+    {
+      "bug": "diff-df5fb945bf",
+      "arm": "A",
+      "sid": "7e4b9413960186bf07416e99844c2a74",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/7e4b9413960186bf07416e99844c2a74.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 5888,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 11578,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 222,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 11800,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 86489920
+    },
+    {
+      "bug": "diff-0041fe831a",
+      "arm": "BT",
+      "sid": "9a33d3c06d86aee15024fb89539799df",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/9a33d3c06d86aee15024fb89539799df.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13440,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 20736,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 228,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 20964,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 111249600
+    },
+    {
+      "bug": "diff-0dc1b2afef",
+      "arm": "A",
+      "sid": "281af6d46c2efba612dd029e87c864e6",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/281af6d46c2efba612dd029e87c864e6.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 5344128,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 5496173,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 34729,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 5530902,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 5733678720
+    },
+    {
+      "bug": "diff-b607037341",
+      "arm": "A",
+      "sid": "060d806673cbcf1b040430093f47f401",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/060d806673cbcf1b040430093f47f401.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 18688,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 26133,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 308,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 26441,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 118693520
+    },
+    {
+      "bug": "diff-27a65d6991",
+      "arm": "BT",
+      "sid": "97a343068e5350ae49f074254edab99e",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/97a343068e5350ae49f074254edab99e.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 43648,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 59387,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 184,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 59571,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 234246320
+    },
+    {
+      "bug": "diff-378bd893ed",
+      "arm": "BT",
+      "sid": "b85b94c9b407ae8e34e341cb829c6946",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/b85b94c9b407ae8e34e341cb829c6946.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 26624,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 37040,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 48,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 37088,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 151106560
+    },
+    {
+      "bug": "diff-9f61b39391",
+      "arm": "A",
+      "sid": "255e86bdb1cbcc827c71398cc4b807a7",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/255e86bdb1cbcc827c71398cc4b807a7.json",
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 9047,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 89,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 9136,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 122944800
+    },
+    {
+      "bug": "diff-5e17ecf53c",
+      "arm": "A",
+      "sid": "32b12cbe9e65e670265af439091a5234",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/32b12cbe9e65e670265af439091a5234.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 14848,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 21104,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 394,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 21498,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 104714720
+    },
+    {
+      "bug": "diff-2eaec0a7ad",
+      "arm": "BT",
+      "sid": "96109e16dfed9c4aae96ff4f2f99b59f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/96109e16dfed9c4aae96ff4f2f99b59f.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 27520,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 38041,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 260,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 38301,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 161282000
+    },
+    {
+      "bug": "diff-63713569c1",
+      "arm": "A",
+      "sid": "465a2a29122972002fbc9e1ffa185ba7",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/465a2a29122972002fbc9e1ffa185ba7.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 7889,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 72,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 7961,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 106986000
+    },
+    {
+      "bug": "diff-5053bc5bea",
+      "arm": "A",
+      "sid": "a536f2072f231c78dda217886dcfa298",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/a536f2072f231c78dda217886dcfa298.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 7424,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 15275,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 100,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 15375,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 110859760
+    },
+    {
+      "bug": "diff-6f9a2656f3",
+      "arm": "BT",
+      "sid": "4c79d9ebd30eb31b96919aae7ac5bd5a",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/4c79d9ebd30eb31b96919aae7ac5bd5a.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13312,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 18925,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 175,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 19100,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 86878880
+    },
+    {
+      "bug": "diff-fdcd0552e9",
+      "arm": "BT",
+      "sid": "e9315c29c2ea9bc7678f766d0c970a53",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e9315c29c2ea9bc7678f766d0c970a53.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 17920,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 25061,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 451,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 25512,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 120005600
+    },
+    {
+      "bug": "diff-df5fb945bf",
+      "arm": "BT",
+      "sid": "4001e8b3d791a826ef4c230248456bcf",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/4001e8b3d791a826ef4c230248456bcf.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 7296,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 14814,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 325,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 15139,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 115317840
+    },
+    {
+      "bug": "diff-1cfbe59c5b",
+      "arm": "BT",
+      "sid": "dbdd995a11801b1933325bf791514f5d",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/dbdd995a11801b1933325bf791514f5d.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 993152,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 1041720,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 21004,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 1062724,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 1909842880
+    },
+    {
+      "bug": "diff-43553e0d35",
+      "arm": "A",
+      "sid": "811637054ad6d1e6fad0d434f4946b00",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/811637054ad6d1e6fad0d434f4946b00.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 11008,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 22362,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 308,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 22670,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 166913120
+    },
+    {
+      "bug": "diff-5c3a37983d",
+      "arm": "A",
+      "sid": "8882343039dcc040dd05b090a1e7e08d",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/8882343039dcc040dd05b090a1e7e08d.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 12160,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 24567,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 223,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 24790,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 177953600
+    },
+    {
+      "bug": "diff-b4dc5c62d0",
+      "arm": "BT",
+      "sid": "099ed5610b11b47aac72b0b2c243abde",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/099ed5610b11b47aac72b0b2c243abde.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 41344,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 56618,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 141,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 56759,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 225391760
+    },
+    {
+      "bug": "diff-63713569c1",
+      "arm": "BT",
+      "sid": "f8687a777d22ec8f85833ae0f94e069a",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/f8687a777d22ec8f85833ae0f94e069a.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 9013,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 89,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 9102,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 122496000
+    },
+    {
+      "bug": "diff-1c0f689be1",
+      "arm": "A",
+      "sid": "86a420203be8c88abf46ffee222115ff",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/86a420203be8c88abf46ffee222115ff.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24832,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 37774,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 100,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 37874,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 185720480
+    },
+    {
+      "bug": "diff-bb39a5fd49",
+      "arm": "A",
+      "sid": "18271c0058d6c08bd5031c15cd02f45d",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/18271c0058d6c08bd5031c15cd02f45d.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24576,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 34297,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 152,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 34449,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 145149840
+    },
+    {
+      "bug": "diff-62d65b4fab",
+      "arm": "A",
+      "sid": "44d1823dea268c88935e3e64939552d2",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/44d1823dea268c88935e3e64939552d2.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 21632,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 30490,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 330,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 30820,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 139511680
+    },
+    {
+      "bug": "diff-5c3a37983d",
+      "arm": "BT",
+      "sid": "cd64df8df2420fb5f3719473b77d8e88",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/cd64df8df2420fb5f3719473b77d8e88.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 2092544,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 2170618,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 21554,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 2192172,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 2804834560
+    },
+    {
+      "bug": "diff-b4dc5c62d0",
+      "arm": "A",
+      "sid": "94039d860aede408e75ede8c802d891d",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/94039d860aede408e75ede8c802d891d.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 36608,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 49962,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 234,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 50196,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 201646720
+    },
+    {
+      "bug": "diff-95655a5e97",
+      "arm": "BT",
+      "sid": "09067fd783f3c3cbf786d665de4885c6",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/09067fd783f3c3cbf786d665de4885c6.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 11008,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 17287,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 106,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 17393,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 91923920
+    },
+    {
+      "bug": "diff-4d3aaeb3d1",
+      "arm": "A",
+      "sid": "2bd8364c036cc971f4f1b9c808b83f3b",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/2bd8364c036cc971f4f1b9c808b83f3b.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 5504,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 11095,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 546,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 11641,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 97844560
+    },
+    {
+      "bug": "diff-95655a5e97",
+      "arm": "A",
+      "sid": "00969b7bdf88ae6164112f644f422408",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/00969b7bdf88ae6164112f644f422408.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13440,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 19200,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 224,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 19424,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 90816000
+    },
+    {
+      "bug": "diff-fdcd0552e9",
+      "arm": "A",
+      "sid": "676d82ad44dd9ff8fe215add1c3d8ac2",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/676d82ad44dd9ff8fe215add1c3d8ac2.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13440,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 19043,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 1445,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 20488,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 137095200
+    },
+    {
+      "bug": "diff-bb39a5fd49",
+      "arm": "BT",
+      "sid": "0f23bb69a200485d9306560e463ae6a7",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/0f23bb69a200485d9306560e463ae6a7.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 28416,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 38586,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 1534,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 40120,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 207493440
+    },
+    {
+      "bug": "diff-6449f901ba",
+      "arm": "BT",
+      "sid": "ba056ab977e7e2031b67f27724857bf3",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ba056ab977e7e2031b67f27724857bf3.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 550144,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 640226,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 12460,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 652686,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 1924561760
+    },
+    {
+      "bug": "diff-d3b5598051",
+      "arm": "BT",
+      "sid": "8f4111d1fe9944403a5151bdb2805e12",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/8f4111d1fe9944403a5151bdb2805e12.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 36224,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 49420,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 283,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 49703,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 201332560
+    },
+    {
+      "bug": "diff-57069dc4f7",
+      "arm": "A",
+      "sid": "cffc9bcd56550178afb81e7e257b9f38",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/cffc9bcd56550178afb81e7e257b9f38.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 5856,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 115,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 5971,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 81853200
+    },
+    {
+      "bug": "diff-7e35e90ce9",
+      "arm": "A",
+      "sid": "bb13dce876905692f17a4128645bb7fd",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/bb13dce876905692f17a4128645bb7fd.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 12672,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 25466,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 155,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 25621,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 180594480
+    },
+    {
+      "bug": "diff-8df49fdb43",
+      "arm": "A",
+      "sid": "b08f8b7e9ed79a8d1abef20e921a1f4f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/b08f8b7e9ed79a8d1abef20e921a1f4f.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 2040192,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 2088994,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 35372,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 2124366,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 2942602080
+    },
+    {
+      "bug": "diff-c2e0ac6264",
+      "arm": "A",
+      "sid": "ca0c58d4c2bd78803a46db7a2f2812f9",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ca0c58d4c2bd78803a46db7a2f2812f9.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 23040,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 31865,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 3275,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 35140,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 256317600
+    },
+    {
+      "bug": "diff-8df49fdb43",
+      "arm": "BT",
+      "sid": "ba351aaabdfa529b5cf75afaae98e686",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ba351aaabdfa529b5cf75afaae98e686.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13568,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 27345,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 121,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 27466,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 192617920
+    },
+    {
+      "bug": "diff-7e35e90ce9",
+      "arm": "BT",
+      "sid": "06a7bc37cae032a493df7843ab312757",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/06a7bc37cae032a493df7843ab312757.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 14080,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 28715,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 746,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 29461,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 228918800
+    },
+    {
+      "bug": "diff-b58235b247",
+      "arm": "BT",
+      "sid": "614a2d576396df14e0e2fa4d02993f1f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/614a2d576396df14e0e2fa4d02993f1f.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 35200,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 48926,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 91,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 49017,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 200274800
+    },
+    {
+      "bug": "diff-27a65d6991",
+      "arm": "A",
+      "sid": "e0862fd7baf5d1ddc6c78c5312e54bf3",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e0862fd7baf5d1ddc6c78c5312e54bf3.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 39040,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 53368,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 705,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 54073,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 234225200
+    },
+    {
+      "bug": "diff-378bd893ed",
+      "arm": "A",
+      "sid": "82745cc087c895d12af888f9edb42d1f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/82745cc087c895d12af888f9edb42d1f.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 22144,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 30816,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 256,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 31072,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 134351360
+    },
+    {
+      "bug": "diff-b58235b247",
+      "arm": "A",
+      "sid": "e1c6a6dbcb58f2283e01beceebbbb2d5",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e1c6a6dbcb58f2283e01beceebbbb2d5.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 30720,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 43085,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 160,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 43245,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 183070800
+    },
+    {
+      "bug": "diff-a75a035026",
+      "arm": "BT",
+      "sid": "1997fd6f8771319f67bc122ae4aa2149",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/1997fd6f8771319f67bc122ae4aa2149.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 22656,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 35171,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 60,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 35231,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 177542640
+    },
+    {
+      "bug": "diff-6f9a2656f3",
+      "arm": "A",
+      "sid": "0d7e1def05a270b71ce37fc901b37fa3",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/0d7e1def05a270b71ce37fc901b37fa3.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 5888,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 9237,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 100,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 9337,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 50757520
+    },
+    {
+      "bug": "diff-5e17ecf53c",
+      "arm": "BT",
+      "sid": "47827df6fc259aacccff85d66f664d12",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/47827df6fc259aacccff85d66f664d12.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 6105,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 273,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 6378,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 91396800
+    },
+    {
+      "bug": "diff-0dc1b2afef",
+      "arm": "BT",
+      "sid": "cad7192b1143b638ae3e72f3b166ef28",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/cad7192b1143b638ae3e72f3b166ef28.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 23040,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 31800,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 249,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 32049,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 135630000
+    },
+    {
+      "bug": "diff-2eaec0a7ad",
+      "arm": "A",
+      "sid": "bf263a984447e31c91b6dd87ef7369d2",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/bf263a984447e31c91b6dd87ef7369d2.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 15104,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 23322,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 361,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 23683,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 129418960
+    },
+    {
+      "bug": "diff-43823779fb",
+      "arm": "A",
+      "sid": "f6476346b0802dea7c3ab0e4e904e710",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/f6476346b0802dea7c3ab0e4e904e710.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 874496,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 912925,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 26863,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 939788,
+          "reported_turns": 1
+        }
+      },
+      "turn_cost_usd_ticks": 1955815840
+    },
+    {
+      "bug": "diff-695a400f18",
+      "arm": "BT",
+      "sid": "e09005d7b3e3b46d5303696c57887720",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e09005d7b3e3b46d5303696c57887720.json",
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13952,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 21646,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 113,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 21759,
+          "reported_turns": 3
+        }
+      },
+      "turn_cost_usd_ticks": 112174480
+    },
+    {
+      "bug": "diff-a75a035026",
+      "arm": "A",
+      "sid": "e0a64876e46920eda62a20db8b98f017",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/e0a64876e46920eda62a20db8b98f017.json",
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 30080,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 41322,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 741,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 42063,
+          "reported_turns": 4
+        }
+      },
+      "turn_cost_usd_ticks": 190973200
+    },
+    {
+      "bug": "diff-8a51f05e0a",
+      "arm": "BT",
+      "sid": "ae00c517840417635d63486b49ca4779",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-review-driver/carrier-usage/ae00c517840417635d63486b49ca4779.json",
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 12800,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 25828,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 7742,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 33570,
+          "reported_turns": 2
+        }
+      },
+      "turn_cost_usd_ticks": 484184800
+    }
+  ]
+}

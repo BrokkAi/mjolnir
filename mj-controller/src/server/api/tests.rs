@@ -323,6 +323,148 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
     assert!(requests[0].created_at_ms > 0);
 }
 
+/// The body limit stands in front of the prompt validator, so it must admit
+/// every prompt the worker's relay can take, however a client escapes it, and
+/// a body it refuses must say how much would have fit. `mj message` reaches
+/// this route.
+// Hard-won: #1556: a prompt the worker could take was refused as an unexplained 413
+#[tokio::test]
+async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_their_limits() {
+    use super::super::{MAX_BODY_BYTES, MAX_PROMPT_TEXT_BODY_BYTES};
+    use mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    let send = |body: String| {
+        bearer(Request::post("/api/v1/sessions/session-1/message"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let json = |request_id: &str, text: &str| {
+        serde_json::json!({"request_id": request_id, "text": text}).to_string()
+    };
+    // What a prompt of `count` copies of `unit` costs as the worker's command.
+    let command_bytes = |unit: &str, count: usize| {
+        let command = mj_core::relay::RelayCommand::Prompt {
+            prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                agent_client_protocol::v1::schema::TextContent::new(unit.repeat(count)),
+            )],
+        };
+        serde_json::to_vec(&command).unwrap().len()
+    };
+    let largest = |unit: &str| {
+        let envelope = command_bytes(unit, 0);
+        let each = command_bytes(unit, 1) - envelope;
+        (RELAY_COMMAND_BYTE_BUDGET - envelope) / each
+    };
+
+    // A control character costs six bytes in both encodings; an emoji costs
+    // four as serde_json writes it and twelve from a client that escapes all
+    // non-ASCII, as Python's json module does by default; an ASCII letter
+    // costs one, or six from a client that escapes it.
+    let control = largest("\u{1}");
+    let body = json("control", &"\u{1}".repeat(control));
+    assert!(body.len() > MAX_BODY_BYTES);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    let emoji = largest("\u{1F600}");
+    let body = format!(
+        r#"{{"request_id":"escaped","text":"{}"}}"#,
+        "\\ud83d\\ude00".repeat(emoji)
+    );
+    assert!(body.len() > 3 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    let letters = largest("a");
+    let body = format!(
+        r#"{{"request_id":"letters","text":"{}"}}"#,
+        "\\u0061".repeat(letters)
+    );
+    assert!(body.len() > 6 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
+
+    let response = app
+        .clone()
+        .oneshot(send(json("one-more", &"\u{1}".repeat(control + 1))))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("maximum {RELAY_COMMAND_BYTE_BUDGET}")),
+        "{refusal}"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(send(json(
+            "too-large",
+            &"x".repeat(MAX_PROMPT_TEXT_BODY_BYTES),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_PROMPT_TEXT_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
+    // A route without a limit of its own refuses under the general one, and
+    // keeps the header a client checks before it reads the refusal.
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; MAX_BODY_BYTES + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.headers().contains_key(super::API_VERSION_HEADER));
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(
+        refusal.contains(&format!("({MAX_BODY_BYTES} bytes)")),
+        "{refusal}"
+    );
+
+    let response = app
+        .oneshot(send(json(&"c".repeat(65), "short")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal = json_body(response).await["error"].to_string();
+    assert!(refusal.contains("use 1-64 ASCII letters"), "{refusal}");
+    assert_eq!(backend.submissions.lock().unwrap().len(), 3);
+}
+
 /// A message with no sender comes from the user's own shell, so it is the
 /// user's prompt and takes the prompt endpoint's path: it waits for a session
 /// still starting, and its request id is the command id, so a retry after an
@@ -6240,7 +6382,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
 // Hard-won: a95e5e66: launch admission accepted targets that could not supply a worker.
 #[tokio::test]
 async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
-    let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
+    let check: crate::server::WorkerSourceCheck = Arc::new(|target, _bundle| {
         (target == "podman").then(|| {
             "worker source for aarch64 (Darwin) was unavailable when the daemon started: not built"
                 .to_owned()
@@ -7225,6 +7367,147 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         json_body(response).await["subagents"],
         serde_json::json!([])
     );
+}
+
+#[tokio::test]
+async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
+    const MARKER: &str = "MJ_TEST_FINISHED_REVIEW_API";
+    if std::env::var_os(MARKER).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "finished_review_api_returns_reviewer_output_after_the_child_is_gone",
+            ),
+        )
+        .env(MARKER, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = crate::controller::test_support::checkpoint_test_session("session-1");
+    let child = crate::controller::test_support::checkpoint_test_session("review-child-1");
+    crate::database::save_session(&parent).unwrap();
+    crate::database::save_session(&child).unwrap();
+    let database = crate::database::database_path();
+    crate::database::record_subagent_handback(
+        &child.id,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "review-prompt".into(),
+            message: "The parser drops queued input.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "api-review".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, &child.id, "The parser drops queued input.");
+    let state = mj_core::storage::TurnReviewState {
+        active: Some("api-review".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![mj_core::review::settings::ResolvedReviewSettings {
+                profile: "codex".into(),
+                main: mj_core::review::settings::ReviewModelSettings {
+                    model: Some("gpt-6-terra".into()),
+                    effort: Some("xhigh".into()),
+                    fast_mode: false,
+                },
+                autoconfigured: false,
+            }],
+            registrations: vec![mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.id.clone()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    crate::database::save_reviewer_outcome(
+        &parent.id,
+        &state,
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "The parser drops queued input.".into(),
+        }],
+    )
+    .unwrap();
+    crate::database::close_turn_review_state(
+        &parent.id,
+        &mj_core::storage::TurnReviewState {
+            active: None,
+            active_group: None,
+            ..state
+        },
+        mj_core::storage::FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    crate::database::delete_session(&child.id).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute("DELETE FROM subagent_sessions", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM subagent_handbacks", [])
+        .unwrap();
+    drop(connection);
+
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/reviews"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["review"]["review_id"], "api-review");
+    assert_eq!(body["review"]["resolution"], "completed");
+    assert_eq!(body["review"]["roles"][0]["role"], "reviewer-1");
+    assert_eq!(body["review"]["roles"][0]["profile"], "codex");
+    assert_eq!(body["review"]["roles"][0]["model"], "gpt-6-terra");
+    assert_eq!(body["review"]["roles"][0]["effort"], "xhigh");
+    assert_eq!(
+        body["review"]["roles"][0]["handback"],
+        "The parser drops queued input."
+    );
+    assert_eq!(body["review"]["roles"][0]["verdict"]["verdict"], "findings");
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/reviews?review=missing",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

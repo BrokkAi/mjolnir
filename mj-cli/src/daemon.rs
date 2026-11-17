@@ -836,8 +836,13 @@ fn kept_daemon_notice(message: String) {
 
 /// What the running daemon, if any, is to this client.
 enum ExistingDaemon {
-    /// None answers, so one has to be started.
+    /// None runs, so one has to be started.
     Absent,
+    /// One is recorded and may still run, but it did not answer. A busy
+    /// daemon answers late, and a container daemon's store lock is not on
+    /// this host, so only [`recorded_daemon_is_gone`] may turn this into
+    /// [`ExistingDaemon::Absent`].
+    Unanswered(DaemonMetadata),
     /// It answers and this client may use it.
     Use(DaemonClient),
     /// It answers but has to be replaced first. `notice` is what to tell the
@@ -935,6 +940,16 @@ async fn ensure_supported_or_gone(metadata: &DaemonMetadata) -> Result<bool> {
     }
 }
 
+/// A recorded daemon that did not answer is absent only once it has provably
+/// exited.
+async fn unanswered(metadata: DaemonMetadata) -> Result<ExistingDaemon> {
+    Ok(if recorded_daemon_is_gone(&metadata).await? {
+        ExistingDaemon::Absent
+    } else {
+        ExistingDaemon::Unanswered(metadata)
+    })
+}
+
 async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let metadata = tokio::task::spawn_blocking(read_metadata_any)
         .await
@@ -945,10 +960,7 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     if !ensure_supported_or_gone(&metadata).await? {
         return Ok(ExistingDaemon::Absent);
     }
-    let daemon =
-        BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
-    let release = daemon.version().cmp_precedence(this_build().version());
-    if metadata.protocol_version < PROTOCOL_VERSION || release.is_lt() {
+    if metadata.protocol_version < PROTOCOL_VERSION {
         // The same-protocol path below treats an unreachable daemon as absent.
         // This path replaces a daemon it cannot ask, so it first has to know
         // that one still owns the store: a record left by a daemon that died
@@ -973,35 +985,17 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
         });
     }
     let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     };
     if ping_daemon(&mut client).await.is_err() {
-        return Ok(ExistingDaemon::Absent);
+        return unanswered(metadata).await;
     }
-    let identity = match tokio::time::timeout(Duration::from_secs(2), client.identity()).await {
-        Ok(Ok(identity)) => identity,
-        Ok(Err(error)) => {
-            // A daemon of this protocol must answer. If it did not, keep the
-            // old answer for this decision only; nothing below trusts it.
-            tracing::debug!(
-                error = format!("{error:#}"),
-                "the daemon did not report its identity"
-            );
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-        Err(_) => {
-            tracing::debug!("the daemon did not report its identity before the deadline");
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-    };
+    // This protocol reports its own placement. A failed discovery cannot safely
+    // decide whether to use or replace it, and may have interrupted the connection.
+    let identity = client
+        .identity()
+        .await
+        .context("read the running daemon's identity")?;
     let build = daemon_build(&metadata, &identity.placement)?;
     // A container daemon's store is in its volume; the host store says
     // nothing about it. The daemon reports its own migration failure.
@@ -1091,23 +1085,47 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
 
 /// Act on [`decide_existing_daemon`] while holding the startup lock
 /// exclusively: use the running daemon, or replace it and report that none is
-/// running yet.
+/// running yet. A recorded daemon that does not answer is waited for until it
+/// answers or provably exits; starting another beside it could leave two
+/// daemons serving one instance.
 async fn prepare_existing_daemon(_startup: &DaemonStartGuard) -> Result<Option<DaemonClient>> {
-    match decide_existing_daemon().await? {
-        ExistingDaemon::Absent => Ok(None),
-        ExistingDaemon::Use(client) => Ok(Some(client)),
-        ExistingDaemon::Replace { metadata, notice } => {
-            match notice {
-                Some(notice) => startup_notice(notice),
-                None => tracing::info!(
-                    daemon_protocol = metadata.protocol_version,
-                    client_protocol = PROTOCOL_VERSION,
-                    daemon_build = %metadata.build_version,
-                    "the daemon is an older protocol or release, or its store needs a migration; replacing it"
-                ),
+    let asked = Instant::now();
+    let mut notice_at = asked + START_NOTICE_DELAY;
+    loop {
+        match decide_existing_daemon().await? {
+            ExistingDaemon::Absent => return Ok(None),
+            ExistingDaemon::Use(client) => return Ok(Some(client)),
+            ExistingDaemon::Replace { metadata, notice } => {
+                match notice {
+                    Some(notice) => startup_notice(notice),
+                    None => tracing::info!(
+                        daemon_protocol = metadata.protocol_version,
+                        client_protocol = PROTOCOL_VERSION,
+                        daemon_build = %metadata.build_version,
+                        "the daemon is an older protocol or release, or its store needs a migration; replacing it"
+                    ),
+                }
+                replace_daemon(&metadata).await?;
+                return Ok(None);
             }
-            replace_daemon(&metadata).await?;
-            Ok(None)
+            ExistingDaemon::Unanswered(metadata) => {
+                if Instant::now() >= notice_at {
+                    let waited = asked.elapsed().as_secs();
+                    tracing::info!(
+                        pid = metadata.pid,
+                        address = %metadata.address,
+                        waited_s = waited,
+                        "the recorded daemon has not answered and has not exited"
+                    );
+                    startup_notice(format!(
+                        "The Mjolnir daemon at {} has not answered for {waited}s and is still \
+                         running; waiting for it to answer or exit.",
+                        metadata.address
+                    ));
+                    notice_at = Instant::now() + startup_notice_interval();
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
     }
 }
@@ -2025,6 +2043,154 @@ pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    // Hard-won: #1566: startup guessed a legacy identity after abandoning a supported daemon's request.
+    #[tokio::test]
+    async fn startup_propagates_identity_failure_instead_of_guessing_placement() {
+        const CHILD: &str = "MJ_TEST_STARTUP_IDENTITY_FAILURE";
+        const TEST: &str =
+            "daemon::tests::startup_propagates_identity_failure_instead_of_guessing_placement";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        for build_version in [env!("CARGO_PKG_VERSION"), "0.0.1"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = DaemonMetadata {
+                protocol_version: PROTOCOL_VERSION,
+                pid: std::process::id(),
+                address: listener.local_addr().unwrap(),
+                token: "isolated-identity-failure".into(),
+                started_at: "test".into(),
+                build_version: build_version.into(),
+                instance_id: String::new(),
+                placement: DaemonPlacement::Host,
+            };
+            fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(ping.action, DaemonAction::Ping));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: ping.protocol_version,
+                        request_id: ping.request_id,
+                        result: Ok(DaemonReply::Pong),
+                    },
+                )
+                .await
+                .unwrap();
+                let identity: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(identity.action, DaemonAction::Identity));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: identity.protocol_version,
+                        request_id: identity.request_id,
+                        result: Err("identity unavailable".into()),
+                    },
+                )
+                .await
+                .unwrap();
+                use tokio::io::AsyncReadExt;
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            });
+            let error = match decide_existing_daemon().await {
+                Err(error) => error,
+                Ok(_) => panic!("startup used a daemon without its identity"),
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains("identity unavailable"), "{message}");
+            server.await.unwrap();
+        }
+    }
+
+    // Hard-won: #1566: guessed RPC deadlines blocked startup and same-protocol upgrades under load.
+    #[tokio::test]
+    async fn startup_waits_for_slow_identity_before_replacing_an_older_release() {
+        const CHILD: &str = "MJ_TEST_SLOW_STARTUP_IDENTITY";
+        const TEST: &str =
+            "daemon::tests::startup_waits_for_slow_identity_before_replacing_an_older_release";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "isolated-slow-identity".into(),
+            started_at: "test".into(),
+            build_version: "0.0.1".into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let (received, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for is_identity in [false, true] {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(if is_identity {
+                    matches!(request.action, DaemonAction::Identity)
+                } else {
+                    matches!(request.action, DaemonAction::Ping)
+                });
+                if is_identity {
+                    let (release, released) = tokio::sync::oneshot::channel();
+                    received.send(release).unwrap();
+                    released.await.unwrap();
+                }
+                let reply = if is_identity {
+                    DaemonReply::Identity(DaemonIdentity {
+                        instance_id: "isolated-slow-identity".into(),
+                        build_version: "0.0.1".into(),
+                        // Avoid a host store check: this peer represents a
+                        // container daemon with its own volume and store.
+                        placement: DaemonPlacement::Container {
+                            name: "isolated-slow-identity".into(),
+                            runtime: None,
+                        },
+                    })
+                } else {
+                    DaemonReply::Pong
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let decision = decide_existing_daemon();
+        tokio::pin!(decision);
+        let release = tokio::select! {
+            result = &mut decision => panic!("startup finished before Identity replied: {}", result.is_ok()),
+            release = waiting.recv() => release.unwrap(),
+        };
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        // Poll after the old deadline, before releasing Identity's reply.
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(decision.as_mut().poll(cx).is_pending())
+            })
+            .await,
+            "startup abandoned its pending Identity request"
+        );
+        release.send(()).unwrap();
+        assert!(matches!(
+            decision.await.unwrap(),
+            ExistingDaemon::Replace { .. }
+        ));
+        server.await.unwrap();
+    }
 
     // Hard-won: 413864386: the startup splash displayed frozen blocker ages for thirty seconds.
     #[tokio::test]

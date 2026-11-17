@@ -1,0 +1,108 @@
+{
+  "metric": "template applicability (reach unmeasured)",
+  "reach_measured": false,
+  "assignments": [
+    {
+      "id": "fact-001",
+      "template": "T8a",
+      "rationale": "Trace the tree-root range into the module CodeUnit and compare its sibling derivation into FileScope. Assumes a range produced or consumed at the changed FileScope/enclosing_code_unit site supplies the diff seed; this is value flow, not a caller-argument lookup.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-002",
+      "template": "T8a",
+      "rationale": "Follow template_signature into CodeUnit::signature and its consumption by cpp_direct_base_types, retaining which components form that value. Assumes the changed consumer supplies the value seed; the relation is in-language value derivation.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-003",
+      "template": "none",
+      "rationale": "The requested relation is execution ordering among decoding, asset hashing, and a later gate. No listed template provides general call-path or happens-before traversal. Artifact readers in T3 would require a diff literal and would not establish this ordering.",
+      "confidence": "high"
+    },
+    {
+      "id": "fact-004",
+      "template": "T2",
+      "rationale": "The writer-accessor relation can retrieve consumers that populate the request-domain declaration memo. Assumes the diff touches that memo as identifiable field/key storage, which the description does not establish. This assignment covers writer retrieval; it does not claim a second traversal proving later gap replay or its absence.",
+      "confidence": "low"
+    },
+    {
+      "id": "fact-005",
+      "template": "T8a",
+      "rationale": "Follow values produced by direct_children or summary_file_projection into comment-ownership consumers and their range derivation. Assumes one of those changed producers supplies the seed. T1 only retrieves call inputs and would not follow returned child values into these computations.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-006",
+      "template": "T8a",
+      "rationale": "Track the exit_status result into the public status-string conversion, including the POLICY_EXIT_CLEAN value. Assumes the changed outcome/status site seeds that value flow; the desired relation concerns consumption of a return value rather than arguments supplied to the changed function.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-007",
+      "template": "T8a",
+      "rationale": "Trace semantic-target fields into the stored member-shape tuple and its matching consumer. This is value derivation, including which input fields survive projection. Assumes the changed result-contract matching site seeds the flow; no extra accessor or control-path template is added.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-008",
+      "template": "T8a",
+      "rationale": "Follow assignment-derived range values through Field replacement into the declaration range returned to the changed consumer. Assumes that range consumption is the diff seed. The fit is provenance of the resulting value, with replacement behavior supplied by the description rather than an asserted executed query result.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-009",
+      "template": "T8a",
+      "rationale": "Treat Some(false) as the produced value and trace its derivation from the uncertainty flag and returned supertype inventory. Assumes the changed subtype/access-verdict site supplies the value seed. This fits return-value derivation, but does not establish that a flow query can prove the absence of a closed-hierarchy check.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-010",
+      "template": "T8a",
+      "rationale": "Track the constructed provider/session values into successive base-proof consumers; shared origin is the relevant value-flow relation. Assumes a changed base-proof site consumes those values. This does not introduce a general call-path traversal, and does not measure whether the engine retains the provider/session identity.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-011",
+      "template": "T8a",
+      "rationale": "Trace caller-constructed activation evidence into matching and pack activation independently of discovery-produced evidence. Assumes the changed activation/discovery site provides a consumed evidence-value seed. The selected relation is evidence flow, without adding a separate execution-order query.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-012",
+      "template": "none",
+      "rationale": "The described relation is recursive execution of analyzer inference through a selected enclosing assignment and RHS read. None of the templates supplies general recursive call reachability; T8a describes in-language value flow and cannot silently become a traversal of the analyzer's inference calls. The description leaves a possible narrower value-flow formulation unsettled.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-013",
+      "template": "T8a",
+      "rationale": "Trace the this_expression value back to the created procedure receiver, including its binding provenance. Assumes the changed value-class lowering site consumes or produces that receiver. This fits value origin; whether missing carrier registration can actually be exposed remains unmeasured.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-014",
+      "template": "T8a",
+      "rationale": "Follow the activated normal_continuation_absent value from its model/runtime producer toward ScalarStateDerivation in reachability computation. Assumes the changed nilness expansion site supplies the consumed-value seed. This is one value-propagation relation, not serialized-counterpart lookup merely because the source model is JSON.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-015",
+      "template": "T8a",
+      "rationale": "Track producer-derived alias fields, including kind, static flag, status, and namespace, into the bridge consumer. Assumes the changed jvm_alias_import_bridges site consumes these values. T8a best captures the field derivations rather than merely retrieving a call's aggregate argument with T1.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-016",
+      "template": "T8a",
+      "rationale": "Trace incomplete or unsupported member-family answers into the returned Some(empty) value. Assumes a changed dispatch result consumer or producer supplies the value seed. This is return-value derivation and does not equate an empty result with proof of absence.",
+      "confidence": "medium"
+    },
+    {
+      "id": "fact-017",
+      "template": "T3",
+      "rationale": "Retrieve readers of the CodeUnit range/signature storage affected by registering the new root range, identifying the summary renderer. Assumes those fields are storage touched by the diff. T3 supplies the reader relation; the described max computation explains the reader's relevance without adding a separate value-flow traversal.",
+      "confidence": "medium"
+    }
+  ]
+}

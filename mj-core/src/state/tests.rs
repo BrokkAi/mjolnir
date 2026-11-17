@@ -529,6 +529,7 @@ fn capacity_gib_text_never_rounds_a_limit_up() {
 
 fn sample_config() -> Config {
     Config {
+        images: Default::default(),
         jev: Default::default(),
         quota: Default::default(),
         keys: Default::default(),

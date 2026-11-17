@@ -236,6 +236,7 @@ fn reconcile_config(
                         .insert(canonical.clone(), saved.project.bundle);
                 }
                 fresh.bundles.remove(&id);
+                fresh.images.consolidate_bundle(&id, &canonical);
             }
             Ok(())
         })?;

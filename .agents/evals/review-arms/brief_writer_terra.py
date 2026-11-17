@@ -8,6 +8,12 @@ rewrite prompt of brief/workflow-oracle.js) and judged again. Stage B used one
 Opus/high judge; here both judges of `verify_driver.py --kind judge` read it, and
 a brief leaks when either says caught or partial.
 
+Leak/rewrite steps also accept --kind blind --bugs-from jobs.json --name <stage>.
+Use the same flags on every step. This selects only the jobs' known-bug diffs,
+uses briefs/<stage>-leak-<round> and briefs/<stage>-rewrite, and validates saved
+scope before consuming results. With no flags the original Terra paths and
+selection remain unchanged. A still-leaking round1 result is reported, not hidden.
+
 Usage:
   python3 brief_writer_terra.py leak-build [--round 0|1]
       round 0: every brief; round 1: the briefs rewritten after round 0
@@ -48,6 +54,8 @@ from driver import ROOT, SCRIPTS, save
 
 KIND = "blind-terra"
 OUT = ROOT / "briefs" / KIND
+BUGS = None
+ROUND_NAME = None
 CORPUS_FIELDS = ("defect", "location", "trigger", "match_rule", "near_misses", "why_findable",
                  "intro_commit", "fix_commit")
 
@@ -58,15 +66,39 @@ def sha(text):
 
 def diffs():
     s = brief_oracle.sets()
-    return {b: g for g in ("P", "S") for b in s[g]}
+    known = {b: g for g in ("P", "S") for b in s[g]}
+    if BUGS is not None and (not BUGS or BUGS - known.keys()):
+        raise SystemExit(f"empty or unknown leak subset: {sorted(BUGS - known.keys())}")
+    return {b: g for b, g in known.items() if BUGS is None or b in BUGS}
 
 
 def leak_dir(n):
-    return ROOT / "briefs" / f"{KIND}-leak-{n}"
+    return ROOT / "briefs" / f"{ROUND_NAME or KIND}-leak-{n}"
+
+
+def round_scope():
+    return {"kind": KIND, "name": ROUND_NAME or KIND, "diffs": diffs()}
+
+
+def check_scope(directory, create=False):
+    path = directory / "settings.json"
+    current = round_scope()
+    if path.exists():
+        if json.loads(path.read_text()) != current:
+            raise SystemExit(f"{directory}: leak/rewrite scope differs from saved settings")
+    elif create:
+        save(path, current)
+    elif BUGS is not None or ROUND_NAME is not None or KIND != "blind-terra":
+        raise SystemExit(f"{directory}: missing saved leak/rewrite settings")
+    # Original Terra rounds predate this optional metadata and remain readable.
+
+
+def rewrite_dir():
+    return ROOT / "briefs" / f"{ROUND_NAME or KIND}-rewrite"
 
 
 def leak_build(n):
-    corpus = {r["id"]: r for r in map(json.loads, open(SCRIPTS / "corpus/corpus.jsonl"))}
+    corpus = driver.CORPUS
     if n == 0:
         bugs = list(diffs())
     else:
@@ -77,6 +109,7 @@ def leak_build(n):
     d = leak_dir(n)
     if (d / "key.json").exists():
         raise SystemExit(f"{d} already exists; its key binds verdicts to texts")
+    check_scope(d, create=True)
     batch, key = [], {}
     for b in bugs:
         brief = (OUT / b / "brief.md").read_text()
@@ -92,11 +125,22 @@ def leak_build(n):
 
 def leak_collect(n):
     d = leak_dir(n)
+    check_scope(d)
     key = json.loads((d / "key.json").read_text())
-    verdicts = json.loads((d / "workflow-out.json").read_text())["verdicts"]
+    result = json.loads((d / "workflow-out.json").read_text())
+    assert not result.get("missing"), result.get("missing")
+    verdicts = result["verdicts"]
     judged = {}
     for v in verdicts:
         judged.setdefault(v["output_id"], []).append(v)
+    assert set(judged) == set(key), "leak verdicts must cover exactly the round outputs"
+    # Validate the whole round before updating any published decision.
+    for oid, k in key.items():
+        vs = judged[oid]
+        assert sorted(v["judge"] for v in vs) == ["A", "B"], (k["bug"], vs)
+        assert all(v["bug"] == k["bug"] and v["label"] in ("caught", "partial", "missed") for v in vs), "wrong bug or invalid leak label"
+        assert sha((OUT / k["bug"] / "brief.md").read_text()) == k["brief_sha256"], \
+            f"{k['bug']}: brief.md changed since leak round {n} was built"
     rows = []
     for oid, k in key.items():
         b, vs = k["bug"], judged.get(oid, [])
@@ -131,7 +175,8 @@ The brief is brief-in.md in this folder. Write the rewritten brief to brief.md i
 
 
 def rewrite_build():
-    base = ROOT / "briefs" / f"{KIND}-rewrite"
+    base = rewrite_dir()
+    check_scope(base, create=True)
     made = 0
     for b in diffs():
         record = json.loads((OUT / b / "blind-leak.json").read_text())
@@ -151,14 +196,21 @@ def rewrite_build():
 
 
 def rewrite_collect():
-    base = ROOT / "briefs" / f"{KIND}-rewrite"
-    for u in sorted(p for p in base.iterdir() if p.is_dir()):
+    base = rewrite_dir()
+    check_scope(base)
+    for u in sorted(p for p in base.iterdir() if p.is_dir() and p.name in diffs()):
         b, d = u.name, OUT / u.name
         out = u / "brief.md"
         if not out.exists():
             print(json.dumps({"bug": b, "state": "no rewrite fetched"}))
             continue
         text = out.read_text()
+        original = (u / "brief-in.md").read_text()
+        record = json.loads((d / "blind-leak.json").read_text())
+        first = next(r for r in record["rounds"] if r["round"] == 0)
+        assert sha(original) == first["brief_sha256"], f"{b}: rewrite input is not the round0 judged text"
+        current = (d / "brief.md").read_text()
+        assert current in (original, text), f"{b}: brief changed since rewrite was prepared"
         problems = brief_driver.lint(text, driver.CORPUS[b])
         if problems:
             print(json.dumps({"bug": b, "state": "rewrite fails lint", "problems": problems}))
@@ -423,11 +475,26 @@ def main():
     p.add_argument("step", choices=["leak-build", "leak-collect", "rewrite-build", "rewrite-collect",
                                     "contains-build", "usage", "readout"])
     p.add_argument("--round", type=int, choices=[0, 1], default=0)
-    p.add_argument("--name", default="brief-judge-j", help="readout: judging round")
+    p.add_argument("--name", help="readout round (default brief-judge-j), or distinct leak/rewrite path prefix")
+    p.add_argument("--kind", choices=("blind-terra", "blind"), help="leak/rewrite brief kind; default blind-terra")
+    p.add_argument("--bugs-from", help="leak/rewrite: jobs file whose diffs are the explicit subset")
     a = p.parse_args()
+    global KIND, OUT, BUGS, ROUND_NAME
+    scoped = a.step in ("leak-build", "leak-collect", "rewrite-build", "rewrite-collect")
+    if (a.kind or a.bugs_from) and not scoped:
+        p.error("--kind and --bugs-from apply only to leak/rewrite steps")
+    if scoped:
+        KIND = a.kind or "blind-terra"
+        OUT = ROOT / "briefs" / KIND
+        ROUND_NAME = a.name
+        if ROUND_NAME is not None and (pathlib.Path(ROUND_NAME).name != ROUND_NAME or ROUND_NAME in (".", "..")):
+            p.error("--name must be a single round path component")
+        if a.bugs_from:
+            BUGS = {j["bug"] for j in json.loads(pathlib.Path(a.bugs_from).read_text())}
+        diffs()  # Validate selection before creating round files.
     {"leak-build": lambda: leak_build(a.round), "leak-collect": lambda: leak_collect(a.round),
      "rewrite-build": rewrite_build, "rewrite-collect": rewrite_collect,
-     "contains-build": contains_build, "usage": usage, "readout": lambda: readout(a.name)}[a.step]()
+     "contains-build": contains_build, "usage": usage, "readout": lambda: readout(a.name or "brief-judge-j")}[a.step]()
 
 
 if __name__ == "__main__":

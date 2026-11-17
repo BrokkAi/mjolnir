@@ -4,6 +4,7 @@
 //! into place with the same digest-checked, atomically promoted installer.
 
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Names the host-scoped installation in store gates and logs. It is not a
 /// session: the engine outlives every session on the host.
@@ -45,8 +46,12 @@ pub(crate) fn ensure_microvm_engine(
         .context("the engine path has no directory")?;
     execute_checked(
         executor,
-        targets::locator_command(&host, vec!["mkdir".into(), "-p".into(), directory.into()])
-            .purpose("create the Nitro sandbox engine directory"),
+        targets::locator_command(
+            SshTrafficClass::Control,
+            &host,
+            vec!["mkdir".into(), "-p".into(), directory.into()],
+        )
+        .purpose("create the Nitro sandbox engine directory"),
     )?;
     install_worker_binary_at(
         executor,

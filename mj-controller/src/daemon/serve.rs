@@ -128,7 +128,7 @@ pub(super) async fn forward_in_process_session_request(
         RemoteSessionRequest::Sync { session_id, reply } => {
             let result = async { manager.session(session_id).await?.sync_now().await }
                 .await
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
             let _ = reply.send(result);
         }
         RemoteSessionRequest::RespondElicitation {

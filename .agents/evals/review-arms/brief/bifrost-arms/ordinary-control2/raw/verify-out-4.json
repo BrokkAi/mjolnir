@@ -1,0 +1,58 @@
+{
+  "commits": [
+    {
+      "intro": "5e17ecf53c3ffc620452b0bee0ab022c6ecd0ac4",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-e88f2620",
+            "f-7420bbd5",
+            "f-46c5ea6d",
+            "f-ebc24ec9",
+            "f-dcb5a637",
+            "f-552a987c"
+          ],
+          "summary": "Macro recovery incorrectly consumes identifiers in unrelated erroneous declarations immediately following a completed function-like macro.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, src/analyzer/usages/get_definition/cpp.rs:3953-3971 accepts an identifier with an ERROR ancestor inside an erroneous top-level declaration or expression_statement, walks backward across those wrappers, and returns true upon any preproc_function_def with a value. Lines 3991-3998 require only the wrapper kind and has_error(); nothing checks whether the directive continued beyond its parsed value. Thus an identifier recovered inside the erroneous declaration in int keep; followed by #define F(x) x followed by int later = keep keep; is suppressed despite being on a separate, uncontinued line. The identifier path at lines 284-290 returns no_definition with declaration_or_import_site before ordinary resolution. The base required the translation-unit child itself to be ERROR, so the nested-ERROR wrapper case is newly exposed. The new control in tests/get_definition_test.rs:21944-21975 places a clean separator before malformed code and does not exercise adjacency to a valid macro. The checked-out descendant still uses the same backward boundary heuristic in crates/bifrost-cpp-analysis/src/analyzer/usages/get_definition/cpp.rs:7796-7816; no corrective change was identified.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "intro": "9dad3f2c71bdc0bfea12f55d0ceb5fb7bd2dad97",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-c52d582d",
+            "f-df92633d",
+            "f-37eeae9e"
+          ],
+          "summary": "Production Go requests accumulate new resolution metrics but discard them without exposing or reporting them.",
+          "verdict": "confirmed",
+          "severity": "medium",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/go/native_points.rs:232 declares the private point_metrics field, line 303 initializes it, and lines 439 and 610 pass it as an accumulation sink. These are its only occurrences in the Go module. Production definition and type wrappers return request.resolve_definition_with_evidence(query) and request.resolve_type(query) at lines 819 and 1134, dropping the request without reading its metrics. The fixture measurement instead creates its own ResolutionBatchMetrics at crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:3692, passes it directly to the selected operation at lines 3703/3726, and returns it at line 3746. This measures the lower-level fixture but leaves the newly attached production request metrics inaccessible. Later commit 0467e7a99f299bc93bf18972f7370c9bf2bd04a2 adds BIFROST_TRIAL_NATIVE_GO_POINT_WORK logging that reads request.point_metrics for both production entry points.",
+          "confidence": "high"
+        },
+        {
+          "group": "g2",
+          "findings": [
+            "f-6a7201c0",
+            "f-2729ae14",
+            "f-1cb4ce83",
+            "f-54a44244",
+            "f-cab7ba68"
+          ],
+          "summary": "SQL trace teardown can unregister another pooled reader and free a context still referenced by the traced connection.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "At intro, crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs:562-579 installs a raw pointer into a boxed context on one reader; begin returns that reader at lines 643-648. The new Go measurement opens an operation at line 3676 and calls finish at line 3741 without dropping it. SelectedResolutionMountInventory owns its ReaderGuard (resolution_selection.rs:1286-1287), so that connection remains checked out. finish obtains another active_read_conn at resolution_operation_tests.rs:671-675, disables tracing on that other connection at lines 589-590, and frees the original Box at lines 594-597. The callback dereferences its context at lines 495-498. Operation inventory destruction can execute cleanup SQL (resolution_selection.rs:2116-2121), and subsequent reader reuse can also invoke that dangling callback. The existing Rust measurement has the same outstanding-operation sequence at resolution_operation_tests.rs:2627-2646; this diff changes its previously thread-local callback state into a freed raw-pointer context, introducing memory unsafety. There is also no connection identity guarantee with multiple idle readers: general acquire uses the last idle reader (store/mod.rs:899-900), whereas resolution prefers a matching retained selection (lines 903-915), so begin/work/finish can select different connections even apart from the outstanding checkout. Later commit 486e811d579d9525f5b75e42b71f7cd231891aab adds drop(operation) before Go trace teardown; that supports the ownership defect but does not by itself prove the general multi-reader mismatch fixed.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

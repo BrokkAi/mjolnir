@@ -1,9 +1,11 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -13,6 +15,7 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
+            admission,
             session_id,
             executor,
             manager,
@@ -28,6 +31,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn checkpoint_session_latched_with_recovery_stage(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -50,6 +54,7 @@ impl Controller {
         // thread stack; a direct `mj checkpoint` overflowed a 2 MiB Tokio
         // worker stack that way. Boxing it once here keeps them small.
         Box::pin(self.checkpoint_session_latched_with_layout(
+            admission,
             session_id,
             executor,
             manager,
@@ -72,6 +77,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -258,7 +264,7 @@ impl Controller {
             }
         }
         let (mut relay, mut restarted_worker) = self
-            .open_checkpoint_relay(
+            .open_checkpoint_relay(admission,
                 session_id,
                 executor,
                 manager,
@@ -393,64 +399,22 @@ impl Controller {
             };
             match result {
                 Ok(barrier) => break (barrier, barrier_command_id),
-                Err(error)
-                    if !restarted_worker
-                        && exclusivity.close_purpose().is_none()
-                        && checkpoint_barrier_needs_worker_restart(&error) =>
+                Err(error) if !restarted_worker && exclusivity.close_purpose().is_none() =>
                 {
-                    if exclusivity == LatchExclusivity::ReleaseAfterLatch
-                        && matches!(session.harness_kind, HarnessKind::Kimi | HarnessKind::Codex)
-                    {
-                        let safe_to_restart =
-                            relay.connection_mut().sync().await.is_ok_and(|snapshot| {
-                                snapshot.operational.safe_to_replace(session.harness_kind)
-                            });
-                        if !safe_to_restart {
-                            return Err(error.context(CheckpointDeferred::background_work()));
-                        }
-                    }
-                    tracing::warn!(
+                    let recovery = self.recover_checkpoint_barrier(
                         session_id,
-                        "checkpoint requires a worker restart; restarting and retrying: {error:#}"
-                    );
-                    let restarted = self
-                        .restart_worker_for_checkpoint(
-                            session_id,
-                            executor,
-                            &backend,
-                            &worker_root,
-                            &reconnect,
-                        )
-                        .await;
-                    let connection = match restarted {
-                        Ok(connection) => connection,
-                        Err(restart)
-                            if restart_falls_back_to_checkpoint_only(exclusivity, &restart) =>
-                        {
-                            tracing::warn!(
-                                session_id,
-                                "the worker restarted for the checkpoint did not come back; checkpointing its durable state without starting the harness: {restart:#}"
-                            );
-                            executor.notify_notice(
-                                "Saving the session without starting its harness, which did not come back",
-                            );
-                            self.restart_worker_for_checkpoint_only(
-                                session_id,
-                                executor,
-                                &backend,
-                                &worker_root,
-                                &reconnect,
-                            )
-                            .await
-                            .map_err(|fallback| {
-                                fallback.context(format!(
-                                    "the worker restart for the checkpoint failed first: {restart:#}"
-                                ))
-                            })?
-                        }
-                        Err(restart) => return Err(restart),
-                    };
-                    relay.replace_connection(connection);
+                        executor,
+                        &mut relay,
+                        &backend,
+                        &worker_root,
+                        &reconnect,
+                        BarrierRecovery::Checkpoint(exclusivity),
+                        None,
+                        error,
+                    ).await?;
+                    if let BarrierRecoveryOutcome::CloseRejected(error) = recovery {
+                        return Err(error);
+                    }
                     restarted_worker = true;
                 }
                 Err(error) => return Err(error),
@@ -463,14 +427,14 @@ impl Controller {
             let mut settled = barrier.operational.clone();
             settled.checkpoint_barrier = None;
             if !settled.safe_to_move(session.harness_kind, purpose) {
-                relay.cancel_abandoned_barrier().await?;
+                relay.cancel_abandoned_barrier(admission).await?;
                 return Err(CheckpointDeferred::harness_busy().into());
             }
         }
         if let Some(expected) = &quota_recovery
             && super::super::move_session::quota_move_recovery(&barrier.operational).ok() != Some(expected)
         {
-            relay.cancel_abandoned_barrier().await?;
+            relay.cancel_abandoned_barrier(admission).await?;
             anyhow::bail!("quota Move recovery changed before source close");
         }
         let barrier_ready_at = Instant::now();
@@ -568,6 +532,7 @@ impl Controller {
         // and submitting while the slow phase runs.
         if exclusivity == LatchExclusivity::ReleaseAfterLatch {
             relay.end_latch();
+            admission.narrow_copy()?;
         }
 
         // Reuse before exporting: verifying an installed archive costs far less
@@ -589,6 +554,7 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
+                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
                 relay,
@@ -858,7 +824,7 @@ impl Controller {
                 // harness frozen until that connection happens to drop. A
                 // barrier released after the export is already gone.
                 if completion == CheckpointCompletion::HeldBarrier
-                    && let Err(cancel_error) = relay.cancel_abandoned_barrier().await
+                    && let Err(cancel_error) = relay.cancel_abandoned_barrier(admission).await
                 {
                     tracing::warn!(
                         session_id,
@@ -869,6 +835,7 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
+                admission: admission.clone(),
                 _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,
             relay,
@@ -946,7 +913,7 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
         }
         let mut args = vec!["rm".to_owned(), "-rf".to_owned(), "--".to_owned()];
         args.extend(self.paths.iter().cloned());
-        let command = targets::locator_command(self.backend, args)
+        let command = targets::locator_command(SshTrafficClass::Control, self.backend, args)
             .purpose("remove unused target checkpoint files");
         match self.executor.execute(&command) {
             Ok(output) if output.status == 0 => {}
@@ -964,6 +931,124 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
                 "could not remove an unused checkpoint's files from the target"
             ),
         }
+    }
+}
+
+/// Explicit child close ends the harness permanently; other checkpoints retain
+/// their existing restart and checkpoint-only recovery policy.
+#[derive(Clone, Copy)]
+pub(in crate::controller) enum BarrierRecovery {
+    Checkpoint(LatchExclusivity),
+    ChildClose,
+}
+
+/// A rejected close leaves the original worker untouched. Restart errors are
+/// separate: they may have already stopped it and must retain recovery intent.
+pub(in crate::controller) enum BarrierRecoveryOutcome {
+    Restarted,
+    CloseRejected(anyhow::Error),
+}
+
+impl Controller {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::controller) async fn recover_checkpoint_barrier(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        relay: &mut ControllerRelayLease,
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        reconnect: &targets::CommandSpec,
+        recovery: BarrierRecovery,
+        before_escalating: Option<super::super::lifecycle::BeforeClose>,
+        error: anyhow::Error,
+    ) -> Result<BarrierRecoveryOutcome> {
+        if !checkpoint_barrier_needs_worker_restart(&error) {
+            return Err(error);
+        }
+        if matches!(
+            recovery,
+            BarrierRecovery::Checkpoint(LatchExclusivity::ReleaseAfterLatch)
+        ) {
+            let harness = self.state.sessions[session_id].harness_kind;
+            if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex) {
+                let safe_to_restart = relay
+                    .connection_mut()
+                    .sync()
+                    .await
+                    .is_ok_and(|snapshot| snapshot.operational.safe_to_replace(harness));
+                if !safe_to_restart {
+                    return Err(error.context(CheckpointDeferred::background_work()));
+                }
+            }
+        }
+        // Commit the explicit stop before replacing a live harness with a
+        // checkpoint-only worker. An aborted close must never need rollback.
+        if let Some(before_escalating) = before_escalating
+            && let Err(error) = before_escalating.await
+        {
+            return Ok(BarrierRecoveryOutcome::CloseRejected(error));
+        }
+        tracing::warn!(
+            session_id,
+            "checkpoint requires a worker restart; restarting and retrying: {error:#}"
+        );
+        let connection = match recovery {
+            BarrierRecovery::ChildClose => {
+                executor.notify_notice(
+                    "Stopping the unresponsive worker and saving the session without starting its harness",
+                );
+                self.restart_worker_for_checkpoint_only(
+                    session_id,
+                    executor,
+                    backend,
+                    worker_root,
+                    reconnect,
+                )
+                .await?
+            }
+            BarrierRecovery::Checkpoint(exclusivity) => {
+                match self
+                    .restart_worker_for_checkpoint(
+                        session_id,
+                        executor,
+                        backend,
+                        worker_root,
+                        reconnect,
+                    )
+                    .await
+                {
+                    Ok(connection) => connection,
+                    Err(restart)
+                        if restart_falls_back_to_checkpoint_only(exclusivity, &restart) =>
+                    {
+                        tracing::warn!(
+                            session_id,
+                            "the worker restarted for the checkpoint did not come back; checkpointing its durable state without starting the harness: {restart:#}"
+                        );
+                        executor.notify_notice(
+                            "Saving the session without starting its harness, which did not come back",
+                        );
+                        self.restart_worker_for_checkpoint_only(
+                            session_id,
+                            executor,
+                            backend,
+                            worker_root,
+                            reconnect,
+                        )
+                        .await
+                        .map_err(|fallback| {
+                            fallback.context(format!(
+                                "the worker restart for the checkpoint failed first: {restart:#}"
+                            ))
+                        })?
+                    }
+                    Err(restart) => return Err(restart),
+                }
+            }
+        };
+        relay.replace_connection(connection);
+        Ok(BarrierRecoveryOutcome::Restarted)
     }
 }
 

@@ -1,5 +1,6 @@
 use super::launch::*;
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 use crate::targets::tests::unwrapped_remote_line;
 
@@ -2183,6 +2184,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
         execute_checked(
             &ProcessExecutor,
             targets::locator_command(
+                SshTrafficClass::Control,
                 &locator,
                 vec![
                     "sh".into(),
@@ -4491,6 +4493,45 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         );
         assert_eq!(launch.environment["IS_SANDBOX"], "1", "{target}");
     }
+
+    // Hard-won: review of a13f351: Docker sessions on the root default image got no sandbox marker, so Claude refused to start.
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(parent_id).unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session(parent_id);
+    session.project_directory = None;
+    session.container_workspace = Some(workspace.clone());
+    let docker = mj_core::config::TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: mj_core::config::DEFAULT_SESSION_IMAGE.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let launch = worker_launch_config(
+        &session,
+        &claude,
+        Some(&crate::controller::test_support::local_bundle(Path::new(
+            "/src/project",
+        ))),
+        &targets::TargetLocator::LocalDocker {
+            container_id: targets::resource_name(parent_id).unwrap(),
+            borrowed_from: None,
+        },
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&workspace),
+            parent_worktree: None,
+        },
+        &mj_core::state::TargetRuntimeSettings::from(&docker),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(launch.environment["IS_SANDBOX"], "1");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
-mod backend;
+pub(crate) mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
@@ -314,6 +314,7 @@ pub fn create_bundle_from_sources(
                 .bundles
                 .insert(canonical.clone(), saved.bundle.clone());
             config.bundles.remove(&id);
+            config.images.consolidate_bundle(&id, &canonical);
             crate::database::store_catalog_project(&canonical, &saved, true)?;
         }
         Ok(canonical)
@@ -340,6 +341,7 @@ pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
             config.bundles.remove(bundle_id).is_some(),
             "project {bundle_id:?} is no longer saved"
         );
+        config.images.bundles.remove(bundle_id);
         config.validate()?;
         crate::database::hide_catalog_project(bundle_id)?;
         Ok(())

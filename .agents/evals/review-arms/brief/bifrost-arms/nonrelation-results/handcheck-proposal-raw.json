@@ -1,0 +1,142 @@
+{
+  "01e7eab53851371e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that an unresolved or unsupported competing conversion is not proven inapplicable, yet is discarded to select the sole successful overload as exact."
+  },
+  "08dba19cbc43c879": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "1519da597540dc64": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  },
+  "20c952e71f6ecaed": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  },
+  "270d26c32aa546f7": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies unconditional Option<Foo> stripping for an ordinary call before any unwrap syntax, causing member lookup on Foo rather than Option; the alternate method trigger satisfies the same mechanism."
+  },
+  "2ec9c41a1e14be31": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies multiple namespace blocks being reduced to one namespace per file and explicitly connects that approximation to omitted candidate discovery or candidate selection, in addition to incorrect resolution."
+  },
+  "3c9e87973358a73b": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "5bc50a8004638643": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "69ecf142bfb7d2ee": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that an unresolved or unsupported competing conversion is not proven inapplicable, yet is discarded to select the sole successful overload as exact."
+  },
+  "76cb0b03725fa98f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies multiple namespace blocks being reduced to one namespace per file and explicitly connects that approximation to omitted candidate discovery or candidate selection, in addition to incorrect resolution."
+  },
+  "78a861a7d8bb829d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "7b91bb0c78dbb616": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that an unresolved or unsupported competing conversion is not proven inapplicable, yet is discarded to select the sole successful overload as exact."
+  },
+  "837f84dcab8b35fb": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "878e20ba89942028": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "89256679c057960a": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "8c978fbc8eeecc67": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "8faddbde7a79aeb3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "9758bf302b2162c5": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies multiple namespace blocks being reduced to one namespace per file and explicitly connects that approximation to omitted candidate discovery or candidate selection, in addition to incorrect resolution."
+  },
+  "a3b2cb7d0ccf1e08": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  },
+  "a8d34d5aa073af0f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the while_expression body/consequence field mismatch and explains that the failed lookup returns None and omits the while-let pattern binding."
+  },
+  "ac3f2c234532a0a2": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies multiple namespace blocks being reduced to one namespace per file and explicitly connects that approximation to omitted candidate discovery or candidate selection, in addition to incorrect resolution."
+  },
+  "b575f25f3fa5d9f5": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "b6d1e3ecd0b383cb": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that an unresolved or unsupported competing conversion is not proven inapplicable, yet is discarded to select the sole successful overload as exact."
+  },
+  "c7da8e99ca03b977": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  },
+  "d94f239f956aaca0": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  },
+  "dd8b616edebc9dfd": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that an unresolved or unsupported competing conversion is not proven inapplicable, yet is discarded to select the sole successful overload as exact."
+  },
+  "e4d929beb05ea0fd": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies that more valid requested files than max_files are omitted by the early break without setting input_truncated. The claim concerns excess inputs and does not recommend marking exact-fit input truncated."
+  },
+  "f1f712fa4b5b7176": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies promotion of a selected nonterminal constant to the whole scope_resolution, causing navigation to the terminal constant instead of the selected prefix."
+  }
+}

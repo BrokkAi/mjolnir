@@ -3,6 +3,7 @@ use super::*;
 use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
+use mj_core::targets::SshTrafficClass;
 use std::path::Path;
 
 fn repositories(
@@ -174,6 +175,7 @@ fn utility(
                 mj_core::worker_build::WORKER_BUILD_ID
             );
             let probe = executor.execute(&targets::command_on_locator(
+                SshTrafficClass::Control,
                 backend,
                 id,
                 vec!["test".into(), "-x".into(), helper.clone()],
@@ -186,6 +188,7 @@ fn utility(
         }
     };
     let command_spec = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         id,
         vec![executable, "worker".into(), "move-workspace".into()],
@@ -224,6 +227,7 @@ chmod 700 "$temporary"
 mv -f -- "$temporary" "$1"
 "#;
     let command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         id,
         vec![
@@ -290,7 +294,11 @@ fn copy_workspace(
 ) -> Result<()> {
     std::fs::create_dir_all(local)?;
     let local_path = format!("{}/", local.display());
-    let base = targets::locator_command(backend, rsync_remote_arguments(remote));
+    let base = targets::locator_command(
+        SshTrafficClass::Bulk,
+        backend,
+        rsync_remote_arguments(remote),
+    );
     let command = CommandSpec::new("rsync", Vec::<String>::new())
         .purpose("transfer Move workspace with resumable files");
     let output = retry_refused_transport(
@@ -478,7 +486,7 @@ fn storage_probe(
 
 fn at_host(ssh: Option<&targets::SshTarget>, mut arguments: Vec<String>) -> CommandSpec {
     if let Some(ssh) = ssh {
-        targets::ssh_command_owned(ssh, arguments)
+        targets::ssh_command_owned(SshTrafficClass::Control, ssh, arguments)
     } else {
         let program = arguments.remove(0);
         CommandSpec::new(program, arguments)
@@ -751,6 +759,7 @@ impl Controller {
             ),
             (
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &layout.backend,
                     id,
                     rsync_probe(),
@@ -775,6 +784,7 @@ impl Controller {
         storage_probe(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &layout.backend,
                 id,
                 storage_arguments(Path::new(&source_root)),
@@ -790,10 +800,16 @@ impl Controller {
             .container_engine()
             .and_then(container_storage_arguments)
         {
-            let host = targets::locator_command(&layout.backend, vec!["true".into()]).ssh_session;
+            let host = targets::locator_command(
+                SshTrafficClass::Control,
+                &layout.backend,
+                vec!["true".into()],
+            )
+            .ssh_session;
             storage_probe(
                 executor,
-                at_host(host.as_ref(), arguments).purpose("check source container backing storage"),
+                at_host(host.as_ref().map(|request| &request.target), arguments)
+                    .purpose("check source container backing storage"),
                 "Source backing storage",
                 "source",
                 1,
@@ -867,7 +883,11 @@ impl Controller {
                 rsync_probe()
             };
         let command = if let Some(ssh) = destination_ssh {
-            targets::ssh_command_owned(&targets::SshTarget::from(ssh), arguments)
+            targets::ssh_command_owned(
+                SshTrafficClass::Control,
+                &targets::SshTarget::from(ssh),
+                arguments,
+            )
         } else {
             let program = arguments.remove(0);
             CommandSpec::new(program, arguments)
@@ -1123,6 +1143,7 @@ impl Controller {
         super::super::execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &layout.backend,
                 id,
                 vec![
@@ -1220,6 +1241,7 @@ impl Controller {
                 super::super::execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         &backend,
                         id,
                         vec![
@@ -1525,7 +1547,10 @@ mod tests {
         assert!(assessment.selection_problem(&selection).is_none());
     }
 
+    // Unix only: one source is read through a session locator, and a local
+    // bare worker root is a POSIX path, which no Windows directory is.
     // Hard-won: #1542: a Move into a fresh environment left the checkout unmarked, so Suspend could not export it
+    #[cfg(unix)]
     #[test]
     fn moved_bundle_exports_each_repository_with_its_original_base() {
         use crate::controller::test_support::{
@@ -1540,12 +1565,10 @@ mod tests {
             CheckpointRepositorySpec, export_checkpoint,
         };
 
-        #[cfg(unix)]
         struct RemoteGit {
             remote_path: std::path::PathBuf,
             source_path: std::path::PathBuf,
         }
-        #[cfg(unix)]
         impl CommandExecutor for RemoteGit {
             fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
                 mj_core::targets::DeadlinePause::none()
@@ -1699,7 +1722,6 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             };
-            #[cfg(unix)]
             let handoff = if index == 2 {
                 let remote_path = directory.path().join("exists-only-on-source");
                 assert!(!remote_path.exists());
@@ -1731,14 +1753,6 @@ mod tests {
                 )
                 .unwrap()
             };
-            #[cfg(not(unix))]
-            let handoff = record_move_handoff_bases(
-                &source_record,
-                &handoff,
-                &local,
-                &targets::ProcessExecutor,
-            )
-            .unwrap();
             snapshot.metadata =
                 mj_checkpoint::archive::read_checkpoint_manifest(&handoff.archive_path)
                     .unwrap()

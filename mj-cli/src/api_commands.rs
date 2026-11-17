@@ -2337,6 +2337,20 @@ enum ReviewCommand {
     /// Show the review the session has open: what it is doing, each reviewing
     /// role, and its verdict once it has one.
     Status(SessionArgs),
+    /// Show a finished review's per-reviewer output: each reviewer's model,
+    /// effort and profile, its full handback, its verdict, and its usage.
+    /// Works after the reviewer sessions have been destroyed.
+    Show(ReviewShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ReviewShowArgs {
+    #[command(flatten)]
+    session: SessionArgs,
+    /// Review id, as a verdict message names it. Defaults to the newest
+    /// finished review for the session.
+    #[arg(long)]
+    review: Option<String>,
 }
 
 pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
@@ -2363,6 +2377,16 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
             print_lines(review_lines(status.review.as_ref()));
             Ok(())
         }
+        ReviewCommand::Show(args) => {
+            let response = client
+                .finished_review(&args.session.session, args.review.as_deref())
+                .await?;
+            if args.session.json {
+                return print_json(&response);
+            }
+            print_lines(finished_review_lines(&response));
+            Ok(())
+        }
     }
 }
 
@@ -2381,6 +2405,105 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
         if !verdict.text.is_empty() {
             lines.push(String::new());
             lines.push(verdict.text.clone());
+        }
+    }
+    lines
+}
+
+/// A finished review as plain lines, including each reviewer's full handback
+/// and the usage its deleted child session still accounts for.
+fn finished_review_lines(
+    response: &mj_controller::server::api::FinishedReviewResponse,
+) -> Vec<String> {
+    let Some(review) = &response.review else {
+        return vec![format!(
+            "no finished review is recorded for {}",
+            response.session_id
+        )];
+    };
+    let resolution = match review.resolution {
+        mj_controller::database::FinishedReviewResolution::Completed => "completed",
+        mj_controller::database::FinishedReviewResolution::Failed => "failed",
+        mj_controller::database::FinishedReviewResolution::Cancelled => "cancelled",
+    };
+    let finished = chrono::DateTime::from_timestamp_millis(review.finished_at_ms)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{} ms", review.finished_at_ms));
+    let mut lines = vec![format!(
+        "review {}: {resolution}, finished {finished}",
+        review.review_id
+    )];
+    for role in &review.roles {
+        lines.push(format!(
+            "  {} ({}) profile {}; model {}; effort {}",
+            role.label,
+            role.role,
+            if role.profile.is_empty() {
+                "unknown"
+            } else {
+                &role.profile
+            },
+            role.model.as_deref().unwrap_or("harness default"),
+            role.effort.as_deref().unwrap_or("default effort"),
+        ));
+        match role.verdict.as_ref() {
+            Some(mj_core::review::verdict::ReviewVerdict::Clean) => {
+                lines.push("    verdict: clean".to_owned());
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Findings { synthesis, .. }) => {
+                lines.push("    verdict: findings".to_owned());
+                for line in synthesis.lines() {
+                    lines.push(format!("      {line}"));
+                }
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Failed { reason }) => {
+                lines.push(format!("    verdict: failed: {reason}"));
+            }
+            None => lines.push("    verdict: none (the reviewer did not settle)".to_owned()),
+        }
+        if let Some(turn) = &role.turn {
+            let result = turn.result();
+            let kind = match result.kind {
+                mj_core::event_outcome::TurnResultKind::Completed => "completed",
+                mj_core::event_outcome::TurnResultKind::InputRequired => "input required",
+                mj_core::event_outcome::TurnResultKind::Cancelled => "cancelled",
+                mj_core::event_outcome::TurnResultKind::Rejected => "rejected",
+                mj_core::event_outcome::TurnResultKind::Interrupted => "interrupted",
+                mj_core::event_outcome::TurnResultKind::Failed => "failed",
+            };
+            let detail = result
+                .message
+                .as_deref()
+                .or(result.stop_reason.as_deref())
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            lines.push(format!("    turn: {kind}{detail}"));
+            if let Some(usage) = &turn.usage {
+                let mut counters = vec![
+                    format!("total {}", usage.total_tokens),
+                    format!("input {}", usage.input_tokens),
+                    format!("output {}", usage.output_tokens),
+                ];
+                for (name, value) in [
+                    ("thought", usage.thought_tokens),
+                    ("cached read", usage.cached_read_tokens),
+                    ("cached write", usage.cached_write_tokens),
+                ] {
+                    if let Some(value) = value {
+                        counters.push(format!("{name} {value}"));
+                    }
+                }
+                lines.push(format!("    usage: {}", counters.join(", ")));
+            }
+        }
+        if let Some(handback) = &role.handback {
+            lines.push("    handback:".to_owned());
+            if handback.is_empty() {
+                lines.push("      (empty)".to_owned());
+            }
+            for line in handback.lines() {
+                lines.push(format!("      {line}"));
+            }
         }
     }
     lines
@@ -2765,8 +2888,10 @@ const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 /// Pump runtime deltas until `done` holds or the deadline passes; returns the
 /// latest cursor and metadata seen. One waiter feeds `--refresh` (a new
 /// cycle) and `--with-disabled` (a report for every profile just probed).
+/// Own a dedicated connection: a deadline abandons its in-flight exchange,
+/// while quota control requests continue on their original connection.
 async fn pump_quota_feed(
-    daemon: &mut mj_client::daemon::DaemonClient,
+    mut daemon: mj_client::daemon::DaemonClient,
     mut cursor: Option<mj_client::runtime_feed::RuntimeCursor>,
     mut metadata: mj_client::runtime_feed::RuntimeMetadata,
     deadline: std::time::Instant,
@@ -2827,9 +2952,13 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         let pending = metadata.quotas.cycles;
         daemon.refresh_quota().await?;
         let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
-        let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
-            metadata.quotas.cycles > pending
-        })
+        let pumped = pump_quota_feed(
+            mj_client::daemon::connect_existing().await?,
+            cursor,
+            metadata,
+            deadline,
+            |metadata| metadata.quotas.cycles > pending,
+        )
         .await?;
         cursor = pumped.0;
         metadata = pumped.1;
@@ -2851,11 +2980,17 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
         if !probe.is_empty() {
             daemon.probe_quota_profiles(probe.clone(), false).await?;
             let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
-            let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
-                probe
-                    .iter()
-                    .all(|id| metadata.quotas.reports.contains_key(id))
-            })
+            let pumped = pump_quota_feed(
+                mj_client::daemon::connect_existing().await?,
+                cursor,
+                metadata,
+                deadline,
+                |metadata| {
+                    probe
+                        .iter()
+                        .all(|id| metadata.quotas.reports.contains_key(id))
+                },
+            )
             .await?;
             metadata = pumped.1;
         }
@@ -3265,10 +3400,40 @@ mod tests {
             };
             let session = match args.command {
                 ReviewCommand::Start(session) | ReviewCommand::Status(session) => session,
+                ReviewCommand::Show(_) => panic!("expected start or status"),
             };
             assert_eq!(session.session, "s1");
             assert_eq!(session.json, json);
         }
+        let cli = Cli::try_parse_from([
+            "mj",
+            "review",
+            "show",
+            "--session",
+            "s1",
+            "--review",
+            "r1",
+            "--json",
+        ])
+        .expect("review show parses");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert_eq!(args.session.session, "s1");
+        assert_eq!(args.review.as_deref(), Some("r1"));
+        assert!(args.session.json);
+        let cli = Cli::try_parse_from(["mj", "review", "show", "--session", "s1"])
+            .expect("review show defaults to the latest finished review");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert!(args.review.is_none());
         for verb in ["forward", "dismiss", "cancel"] {
             assert!(Cli::try_parse_from(["mj", "review", verb, "--session", "s1"]).is_err());
         }
@@ -4838,6 +5003,80 @@ mod tests {
         output.push_str("\n=== mj models, nothing offered ===\n");
         output.push_str(&render_models_aggregate(&[], false).unwrap());
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models-aggregate", &output);
+    }
+
+    // Hard-won: #1566: a timed-out quota feed left the control client unusable for disabled-profile probes.
+    #[tokio::test]
+    async fn quota_feed_timeout_preserves_the_control_connection() {
+        use mj_client::daemon::{
+            DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply,
+            PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "quota-feed-timeout".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut control, _) = listener.accept().await.unwrap();
+            let (mut feed, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut feed).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::RuntimeChanges { .. }
+            ));
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(feed.read(&mut byte).await.unwrap(), 0);
+            let request: RequestEnvelope = read_frame(&mut control).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::ProbeQuotaProfiles { .. }
+            ));
+            write_frame(
+                &mut control,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let mut control = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let feed = DaemonClient::connect(metadata).await.unwrap();
+        let observed = mj_client::runtime_feed::RuntimeMetadata::default();
+        let pump = pump_quota_feed(
+            feed,
+            None,
+            observed.clone(),
+            std::time::Instant::now() + QUOTA_REFRESH_WAIT,
+            |_| false,
+        );
+        tokio::pin!(pump);
+        tokio::select! {
+            result = &mut pump => panic!("feed reply remains pending: {result:?}"),
+            result = waiting => result.unwrap(),
+        }
+        tokio::time::pause();
+        tokio::time::advance(QUOTA_REFRESH_WAIT + std::time::Duration::from_secs(1)).await;
+        let (_, latest) = pump.await.unwrap();
+        assert_eq!(latest, observed);
+        control
+            .probe_quota_profiles(vec!["disabled".into()], false)
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 
     #[test]

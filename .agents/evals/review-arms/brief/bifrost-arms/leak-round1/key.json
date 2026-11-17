@@ -1,0 +1,18 @@
+{
+  "53bac6a7c4d4dce7": {
+    "bug": "mcp-default-advisory-reported-clean",
+    "brief_sha256": "717c2880a703a6b2016aa96d0d116a0116d3073ddbe11d8f43499b5102c5ee46"
+  },
+  "db656f7403280806": {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "brief_sha256": "9fddbbb7634ef2cbd21d2969c22ee653515274e4ae6a7867859305b92f7c7367"
+  },
+  "b8c28f04c5b5ce31": {
+    "bug": "python-module-binding-representative-after-event",
+    "brief_sha256": "01a936a33c239537efdd025576eb1465279d193c7e402b1a820e26d86af8a95e"
+  },
+  "6bb26f3b6b34cbd1": {
+    "bug": "unproven-override-family-certifies-empty",
+    "brief_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c"
+  }
+}

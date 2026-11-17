@@ -1,0 +1,351 @@
+{
+  "method": "existing audit.audit_reviewer, all full saved transcript pages; no scanner fork",
+  "writers": [
+    {
+      "id": "diff-6f9a2656f3",
+      "sid": "96be565ed7f378c3f07b1e40685106de",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-6f9a2656f3/reviewers/96be565ed7f3/transcript.json",
+      "tool_items": 11,
+      "hits": [
+        {
+          "seq": 109,
+          "kind": "git-history-escape",
+          "where": "input",
+          "snippet": "59`) and requests reverse neighbors (`src/relevance.rs:343`), reaching the shared index builder through language providers (`src/analyzer/capabilities.rs:64`). Git results can fill the requested limit before the import phase (`src/relevance.rs:89`).\\n- `MultiAnalyzer::update` dispatches to delegate updates (`src/analyzer/multi_analyzer.rs:256`), including Go (`src/analyzer/multi_analyzer.rs:105`). Go creates an empty reverse-index lock alongside replacement forward and reverse caches (`src/analyzer/go_analyzer.rs:318`), even when the inner tree-sitter update returns its clone for an empty change set (`src/analyzer/tree_sitter_analyzer.rs:648`).\\n- JavaScript's `update` and `update_all` allocate new `JsMemoCaches` (`src/analyzer/javascript_analyzer.rs:295`, `src/analyzer/javascript_analyzer.rs:303`); their existing constructor calls now also initialize an empty reverse-index lock (`src/analyzer/javascript_analyzer.rs:129`).\\n- The delegate's Rust `update_all` route (`src/analyzer/multi_analyzer.rs:125`) rebuilds the inner analyzer (`src/analyzer/rust_analyzer.rs:291`) and creates an empty reverse-index lock (`src/analyzer/rust_analyzer.rs:295`); the inner rebuild enumerates project state anew (`src/analyzer/tree_sitter_analyzer.rs:682`).\\n- TypeScript checks its per-target reverse cache before initializing the index (`src/analyzer/typescript_analyzer.rs:236`, `src/analyzer/typescript_analyzer.rs:240`). Its `update` and `update_all` routes replace that index (`src/analyzer/typescript_analyzer.rs:317`, `src/analyzer/typescript_analyzer.rs:327`), reached through delegate dispatch (`src/analyzer/multi_analyzer.rs:109`, `src/analyzer/multi_analyzer.rs:124`).\\n\\n## Value flow\\n- The shared builder receives each analyzer's `get_analyzed_files()` set (`src/analyzer/go_analyzer.rs:231`); the underlying implementation collects keys from `state.files` (`src/analyzer/tree_sitter_analyzer.rs:639`). The builder invokes forward resolution for every member using parallel iteration (`src/analyzer/capabilities.rs:71`).\\n- Reverse-index keys come from `CodeUnit::source()`, which returns the unit's stored `ProjectFile` (`src/analyzer/model.rs:207`); the builder groups importing files under those keys, excludes self references, and deduplicates importers with a `BTreeSet` (`src/analyzer/capabilities.rs:79`).\\n- Go's builder callback (`src/analyzer/go_analyzer.rs:232`) reads the forward cache or resolves imports against analyzed file parents (`src/analyzer/go_analyzer.rs:185`). Resolution skips `_` aliases and includes non-module top-level declarations from matching files (`src/analyzer/go_analyzer.rs:193`, `src/analyzer/go_analyzer.rs:210`).\\n- Go derives `Clone` (`src/analyzer/go_analyzer.rs:109`), so cloned analyzers share the new `Arc<OnceLock<...>>` (`src/analyzer/go_analyzer.rs:115`). JavaScript also derives `Clone` and stores memo caches behind an `Arc` (`src/analyzer/javascript_analyzer.rs:107`), sharing the lock added inside those caches (`src/analyzer/javascript_analy",
+          "classification": "false positive: literal brief text in single-quoted heredoc",
+          "reason": "The pattern matches Git ... clone wording inside literal relation prose, not an executed git clone/fetch/history command. Complete recorded exec_command is only cat > brief.md with quoted EOF and no following command.",
+          "actual_command_first_line": "cat > brief.md <<'EOF'",
+          "actual_command_last_line": "EOF",
+          "captured_evidence_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/audit-hits/diff-6f9a2656f3-109.json",
+          "bridge_payload_note": "rawInput is null in this record; complete command is preserved in exec_command title with closing EOF, plus completed-call evidence"
+        }
+      ]
+    },
+    {
+      "id": "diff-5febdb1c44",
+      "sid": "d9f326194498d81f8e33f73bf37bb157",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-5febdb1c44/reviewers/d9f326194498/transcript.json",
+      "tool_items": 12,
+      "hits": []
+    },
+    {
+      "id": "diff-95655a5e97",
+      "sid": "d16f7646117b7855e9ffc424cfea8992",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-95655a5e97/reviewers/d16f7646117b/transcript.json",
+      "tool_items": 9,
+      "hits": []
+    },
+    {
+      "id": "diff-6449f901ba",
+      "sid": "08f02936e1843bebe3cdf72646485725",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-6449f901ba/reviewers/08f02936e184/transcript.json",
+      "tool_items": 16,
+      "hits": []
+    },
+    {
+      "id": "diff-5e17ecf53c",
+      "sid": "283a2a5be5d096eae46c837692c6567c",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-5e17ecf53c/reviewers/283a2a5be5d0/transcript.json",
+      "tool_items": 6,
+      "hits": []
+    },
+    {
+      "id": "diff-2eaec0a7ad",
+      "sid": "3581d9c000a3824f834bac98ad850665",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-2eaec0a7ad/reviewers/3581d9c000a3/transcript.json",
+      "tool_items": 10,
+      "hits": []
+    },
+    {
+      "id": "diff-63713569c1",
+      "sid": "0b794b97cdb19c1974135b4c60d3b30d",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-63713569c1/reviewers/0b794b97cdb1/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "diff-bb39a5fd49",
+      "sid": "dbb73e1c0daefd7f5da8998b63977ca8",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-bb39a5fd49/reviewers/dbb73e1c0dae/transcript.json",
+      "tool_items": 14,
+      "hits": []
+    },
+    {
+      "id": "diff-9f61b39391",
+      "sid": "d036ec2f6dd617073343a9430aa9f90a",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-9f61b39391/reviewers/d036ec2f6dd6/transcript.json",
+      "tool_items": 13,
+      "hits": []
+    },
+    {
+      "id": "diff-c9cd4a27f9",
+      "sid": "204cd30153b61b3d3a2282de0f6c60fa",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-c9cd4a27f9/reviewers/204cd30153b6/transcript.json",
+      "tool_items": 16,
+      "hits": []
+    },
+    {
+      "id": "diff-b58235b247",
+      "sid": "6d1dd9514b0d0d096d9cbb8bc95df779",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-b58235b247/reviewers/6d1dd9514b0d/transcript.json",
+      "tool_items": 14,
+      "hits": []
+    },
+    {
+      "id": "diff-a75a035026",
+      "sid": "5001c2ab46727e4a1a90fa3faf171763",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-a75a035026/reviewers/5001c2ab4672/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-b607037341",
+      "sid": "5b914ca959939b31387da4c1c0dcb3d4",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-b607037341/reviewers/5b914ca95993/transcript.json",
+      "tool_items": 7,
+      "hits": []
+    },
+    {
+      "id": "diff-fdcd0552e9",
+      "sid": "3376634e5604e8f786c3d27a606bb9c7",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-fdcd0552e9/reviewers/3376634e5604/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "diff-0041fe831a",
+      "sid": "f05fc3993356a97d2ef0154445b7da4c",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-0041fe831a/reviewers/f05fc3993356/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-4d3aaeb3d1",
+      "sid": "ef5de3f1fac37756c44d789822398577",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-4d3aaeb3d1/reviewers/ef5de3f1fac3/transcript.json",
+      "tool_items": 14,
+      "hits": []
+    },
+    {
+      "id": "diff-1cfbe59c5b",
+      "sid": "fca94620eb38cd16e795b35cf2e5aa7b",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-1cfbe59c5b/reviewers/fca94620eb38/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "diff-695a400f18",
+      "sid": "3d239504eedfb85f68e743e9f9338dc1",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-695a400f18/reviewers/3d239504eedf/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-22207e44f0",
+      "sid": "41a736230049ff44e9e7d602c57c581f",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-22207e44f0/reviewers/41a736230049/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "diff-57069dc4f7",
+      "sid": "d834f990f4033ab133a67b2e4fd9c9d3",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-57069dc4f7/reviewers/d834f990f403/transcript.json",
+      "tool_items": 8,
+      "hits": []
+    },
+    {
+      "id": "diff-df5fb945bf",
+      "sid": "989636ce4df80a94b20bb486e9020e3c",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-df5fb945bf/reviewers/989636ce4df8/transcript.json",
+      "tool_items": 15,
+      "hits": []
+    },
+    {
+      "id": "diff-0dc1b2afef",
+      "sid": "eefc7675af791c66a3d7683c89fc0040",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-0dc1b2afef/reviewers/eefc7675af79/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-43823779fb",
+      "sid": "614d602b41306f7eb4132146413e4fba",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-43823779fb/reviewers/614d602b4130/transcript.json",
+      "tool_items": 9,
+      "hits": []
+    },
+    {
+      "id": "diff-378bd893ed",
+      "sid": "1d8a1cde22dddd106fe78d68f75026a8",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-378bd893ed/reviewers/1d8a1cde22dd/transcript.json",
+      "tool_items": 20,
+      "hits": []
+    },
+    {
+      "id": "diff-5053bc5bea",
+      "sid": "2d0a131d438d1c289494fbf505efceb3",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-5053bc5bea/reviewers/2d0a131d438d/transcript.json",
+      "tool_items": 10,
+      "hits": [
+        {
+          "seq": 88,
+          "kind": "memory-or-sessions",
+          "where": "input",
+          "snippet": "read before configuration and migration; writer configuration also retries WAL setup. Both routes use the five-second initialization deadline and wrap returned SQLite errors with operation-specific catalog context (`crates/bifrost-analysis/src/analyzer/semantic_model/catalog/db.rs:69`, `crates/bifrost-analysis/src/analyzer/s",
+          "classification": "false positive: literal brief text in single-quoted heredoc",
+          "reason": "The pattern matches literal SQLite discussion inside relation prose; no SQLite/session-memory database command is executed. Complete recorded exec_command is only cat > brief.md with quoted EOF and no following command.",
+          "actual_command_first_line": "cat > brief.md <<'EOF'",
+          "actual_command_last_line": "EOF",
+          "captured_evidence_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/audit-hits/diff-5053bc5bea-88.json",
+          "bridge_payload_note": "rawInput is null in this record; complete command is preserved in exec_command title with closing EOF, plus completed-call evidence"
+        }
+      ]
+    },
+    {
+      "id": "diff-c2e0ac6264",
+      "sid": "d4617d755913c4ba328c27cdc9b6af45",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-c2e0ac6264/reviewers/d4617d755913/transcript.json",
+      "tool_items": 14,
+      "hits": []
+    },
+    {
+      "id": "diff-9dad3f2c71",
+      "sid": "b637d37939d97e4d2f36b8b28f733159",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-9dad3f2c71/reviewers/b637d37939d9/transcript.json",
+      "tool_items": 12,
+      "hits": []
+    },
+    {
+      "id": "diff-62d65b4fab",
+      "sid": "49d882ad74286ddd99c90abb8c169113",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-62d65b4fab/reviewers/49d882ad7428/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-d3b5598051",
+      "sid": "95a3f34c7708b49d198e319c59c029c9",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-d3b5598051/reviewers/95a3f34c7708/transcript.json",
+      "tool_items": 9,
+      "hits": [
+        {
+          "seq": 110,
+          "kind": "memory-or-sessions",
+          "where": "input",
+          "snippet": "lected inventory connection under a cancellation progress handler (`crates/bifrost-analysis/src/analyzer/store/resolution_operation/rust_reverse_rows.rs:297`). SQLite interruption during cancellation becomes a cancellation completion reason; other returned errors propagate (`crates/bifrost-analysis/src/analyzer/store/resolut",
+          "classification": "false positive: literal brief text in single-quoted heredoc",
+          "reason": "The pattern matches literal SQLite discussion inside relation prose; no SQLite/session-memory database command is executed. Complete recorded exec_command is only cat > brief.md with quoted EOF and no following command.",
+          "actual_command_first_line": "cat > brief.md <<'EOF'",
+          "actual_command_last_line": "EOF",
+          "captured_evidence_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/audit-hits/diff-d3b5598051-110.json",
+          "bridge_payload_note": "rawInput is null in this record; complete command is preserved in exec_command title with closing EOF, plus completed-call evidence"
+        }
+      ]
+    },
+    {
+      "id": "diff-4a12c7dafa",
+      "sid": "9b1a2c8da1c4c56a8f1ef703865163ca",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-4a12c7dafa/reviewers/9b1a2c8da1c4/transcript.json",
+      "tool_items": 8,
+      "hits": []
+    },
+    {
+      "id": "diff-a3b59a9183",
+      "sid": "2909b9a8695cefa75990aeef1851a5ed",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-a3b59a9183/reviewers/2909b9a8695c/transcript.json",
+      "tool_items": 9,
+      "hits": [
+        {
+          "seq": 104,
+          "kind": "memory-or-sessions",
+          "where": "input",
+          "snippet": "he inner capability query (`crates/bifrost-analysis/src/analyzer/resolution/seam_profile.rs:1042`).\\n- `visit_external_supertypes` reads owner coordinates from SQLite, constructs a target semantic, and calls `record_external_hierarchy_reference` before emitting the supertype row (`crates/bifrost-analysis/src/analyzer/store/r",
+          "classification": "false positive: literal brief text in single-quoted heredoc",
+          "reason": "The pattern matches literal SQLite discussion inside relation prose; no SQLite/session-memory database command is executed. Complete recorded exec_command is only cat > brief.md with quoted EOF and no following command.",
+          "actual_command_first_line": "cat > brief.md <<'EOF'",
+          "actual_command_last_line": "EOF",
+          "captured_evidence_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/audit-hits/diff-a3b59a9183-104.json",
+          "bridge_payload_note": "rawInput is null in this record; complete command is preserved in exec_command title with closing EOF, plus completed-call evidence"
+        }
+      ]
+    },
+    {
+      "id": "diff-43553e0d35",
+      "sid": "95f95469c39145bd0f26a6b710622b63",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-43553e0d35/reviewers/95f95469c391/transcript.json",
+      "tool_items": 15,
+      "hits": []
+    },
+    {
+      "id": "diff-bb4addf48b",
+      "sid": "41b2ea242c46ed5519facabddea72f8b",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-bb4addf48b/reviewers/41b2ea242c46/transcript.json",
+      "tool_items": 20,
+      "hits": []
+    },
+    {
+      "id": "diff-8a51f05e0a",
+      "sid": "d14593460a319050c98a22dcb385cb77",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-8a51f05e0a/reviewers/d14593460a31/transcript.json",
+      "tool_items": 10,
+      "hits": []
+    },
+    {
+      "id": "diff-8df49fdb43",
+      "sid": "5dc018a95821e15a81e5ac25ebf2752f",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-8df49fdb43/reviewers/5dc018a95821/transcript.json",
+      "tool_items": 15,
+      "hits": []
+    },
+    {
+      "id": "diff-b4dc5c62d0",
+      "sid": "b09257c1407a73d84f9bf38fa86794c5",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-b4dc5c62d0/reviewers/b09257c1407a/transcript.json",
+      "tool_items": 11,
+      "hits": []
+    },
+    {
+      "id": "diff-5c3a37983d",
+      "sid": "a6f33629c61d255a2c0b0f0d93bdbbf3",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-5c3a37983d/reviewers/a6f33629c61d/transcript.json",
+      "tool_items": 17,
+      "hits": []
+    },
+    {
+      "id": "diff-1c0f689be1",
+      "sid": "768e1d687f47c3af67f39877b321b662",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-1c0f689be1/reviewers/768e1d687f47/transcript.json",
+      "tool_items": 12,
+      "hits": []
+    },
+    {
+      "id": "diff-27a65d6991",
+      "sid": "55aa7100a66ef649cad2918fd848143c",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-27a65d6991/reviewers/55aa7100a66e/transcript.json",
+      "tool_items": 23,
+      "hits": []
+    },
+    {
+      "id": "diff-7e35e90ce9",
+      "sid": "6e33f73734de229e933c7ce6ed556ae8",
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/diff-7e35e90ce9/reviewers/6e33f73734de/transcript.json",
+      "tool_items": 14,
+      "hits": []
+    }
+  ],
+  "coverage": {
+    "expected": 40,
+    "audited": 40,
+    "tool_items": 516,
+    "raw_hits": 4,
+    "missing_transcripts": []
+  },
+  "classification_status": "all4rawhits manually classified as literal-heredoc false positives; raw hits/calls retained",
+  "recorded_at": "2026-11-17T08:27:52.650229+00:00",
+  "raw_hit_counts": {
+    "git-history-escape": 1,
+    "memory-or-sessions": 3
+  },
+  "actual_forbidden_operations": []
+}

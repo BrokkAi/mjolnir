@@ -245,7 +245,7 @@ impl HostState {
                 }
                 self.run(&session_id, pending.requests);
             }
-            PersistenceCompletion::Close => {
+            PersistenceCompletion::Close(_resolution) => {
                 self.closing.remove(&session_id);
                 if let Err(error) = result {
                     tracing::warn!(

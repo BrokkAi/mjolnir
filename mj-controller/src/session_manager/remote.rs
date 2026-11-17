@@ -117,12 +117,21 @@ pub(super) async fn run_remote_session_actor(
                 command_id,
                 command,
                 reply,
-            } => RemoteSessionRequest::Submit {
-                session_id: session_id.clone(),
-                command_id,
-                command,
-                reply,
-            },
+            } => {
+                let (remote_reply, result) = oneshot::channel();
+                tokio::spawn(async move {
+                    let answer = result
+                        .await
+                        .unwrap_or_else(|_| Err("remote submit receiver stopped".into()));
+                    let _ = reply.send(answer.map_err(SubmitFailure::from));
+                });
+                RemoteSessionRequest::Submit {
+                    session_id: session_id.clone(),
+                    command_id,
+                    command,
+                    reply: remote_reply,
+                }
+            }
             ActorCommand::Sync { reply } => RemoteSessionRequest::Sync {
                 session_id: session_id.clone(),
                 reply,
@@ -182,8 +191,12 @@ pub(super) async fn run_remote_session_actor(
                 RemoteSessionRequest::Submit { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
-                RemoteSessionRequest::Sync { reply, .. }
-                | RemoteSessionRequest::RespondElicitation { reply, .. }
+                RemoteSessionRequest::Sync { reply, .. } => {
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "controller daemon request bridge stopped"
+                    )));
+                }
+                RemoteSessionRequest::RespondElicitation { reply, .. }
                 | RemoteSessionRequest::StopBackgroundTask { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }

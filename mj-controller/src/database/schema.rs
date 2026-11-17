@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 136;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 137;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2605,6 +2605,49 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: finished review output is durable data that an older daemon
+    // cannot preserve. It settles reviewers, clears the active group and
+    // prunes their handbacks without writing `review_reports`, which would
+    // lose a review's output irrecoverably. Refuse its reads and writes before
+    // such a review can be lost; a store written by a newer daemon raises this
+    // floor further still. The table itself is standalone; the floor is raised
+    // for this preservation reason only. The trigger removes a session's
+    // reports with the session itself, so a destroyed session cannot leave
+    // unreachable handbacks behind. A later migration that recreates `sessions`
+    // drops this trigger and must create it again.
+    if version < 137 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS review_reports (
+                 parent_session_id TEXT NOT NULL,
+                 review_id TEXT NOT NULL,
+                 role TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 command_id TEXT NOT NULL,
+                 child_session_id TEXT,
+                 profile TEXT NOT NULL DEFAULT '',
+                 model TEXT,
+                 effort TEXT,
+                 handback TEXT,
+                 verdict TEXT,
+                 finished_at_ms INTEGER,
+                 resolution TEXT,
+                 updated_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY(parent_session_id, review_id, role)
+             );
+             CREATE INDEX IF NOT EXISTS review_reports_finished
+                 ON review_reports(parent_session_id, finished_at_ms DESC);
+             CREATE TRIGGER IF NOT EXISTS review_reports_session_destroyed
+                 AFTER DELETE ON sessions BEGIN
+                     DELETE FROM review_reports WHERE parent_session_id = OLD.session_id;
+                 END;
+             UPDATE schema_compatibility SET minimum_compatible_version = 137 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (137, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 137;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4158,7 +4201,16 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
-        assert!(state.ensure_supported_by(132).is_err());
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+                .is_ok()
+        );
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(upgraded.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
         let preserved: String = upgraded
             .query_row(
@@ -4560,6 +4612,13 @@ mod reader_tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("mj.sqlite3");
             let connection = Connection::open(&path).unwrap();
+            // Building the store as it stood at `revision` is fixture work
+            // that only this process reads. Flushed, it is one disk flush per
+            // historical step for every revision: the slowest test in the
+            // suite by far on a slow disk.
+            connection
+                .execute_batch("PRAGMA synchronous = OFF;")
+                .unwrap();
             connection
                 .execute_batch(include_str!("legacy_v1.sql"))
                 .unwrap();
@@ -4807,6 +4866,14 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 137 {
+            connection
+                .execute_batch(
+                    "DROP TRIGGER IF EXISTS review_reports_session_destroyed;
+                     DROP TABLE IF EXISTS review_reports;",
+                )
+                .unwrap();
+        }
         if version < 135 {
             connection.execute_batch("DROP TRIGGER IF EXISTS subagent_accounting_kind_insert; DROP TRIGGER IF EXISTS subagent_accounting_kind_update;").unwrap();
             if legacy_schema::table_has_column(&connection, "subagent_accounting", "kind").unwrap()
@@ -5428,8 +5495,8 @@ mod reader_tests {
     }
 
     #[test]
-    fn move_close_intent_migration_preserves_revision_132_writers() {
-        const NAME: &str = "move_close_intent_migration_preserves_revision_132_writers";
+    fn move_close_intent_migration_preserves_older_column_writes() {
+        const NAME: &str = "move_close_intent_migration_preserves_older_column_writes";
         const CHILD: &str = "MJ_TEST_MOVE_CLOSE_MIGRATION";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
@@ -5446,8 +5513,9 @@ mod reader_tests {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
         stamp_schema_version(&path, 132);
-        // Exact explicit-column UPSERT used by revision-132 writers. It must
-        // preserve future columns on updates and default them to NULL on insert.
+        // Exact explicit-column UPSERT a revision-132 writer issues. It still
+        // preserves the later column mechanically; revision 134 refuses such
+        // a writer outright because it cannot record finished review output.
         let older_write = |connection: &Connection, session: &str, operation: &str| {
             connection.execute("INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
                 VALUES (?1,?2,?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
@@ -5476,10 +5544,15 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
-        // The later brief-writer fence refuses older daemons; the column
-        // preservation checks below still exercise revision-132 SQL.
+        // The later fences refuse older daemons; the column preservation
+        // checks below still exercise revision-132 SQL.
         assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(schema.ensure_supported_by(132).is_err());
+        assert!(
+            schema
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+                .is_ok()
+        );
         let intent = |session: &str| {
             writer
                 .query_row(

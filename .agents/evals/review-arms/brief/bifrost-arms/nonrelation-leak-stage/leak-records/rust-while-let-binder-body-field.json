@@ -1,0 +1,28 @@
+{
+  "id": "rust-while-let-binder-body-field",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "2fc693cd9b11e6e155c8d3f2c0ffebe0ae78d1fe0052f51f64a63a5de1121490",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces binding activation into lexical binding rows, but does not identify the body/consequence field mismatch for while-let or the resulting omitted binder. Merely citing the activation code does not satisfy the match rule.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions consequence activation intervals and the binding hook, but does not identify the while_expression body/consequence distinction or the resulting missing while-let binder. Location overlap alone does not meet the partial bar.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

@@ -26,12 +26,14 @@ A brief writer is an optional extra step before the reviewers start. It is off u
 
 ```toml
 [review]
-brief_writer = { enabled = true, model = "gpt-6.10-sol", effort = "high" }
+brief_writer = { enabled = true, model = "gpt-6.1-sol", effort = "high" }
 ```
 
 With the writer enabled, a hidden writer session reads the change and the rest of the repository, then hands back a short list of relations between the changed code and its surroundings: who calls it, what else reads or writes the same state, and which other paths reach it. Each item carries `file:line` anchors. Every reviewer's prompt then includes the list under "Relations computed from the repository", labelled as relations and not findings. `model` is required while the writer is enabled, and it is resolved to an enabled profile like a reviewer model.
 
 The writer never blocks a review. If it cannot start, ends without handing back, or is cancelled with the review, the reviewers start without a brief and the requester sees a notice saying so. The writer's usage counts toward the requesting session like a reviewer's, and the session is closed when the writer is done. A session's own `--reviewer` choice does not change the writer.
+
+The writer is off by default because its effect depends on the codebase. On Mjolnir's own bugs whose cause lies outside the changed code, a GPT-6.1 Sol/high writer raised GPT-6.1 Terra/high reviewers' catch rate from about 20% to about 56%. On another large Rust codebase it lowered that rate, from 17.6% to 7.8%, because its briefs usually missed the relation that mattered. On ordinary changes there, it did not reduce the findings reviewers confirmed. A Terra-written brief carried much less of the lift than a Sol-written one, so use a Sol-class model for the writer. A Sol/high brief costs about $0.20 at API prices and adds the writer's run time before the reviewers start. The measurements are in the repository's review evaluation notes.
 
 ### Per-session settings
 
@@ -61,7 +63,7 @@ The pre-push hook accepts trees recorded under either `refs/mj/reviewed/` or `re
 
 The parent conversation and its prompt remain available while reviewers work. A short status appears above the prompt. Open **Reviewers** to inspect reviewer sessions in the virtual workspace; close the workspace or press Escape in the Sessions list to return. The web viewer works the same way: **Reviewers · n**, with the number of reviewers still open, sits beside **Subagents · n** once a session has any reviewer, and opens the same list filtered to reviewers. **Subagents** lists only the other children.
 
-A clean review advances the reviewed boundary automatically. Findings arrive as a message to the primary agent, and a failed review reports its reason. `mj review status` shows the current state and verdict.
+A clean review advances the reviewed boundary automatically. Findings arrive as a message to the primary agent, and a failed review reports its reason. `mj review status` shows the current state and verdict. `mj review show` reads a finished review after it closes, including each reviewer's model, effort, profile, full handback, verdict, and usage. Reviewer sessions are destroyed when their role ends; the review's output does not depend on them and remains readable with `mj review show --session <id> [--review <id>]` and `GET /sessions/{id}/reviews`.
 
 ## Lifecycle behavior
 

@@ -73,14 +73,16 @@ impl RuntimeState {
             session_id,
             LifecycleKind::UpgradeContainer,
             super::lifecycle::LifecycleStart {
+                origin: super::lifecycle::LifecycleOrigin::Person,
                 resume_workspace_id: None,
                 request_key: Some(request_key),
                 control: None,
                 phase,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, session_admission| async move {
                 let admitted = blocking({
                     let session_id = session_id.clone();
                     let cancelled = cancelled.clone();
@@ -102,9 +104,9 @@ impl RuntimeState {
                 };
                 state.bind_restart_intent(&session_id, &intent.operation_id)?;
                 let _ = accepted.send(Ok(()));
-                state.restart_admitted(session_id, cancelled, Some(intent), false).await
+                state.restart_admitted(&session_admission, session_id, cancelled, Some(intent), false).await
             },
-        )?;
+        ).await?;
         let runtime = self.clone();
         tokio::spawn(async move {
             if let Err(error) = Self::wait_lifecycle_result(operation.clone()).await {

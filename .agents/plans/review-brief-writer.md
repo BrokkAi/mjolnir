@@ -19,8 +19,8 @@ A later milestone gives the writer Bifrost query tools (RQL steps over a code gr
 - [x] Milestone 2 (2026-11-16): the WritingBrief phase. Driver, writer prompt (`mj-review/templates/brief_writer.md`), host registration and routing, recovery, and a "Brief writer" row in the review view (running, then done or failed; its child session id is attached like a reviewer's). Tests: 6 driver transitions (written, failed or empty, cancelled, group failure, restart), 3 host flow tests (hands back, ends without a handback, fails to launch), 2 host restore tests in WritingBrief. Full suites and clippy: see Outcomes.
 - [x] Milestone 2 compatibility follow-up (2026-11-17): merged `origin/master` (`a43b47fbb`) without conflicts; added breaking schema revision 135/minimum-compatible 135 and daemon protocol 102; updated historical schema fixtures and final compatibility assertions. Targeted tests: 46 schema/migration + 80 review-host tests, 1 core review-driver test, 11 client protocol tests passed. Final workspace Clippy and formatting checks passed. API baseline classification: see Outcomes.
 - [x] Schema collision follow-up (2026-11-17): fetched and merged `origin/master` at `c1d5992a2` into parent merge `e4239eaf7`; preserved upstream's compatible accounting migration 135 exactly and moved the brief-writer fence/revision/minimum-compatible version to 136. Historical revisions 132–135 use floor 132; daemon protocol remains 102 (upstream 101). Targeted database/review-host tests: 345 passed, 2 ignored; see Outcomes for final validation.
-- [ ] Milestone 3: end-to-end in an isolated instance with a real harness. A real review shows the brief in reviewer prompts; usage is accounted; the writer is destroyed at the end.
-- [ ] Milestone 4: ship decision. Set the default writer model from milestone 0, document the setting, and decide whether it is on by default from milestone 0's generalization result.
+- [x] Milestone 3 (2026-11-17): real Codex end-to-end passed using `review_before_push.py --brief-writer`, isolated instance `brief-e2e`, copied codex4 login, and `gpt-6.1-terra`/low for requester, writer and reviewer. The reviewer received the complete anchored handback, the store retained it, both children were destroyed by review completion, and `mj usage --parent` retained the writer’s 84,458 total tokens. See the command and prompt excerpt in Outcomes.
+- [x] Milestone 4 (2026-11-17): ship decision. The writer stays opt-in, because `PLAN-bifrost-bugs.md` read "Does not generalize". The recommended writer is Sol/high, because `PLAN-writer-terra.md` read "Sol writes". `docs/src/content/docs/turn-review.md` states the measured effect and cost. See Outcomes.
 - [ ] Milestone 5: Bifrost tools for the writer (a per-role MCP server for the writer child), added template by template, each measured.
 
 
@@ -90,6 +90,10 @@ Final-review follow-up: retained `NoteBriefSkipped` during Running recovery and 
 Schema-number collision follow-up (2026-11-17): `git fetch origin` then `git merge origin/master` produced one conflict in `database/schema.rs`. Upstream's revision 135 (`78c792f32`, retained child kinds with insert/update triggers) is preserved byte-for-byte. The unshipped brief-writer breaking fence is now revision 136 with minimum-compatible 136 in the same transaction; its breaking classification comment is unchanged. `SCHEMA_VERSION`, the migration-test floor constant, historical rewind fixtures and final-store assertions use the new contract. Rewinding before 135 removes the accounting-kind triggers/column, while revision 135 retains upstream's floor 132. The upstream accounting regression stops before 136 to continue proving compatibility with revision-134 writers, then applies the fence and checks refusal of revision 135. The historical “135” brief-fence entries above describe the earlier checkpoint; 136 is the final fence number.
 
 Validation: `cargo test -p brokk-mj-controller --lib -- database:: review_host::tests`, outside the sandbox/dev profile, passed 345 tests (263 database + 82 review-host), 2 ignored, zero failures, including `usage_kind_migration_backfills_live_children_and_preserves_legacy_writes` and the direct-upgrade matrix. Evidence: `collision-tests.log` in the continuation report directory (session 4fc59802). Upstream daemon protocol was checked from fetched `origin/master`: 101; the feature's 102 remains free. No full suites or known unrelated master failures were rerun. The single requested workspace `cargo clippy --all-targets -- -D warnings` pass completed successfully (`collision-clippy.log`); `cargo fmt --all` and staged/unstaged `git diff --check` also passed.
+
+Milestone 4 (2026-11-17), shipped defaults from milestone 0's two validation plans:
+- Writer model (`.agents/evals/review-arms/brief/PLAN-writer-terra.md`, round J, 18 primary mjolnir relation diffs, Terra/high reviewers): no brief 20.4%, Terra-written brief 29.6%, Sol-written brief 55.6%. TT − BT −25.9 points (95% CI −44.4 to −9.3); TT − no brief +9.3 (−5.6 to +27.8). Reading "Sol writes". A blind contains check found that Terra's briefs stated the decisive fact 2/22 times against Sol's 9/22. The recommended writer is Sol/high, about $0.20 per brief at API prices.
+- Generalization (`.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md`, bifrost-dev, `brief/bifrost-arms/README.md`): 17 relation diffs, no brief 17.6% against Sol brief 7.8%, −9.8 points (−19.6 to −2.0); 13 non-relation diffs, +5.1 (0.0 to +12.8); 40 ordinary controls, 110% retention of confirmed findings (−0.050 to +0.175 groups per reviewer). Reading "Does not generalize", so the writer stays opt-in. Diagnostics: the brief stated the decisive fact in 3 of 17 relation briefs, and 13 of 15 template-applicable facts are value flow. The controls show no general loss of confirmed findings on ordinary changes. They can't rule out a distraction effect on the relation diffs themselves, since reviewer transcripts are unavailable. The loss concentrates in relation diffs whose brief missed the relation, so fact quality (milestone 5) is the most likely lever, not a proven cause.
 
 ## Context and Orientation
 
@@ -179,6 +183,15 @@ Milestone 5 gives the writer Bifrost tools. Today reviewer children get no MCP s
 - error propagation.
 Each template is added only when its steps answer completely and quickly on real code. Its effect is measured as the share of census decisive facts the writer's brief states, against the grep-only writer, plus the reviewers' catch rate. Bifrost's prerequisites are tracked in bifrost-dev (#13921, #13211 slices, #13871, #13616, #13401, #13612/#13728, #13216 S2) and are not part of this plan's code.
 
+Why milestone 5 matters more after milestone 0's bifrost-dev check: there, the grep-only Sol writer stated the decisive fact in only 3 of 17 relation briefs, and its briefs lowered Terra's catch rate (17.6% → 7.8%). 13 of the 15 template-applicable bifrost-dev relation facts are value flow (census template T8a), which grep finds poorly. The T8a engine audit (2026-11-17, helper 9b8ed7dc, bifrost-dev `.agents/plans/rql-value-flow-census-audit.md`) ranked exact source endpoints first. That's bifrost-dev #13639 (AST identity on Rust calls, arguments, bindings, returns and fields, plus the result-phase and operand contract), now in progress. Existing primitives already compose a local def-use chain (`state_events_of` → `binding_initializer_calls_of` → `flow_relations_of`), which a template can use before `flow_query` reaches every endpoint.
+
+Integration constraints, from the review-writer cost measurement (helper 8714bc9f, 2026-11-17) and the engine coordinator's overlap ruling:
+- Writer and reviewers borrow the requester's session root (`delta.root`; `review_host/reviewer_child.rs`, `controller/subagents.rs`). Session roots are independent `git clone --local --dissociate` copies, so stores don't carry across sessions, and a new writer process loses Bifrost's resident graphs. On mjolnir master, a cold index takes about 579 s (5.9 GiB peak, controlled profile), and reopening the same path takes about 20 s before any query time.
+- Store sharing across sessions extends bifrost's existing shared-cache mechanism (explicit CACHE_DIR with its build lock, #13147 lineage, owner 0275a8b5), not a second path in bifrost or in mj. Any mj-side change, such as giving the writer a CACHE_DIR or staging linked worktrees, goes through the engine coordinator to the mj side as a short note.
+- Commit-correct analysis comes from the frozen diff object IDs through bifrost's request source pinning (#10979, owner b2826633), not from a checkout or verification layer of our own. The borrowed root is live and can advance during a review.
+
+Feasibility measurement (2026-11-17, helper 8714bc9f, mjolnir 9c2fd7 at three real diffs of 85, 657 and 1758 lines, bifrost 96f3, realistic profile, 3 samples each). The writer's four-family bundle is callers, call_results, state_events_of and flow_relations_of. From review checkout to the last response it took a median of 155 s, 191 s and 65 s (first samples 155, 356 and 232 s); server startup on a reused store took about 25 s. No sample returned a complete bundle. callers was complete only on the small diff and partial on the others. state_events_of and flow_relations_of hit the 60 s deadline on the small and typical diffs, and came back partial or incomplete on the large one. Verdict: a cold index (about 9 m 49 s) is unaffordable, and a warm reused store is necessary but not sufficient. Completeness and latency of state_events_of and flow_relations_of are binding. Attribution (helper 8ec00bf2): about 87% of warm flow CPU goes to inert drop-glue proofs for sibling procedures the query never demanded, because seed_derivation derives the whole file before filtering. That makes bifrost-dev #13871 (per-request proof memo) and demand scoping through the existing procedure-scoped entry the levers. Milestone 5 waits on those, on #13639 and on #14103.
+
 
 ## Concrete Steps
 
@@ -226,3 +239,92 @@ At the end of milestone 2 these exist:
   - a request `ReviewRequest::StartBriefWriter { prompt: String, model: ..., effort: ... }` and `ReviewRequest::CloseBriefWriter`;
   - inputs `brief_written(&mut self, text: String) -> Vec<ReviewRequest>` and `brief_failed(&mut self, reason: String) -> Vec<ReviewRequest>`.
 - In `mj-review/templates/`: `brief_writer.md`, from `brief/WRITER.md`.
+
+
+Milestone 3 (2026-11-17): extended `tests/e2e/review_before_push.py` with
+`--brief-writer` and `--effort`. The brief mode commits a two-file change in a
+three-file Python fixture and requests review without pushing; the default mode
+retains the original push/gate regression. The test archives operational child
+records atomically when the review host destroys them, then checks that both
+children are gone before test cleanup. It checks the complete writer handback against the
+reviewer's recorded initial prompt, a retained `subagent_handbacks` command and
+message, and nonzero whole-turn writer usage in the requester's CLI usage tree.
+
+Validation from `~/Projects/mjolnir-wt/m3-e2e` (detached at `9d2109955`):
+
+```sh
+cargo build -p brokk-mjolnir -p brokk-mj-worker
+env -i HOME=/home/jonathan PATH="$PATH" python3 tests/e2e/review_before_push.py \
+  --mj target/debug/mj --worker target/debug/mj-worker \
+  --root /home/jonathan/.cache/mjolnir/build/brief-m3-e2e-5 \
+  --instance brief-e2e --profile-home /home/jonathan/.codex4 \
+  --model gpt-6.1-terra --effort low --brief-writer
+```
+
+The real run passed in 111.49 seconds with one clean review. Requester:
+`6a713788ac2d713cc620e5fdf5e94c37`; writer:
+`7177421ea66988a13e477d069d629aa0`; reviewer:
+`71c5c9be8eb50f2911c2f81326d8fc52`. The writer's retained usage row reports one
+whole turn, 27,298 input, 56,576 cached-read and 584 output tokens (84,458 total),
+with `operational_session_present: false`. The daemon stopped successfully.
+No Rust changed; Python compilation and `git diff --check` passed.
+
+Recorded reviewer prompt excerpt (identical to the stored writer handback after
+the introductory paragraph):
+
+```markdown
+## Relations computed from the repository
+
+These are relations computed from the repository at this commit, not findings. They may be incomplete.
+
+## Affected callers
+- `app.py:1` imports `greeting`, and `app.py:4` returns its result from `welcome()`; `greeting.py:2` constructs that result.
+
+## Paths
+- Calling `welcome()` at `app.py:3` invokes `greeting()` at `app.py:4`, reaching the return expression at `greeting.py:2`.
+
+## Value flow
+- `app.py:4` passes the literal `"world"` as the `name` parameter declared at `greeting.py:1`; `greeting.py:2` interpolates it and returns `"Welcome, world"` through `app.py:4`.
+```
+
+Surprises during live validation: Destroy removes `subagent_sessions` launch
+records along with operational children, while retaining handbacks and usage;
+the script therefore captures prompts before cleanup. Luna/low was inconsistent:
+one run stopped on a Git sandbox denial and another produced only `none`
+relations despite the caller fixture. The successful run uses Terra/low. Brief
+mode omits the unrelated push probe, which encountered an automatic approval
+rejection in an earlier Luna run. Four exploratory attempts were interrupted
+while correcting the fixture/polling or changing models; all five isolated
+daemons were stopped. No brief-writer product defect or Rust change was needed.
+Evidence: `e2e-5.log`, `summary.json`, `writer-handback.txt`, `usage-tree.json`, and
+`reviewer-71c5c9be8eb50f2911c2f81326d8fc52-prompt.txt` in report directory
+`.mj/agents/2f19d11c15792ec0986c374e155d5be8/` of the parent checkout.
+
+
+Milestone 3 review follow-up (2026-11-17): fixed the test's polling race by
+installing a test-only observation table and BEFORE DELETE trigger in its
+isolated SQLite database before creating the requester. The trigger copies the
+stored launch record during normal Destroy; it does not retain operational rows
+or delay the child. Live and archived relations are read in one SQL statement,
+so a child can finish entirely between polls without losing its prompt. Writer
+handbacks are matched to reviewer prompts using the exact captured Git diff
+commands and complete brief text, allowing multiple review rounds. The test now
+also checks the committed greeting contents and diff and the unchanged caller.
+Cleanup skips already-destroyed children instead of issuing expected 404s.
+The test carries a Hard-won comment for `835967621`.
+
+Reran only the e2e script with the same real build, codex4 profile, Terra/low and
+isolated instance, changing `--root` to
+`/home/jonathan/.cache/mjolnir/build/brief-m3-e2e-6`. PASS in 118.00
+seconds: one clean round, writer `03f683fba51dbdab5128377f0f8e72f2`, reviewer
+`43465a7d58db659749a55dadbdd93ad2`, requester `7d65491649f0833487d2dea3197198dc`. The intended committed greeting
+and caller fixture were verified. Both launch records survived in the test
+archive after their operational rows were deleted. The anchored writer handback
+was retained in `subagent_handbacks` and included verbatim in the reviewer
+prompt. The requester's `mj usage --parent` tree retained one writer whole turn
+and 84,764 total tokens after destruction.
+The daemon stopped successfully; Python compilation and diff checks passed.
+No Rust or product behavior changed. Evidence in the same report directory:
+`e2e-6.log`, `final-summary.json`, `final-usage-tree.json`,
+`writer-03f683fba51dbdab5128377f0f8e72f2-handback.txt` and
+`reviewer-43465a7d58db659749a55dadbdd93ad2-prompt.txt`.

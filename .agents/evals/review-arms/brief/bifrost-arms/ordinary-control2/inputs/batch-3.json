@@ -1,0 +1,114 @@
+[
+ {
+  "intro": "0dc1b2afeff033dc3ede39f124d874f170a02bf5",
+  "base": "5d885dfd460b0b1e859c3b600f7f9f5565d13af8",
+  "findings": [
+   {
+    "id": "f-a1904058",
+    "text": "- [P2] Preserve replay uncertainty when selecting deferred methods \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27041-27042\n  When an inherent method value is found but replay cannot fully search an earlier value route (for example, an owner has a missing member scope), `replayed` contains the resulting incomplete reason and no selected earlier target. This branch discards that answer and returns the deferred method with only the direct and member completions, potentially reporting a complete method binding even though an earlier value could shadow it. Retain the replay uncertainty when selecting the deferred member, consistent with [AGENTS.md:68](AGENTS.md#L68)."
+   },
+   {
+    "id": "f-272db163",
+    "text": "- [P2] Preserve replay uncertainty when selecting deferred members \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27041-27042. When a method-value candidate exists but replay of the earlier value route is incomplete and finds no selected target, this branch discards `replayed` entirely, including its completion reasons. The returned method can therefore appear complete even though the unresolved earlier route might contain a value that takes precedence; the same loss also discards any `deferred_completion` combined into the replay result."
+   },
+   {
+    "id": "f-5b81bfd8",
+    "text": "- [P1] Preserve impl overrides when the direct route finds a trait method \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26052-26056\n  When a method is used as a value and the direct crate route resolves its trait declaration, `deferred_precedence` is set even if deferred lookup found the concrete impl item. This new early return therefore selects the trait declaration before the existing shadowing logic can replace it with the impl override, so definition and usage results for `Type::method` point to the wrong declaration."
+   },
+   {
+    "id": "f-e150e509",
+    "text": "- [P2] Retain replay uncertainty when selecting deferred members \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27041-27042\n  When replay cannot fully enumerate the earlier value namespace (for example, an omitted or unresolved qualifier origin) and finds no earlier target, this branch discards `replayed` and its incomplete completion before returning the method candidate. The result can consequently be reported as complete even though the missing earlier route could contain a value that takes precedence."
+   },
+   {
+    "id": "f-588d886a",
+    "text": "- [P2] Preserve earlier-route uncertainty when choosing deferred members \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27041-27042. When ordinary value replay is incomplete and finds no selected target, this returns the deferred method answer without the replay completion or the saved ordinary deferred completion. An unresolved earlier value route can therefore be reported as a complete method binding even though it may later resolve to a value that takes precedence; propagate that uncertainty into the chosen answer."
+   },
+   {
+    "id": "f-e15993be",
+    "text": "- [P2] Preserve replay uncertainty when choosing deferred members \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27042-27043. If the earlier value-namespace replay is incomplete and finds no selected target, a deferred method is returned without the replay or omitted-origin completion reasons. The result can therefore be reported as complete even though an unresolved earlier value route could shadow that method. Carry the replay's uncertainty into the selected deferred answer."
+   },
+   {
+    "id": "f-57482d33",
+    "text": "- [P2] Preserve earlier-namespace uncertainty when selecting a method value \u2014 crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:27041-27042\n  When the earlier value lookup is incomplete, for example because a qualifier or member scope could not be resolved, `replayed` carries that uncertainty and `deferred_completion` may carry additional uncertainty from the ordinary impl lookup. Returning only `direct` and `members` discards both, so a later method value can be reported as a complete binding even though an earlier value may still shadow it. Preserve the earlier lookup's completion in the selected answer."
+   }
+  ]
+ },
+ {
+  "intro": "b58235b247fdea10a2d6cf9039aec4de5245792a",
+  "base": "9a9c6dedfa540e19836424b411e7c8fb2a2b9e09",
+  "findings": [
+   {
+    "id": "f-8d6a0db4",
+    "text": "- [P2] Check importlib rebinding before accepting the receiver \u2014 crates/bifrost-python/src/graph/extractor.rs:536-543. When a function imports `importlib` and subsequently reassigns that local before calling `importlib.import_module`, this selects the earlier import solely by its range and reports the resulting module member as a usage even though the receiver now refers to another object. The binding must be valid at the assignment site, including intervening writes."
+   },
+   {
+    "id": "f-8ea13eb8",
+    "text": "- [P1] Follow Python's method resolution order for multiple inheritance \u2014 crates/bifrost-python/src/graph/resolver.rs:59-62\n  For `class C(A, B)` where `A` inherits `X` and both `X` and `B` define the member, Python resolves `C().member` to `X.member` when the MRO is `C, A, X, B, object`. This breadth-first search instead stops at `B`, so both usage queries and inverted edges attribute the call to the wrong declaration. It also returns both declarations when two direct bases define the member, although Python selects the first in the MRO."
+   },
+   {
+    "id": "f-b3122ec4",
+    "text": "- [P2] Follow Python's method resolution order for multiple inheritance \u2014 crates/bifrost-python/src/graph/resolver.rs:55-64\n  When a class inherits from multiple bases, Python uses C3 method resolution order rather than the nearest breadth-first layer. For example, with `class C(A, B)` where `A` inherits `save` from a parent and `B` declares `save`, `C().save()` selects the inherited `A` member, but this search stops at `B` and attributes the call to the wrong declaration. Two direct bases declaring the member similarly produce both declarations instead of selecting the first."
+   },
+   {
+    "id": "f-a284512c",
+    "text": "- [P2] Check the importlib binding at the assignment site \u2014 crates/bifrost-python/src/imports.rs:60-62\n  If `importlib` is rebound before the assignment and restored before the reference, such as `importlib = fake; mod = importlib.import_module(\"pkg\"); import importlib; mod.member`, the callback checks visibility at the later reference and attributes `mod.member` to `pkg` even though the call used `fake`. This produces incorrect usage and graph edges for the workspace module."
+   },
+   {
+    "id": "f-97aa1ef1",
+    "text": "- [P2] Invalidate imported modules after nested or destructuring writes \u2014 crates/bifrost-python/src/imports.rs:71-74. If a direct literal import is followed by `if condition: canonical = other` or `canonical, x = other, 1`, the binding collector is called only on the outer statement and does not traverse its body or the expression wrapper. The earlier module remains selected, so `canonical.member` is reported as a definite usage of the imported module even when the receiver has been reassigned."
+   },
+   {
+    "id": "f-facd489a",
+    "text": "- [P2] Respect Python's method resolution order for multiple inheritance \u2014 crates/bifrost-python/src/graph/resolver.rs:59-65. When multiple bases declare the same member, returning every declaration in the first breadth-first layer attributes a call to all of them, although Python selects the first declaration in its C3 method resolution order. Breadth-first traversal can also select a later base over an earlier base's ancestor, so both usage results and inverted edges are incorrect for ordinary multiple-inheritance hierarchies."
+   },
+   {
+    "id": "f-987898c7",
+    "text": "- [P2] Honor inner function declarations before outer imports \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1945-1951. If an outer function imports a name and an inner function declares a function with that same name, the outer import passes this scope-range check and `has_runtime_callable_binding_at` does not treat a function-only declaration as a runtime binding. Navigation on the inner call therefore returns the imported symbol instead of the inner function, bypassing the existing lexical resolution path."
+   },
+   {
+    "id": "f-882f74fd",
+    "text": "- [P2] Respect an inner function's local binding before selecting an outer import \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1952. When an outer function imports `Worker` and an inner function references `Worker` before its own later `from other import Worker`, this search selects the outer import because the inner import occurs after the reference. Python treats `Worker` as local throughout the inner function, so the reference raises `UnboundLocalError`; navigation instead incorrectly resolves it to the outer target."
+   },
+   {
+    "id": "f-696f3452",
+    "text": "- [P2] Account for reassignment of a function-local importlib binding \u2014 crates/bifrost-python/src/graph/extractor.rs:542-543\n  When a function executes `import importlib; importlib = fake; canonical = importlib.import_module(\"pkg.mod\"); canonical.member()`, this branch accepts the original import without checking the intervening assignment. The usage scan therefore reports `canonical.member` as a reference to `pkg.mod.member` even though the call was made on `fake`, producing a false positive for the exact-match behavior introduced here."
+   },
+   {
+    "id": "f-9a9d94d2",
+    "text": "- [P1] Follow Python's method resolution order for inherited members \u2014 crates/bifrost-python/src/graph/resolver.rs:59-65. In multiple inheritance, breadth-first layers do not match Python's C3 method resolution order. For example, with `B(A)`, `D(B, C)`, and `save` declared on both `A` and `C`, `D().save()` resolves to `A.save`, but this code selects `C.save`; it also returns both declarations when two direct bases define the member. Usage queries and graph edges therefore omit the actual target and attribute calls to unrelated overrides."
+   },
+   {
+    "id": "f-8ee4c21c",
+    "text": "- [P2] Follow Python's method resolution order for multiple inheritance \u2014 crates/bifrost-python/src/graph/resolver.rs:59-64\n  When a receiver inherits from multiple bases, breadth-first traversal does not implement Python's C3 method resolution order. For example, if `C(A, B)` and both bases define `save`, `C().save()` resolves only to `A.save`, but this returns both declarations; if `A` inherits `save` and `B` defines it, the breadth-first search can select `B.save` even when Python selects the inherited declaration through `A`. Usage results therefore include the wrong method and can omit the actual one."
+   },
+   {
+    "id": "f-c5282523",
+    "text": "- [P2] Resolve the actual local binding of dotted imports \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1966-1969\n  For a function-local `import pkg.submodule` without an alias, Python binds `pkg`, while the recorded qualified name is `pkg.submodule`. The new early return therefore resolves a reference to `pkg` to the submodule instead of the package, including the root of `pkg.submodule` expressions. The binding's consumed attribute count must be considered when resolving the identifier."
+   },
+   {
+    "id": "f-9ae0639b",
+    "text": "- [P1] Follow Python's method resolution order for multiple inheritance \u2014 crates/bifrost-python/src/graph/resolver.rs:59-62\n  For `class C(A, B)` where both bases define the same member, Python selects the first declaration in C's C3 method resolution order, but this returns both declarations at the same breadth-first layer. It can also select a nearer declaration in a later base over an inherited declaration in an earlier base. Consequently usage queries and graph edges attribute calls to the wrong methods and omit the actual method in the latter case."
+   },
+   {
+    "id": "f-42547a0e",
+    "text": "- [P2] Honor inner import shadowing before selecting an outer binding \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1946-1951\n  When an enclosing function imports a name and an inner function imports the same name later in its body, a reference before the inner import is an unbound local in Python. This search skips the later inner import and selects the enclosing one, while the subsequent inventory check does not treat an import as a runtime write, so navigation incorrectly resolves the reference to the outer import."
+   },
+   {
+    "id": "f-d1c89c58",
+    "text": "- [P2] Resolve the bound root of an unaliased dotted import \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1966-1969\n  For a function containing `import pkg.sub` followed by a reference to `pkg`, Python binds `pkg` to the root package, but the new lookup resolves the binding's full `pkg.sub` qualified name. Definition navigation therefore reports the submodule for the root identifier; `consumed_attributes` already distinguishes this import form."
+   },
+   {
+    "id": "f-146c0bdb",
+    "text": "- [P2] Respect inner function declarations when selecting an outer import \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1954-1961\n  If an outer function imports `name` and an inner function declares its own `def name(): ...` before referencing it, the outer import passes the scope-range filter and `has_runtime_callable_binding_at` does not count function declarations. The new early return then resolves the reference to the imported symbol instead of the inner function, bypassing the existing lexical resolution path."
+   },
+   {
+    "id": "f-d4473be4",
+    "text": "- [P2] Account for writes inside the reference's enclosing statement \u2014 crates/bifrost-python/src/imports.rs:48-52\n  When a reference is nested in a compound statement, this stops before inspecting any earlier writes in that statement. For example, after `canonical = importlib.import_module(\"pkg.mod\")`, an `if` body containing `canonical = other` followed by `canonical.target()` is still attributed to `pkg.mod.target`, although the reassignment always precedes that reference. This creates false usage and graph edges for the imported module."
+   },
+   {
+    "id": "f-552c0cbc",
+    "text": "- [P2] Allow a local import to replace a parameter binding \u2014 crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1957-1959\n  In `def f(Worker): from pkg import Worker; return Worker()`, the import replaces the parameter before the reference, but `has_runtime_callable_binding_at` always reports the parameter as a runtime binding. The new early return consequently reports no definition for a valid imported symbol instead of resolving `pkg.Worker`."
+   }
+  ]
+ }
+]

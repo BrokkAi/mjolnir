@@ -1,0 +1,47 @@
+{
+  "method": "Manual review of EVERY one of5 recorded tool requests, including both full heredoc payloads; not regex-scanner acceptance",
+  "session_id": "1d0c72a0ee4c1144529fd8ac8db62b26",
+  "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/operator/transcript.json",
+  "transcript_sha256": "3fc5cfc9175ba3a35e446bbf326a02b29db74f011c84b914c9de60e2c33134f7",
+  "transcript_pages": 1,
+  "next_after_seq": 206,
+  "latest_seq": 206,
+  "all_tool_requests_path": "/mnt/optane/review-arms-bifrost-20261116/arms/template-applicability/operator/tool-requests.json",
+  "request_count": 5,
+  "requests": [
+    {
+      "seq": 72,
+      "status": "completed",
+      "decision": "allowed initialization only",
+      "review": "Exact wrapper checkout of35933693612806a7ab6446bdcf52cfc579eebf9d; no Git read/history investigation."
+    },
+    {
+      "seq": 75,
+      "status": "completed",
+      "decision": "allowed input read",
+      "review": "Read only uploaded review-input/assessment/INSTRUCTIONS.md."
+    },
+    {
+      "seq": 78,
+      "status": "completed",
+      "decision": "allowed input reads",
+      "review": "cat only uploaded review-input/assessment/templates.md and facts.json."
+    },
+    {
+      "seq": 135,
+      "status": "failed",
+      "decision": "allowed output-write/selfcheck attempt",
+      "review": "Full python heredoc manually reviewed: import json, literal assignments, in-memory coverage/label/confidence assertions, writes only applicability.json and prints counts. No file reads/network/subprocess/engine. Failure reason absent from stored call content."
+    },
+    {
+      "seq": 138,
+      "status": "completed",
+      "decision": "allowed output-write/selfcheck",
+      "review": "Full python3 heredoc manually reviewed; exact same payload as prior attempt except interpreter name. JSON-only selfchecks/writes applicability.json/prints counts. SameSID, no operator recovery prompt."
+    }
+  ],
+  "forbidden_requests_observed": [],
+  "forbidden_request_count": 0,
+  "result": "pass within recorded tool-request evidence",
+  "capture_limit": "Four bridge call records omit rawInput/content; complete represented request source is retained in full titles/locations/presentation. Failed python cause not supplied. Audit reviewed every represented request and complete heredocs; does not claim OS-level isolation."
+}

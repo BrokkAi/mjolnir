@@ -1,0 +1,265 @@
+{
+  "verdicts": [
+    {
+      "output_id": "eaa02c4182e956ea",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes model selection and conversion projection, but never identifies ignored unresolved competitors or the resulting unjustified singleton selection. Its code-path observations do not identify a defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "25ee1c25c1991b06",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output traces binding activation into lexical binding rows, but does not identify the body/consequence field mismatch for while-let or the resulting omitted binder. Merely citing the activation code does not satisfy the match rule.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "4b9f8faada4bd6f5",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output says the visitor registers properties as fields, but never identifies callable object members as wrongly classified or connects that classification to missing function results. This is a description of indexing, without the required defect or related faulty symptom.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "941c61e0b4f82ef4",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes epoch publication and generation handling, but never identifies an Immediate writer reservation on the matching-epoch path or contention behind unrelated writers.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "609751934ad6b8ae",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes report caps and serialization, but never identifies the max_files early break returning truncated=false when further distinct files remain. Its observations about rendered line numbers concern a different behavior and do not state a defect finding.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3d0bd7fe5c851dda",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes Rust declarations and shared indexing, but does not identify missing traversal of named fields inside enum struct variants or the resulting absent field declarations.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "686e7bec36fe745a",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output mentions importer candidates coming from files_mentioning, but never identifies terminal-module-name widening to unrelated code mentions or the expensive forward-edge verification it causes. It reports no related faulty symptom.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "4b03f4fce33e2807",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output traces non-dropping local classification into scope-exit cleanup, but never identifies item macros generating an unseen impl Drop or the consequent unsound plain-struct classification and omitted cleanup uncertainty.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5e448de8deb7c90d",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes progress reporting and request execution, but never identifies a timed-out notification remaining queued and being delivered after the response. It does not connect notification cancellation to request lifetime.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9a89fcd44ba8f9a1",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes namespace_of_file and candidate routing, but never identifies multiple namespace blocks in one file or omitted usages in a later namespace. These contextual observations do not identify the required defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ac21898ea9add1b3",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes Rust role predicates and resolution, but never identifies associated constants being admitted into bare current-module value lookup or competing with a module constant.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "455ea1c5b9ac4799",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes focused reference extraction and Ruby constant lookup, but never identifies climbing the entire scope_resolution chain or resolving a nonterminal selection to the terminal constant.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5ac84605f7caee90",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload unwrapping for ordinary calls or invalid field navigation on the resulting receiver.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "eaa02c4182e956ea",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes model selection callers and error propagation but never identifies unresolved competitors being discarded when one candidate succeeds. It asserts no defect in overload certainty.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "25ee1c25c1991b06",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output mentions consequence activation intervals and the binding hook, but does not identify the while_expression body/consequence distinction or the resulting missing while-let binder. Location overlap alone does not meet the partial bar.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "4b9f8faada4bd6f5",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes object properties being registered as fields, but never distinguishes callable members or identifies their incorrect symbol kind or omission from function results. It therefore describes implementation without identifying the defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "941c61e0b4f82ef4",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output discusses epoch comparison and generation publication but does not identify the unconditional Immediate transaction or matching-epoch contention with unrelated writers.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "609751934ad6b8ae",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes cap parameters and the truncated result field, but does not identify the max_files early break or unreported omission of additional distinct files. Its observation about displayed line endpoints concerns a different behavior.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3d0bd7fe5c851dda",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes Rust declaration indexing and parent-child storage but never identifies missing descent into named fields of enum struct variants.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "686e7bec36fe745a",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output notes that importer candidates use files_mentioning, but does not identify terminal-module-name widening to unrelated code mentions or the resulting expensive forward-edge verification. Naming the relevant query alone does not establish a related defective symptom.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "4b03f4fce33e2807",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output traces non-dropping local classification into cleanup analysis, but never identifies item macros generating impl Drop or the resulting unsound plain_structs proof. A normal data-flow description does not identify the missing cleanup uncertainty.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5e448de8deb7c90d",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes progress reporting and request execution but does not discuss notify_progress timing out after enqueue or notifications surviving the response boundary.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9a89fcd44ba8f9a1",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output mentions namespace_of_file and candidate routing, but never identifies multiple namespace blocks or later-namespace references being pruned from candidate files and usage results.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ac21898ea9add1b3",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes Rust reference roles and namespace predicates, but does not identify associated constants being admitted to bare current-module value lookup or competing with module constants.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "455ea1c5b9ac4799",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output describes focus bounds and Ruby constant resolution, but does not identify ascent through the full scope_resolution chain or navigation from a selected prefix to the terminal constant.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5ac84605f7caee90",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output mentions container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload inference for an ordinary call or invalid payload-field navigation.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    }
+  ],
+  "missing": []
+}

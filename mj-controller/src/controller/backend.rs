@@ -1,5 +1,6 @@
 //! Backend target, locator, and capacity conversion for provisioned sessions.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ impl Controller {
             return Ok((launch.cwd, "not a git checkout".to_owned()));
         }
         let output = executor.execute(&targets::command_on_locator(
+            SshTrafficClass::Control,
             &backend,
             session_id,
             vec![
@@ -111,7 +113,11 @@ impl Controller {
             let mut command = vec!["git".to_owned(), "-C".to_owned(), cwd_text.clone()];
             command.extend(args.iter().map(|arg| (*arg).to_owned()));
             let output = executor.execute(&targets::command_on_locator(
-                &backend, session_id, command, purpose,
+                SshTrafficClass::Control,
+                &backend,
+                session_id,
+                command,
+                purpose,
             )?)?;
             Ok((output.status == 0).then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
         };
@@ -757,6 +763,86 @@ impl ContainerOverrides {
     }
 }
 
+/// OCI platform of a container target, before its container exists.
+pub(crate) fn session_image_platform(
+    template: &TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    let (host, container) = template
+        .image_host()
+        .context("image operation requires a container target")?;
+    let architecture = if let Some(platform) = &container.platform {
+        platform
+            .split('/')
+            .find_map(|part| targets::normalize_architecture(part).ok())
+            .context("unsupported container platform")?
+    } else if matches!(
+        host,
+        targets::ImageHost::AppleContainer | targets::ImageHost::SshAppleContainer(_)
+    ) {
+        "aarch64"
+    } else {
+        // The engine owns its native architecture, including Docker Desktop
+        // on a Windows daemon host where uname is not available.
+        let args = match host.engine() {
+            "podman" => vec![
+                "podman".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Host.Arch}}".into(),
+            ],
+            "docker" => vec![
+                "docker".into(),
+                "info".into(),
+                "--format".into(),
+                "{{.Architecture}}".into(),
+            ],
+            _ => vec!["uname".into(), "-sm".into()], // Nitro hosts run Linux.
+        };
+        let output =
+            super::execute_checked(executor, host.command(args, "detect image platform".into()))?;
+        let output = std::str::from_utf8(&output.stdout)?;
+        if matches!(host, targets::ImageHost::SshNitro(_)) {
+            targets::TargetPlatform::parse(output)?.architecture
+        } else {
+            targets::normalize_architecture(output.trim())?
+        }
+    };
+    Ok(format!(
+        "linux/{}",
+        match architecture {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => unreachable!(),
+        }
+    ))
+}
+
+/// Resolve the project assignment before preflight, creation, or recreation.
+/// A target without project images does not require an additional host probe.
+pub(crate) fn session_target(
+    config: &Config,
+    bundle_id: &str,
+    target_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<TargetTemplate> {
+    let template = config
+        .targets
+        .get(target_id)
+        .context("session target configuration is missing")?;
+    if template.container().is_none()
+        || config
+            .images
+            .bundles
+            .get(bundle_id)
+            .is_none_or(BTreeMap::is_empty)
+    {
+        return Ok(template.clone());
+    }
+    let platform = session_image_platform(template, executor)?;
+    config.session_target(Some(bundle_id), target_id, &platform)
+}
+
 pub(super) fn backend_target(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
@@ -822,29 +908,37 @@ pub(super) fn backend_target(
 /// entry takes the more eager of the two.
 pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
     let mut plan: Vec<ImageRefresh> = Vec::new();
-    for target in config.targets.values() {
+    for (target_id, target) in &config.targets {
         let Some((host, container)) = target.image_host() else {
             continue;
         };
-        let Some(refresh) = targets::image_refresh(
-            host,
-            &container.image,
-            container.platform.as_deref(),
-            container.pull_policy,
-        ) else {
-            continue;
-        };
-        // Commands are decided by the host, the image, and the platform alone,
-        // so those three identify the duplicates worth collapsing.
-        if let Some(existing) = plan.iter_mut().find(|entry| {
-            entry.host == refresh.host
-                && entry.image == refresh.image
-                && entry.platform == refresh.platform
-        }) {
-            existing.when = existing.when.max(refresh.when);
-            continue;
+        let mut images = vec![container.image.as_str()];
+        if let Some(platform) = container.platform.as_deref() {
+            for bundle_id in config.bundles.keys() {
+                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
+                    images.push(image);
+                }
+            }
         }
-        plan.push(refresh);
+        for image in images {
+            let Some(refresh) = targets::image_refresh(
+                host.clone(),
+                image,
+                container.platform.as_deref(),
+                container.pull_policy,
+            ) else {
+                continue;
+            };
+            if let Some(existing) = plan.iter_mut().find(|entry| {
+                entry.host == refresh.host
+                    && entry.image == refresh.image
+                    && entry.platform == refresh.platform
+            }) {
+                existing.when = existing.when.max(refresh.when);
+            } else {
+                plan.push(refresh);
+            }
+        }
     }
     plan
 }
@@ -1132,7 +1226,7 @@ fn wait_for_ssh_ready(
 pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Result<()> {
     wait_for_ssh_ready(
         executor,
-        &crate::targets::ssh_command(ssh, ["true"])
+        &crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["true"])
             .purpose("wait for EC2 SSH availability")
             .stage(ProvisionStage::Booting),
         AWS_SSH_READY_TIMEOUT,
@@ -1152,6 +1246,7 @@ pub fn wait_for_ec2_reboot(
     wait_for_ssh_ready(
         executor,
         &crate::targets::ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "sh",

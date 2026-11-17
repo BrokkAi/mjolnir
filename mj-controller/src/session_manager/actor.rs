@@ -107,6 +107,7 @@ pub(super) async fn run_session_actor(
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
+    let mut unreachable = false;
     let mut harness_readiness = HarnessStartupWatch::default();
     let mut next_cpu_read = tokio::time::Instant::now();
     let mut last_recovery_probe = None;
@@ -161,7 +162,10 @@ pub(super) async fn run_session_actor(
                     // A definitive missing target has no relay to poll. The
                     // daemon owns persistence; a changed desired target
                     // retires this actor and starts a fresh one.
-                    () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_))) => Event::Tick,
+                    () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_)))
+                        // A sealed relay has nothing left to follow. Its lifecycle
+                        // owner may stop the target after returning the connection.
+                        && connection.as_ref().is_none_or(|connection| connection.operational().execution != mj_core::relay::RelayExecutionState::Closed) => Event::Tick,
                     () = async {
                         match connection.as_mut() {
                             Some(connection) => connection.relay_changed().await,
@@ -338,6 +342,9 @@ pub(super) async fn run_session_actor(
                 };
                 match result {
                     Ok((snapshot, observed_at)) => {
+                        if std::mem::replace(&mut unreachable, false) {
+                            tracing::warn!(session_id = %target.session_id, "session worker is reachable again");
+                        }
                         failures = 0;
                         let cause = if updates.harness_failure.get().is_some() {
                             harness_readiness.observe_worker(
@@ -403,6 +410,13 @@ pub(super) async fn run_session_actor(
                             }
                         }
                     }
+                    Err(error) if error.is::<RelayJobDeferred>() => {
+                        harness_readiness.lost_contact();
+                        connection = None;
+                        tracing::debug!(session_id = %target.session_id, error = %format!("{error:#}"),
+                            "waiting for the lifecycle owner to finish worker startup");
+                        schedule.after(RECONNECT_INTERVAL);
+                    }
                     Err(error) => {
                         harness_readiness.lost_contact();
                         connection = None;
@@ -412,13 +426,15 @@ pub(super) async fn run_session_actor(
                         // retry, so report it at once rather than waiting for
                         // the unreachable threshold.
                         let integrity = projection_integrity_failure(&error);
-                        tracing::warn!(
-                            session_id = target.session_id,
-                            consecutive_failures = failures,
-                            projection_integrity = integrity,
-                            transport_dead = worker_connect_needs_restart(&error),
-                            "session relay sync failed: {error:#}"
-                        );
+                        if !std::mem::replace(&mut unreachable, true) {
+                            tracing::warn!(session_id = %target.session_id,
+                                projection_integrity = integrity,
+                                error = %format!("{error:#}"), "session worker is unreachable");
+                        } else {
+                            tracing::debug!(session_id = %target.session_id,
+                                consecutive_failures = failures,
+                                error = %format!("{error:#}"), "session relay sync retry failed");
+                        }
                         let recovery_due = !integrity
                             && !crate::controller::move_session::move_owns_session(
                                 &target.session_id,
@@ -526,7 +542,7 @@ pub(super) async fn run_session_actor(
                                 .clone()
                                 .expect("recovery eligibility requires a plan");
                             let restart_unresponsive = worker_connect_allows_live_restart(&error);
-                            tracing::warn!(
+                            tracing::debug!(
                                 session_id = target.session_id,
                                 "relay worker is unreachable; probing it before recovery: {error:#}"
                             );
@@ -598,7 +614,7 @@ pub(super) async fn run_session_actor(
                                     schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Alive) => {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         session_id = target.session_id,
                                         "relay transport failed but the worker is alive; leaving it running"
                                     );
@@ -619,7 +635,7 @@ pub(super) async fn run_session_actor(
                                     schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Starting) => {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         session_id = target.session_id,
                                         "relay worker is still starting; leaving it running"
                                     );
@@ -682,7 +698,7 @@ pub(super) async fn run_session_actor(
                                     );
                                 }
                                 Err(recovery_error) => {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         session_id = target.session_id,
                                         "automatic relay worker recovery failed safely: {recovery_error:#}"
                                     );
@@ -817,7 +833,10 @@ pub(super) async fn run_session_actor(
                                 "rejecting sync while session is leased"
                             );
                             if reply
-                                .send(Err("session is reserved for a lifecycle operation".into()))
+                                .send(Err(RelayJobDeferred(
+                                    "session is reserved for a lifecycle operation",
+                                )
+                                .into()))
                                 .is_err()
                             {
                                 tracing::debug!(
@@ -857,10 +876,7 @@ pub(super) async fn run_session_actor(
                                 "explicit relay synchronization failed"
                             );
                         }
-                        if reply
-                            .send(result.map_err(|error| format!("{error:#}")))
-                            .is_err()
-                        {
+                        if reply.send(result).is_err() {
                             tracing::debug!(
                                 session_id = %target.session_id,
                                 operation = "sync",
@@ -1042,7 +1058,8 @@ pub(super) async fn run_session_actor(
                     ActorCommand::RelayJob { job } => {
                         // The actor alone decides when its connection is
                         // free; a job never opens or reopens one.
-                        if lifecycle.is_leased() {
+                        if let Some((_, lease)) = &lifecycle.active_lease {
+                            job.deferred_by_lease(lease);
                             job.refuse(
                                 RelayJobDeferred(
                                     "a lifecycle operation holds the relay connection",
@@ -1113,6 +1130,8 @@ pub(super) async fn run_session_actor(
                         }
                     }
                     ActorCommand::Lease {
+                        admission,
+                        returns,
                         idle_harness,
                         reply,
                     } => {
@@ -1122,7 +1141,8 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         if idle_harness.is_some()
-                            && (lifecycle.is_leased() || !reviewer_tasks.is_empty())
+                            && !lifecycle.is_leased()
+                            && !reviewer_tasks.is_empty()
                         {
                             if reply
                                 .send(Err(super::handle::SessionNotIdle.into()))
@@ -1133,10 +1153,11 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         if lifecycle.is_leased() {
-                            tracing::debug!(
+                            tracing::error!(
                                 session_id = %target.session_id,
-                                operation = "lease",
-                                "rejecting duplicate session lifecycle lease"
+                                requested = admission.label,
+                                active = lifecycle.active_lease.as_ref().map(|(_, a)| a.label),
+                                "owner granted conflicting session relay leases"
                             );
                             if reply
                                 .send(Err(anyhow::anyhow!(
@@ -1189,13 +1210,25 @@ pub(super) async fn run_session_actor(
                         reviewer_cancellation = tokio_util::sync::CancellationToken::new();
                         reviewer_connections.clear();
                         reviewer_tails.clear();
+                        connection
+                            .as_mut()
+                            .expect("synced connection")
+                            .stop_observing()
+                            .await;
                         next_lease_id = next_lease_id.wrapping_add(1).max(1);
-                        match reply.send(Ok((
-                            lease_id,
-                            connection.take().expect("synced connection"),
-                        ))) {
-                            Ok(()) => lifecycle.activate_lease(lease_id),
-                            Err(Ok((_lease_id, returned))) => connection = Some(returned),
+                        // The reply owns the return guard too: cancellation
+                        // after send but before receive cannot strand the actor.
+                        match reply.send(Ok(ManagedSessionLease {
+                            session_id: target.session_id.clone(),
+                            lease_id: Some(lease_id),
+                            connection: Some(connection.take().expect("synced connection")),
+                            releases: returns,
+                        })) {
+                            Ok(()) => lifecycle.activate_lease(lease_id, admission),
+                            Err(Ok(mut returned)) => {
+                                returned.lease_id.take();
+                                connection = returned.connection.take();
+                            }
                             Err(Err(_)) => {}
                         }
                     }
@@ -1410,7 +1443,17 @@ impl std::fmt::Display for MailboxAdmissionDeferred {
 
 impl std::error::Error for MailboxAdmissionDeferred {}
 
-pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+pub(super) fn submit_failure(error: &anyhow::Error) -> SubmitFailure {
+    let failure = client_submit_failure(error);
+    SubmitFailure {
+        failure,
+        code: error
+            .downcast_ref::<RelayRejected>()
+            .map(|rejected| rejected.0.code),
+    }
+}
+
+fn client_submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
     if error.downcast_ref::<NotSent>().is_some()
         || error.downcast_ref::<MailboxAdmissionDeferred>().is_some()
     {
@@ -1676,33 +1719,37 @@ pub(super) async fn sync_actor_connection(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
 ) -> Result<Option<ManagedSessionSnapshot>> {
-    let observation = if target.worker_recovery.is_some() {
+    let (observation, startup_owned) = if target.worker_recovery.is_some() {
         let id = target.session_id.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
             // If there is no intent, a snapshot cannot complete one. Skip
             // ownership so ordinary actor sync never competes with a swap.
             if crate::database::load_worker_restart(&id)?.is_none() {
-                return Ok(None);
+                return Ok((None, false));
             }
-            crate::worker_lifecycle::WorkerPermit::try_observation(&id)
+            let observation = crate::worker_lifecycle::WorkerPermit::try_observation(&id)?;
+            let startup_owned = observation.is_none();
+            Ok((observation, startup_owned))
         })
         .await
         .context("admit worker readiness observation")??
     } else {
-        None
+        (None, false)
     };
+    let result = async {
     if connection.is_none() {
         let mut fresh = StandaloneSession::connect(target).await?;
         if let Err(error) =
             reopen_subagent_admission_after_move(target, &mut fresh, observation.as_ref()).await
         {
-            tracing::warn!(
+            tracing::debug!(
                 session_id = target.session_id,
                 error = %error,
                 "could not repair sub-agent admission on relay reconnect; the next connection will retry"
             );
             return Err(error.context("repair sub-agent admission on relay reconnect"));
         }
+        fresh.start_observing(target).await;
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;
         *connection = Some(fresh);
@@ -1710,6 +1757,7 @@ pub(super) async fn sync_actor_connection(
     }
     let connection = connection.as_mut().expect("connection was initialized");
     let changed = connection.sync_in_place().await?;
+    connection.start_observing(target).await;
     if changed || observation.is_some() {
         // Readiness can already have been published while the swap owner was
         // active. Its abandoned intent still needs completion on a quiet tick.
@@ -1720,6 +1768,19 @@ pub(super) async fn sync_actor_connection(
         }
     }
     Ok(None)
+    }.await;
+    if startup_owned {
+        // The lifecycle owner is already observing this durable boot and
+        // reports launch failure. Keep successful readiness observations,
+        // but do not mistake its not-yet-serving worker for an unexpected loss.
+        result.map_err(|error: anyhow::Error| {
+            error.context(RelayJobDeferred(
+                "worker startup is owned by its lifecycle operation",
+            ))
+        })
+    } else {
+        result
+    }
 }
 
 async fn reopen_subagent_admission_after_move(

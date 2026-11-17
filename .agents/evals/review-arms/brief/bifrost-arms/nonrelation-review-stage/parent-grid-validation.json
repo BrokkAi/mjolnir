@@ -1,0 +1,18 @@
+{
+  "validated_at": "2026-11-17T07:22:04.127264+00:00",
+  "jobs": 26,
+  "diffs": 13,
+  "unique_reviewers": 78,
+  "exact_grid": true,
+  "roster": "3codex4/gpt-6.1-terra/high per A/BT cell",
+  "all_output_and_usage_hashes_rechecked": true,
+  "all26_carriers_suspended": true,
+  "inventories_clean": 26,
+  "runtime_and_input_hashes_rechecked": true,
+  "prior_artifact_hashes_rechecked": 2005,
+  "primary_reading_and_case_membership_unchanged": true,
+  "tool_audit": null,
+  "latency": null,
+  "missing_tool_audit_reason": "normal reviewer role destruction #1554/#1559; no capture or clean-audit inference",
+  "validation_note": "Initial parent validation completed grid/output/usage/carrier/runtime checks, then resolved relative input paths against ROOT and completed input/prior hashes. No source/output changes."
+}

@@ -1899,7 +1899,7 @@ pub struct DaemonClient {
     ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
     connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
-    stream: TcpStream,
+    stream: Option<TcpStream>,
     next_request_id: u64,
 }
 
@@ -1911,7 +1911,7 @@ impl DaemonClient {
                 .context("time out connecting to Mjolnir daemon")??;
         Ok(Self {
             metadata,
-            stream,
+            stream: Some(stream),
             next_request_id: 1,
             connector: None,
             ssh_lease: None,
@@ -1924,11 +1924,13 @@ impl DaemonClient {
     /// and another process may now hold its port.
     pub(crate) async fn connect_proven(metadata: DaemonMetadata) -> Result<Self> {
         let mut client = Self::connect(metadata).await?;
+        let mut stream = client.take_stream()?;
         ensure!(
-            ssh::prove_stream(&mut client.stream, &client.metadata.token).await?,
+            ssh::prove_stream(&mut stream, &client.metadata.token).await?,
             "the SSH tunnel's local port {} did not prove it reaches the daemon",
             client.metadata.address
         );
+        client.stream = Some(stream);
         Ok(client)
     }
 
@@ -2002,6 +2004,7 @@ impl DaemonClient {
         reader: &mut (impl tokio::io::AsyncRead + Unpin),
     ) -> Result<String> {
         use sha2::{Digest, Sha256};
+        let mut stream = self.take_stream()?;
         let mut digest = Sha256::new();
         let request_id = self.next_request_id;
         self.next_request_id += 1;
@@ -2010,7 +2013,7 @@ impl DaemonClient {
             let n = reader.read(&mut buffer).await?;
             digest.update(&buffer[..n]);
             write_frame(
-                &mut self.stream,
+                &mut stream,
                 &RequestEnvelope {
                     protocol_version: self.metadata.protocol_version,
                     request_id,
@@ -2033,12 +2036,7 @@ impl DaemonClient {
                 break;
             }
         }
-        let response = read_response(&mut self.stream).await?;
-        ensure!(
-            response.request_id == request_id
-                && response.protocol_version == self.metadata.protocol_version,
-            "daemon crossed upload response"
-        );
+        let response = self.finish_exchange(stream, request_id).await?;
         match response.result.map_err(anyhow::Error::msg)? {
             DaemonReply::BlobUploaded(blob) => Ok(blob),
             reply => bail!("unexpected blob upload reply {reply:?}"),
@@ -2153,11 +2151,12 @@ impl DaemonClient {
     }
 
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let mut stream = self.take_stream()?;
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         write_frame(
-            &mut self.stream,
+            &mut stream,
             &RequestEnvelope {
                 protocol_version,
                 request_id,
@@ -2167,20 +2166,38 @@ impl DaemonClient {
         )
         .await
         .map_err(transport_lost)?;
-        let response = read_response(&mut self.stream)
-            .await
-            .map_err(transport_lost)?;
+        self.finish_exchange(stream, request_id)
+            .await?
+            .result
+            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+    }
+
+    // The exchange owns framing until a complete, checked response arrives.
+    // Cancellation or an I/O error drops the stream instead of leaving it reusable.
+    fn take_stream(&mut self) -> Result<TcpStream> {
+        self.stream
+            .take()
+            .context("connection lost to an interrupted request")
+            .context(DaemonTransportLost)
+    }
+
+    async fn finish_exchange(
+        &mut self,
+        mut stream: TcpStream,
+        request_id: u64,
+    ) -> Result<ResponseEnvelope> {
+        let response = read_response(&mut stream).await.map_err(transport_lost)?;
         ensure!(
-            response.protocol_version == protocol_version,
+            response.protocol_version == self.metadata.protocol_version,
             "daemon changed protocol"
         );
         ensure!(
             response.request_id == request_id,
-            "daemon crossed request IDs"
+            "daemon crossed request IDs: expected {request_id}, received {}",
+            response.request_id
         );
-        response
-            .result
-            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
+        self.stream = Some(stream);
+        Ok(response)
     }
 
     pub async fn identity(&mut self) -> Result<DaemonIdentity> {
@@ -3663,11 +3680,19 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // schedule; the daemon answers one all-workspaces draft listing.
 // Version 101: the daemon answers the capacity service's per-host readings.
 // Version 102: review views carry the writing_brief phase and brief-writer role.
-// Version 103: indexed single-item reads for notification text use chunked
-// replies; legacy count-mode stored projection tails remain unchunked.
-pub const PROTOCOL_VERSION: u32 = 103;
+// Version 103: configuration carries the top-level `[images]` section (project
+// images built by `mj image build`), which older clients' strict config reader
+// rejects.
+// Version 104: clients read configuration keys they have no field for, so a
+// configuration key added later needs no protocol version of its own; only
+// the configuration file refuses a key no field reads. `SubagentChoice` is
+// the exception and still refuses unknown keys everywhere.
+// Version 105: indexed single-item stored transcript reads for notification
+// text use chunked replies; legacy count-mode stored projection tails remain
+// unchunked.
+pub const PROTOCOL_VERSION: u32 = 105;
 /// The first protocol with indexed stored transcript item reads.
-pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 103;
+pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3910,6 +3935,132 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
+    }
+
+    // Hard-won: #1566: a cancelled request left its reply for the next request on a reused daemon connection.
+    #[tokio::test]
+    async fn cancelled_request_cannot_reuse_a_complete_or_partial_response() {
+        // Cancel before the reply, within its length header, within its body,
+        // and between fragments of a chunked response.
+        for prefix in [0, 2, 8, usize::MAX] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = cancellation_metadata(listener.local_addr().unwrap());
+            let (received, waiting) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: ping.protocol_version,
+                        request_id: ping.request_id,
+                        result: Ok(DaemonReply::Done),
+                    },
+                )
+                .await
+                .unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(request.action, DaemonAction::Identity));
+                let response = ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                };
+                let body = serde_json::to_vec(&response).unwrap();
+                let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                frame.extend(body);
+                let prefix = if prefix == usize::MAX {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::ReplyChunk {
+                                bytes: vec![b'{'],
+                                finished: false,
+                            }),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    0
+                } else {
+                    stream.write_all(&frame[..prefix]).await.unwrap();
+                    prefix
+                };
+                received.send(()).unwrap();
+                released.await.unwrap();
+                // Cancellation may already have closed the socket. Either result
+                // is valid; the client must never consume this abandoned reply.
+                let _late_reply = stream.write_all(&frame[prefix..]).await;
+            });
+            let mut client = DaemonClient::connect(metadata).await.unwrap();
+            client.request(DaemonAction::Ping).await.unwrap();
+            {
+                let request = client.identity();
+                tokio::pin!(request);
+                tokio::select! {
+                    biased;
+                    result = &mut request => panic!("reply was not released: {result:?}"),
+                    result = waiting => result.unwrap(),
+                }
+            }
+            release.send(()).unwrap();
+            server.await.unwrap();
+            let error = client.request(DaemonAction::Ping).await.unwrap_err();
+            assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
+            assert!(error.downcast_ref::<DaemonTransportLost>().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_upload_cannot_reuse_its_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = cancellation_metadata(listener.local_addr().unwrap());
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut total = 0;
+            while total < 128 * 1024 {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
+                    panic!("expected upload chunk");
+                };
+                assert!(sha256.is_none());
+                total += bytes.len();
+            }
+            received.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let (mut writer, mut reader) = tokio::io::duplex(128 * 1024);
+        writer.write_all(&vec![42; 128 * 1024]).await.unwrap();
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        {
+            let upload = client.upload(&mut reader);
+            tokio::pin!(upload);
+            tokio::select! {
+                result = &mut upload => panic!("upload source remains open: {result:?}"),
+                result = waiting => result.unwrap(),
+            }
+        }
+        let error = client.request(DaemonAction::Ping).await.unwrap_err();
+        assert!(format!("{error:#}").contains("connection lost to an interrupted request"));
+        server.await.unwrap();
+    }
+
+    fn cancellation_metadata(address: std::net::SocketAddr) -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "cancelled-exchange".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        }
     }
 
     /// Only a connection that dropped after the request was sent is marked as

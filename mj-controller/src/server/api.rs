@@ -71,9 +71,9 @@ use mj_core::relay::CapacityRetry;
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ActionOutcome, ApiError, ControllerAction, ControllerRequest, ServerState,
-    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq,
-    require_session_record, validate_action, validate_prompt_text,
+    ActionOutcome, ApiError, ControllerAction, ControllerRequest, MAX_PROMPT_TEXT_BODY_BYTES,
+    ServerState, ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq,
+    named_body_limit, require_session_record, validate_action, validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client
@@ -133,3 +133,5 @@ use workspaces::*;
 
 #[cfg(test)]
 mod tests;
+
+mod images;

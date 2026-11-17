@@ -615,7 +615,7 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
                     .await
             }
             .await
-            .map_err(|error| format!("{error:#}"));
+            .map_err(|error| anyhow::anyhow!("{error:#}"));
             let _ = reply.send(result);
         }
         RemoteSessionRequest::RespondElicitation {

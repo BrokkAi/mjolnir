@@ -10,6 +10,7 @@
 //! only profile configuration and the relay continuation seed are replaced.
 
 use anyhow::{Context, Result, ensure};
+use mj_core::targets::SshTrafficClass;
 use tokio_util::sync::CancellationToken;
 
 use mj_core::state::{MaterializedSession, SessionState};
@@ -503,7 +504,13 @@ impl Controller {
             && previous.state == SessionState::Closing
             && super::super::local_profile_homes::session_has_a_staged_home_of_its_own(previous);
         if !retain_native {
-            crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+            let worker_target = crate::controller::backend::session_target(
+                &self.config,
+                &previous.bundle_id,
+                target_template_id,
+                executor,
+            )?;
+            crate::controller::worker_binary::preflight_worker_binary(&worker_target, executor)?;
         }
         // The directory the *source* profile owns inside the target. It is
         // read from the record's own profile, before the record names the
@@ -514,6 +521,7 @@ impl Controller {
             super::super::execute_checked(
                 executor,
                 crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &backend,
                     session_id,
                     vec!["test".into(), "-d".into(), worker_root],

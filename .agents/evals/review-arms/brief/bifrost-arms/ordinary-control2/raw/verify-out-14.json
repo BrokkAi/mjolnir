@@ -1,0 +1,23 @@
+{
+  "commits": [
+    {
+      "intro": "1c0f689be10f72194cf49e6363366e3188def335",
+      "groups": [
+        {
+          "group": "g1",
+          "findings": [
+            "f-e5464973",
+            "f-ef27134b",
+            "f-aa3f5552",
+            "f-7888d607"
+          ],
+          "summary": "An unconditionally registered C# demand test requires root-reference halves that its producer does not emit, causing ordinary tools test runs to fail.",
+          "verdict": "confirmed",
+          "severity": "high",
+          "evidence": "At intro, crates/bifrost-tools/src/lib.rs:38-40 includes engine_tests under cfg(test), and engine_tests/mod.rs:62 registers csharp_demand. engine_tests/csharp_demand.rs:12-30 defines an ordinary, non-ignored test whose parent always launches the same test with BIFROST_TRIAL_NATIVE_CSHARP=1 and requires child success. Its first lookup is the unqualified Peer field type (lines 33, 77-78), passed to probe_type at lines 97-99. crates/bifrost-csharp/src/resolution/names.rs:133-147 emits a positioned identifier and package reference for a single non-absolute name, then returns without emitting a root reference. fact_lowering.rs:3118-3119 builds canonical root-reference paths from indexed root references; selected_context.rs:406-442 requires the rooted witness, anchor and stack shape for classification as SelectedRootPathHalf::Reference. In resolution_operation/csharp_demand.rs:568-580, closed starts false and paths without that classification are skipped; only the root-half branch sets closed at line 612, so line 614 panics for Peer. The child failure propagates to the parent assertion at engine_tests/csharp_demand.rs:24. The new test exposes this missing producer obligation; it was absent at base. Supporting later repair: f9b0b816314495f9d0f22a0de67b7757b0b0f42e adds the bare lexical ResolutionRootReferenceFact in the producer branch; edfc84f8be8d0a24f8cd73d6449a45cab2ef39ff restricts it to Type references, and bde8713864103748a855386196b44cdaadb3c800 adapts the demand hooks to those roots. Verification used code reading only, without builds or tests.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

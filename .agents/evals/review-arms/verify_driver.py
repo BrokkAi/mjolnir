@@ -66,6 +66,7 @@ if instance != "default":
 if a.kind == "task" and not a.output:
     p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
+REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
@@ -153,7 +154,7 @@ def prompt_text(batch_path, judge):
 
 Write {a.output} in your current working directory when you finish.
 
-The mjolnir checkout with full history is your current working directory. Read only {INPUT}/{batch_path.name}/ and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than {a.output}.
+The {REPO_NAME} checkout with full history is your current working directory. Read only {INPUT}/{batch_path.name}/ and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than {a.output}.
 """
     spec, batch = f"{INPUT}/SPEC.md", f"{INPUT}/{batch_path.name}"
     first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
@@ -170,7 +171,7 @@ Read only {spec}, your batch file, and the repository in your working directory.
 Your batch: {batch}
 Judge every output in it.
 
-The mjolnir checkout with full history is your current working directory. Read only {spec}, your batch file, and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than verdicts.jsonl.
+The {REPO_NAME} checkout with full history is your current working directory. Read only {spec}, your batch file, and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than verdicts.jsonl.
 """
 
 
@@ -231,7 +232,7 @@ def run(batch_path, judge=None):
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
-                 "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
+                 "--no-github-events", "--no-github-credentials", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
         rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
         save(rec_path, rec)

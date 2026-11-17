@@ -265,6 +265,7 @@ pub(crate) fn config() -> Config {
     // SetupDialog sizes itself from the NO_COLOR-aware summary before drawing.
     crate::pin_no_color_override_for_test(true);
     Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),

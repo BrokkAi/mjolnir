@@ -1073,9 +1073,21 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::StartSessionLifecycle(request) => Ok(DaemonReply::LifecycleAccepted(
-            state.start_session_lifecycle(request).await?,
-        )),
+        DaemonAction::StartSessionLifecycle(request) => {
+            match state.start_session_lifecycle(request).await {
+                Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
+                Err(error)
+                    if Refusal::of(&error).is_some_and(|refusal| {
+                        refusal.code() == Some(crate::upgrade::HANDOFF_REFUSAL_CODE)
+                    }) =>
+                {
+                    // Only unaccepted lifecycle admission carries this code.
+                    // The client retries its original request and selections.
+                    Ok(DaemonReply::UpgradePending)
+                }
+                Err(error) => Err(error),
+            }
+        }
         DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
         DaemonAction::SuspendSession {
             session_id,
@@ -1193,6 +1205,10 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            if cancellation.is_cancelled() {
+                return Ok(DaemonReply::Done);
+            }
+            crate::upgrade::gate().begin_draining();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
