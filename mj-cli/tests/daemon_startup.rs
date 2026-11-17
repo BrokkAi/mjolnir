@@ -426,6 +426,14 @@ fn the_daemon_launch_moves_from_the_login_cgroup_to_the_systemd_user_manager() {
         eprintln!("skipping systemd user scope test inside the user manager");
         return;
     }
+    if !mj_core::login_environment::account_name().is_ok_and(|user| {
+        std::path::Path::new("/var/lib/systemd/linger")
+            .join(user)
+            .is_file()
+    }) {
+        eprintln!("skipping systemd user scope test without lingering");
+        return;
+    }
     let mut probe = Command::new("systemd-run");
     probe.args([
         "--user",

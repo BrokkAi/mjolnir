@@ -744,6 +744,18 @@ fn daemon_scope_launcher(
     // rootless Podman execs need to start inside the delegated user subtree.
     let systemd_run =
         mj_core::program_path::find_executable_on_path("systemd-run", variable("PATH").as_deref())?;
+    // logind stops the user manager at logout without lingering. Keep the
+    // detached daemon and its bare workers in their original cgroup then.
+    let user = mj_core::login_environment::account_name().ok()?;
+    // logind C-escapes account names for linger filenames. Check names that
+    // appear verbatim there so an escaped filename cannot match another user.
+    if !user
+        .bytes()
+        .all(|byte| (b' '..=b'~').contains(&byte) && !matches!(byte, b'/' | b'\\' | b'\'' | b'"'))
+        || !Path::new("/var/lib/systemd/linger").join(user).is_file()
+    {
+        return None;
+    }
     Some((systemd_run, runtime_dir))
 }
 
