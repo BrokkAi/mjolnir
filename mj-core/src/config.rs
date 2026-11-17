@@ -92,7 +92,6 @@ const fn is_true(value: &bool) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PhoneConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -156,7 +155,6 @@ pub struct ReviewConfig {
 /// hands back relations between it and the rest of the repository, which every
 /// reviewer's prompt then carries.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BriefWriterConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -277,7 +275,6 @@ impl RemovedTrigger {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReviewConfigInput {
     #[serde(default)]
     trigger: Option<RemovedTrigger>,
@@ -634,7 +631,6 @@ pub fn apply_legacy_override(
 /// covers every harness. Only archiving is a setting, because only archiving
 /// deletes data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionWikiConfig {
     /// Deprecated switch retained for read compatibility with configurations
     /// written while indexing was optional. It is ignored and omitted from
@@ -705,7 +701,7 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 /// Sessions choose Native or Mjolnir; task model and effort choices are global,
 /// except that a target with `permissions = "yolo"` can have its own choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SubagentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub straightforward: Option<SubagentChoice>,
@@ -742,7 +738,7 @@ pub struct SubagentConfig {
 
 /// The task choices one target mode uses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SubagentChoices {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub straightforward: Option<SubagentChoice>,
@@ -800,6 +796,12 @@ fn validate_subagent_choices(
     Ok(())
 }
 
+/// One model choice. Unlike the other configuration types it refuses a key it
+/// does not read, wherever it is read: API requests carry it inside tagged
+/// policies (`SubagentPolicy`, `SessionReview`) that serde reads from a
+/// buffered copy, where only the type itself can refuse a misspelled
+/// `effort` rather than run at the default. A field added here therefore
+/// needs a daemon socket protocol version, as before #1557.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentChoice {
@@ -905,7 +907,7 @@ impl SubagentConfig {
 
 /// Read-only legacy policy, folded into machine settings when loading.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct LegacyBuildCacheConfig {
     enabled: bool,
 }
@@ -920,7 +922,7 @@ impl Default for LegacyBuildCacheConfig {
 /// nothing to Jev: no turn or GitHub-item classification and no quota recovery.
 /// `[jev] enabled = false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct JevConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -942,7 +944,7 @@ impl JevConfig {
 /// Codex app-server, Grok's agent, and Claude Code's login refresh.
 /// `[quota] runtime = "auto"`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct QuotaConfig {
     #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
     pub runtime: QuotaRuntimeChoice,
@@ -984,7 +986,7 @@ impl QuotaRuntimeChoice {
 /// Legacy automatic-continuation switch, read but never written. The feature
 /// was removed (#1532); an existing `[continuation]` section is still accepted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct LegacyContinuationConfig {
     #[allow(dead_code, reason = "decoded only so an existing section still loads")]
     enabled: bool,
@@ -992,7 +994,7 @@ struct LegacyContinuationConfig {
 
 /// Legacy GitHub event source switch, read but never written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct LegacyMailboxConfig {
     pub enabled: bool,
 }
@@ -1168,12 +1170,114 @@ fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str
     }
 }
 
+/// Refuse a configuration file that carries keys no setting reads, naming
+/// each one as the file spells it.
+fn refuse_unread_keys(path: &Path, unread: &[String]) -> Result<()> {
+    if unread.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{}: no Mjolnir setting is named {}; correct or remove it (see {CONFIGURATION_DOCUMENTATION_URL})",
+        path.display(),
+        unread
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// A key path as the configuration file spells it, one segment per table or
+/// array level, such as `["profiles", "codex", "models"]`. Filters compare
+/// segments, so a quoted key that contains a dot is still one key.
+fn setting_path(path: &serde_ignored::Path<'_>) -> Vec<String> {
+    fn push(path: &serde_ignored::Path<'_>, segments: &mut Vec<String>) {
+        use serde_ignored::Path;
+        match path {
+            Path::Root => {}
+            Path::Seq { parent, index } => {
+                push(parent, segments);
+                segments.push(index.to_string());
+            }
+            Path::Map { parent, key } => {
+                push(parent, segments);
+                segments.push(key.clone());
+            }
+            Path::Some { parent }
+            | Path::NewtypeStruct { parent }
+            | Path::NewtypeVariant { parent } => push(parent, segments),
+        }
+    }
+    let mut segments = Vec::new();
+    push(path, &mut segments);
+    segments
+}
+
+/// `build_cache` keys that no setting reads, under a machine or runtime whose
+/// kind reads that table.
+///
+/// Machines and runtimes are tagged tables, which serde reads from a buffered
+/// copy out of sight of the file loader's unread-key check. Their
+/// `build_cache` tables have always refused a key they do not read, so each is
+/// read again here on its own. Under a kind without the setting, such as a
+/// bare runtime or an EC2 machine, the table was never read and still loads.
+fn unread_build_cache_keys(document: &toml::Value) -> Vec<String> {
+    let reads_build_cache = |section: &str, kind: &str| match section {
+        "machines" => matches!(kind, "local" | "ssh"),
+        // Container runtimes, under their current kinds and the fused kinds
+        // of files before version 12.
+        _ => matches!(
+            kind,
+            "podman"
+                | "docker"
+                | "apple-container"
+                | "nitro"
+                | "local-podman"
+                | "local-docker"
+                | "ssh-podman"
+                | "ssh-docker"
+                | "ssh-apple-container"
+                | "ssh-nitro"
+        ),
+    };
+    let mut unread = Vec::new();
+    for section in ["machines", "targets"] {
+        let Some(tables) = document.get(section).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (id, table) in tables {
+            let kind = table
+                .get("kind")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default();
+            let Some(build_cache) = table.get("build_cache") else {
+                continue;
+            };
+            if !reads_build_cache(section, kind) {
+                continue;
+            }
+            // The whole file has already been read, this table with it, so
+            // only the names this read gathers matter.
+            let _ = serde_ignored::deserialize(build_cache.clone(), |key| {
+                unread.push(format!(
+                    "{section}.{id}.build_cache.{}",
+                    setting_path(&key).join(".")
+                ));
+            })
+            .map(|_: TargetBuildCache| ());
+        }
+    }
+    unread
+}
+
 // Old config files may still contain [startup]. Accept it without retaining
-// settings that could recreate automatic first-session behavior on save.
+// settings that could recreate automatic first-session behavior on save. The
+// section is read whole rather than as `IgnoredAny`, which the file loader
+// counts as a key no setting reads.
 fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<(), D::Error> {
-    serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
+    serde_json::Value::deserialize(deserializer).map(|_| ())
 }
 
 /// OCI spelling for the architecture aliases accepted by container engines.
@@ -1193,7 +1297,6 @@ pub fn canonical_image_platform(platform: &str) -> &str {
 
 /// Registry namespace used for published project session images.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ImagesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
@@ -1309,7 +1412,6 @@ pub struct Config {
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
 /// runtimes under `[targets.<id>]`, each runtime naming its machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StoredConfig {
     /// A retired session filter. Files written before version 7 may still
     /// carry it, so it is accepted and dropped.
@@ -1431,7 +1533,8 @@ enum InterpretedTarget {
 /// leaving out any already reported by this process.
 ///
 /// Serde cannot refuse them: a container runtime's settings are flattened into
-/// the tagged `StoredTarget`, and flattening turns `deny_unknown_fields` off.
+/// the tagged `StoredTarget`, out of sight of the file loader's unread-key
+/// check.
 /// A misspelled or invented setting is therefore ignored, and saying so once
 /// is what stops a person from believing it applies (R4-6). The configuration
 /// is read many times in one process, so each key is reported only the first
@@ -2152,9 +2255,26 @@ impl Config {
         // this configuration and the process environment. One that does not
         // resolve makes its profile or target unusable, not this file
         // unreadable; see `HarnessProfile::ensure_ready`.
-        let config: Self =
-            with_secret_resolver(SecretResolver::beside(path), || toml::from_str(&contents))
-                .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        // The configuration types read past keys they have no field for,
+        // because the daemon serves this configuration to clients that may
+        // predate a field (#1557). A person writes the file, so here such a
+        // key is a mistake, refused by name wherever a type used to refuse it.
+        let mut unread = Vec::new();
+        let config: Self = with_secret_resolver(SecretResolver::beside(path), || {
+            serde_ignored::deserialize(toml::Deserializer::new(&contents), |key| {
+                let key = setting_path(&key);
+                // These sections never refused a key, and files still carry
+                // retired ones such as `advanced.show_stopped_sessions`.
+                // Refusing them now would stop an upgraded daemon from
+                // starting.
+                if !(key.len() > 1 && matches!(key[0].as_str(), "advanced" | "notify")) {
+                    unread.push(key.join("."));
+                }
+            })
+        })
+        .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        unread.extend(unread_build_cache_keys(&document));
+        refuse_unread_keys(path, &unread)?;
         config.validate()?;
         Ok(config)
     }

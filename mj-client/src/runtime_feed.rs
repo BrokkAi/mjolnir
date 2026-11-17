@@ -974,6 +974,51 @@ mod tests {
         assert!(replica.projection.sessions["new"].connected);
     }
 
+    /// A daemon newer than this client serves configuration keys the client
+    /// has no field for, at any depth. The client still reads the feed. Only
+    /// the file loader refuses an unread key, because a person wrote it.
+    // Hard-won: #1557: an older TUI stopped refreshing sessions once a profile set a newer field
+    #[test]
+    fn a_client_reads_configuration_keys_added_after_it_was_built() {
+        let profile = serde_json::json!({"kind": "codex", "home": "/home/agent/codex"});
+        let mut config = Config::default().with_local_targets();
+        config.profiles.insert(
+            "codex".into(),
+            serde_json::from_value(profile.clone()).unwrap(),
+        );
+        let metadata = RuntimeMetadata {
+            config: config.clone().into(),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&metadata).unwrap();
+        let newer = &mut value["config"];
+        newer["a_later_section"] = serde_json::json!({"setting": 1});
+        newer["profiles"]["codex"]["a_later_profile_field"] = true.into();
+        newer["review"]["a_later_review_field"] = "on".into();
+        newer["targets"]["docker"]["a_later_runtime_setting"] = 1.into();
+        newer["targets"]["docker"]["build_cache"] = serde_json::json!({"a_later_cache_field": 1});
+        let received: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(received.config.profiles, config.profiles);
+        assert_eq!(received.config.review, config.review);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "version = {}\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/agent/codex\"\n\
+                 a_later_profile_field = true\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        let refusal = format!("{:#}", Config::load_from(&path).unwrap_err());
+        assert!(
+            refusal.contains("`profiles.codex.a_later_profile_field`"),
+            "{refusal}"
+        );
+    }
+
     #[test]
     fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
         let mut metadata = RuntimeMetadata {

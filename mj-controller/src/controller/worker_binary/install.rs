@@ -1173,12 +1173,128 @@ pub(super) fn install_worker_over_ssh(
 
 const PROFILE_CONTENT_STORE: &str = ".cache/mjolnir/profile-content";
 const PROFILE_CONTENT_MISSING: i32 = 75;
+// A retired/incomplete stage consumes the same existing retry slot as a
+// missing content pin, but needs a fresh host query rather than missing keys.
+const PROFILE_STAGE_MISSING: i32 = 76;
+
+// Registration and collection take the same store gate. A collector's
+// snapshot cannot predate a directory that an active attempt is about to use.
+struct ProfileUpload {
+    store: String,
+    token: String,
+}
+
+type ProfileUploads = std::sync::Mutex<HashMap<String, HashSet<String>>>;
+
+fn profile_uploads() -> &'static ProfileUploads {
+    static UPLOADS: OnceLock<ProfileUploads> = OnceLock::new();
+    UPLOADS.get_or_init(Default::default)
+}
+
+impl ProfileUpload {
+    fn register(store: &str, token: &str) -> Self {
+        let mut uploads = profile_uploads().lock().unwrap_or_else(|e| e.into_inner());
+        uploads
+            .entry(store.to_owned())
+            .or_default()
+            .insert(token.to_owned());
+        Self {
+            store: store.to_owned(),
+            token: token.to_owned(),
+        }
+    }
+
+    fn active(store: &str) -> Vec<String> {
+        profile_uploads()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(store)
+            .map_or_else(Vec::new, |tokens| tokens.iter().cloned().collect())
+    }
+}
+
+impl Drop for ProfileUpload {
+    fn drop(&mut self) {
+        let mut uploads = profile_uploads().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tokens) = uploads.get_mut(&self.store) {
+            tokens.remove(&self.token);
+            if tokens.is_empty() {
+                uploads.remove(&self.store);
+            }
+        }
+    }
+}
+
+// Reuse teardown's process identity, including boot/start identity on Linux.
+// A failed identity query never authorizes deletion.
+fn profile_script(body: &str) -> String {
+    format!(
+        "{}\nmj_profile_stage_missing_status={PROFILE_STAGE_MISSING}\n{PROFILE_OWNER_SCRIPT}\n{body}",
+        mj_core::subprocess::PROCESS_BIRTH_SCRIPT
+    )
+}
+
+const PROFILE_OWNER_SCRIPT: &str = r#"mj_profile_stage_missing() {
+    echo "stage removed by a collector or incomplete: $work" >&2
+    return "$mj_profile_stage_missing_status"
+}
+mj_profile_check_marker() {
+    marker=$(cat -- "$1" 2>/dev/null) || { mj_profile_stage_missing; return "$mj_profile_stage_missing_status"; }
+    [ "$marker" = "${work##*/}" ] || mj_profile_stage_missing
+}
+mj_profile_claim() {
+    birth=$(mj_process_birth "$$") || birth=
+    if [ -z "$birth" ]; then
+        echo "cannot identify profile stage process $$ in $work" >&2
+        return 1
+    fi
+    # The first write of a later phase replaces its owner atomically. Never
+    # recreate a collected directory, or treat a partial receive as complete.
+    if ! { printf '%s\n%s\n' "$$" "$birth" > "$work/.owner.next" &&
+           mv -- "$work/.owner.next" "$work/.owner"; }; then
+        mj_profile_stage_missing; return "$mj_profile_stage_missing_status"
+    fi
+    mj_profile_check_marker "$work/.token"
+}
+mj_profile_quiescent() {
+    # Foreground payload work has finished. Match the exact owning identity,
+    # so a killed later phase cannot inherit its predecessor's completion.
+    if ! { cat -- "$work/.owner" > "$work/.quiescent.next" &&
+           mv -- "$work/.quiescent.next" "$work/.quiescent"; }; then
+        mj_profile_stage_missing; return "$mj_profile_stage_missing_status"
+    fi
+}
+mj_profile_warn_unknown() {
+    recorded=$(tr '\n' ':' < "$1/.owner" 2>/dev/null) || recorded=unavailable
+    echo "profile staging ownership unknown or work not quiescent; retaining $1 (owner $recorded)" >&2
+}
+mj_profile_owner_state() {
+    pid=$(sed -n '1p' "$1/.owner" 2>/dev/null) || pid=
+    birth=$(sed -n '2p' "$1/.owner" 2>/dev/null) || birth=
+    case $pid in *[!0123456789]*|'') printf unknown; return ;; esac
+    [ -n "$birth" ] || { printf unknown; return; }
+    current=$(mj_process_birth "$pid" 2>/dev/null) || current=
+    if [ -n "$current" ]; then
+        if [ "$current" = "$birth" ]; then printf alive; return; fi
+    else
+        # ps's documented empty selection is status 1 without output/errors.
+        # An unreadable birth alone does not prove absence.
+        status=0
+        selected=$(LC_ALL=C ps -o pid= -p "$pid" 2> "$2") || status=$?
+        if [ "$status" != 1 ] || [ -n "$selected" ] || [ -s "$2" ]; then
+            printf unknown; return
+        fi
+    fi
+    # A dead shell alone does not prove its tar/cp children stopped. Only
+    # that exact owner can attest that all foreground work finished.
+    if cmp -s "$1/.owner" "$1/.quiescent"; then printf dead; else printf unknown; fi
+}"#;
 
 // Match store.rs:COLLECT and COLLECT_INTERVAL: retain content for a day and
 // collect at most hourly. Touch requested content before collecting it.
 const QUERY_PROFILE_CONTENT: &str = r#"set -eu
 umask 077
-store="$HOME/$1"
+store="$HOME/$1"; shift
 mkdir -p -- "$store"
 chmod -- 700 "$store"
 present=$(mktemp "$store/.present-XXXXXXXXXX")
@@ -1192,11 +1308,60 @@ while IFS= read -r key; do
 done
 (cd "$store" && xargs sh -c '[ "$#" -eq 0 ] || touch -- "$@"' sh) < "$present"
 if [ ! -f "$store/.collected" ] || [ -n "$(find "$store/.collected" -mmin +60 -print)" ]; then
-    find "$store" -type f -mmin +1440 -exec rm -f -- {} +
+    find "$store" -mindepth 1 -maxdepth 1 -type f -mmin +1440 -exec rm -f -- {} +
     # Upload and pin directories that an interrupted run left behind.
-    find "$store" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf -- {} +
+    find "$store" -mindepth 1 -maxdepth 1 -type d ! -name '.stage-*' ! -name '.retired-*' -mmin +1440 -exec rm -rf -- {} +
     touch -- "$store/.collected"
-fi"#;
+fi
+# Private staging is reclaimed by ownership, never by age. The caller holds
+# the store gate and passes its live registry from that same locked view.
+mj_profile_restore() {
+    if [ -e "$2" ] || ! mv -- "$1" "$2"; then
+        echo "could not restore profile staging; retaining $1" >&2
+    fi
+}
+for work in "$store"/.stage-* "$store"/.retired-*; do
+    [ -d "$work" ] || continue
+    name=$(cat -- "$work/.token" 2>/dev/null) || name=
+    case $name in .stage-*) ;; *)
+        mj_profile_warn_unknown "$work"; continue ;;
+    esac
+    case $name in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*)
+        mj_profile_warn_unknown "$work"; continue ;;
+    esac
+    token=${name#.stage-}
+    active=0
+    for live in "$@"; do [ "$live" != "$token" ] || active=1; done
+    [ "$active" = 0 ] || continue
+    snapshot=$(cat -- "$work/.owner" 2>/dev/null) || snapshot=
+    state=$(mj_profile_owner_state "$work" "$present")
+    case ${work##*/} in .retired-*)
+        case $state in
+            dead) rm -rf -- "$work" ;;
+            alive) mj_profile_restore "$work" "$store/$name" ;;
+            *) mj_profile_warn_unknown "$work" ;;
+        esac
+        continue ;;
+    esac
+    if [ "$state" = alive ]; then continue; fi
+    if [ "$state" != dead ] || [ "${work##*/}" != "$name" ]; then
+        mj_profile_warn_unknown "$work"; continue
+    fi
+    # Claim and retirement contend on the original directory path. Once it is
+    # retired no later phase can install an owner marker or begin using it.
+    retired=$(mktemp -d "$store/.retired-XXXXXXXXXX")
+    rmdir -- "$retired"
+    mv -- "$work" "$retired" 2>/dev/null || continue
+    after=$(cat -- "$retired/.owner" 2>/dev/null) || after=
+    state=$(mj_profile_owner_state "$retired" "$present")
+    if [ "$after" != "$snapshot" ] || [ "$state" = alive ]; then
+        mj_profile_restore "$retired" "$work"
+    elif [ "$state" = dead ]; then
+        rm -rf -- "$retired"
+    else
+        mj_profile_warn_unknown "$retired"
+    fi
+done"#;
 
 // The archive holds the profile under `profile/`, with private files and a
 // relative symlink per shared path into `.mj-store`; beside it, outside the
@@ -1204,25 +1369,39 @@ fi"#;
 // `.mj-keys` (every shared key, one per line). This script extracts it into a
 // private work directory and points `.mj-store` there at the store. One dereferencing `cp -RL` then materializes the
 // whole profile, so the cost does not grow with one process per file.
+const STAGE_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+work="$HOME/$1"
+mkdir -p -- "$work"
+trap 'rm -rf -- "$work"' EXIT
+printf '%s\n' "${work##*/}" > "$work/.token"
+mj_profile_claim
+tar -xzf - --no-same-owner --no-same-permissions -C "$work"
+printf '%s\n' "${work##*/}" > "$work/.received"
+mj_profile_quiescent
+trap - EXIT"#;
+
 const INSTALL_PROFILE_CONTENT: &str = r#"set -eu
 umask 077
 destination=$1
 store="$HOME/$2"
+work="$HOME/$3"
+mj_profile_claim
+mj_profile_check_marker "$work/.received"
+[ -d "$work/profile" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
 rm -rf -- "$destination"
-mkdir -p -- "$store" "$(dirname -- "$destination")"
+mkdir -p -- "$(dirname -- "$destination")"
 chmod -- 700 "$store"
-work=$(mktemp -d "$destination.work-XXXXXXXXXX")
 upload=
 pins=
 trap 'rm -rf -- "$work" ${upload:+"$upload"} ${pins:+"$pins"}' EXIT
-tar -xzf - --no-same-owner --no-same-permissions -C "$work"
 tree="$work/profile"
-mkdir -p -- "$tree"
 content="$work/.mj-content"
 if [ -d "$content" ]; then
     case $(uname -s) in Darwin) sum='shasum -a 256';; *) sum=sha256sum;; esac
     expected=$(cd "$content" && find . -type f | wc -l)
-    upload=$(mktemp -d "$store/.upload-XXXXXXXXXX")
+    upload="$work/.upload"
+    mkdir -- "$upload"
     find "$content" -type f -exec sh -c 'cp -- "$@" "$0"' "$upload" {} +
     # Verify the copies that will be published, in one digest pass: a
     # truncated copy fails its digest and a missing one fails the count.
@@ -1242,7 +1421,8 @@ fi
 # Pin every needed file with a hard link in a private directory of the store
 # (always the same filesystem), then check and copy from the pins: content
 # removed from the store afterwards cannot change what this run decided.
-pins=$(mktemp -d "$store/.pins-XXXXXXXXXX")
+pins="$work/.pins"
+mkdir -- "$pins"
 ln -s -- "$pins" "$work/.mj-store"
 missing=
 if [ -f "$work/.mj-keys" ]; then
@@ -1256,7 +1436,23 @@ if [ -n "$missing" ]; then
     printf '%s' "$missing"
     exit 75
 fi
-cp -RL -- "$tree" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }"#;
+# Materialization uses these private pins after releasing the store owner.
+printf '%s\n' "${work##*/}" > "$work/.published"
+mj_profile_quiescent
+trap - EXIT"#;
+
+const MATERIALIZE_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+work="$HOME/$1"; destination=$2; pins="$work/.pins"
+mj_profile_claim
+mj_profile_check_marker "$work/.published"
+[ -d "$work/profile" ] && [ -d "$pins" ] && [ -f "$work/.mj-keys" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
+while IFS= read -r key; do
+    [ -f "$pins/$key" ] || { mj_profile_stage_missing; exit "$mj_profile_stage_missing_status"; }
+done < "$work/.mj-keys"
+trap 'rm -rf -- "$work" "$pins"' EXIT
+cp -RL -- "$work/profile" "$destination" || { echo "could not copy stored profile content into $destination" >&2; exit 1; }
+mj_profile_quiescent"#;
 
 struct ProfileArchiveEntry {
     path: PathBuf,
@@ -1386,8 +1582,10 @@ fn build_profile_archive(
     Ok(file)
 }
 
-/// Serialize the missing-content decision and upload per host. The destination
-/// is staging only: callers copy it into a private profile, then remove it.
+/// One transfer per shared content set; unrelated profiles transfer together.
+/// Only querying/collecting and publishing/pinning share the store-wide gate.
+/// The destination is staging only: callers copy it into a private profile,
+/// then remove it.
 fn upload_profile_archive(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
@@ -1405,35 +1603,62 @@ fn upload_profile_archive(
         worker_id: None,
         workspace: String::new(),
     };
-    let gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
-    let _guard = super::store::lock_gate(executor, &gate, destination, "send profile content")?;
-    let query = targets::ssh_command(
-        SshTrafficClass::Control,
-        ssh,
-        [
-            "sh",
-            "-c",
-            QUERY_PROFILE_CONTENT,
-            "mj-profile-content",
-            PROFILE_CONTENT_STORE,
-        ],
-    )
-    .purpose("query host profile content")
-    .stage(ProvisionStage::Syncing);
-    let mut input = std::io::Cursor::new(
-        keys.iter()
-            .map(|key| format!("{key}\n"))
-            .collect::<String>(),
-    );
-    let output = executor.execute_with_stdin(&query, &mut input)?;
-    ensure!(
-        output.status == 0,
-        "{} failed with status {}: {}",
-        query.purpose,
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let mut missing = profile_content_keys(&output.stdout, &keys)?;
+    let mut sorted_keys: Vec<_> = keys.iter().map(String::as_str).collect();
+    sorted_keys.sort_unstable();
+    let content_digest = mj_core::hex::lower_hex(Sha256::digest(sorted_keys.join("\n").as_bytes()));
+    let gate =
+        super::store::store_gate(&host, &format!("{PROFILE_CONTENT_STORE}/{content_digest}"));
+    let store_gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
+    let registry_key = super::store::store_key(&host, PROFILE_CONTENT_STORE);
+    let query_missing = || -> Result<HashSet<String>> {
+        let mut input = std::io::Cursor::new(
+            sorted_keys
+                .iter()
+                .map(|key| format!("{key}\n"))
+                .collect::<String>(),
+        );
+        let _store = super::store::lock_gate(
+            executor,
+            &store_gate,
+            destination,
+            "query and collect profile content",
+        )?;
+        let mut args = vec![
+            "sh".to_owned(),
+            "-c".into(),
+            profile_script(QUERY_PROFILE_CONTENT),
+            "mj-profile-content".into(),
+            PROFILE_CONTENT_STORE.into(),
+        ];
+        args.extend(ProfileUpload::active(&registry_key));
+        let query = targets::ssh_command(SshTrafficClass::Control, ssh, args)
+            .purpose("query host profile content")
+            .warn_on_stderr()
+            .stage(ProvisionStage::Syncing);
+        let output = executor.execute_with_stdin(&query, &mut input)?;
+        let output = targets::checked_command_output(&query, output)?;
+        profile_content_keys(&output.stdout, &keys)
+    };
+    let mut missing = query_missing()?;
+    // Cached profiles send only private bytes and need no content owner. If
+    // content is missing, one uploader decides again after taking its owner:
+    // the preceding uploader may already have supplied everything it needs.
+    let mut content_owner = if missing.is_empty() {
+        None
+    } else {
+        Some(super::store::lock_gate(
+            executor,
+            &gate,
+            destination,
+            "send profile content",
+        )?)
+    };
+    if content_owner.is_some() {
+        missing = query_missing()?;
+        if missing.is_empty() {
+            drop(content_owner.take());
+        }
+    }
     for attempt in 0..2 {
         let mut file = build_profile_archive(source, &entries, &missing)?;
         tracing::info!(
@@ -1442,37 +1667,110 @@ fn upload_profile_archive(
             destination,
             "send profile content"
         );
-        let command = targets::ssh_command(
-            SshTrafficClass::Bulk,
-            ssh,
-            [
-                "sh",
-                "-c",
-                INSTALL_PROFILE_CONTENT,
-                "mj-profile-archive",
+        let token = crate::session_manager::new_command_id("profile-stage")?;
+        let work = format!("{PROFILE_CONTENT_STORE}/.stage-{token}");
+        let _active = {
+            let _store = super::store::lock_gate(
+                executor,
+                &store_gate,
                 destination,
-                PROFILE_CONTENT_STORE,
-            ],
-        )
-        .purpose("send profile content")
-        .stage(ProvisionStage::Syncing);
-        let output = executor
-            .execute_with_stdin(&command, &mut file)
-            .context("stream staged harness profile archive")?;
+                "register private profile staging",
+            )?;
+            ProfileUpload::register(&registry_key, &token)
+        };
+        let transfer = (|| -> Result<CommandOutput> {
+            let command = targets::ssh_command(
+                SshTrafficClass::Bulk,
+                ssh,
+                [
+                    "sh",
+                    "-c",
+                    &profile_script(STAGE_PROFILE_CONTENT),
+                    "mj-profile-stage",
+                    &work,
+                ],
+            )
+            .purpose("send profile content")
+            .stage(ProvisionStage::Syncing);
+            let output = executor
+                .execute_with_stdin(&command, &mut file)
+                .context("stream staged harness profile archive")?;
+            targets::checked_command_output(&command, output)?;
+            // Collection cannot unlink between publication and pinning. The
+            // network transfer has already finished before taking this owner.
+            let _store = super::store::lock_gate(
+                executor,
+                &store_gate,
+                destination,
+                "publish and pin profile content",
+            )?;
+            let output = executor.execute(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    [
+                        "sh",
+                        "-c",
+                        &profile_script(INSTALL_PROFILE_CONTENT),
+                        "mj-profile-archive",
+                        destination,
+                        PROFILE_CONTENT_STORE,
+                        &work,
+                    ],
+                )
+                .purpose("publish profile content")
+                .stage(ProvisionStage::Syncing),
+            )?;
+            drop(_store);
+            if output.status != 0 {
+                return Ok(output);
+            }
+            let output = executor.execute(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    [
+                        "sh",
+                        "-c",
+                        &profile_script(MATERIALIZE_PROFILE_CONTENT),
+                        "mj-profile-materialize",
+                        &work,
+                        destination,
+                    ],
+                )
+                .purpose("materialize profile content")
+                .stage(ProvisionStage::Syncing),
+            )?;
+            Ok(output)
+        })();
+        if !transfer.as_ref().is_ok_and(|output| output.status == 0) {
+            tracing::warn!(%work, "profile preparation failed; collector will reclaim staging after verified quiescence");
+        }
+        let output = transfer?;
         if output.status == 0 {
             return Ok(());
         }
-        if output.status == PROFILE_CONTENT_MISSING && attempt == 0 {
-            missing = profile_content_keys(&output.stdout, &keys)?;
-            ensure!(
-                !missing.is_empty(),
-                "host reported missing profile content without any keys"
-            );
+        if attempt == 0
+            && matches!(
+                output.status,
+                PROFILE_CONTENT_MISSING | PROFILE_STAGE_MISSING
+            )
+        {
+            if output.status == PROFILE_STAGE_MISSING {
+                // Another daemon may collect the completed prior phase. A
+                // fresh query and transfer use the existing retry slot.
+                missing = query_missing()?;
+            } else {
+                missing = profile_content_keys(&output.stdout, &keys)?;
+                ensure!(
+                    !missing.is_empty(),
+                    "host reported missing profile content without any keys"
+                );
+            }
             continue;
         }
         bail!(
-            "{} failed with status {}: {}{}",
-            command.purpose,
+            "publish profile content failed with status {}: {}{}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim(),
             String::from_utf8_lossy(&output.stdout).trim()
@@ -1693,6 +1991,10 @@ mod profile_archive_tests {
         home: PathBuf,
         uploads: RefCell<Vec<Vec<u8>>>,
         delete_before_upload: Cell<usize>,
+        warnings: RefCell<Vec<String>>,
+        bin: RefCell<Option<PathBuf>>,
+        disconnect_after_receive: Cell<bool>,
+        collect_before_publish: Cell<usize>,
     }
     impl SystemTar {
         fn new(home: &Path) -> Self {
@@ -1700,6 +2002,10 @@ mod profile_archive_tests {
                 home: home.to_owned(),
                 uploads: RefCell::new(Vec::new()),
                 delete_before_upload: Cell::new(0),
+                warnings: RefCell::new(Vec::new()),
+                bin: RefCell::new(None),
+                disconnect_after_receive: Cell::new(false),
+                collect_before_publish: Cell::new(0),
             }
         }
         fn store(&self) -> PathBuf {
@@ -1743,8 +2049,8 @@ mod profile_archive_tests {
             self.execute_with_stdin(command, input)
         }
 
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("profile transfer commands must stream their input")
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.execute_with_stdin(command, &mut std::io::empty())
         }
         fn execute_with_stdin(
             &self,
@@ -1763,14 +2069,61 @@ mod profile_archive_tests {
                     }
                 }
             }
+            if command.purpose == "publish profile content" && self.collect_before_publish.get() > 0
+            {
+                self.collect_before_publish
+                    .set(self.collect_before_publish.get() - 1);
+                for entry in fs::read_dir(self.store())? {
+                    let path = entry?.path();
+                    if path
+                        .file_name()
+                        .unwrap()
+                        .as_encoded_bytes()
+                        .starts_with(b".stage-")
+                    {
+                        // The real receiver already exited quiescently. Model
+                        // a different daemon collecting the inter-phase gap.
+                        fs::remove_dir_all(path)?;
+                    }
+                }
+            }
             let script = command.args.last().context("missing remote command")?;
             let mut local = CommandSpec::new("sh", ["-c", script]);
             local
                 .env
                 .insert("HOME".into(), self.home.to_string_lossy().into_owned());
             local.cwd = Some(self.home.clone());
-            mj_core::targets::ProcessExecutor
-                .execute_with_stdin(&local, &mut std::io::Cursor::new(bytes))
+            if let Some(bin) = self.bin.borrow().as_ref() {
+                local.env.insert(
+                    "PATH".into(),
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                );
+            }
+            let mut output = mj_core::targets::ProcessExecutor
+                .execute_with_stdin(&local, &mut std::io::Cursor::new(bytes))?;
+            if command.purpose == "send profile content"
+                && self.disconnect_after_receive.replace(false)
+            {
+                let pid = std::process::id();
+                let birth = mj_core::subprocess::process_birth_identity(pid)?;
+                for entry in fs::read_dir(self.store())? {
+                    let path = entry?.path();
+                    if path
+                        .file_name()
+                        .unwrap()
+                        .as_encoded_bytes()
+                        .starts_with(b".stage-")
+                    {
+                        fs::write(path.join(".owner"), format!("{pid}\n{birth}\n"))?;
+                    }
+                }
+                output.status = 255;
+                output.stderr = b"simulated SSH connection loss with a surviving receiver".to_vec();
+            }
+            self.warnings
+                .borrow_mut()
+                .push(String::from_utf8_lossy(&output.stderr).into_owned());
+            Ok(output)
         }
     }
 
@@ -1785,6 +2138,417 @@ mod profile_archive_tests {
             destination.to_str().unwrap(),
             &shared_profile_paths(HarnessKind::Claude),
         )
+    }
+
+    // Hard-won: 73052bca7: an unrelated profile transfer held the host-wide gate until restart timed out.
+    #[test]
+    fn distinct_profile_content_transfers_overlap_and_identical_content_is_sent_once() {
+        use std::sync::mpsc;
+        struct HeldTar {
+            tar: SystemTar,
+            reached: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl CommandExecutor for HeldTar {
+            fn pause_deadline(&self) -> targets::DeadlinePause {
+                targets::DeadlinePause::none()
+            }
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                false
+            }
+            fn execute_without_deadline(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.execute(c)
+            }
+            fn execute_with_stdin_without_deadline(
+                &self,
+                c: &CommandSpec,
+                i: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                self.execute_with_stdin(c, i)
+            }
+            fn execute(&self, c: &CommandSpec) -> Result<CommandOutput> {
+                self.tar.execute(c)
+            }
+            fn execute_with_stdin(
+                &self,
+                c: &CommandSpec,
+                i: &mut (dyn Read + Send),
+            ) -> Result<CommandOutput> {
+                if c.purpose == "send profile content" {
+                    self.reached.send(()).unwrap();
+                    self.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("test did not release transfer");
+                }
+                self.tar.execute_with_stdin(c, i)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let first = home.join("first");
+        let second = home.join("second");
+        for (source, byte) in [(&first, b'a'), (&second, b'b')] {
+            fs::create_dir_all(source.join("plugins")).unwrap();
+            let mut state = u64::from(byte);
+            let payload: Vec<_> = (0..100_000)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (state >> 32) as u8
+                })
+                .collect();
+            fs::write(source.join("plugins/content"), payload).unwrap();
+        }
+        let ssh = SshTarget {
+            destination: "unused".into(),
+            ssh_args: vec![],
+        };
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first_ref = &first;
+            let ssh_ref = &ssh;
+            let owner = scope.spawn(move || {
+                let held = HeldTar {
+                    tar: SystemTar::new(home),
+                    reached: reached_tx,
+                    release: release_rx,
+                };
+                upload_profile_archive(
+                    &held,
+                    ssh_ref,
+                    first_ref,
+                    home.join("held").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                assert!(held.tar.uploads.borrow()[0].len() > 64 * 1024);
+            });
+            reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let independent = scope.spawn(move || {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    ssh_ref,
+                    &second,
+                    home.join("independent").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+            });
+            let same = scope.spawn(|| {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    &ssh,
+                    &first,
+                    home.join("same").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                let archives = tar.uploads.borrow();
+                let mut archive =
+                    tar::Archive::new(flate2::read::GzDecoder::new(archives[0].as_slice()));
+                assert!(
+                    archive.entries().unwrap().all(|entry| !entry
+                        .unwrap()
+                        .path()
+                        .unwrap()
+                        .starts_with(".mj-content")),
+                    "identical content was transferred twice"
+                );
+            });
+            let overlapped = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            release_tx.send(()).unwrap();
+            independent.join().unwrap();
+            owner.join().unwrap();
+            same.join().unwrap();
+            assert!(
+                overlapped,
+                "unrelated content queued behind a held transfer"
+            );
+        });
+        // Already cached shared content must not serialize private archives,
+        // even when both profiles have the exact same content-key set.
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first_ref = &first;
+            let ssh_ref = &ssh;
+            let owner = scope.spawn(move || {
+                let held = HeldTar {
+                    tar: SystemTar::new(home),
+                    reached: reached_tx,
+                    release: release_rx,
+                };
+                upload_profile_archive(
+                    &held,
+                    ssh_ref,
+                    first_ref,
+                    home.join("cached-held").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+            });
+            reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let cached = scope.spawn(move || {
+                let tar = SystemTar::new(home);
+                upload_profile_archive(
+                    &tar,
+                    ssh_ref,
+                    first_ref,
+                    home.join("cached-parallel").to_str().unwrap(),
+                    &["plugins"],
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+            });
+            let overlapped = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            release_tx.send(()).unwrap();
+            owner.join().unwrap();
+            cached.join().unwrap();
+            assert!(
+                overlapped,
+                "cached private archives queued behind each other"
+            );
+        });
+        assert_eq!(snapshot(&home.join("same")), snapshot(&first));
+    }
+
+    // Hard-won: efbd5c927: interrupted profile receivers left private staging outside collection.
+    #[test]
+    fn profile_collection_reclaims_failed_and_abandoned_staging_but_preserves_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("settings.json"), vec![b'x'; 100_000]).unwrap();
+        let executor = SystemTar::new(temp.path());
+        executor.disconnect_after_receive.set(true);
+        let failure = upload(
+            &executor,
+            &source,
+            &temp.path().join("disconnected-profile"),
+        )
+        .unwrap_err();
+        assert!(format!("{failure:#}").contains("simulated SSH connection loss"));
+        let interrupted = fs::read_dir(executor.store())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .as_encoded_bytes()
+                    .starts_with(b".stage-")
+            })
+            .expect("SSH status 255 deleted a surviving receiver's files");
+        assert!(interrupted.join("profile/settings.json").exists());
+        // Finish the simulated receiver by restoring its completed real owner.
+        fs::copy(interrupted.join(".quiescent"), interrupted.join(".owner")).unwrap();
+        executor.collect_before_publish.set(1);
+        let before = executor.uploads.borrow().len();
+        let recovered = temp.path().join("automatically-recovered");
+        upload(&executor, &source, &recovered).unwrap();
+        assert_eq!(snapshot(&recovered), snapshot(&source));
+        assert_eq!(
+            executor.uploads.borrow().len() - before,
+            2,
+            "collector loss did not restart from transfer"
+        );
+        executor.collect_before_publish.set(2);
+        let before = executor.uploads.borrow().len();
+        let repeated = upload(&executor, &source, &temp.path().join("repeated-loss")).unwrap_err();
+        assert!(format!("{repeated:#}").contains("stage removed by a collector"));
+        assert_eq!(
+            executor.uploads.borrow().len() - before,
+            2,
+            "collector loss changed the existing retry count"
+        );
+        let entries = profile_archive_entries(&source, &[]).unwrap();
+        let compressed = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+        std::io::copy(&mut flate2::read::GzDecoder::new(compressed), &mut encoder).unwrap();
+        let archive = encoder.finish().unwrap();
+        assert!(archive.len() > 64 * 1024);
+        let ssh = SshTarget {
+            destination: "unused".into(),
+            ssh_args: vec![],
+        };
+        let stage = |token: &str, bytes: &[u8]| {
+            let work = format!("{PROFILE_CONTENT_STORE}/.stage-{token}");
+            executor
+                .execute_with_stdin(
+                    &targets::ssh_command(
+                        SshTrafficClass::Bulk,
+                        &ssh,
+                        [
+                            "sh",
+                            "-c",
+                            &profile_script(STAGE_PROFILE_CONTENT),
+                            "mj-profile-stage",
+                            &work,
+                        ],
+                    )
+                    .purpose("send profile content"),
+                    &mut std::io::Cursor::new(bytes),
+                )
+                .unwrap()
+        };
+        assert_ne!(stage("failed", &archive[..archive.len() - 1024]).status, 0);
+        assert!(
+            !executor.store().join(".stage-failed").exists(),
+            "receiver failure left private files"
+        );
+        assert_eq!(stage("collected-between-phases", &archive).status, 0);
+        fs::rename(
+            executor.store().join(".stage-collected-between-phases"),
+            executor.store().join(".retired-between-phases"),
+        )
+        .unwrap();
+        let destination = temp.path().join("must-not-publish");
+        let removed = executor
+            .execute(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    &ssh,
+                    [
+                        "sh",
+                        "-c",
+                        &profile_script(INSTALL_PROFILE_CONTENT),
+                        "mj-profile-archive",
+                        destination.to_str().unwrap(),
+                        PROFILE_CONTENT_STORE,
+                        &format!("{PROFILE_CONTENT_STORE}/.stage-collected-between-phases"),
+                    ],
+                )
+                .purpose("publish profile content"),
+            )
+            .unwrap();
+        assert_eq!(removed.status, PROFILE_STAGE_MISSING);
+        assert!(String::from_utf8_lossy(&removed.stderr).contains("stage removed by a collector"));
+        assert!(
+            !destination.exists(),
+            "a missing receive was published as an empty profile"
+        );
+        assert!(
+            !executor
+                .store()
+                .join(".stage-collected-between-phases")
+                .exists()
+        );
+        assert!(
+            executor
+                .store()
+                .join(".retired-between-phases/profile/settings.json")
+                .exists()
+        );
+        for token in [
+            "abandoned",
+            "registered",
+            "live",
+            "reused",
+            "unknown",
+            "raced",
+            "unquiescent",
+        ] {
+            assert_eq!(stage(token, &archive).status, 0);
+        }
+        let pid = std::process::id();
+        let birth = mj_core::subprocess::process_birth_identity(pid).unwrap();
+        fs::write(
+            executor.store().join(".stage-live/.owner"),
+            format!("{pid}\n{birth}\n"),
+        )
+        .unwrap();
+        fs::write(
+            executor.store().join(".stage-reused/.owner"),
+            format!("{pid}\n{birth}-another-process\n"),
+        )
+        .unwrap();
+        fs::copy(
+            executor.store().join(".stage-reused/.owner"),
+            executor.store().join(".stage-reused/.quiescent"),
+        )
+        .unwrap();
+        fs::remove_file(executor.store().join(".stage-unquiescent/.quiescent")).unwrap();
+        let abrupt_owner = fs::read_to_string(executor.store().join(".stage-unquiescent/.owner"))
+            .unwrap()
+            .replace('\n', ":");
+        fs::remove_file(executor.store().join(".stage-unknown/.owner")).unwrap();
+        let host = targets::TargetLocator::SshBare {
+            ssh,
+            worker_id: None,
+            workspace: String::new(),
+        };
+        let key = super::super::store::store_key(&host, PROFILE_CONTENT_STORE);
+        let gate = super::super::store::store_gate(&host, PROFILE_CONTENT_STORE);
+        let active = {
+            let _store = super::super::store::lock_gate(
+                &executor,
+                &gate,
+                "test",
+                "register test profile staging",
+            )
+            .unwrap();
+            ProfileUpload::register(&key, "registered")
+        };
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let resolved_mv = targets::ProcessExecutor
+            .execute(&CommandSpec::new("sh", ["-c", "command -v mv"]))
+            .unwrap();
+        let resolved_mv = String::from_utf8(resolved_mv.stdout).unwrap();
+        // Claim first, after the collector's initial dead-owner snapshot but
+        // before its rename. The changed marker must force restoration.
+        let claim = profile_script("work=$1; mj_profile_claim; mj_profile_quiescent");
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "mv",
+            &format!(
+                "#!/bin/sh\n[ \"$1\" != -- ] || shift\nif [ \"${{1##*/}}\" = .stage-raced ]; then\n sh -c {} mj-test-owner \"$1\" || exit\nfi\nexec {} -- \"$@\"\n",
+                targets::posix_quote(&claim),
+                targets::posix_quote(resolved_mv.trim())
+            ),
+        );
+        *executor.bin.borrow_mut() = Some(bin);
+        upload(&executor, &source, &temp.path().join("profile")).unwrap();
+        assert!(
+            !interrupted.exists(),
+            "a completed disconnected receiver was never reclaimed"
+        );
+        for token in ["abandoned", "reused"] {
+            assert!(!executor.store().join(format!(".stage-{token}")).exists());
+        }
+        for token in ["registered", "live", "unknown", "raced", "unquiescent"] {
+            assert!(executor.store().join(format!(".stage-{token}")).exists());
+        }
+        assert!(
+            executor
+                .warnings
+                .borrow()
+                .iter()
+                .any(|warning| warning.contains("ownership unknown")
+                    && warning.contains(".stage-unknown"))
+        );
+        assert!(executor.warnings.borrow().iter().any(|warning| {
+            warning.contains(".stage-unquiescent") && warning.contains(&abrupt_owner)
+        }));
+        drop(active);
+        executor.bin.borrow_mut().take();
+        upload(&executor, &source, &temp.path().join("next-profile")).unwrap();
+        assert!(
+            !executor.store().join(".stage-raced").exists(),
+            "a restored dead owner was never reclaimed"
+        );
+        assert!(
+            !executor.store().join(".retired-between-phases").exists(),
+            "an abandoned retirement was never reclaimed"
+        );
+        assert!(
+            !executor.store().join(".stage-registered").exists(),
+            "finished local owner was never reclaimed"
+        );
     }
 
     fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
@@ -1962,6 +2726,27 @@ mod profile_archive_tests {
         let mut archive = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
         fs::remove_file(executor.store().join(&key)).unwrap();
         let destination = temp.path().join("missing");
+        let work = Path::new("missing-work");
+        executor
+            .execute_with_stdin(
+                &targets::ssh_command(
+                    SshTrafficClass::Bulk,
+                    &SshTarget {
+                        destination: "unused".into(),
+                        ssh_args: vec![],
+                    },
+                    [
+                        "sh",
+                        "-c",
+                        &profile_script(STAGE_PROFILE_CONTENT),
+                        "mj-profile-stage",
+                        work.to_str().unwrap(),
+                    ],
+                )
+                .purpose("send profile content"),
+                &mut archive,
+            )
+            .unwrap();
         let command = targets::ssh_command(
             SshTrafficClass::Control,
             &SshTarget {
@@ -1971,14 +2756,15 @@ mod profile_archive_tests {
             [
                 "sh",
                 "-c",
-                INSTALL_PROFILE_CONTENT,
+                &profile_script(INSTALL_PROFILE_CONTENT),
                 "mj-profile-archive",
                 destination.to_str().unwrap(),
                 PROFILE_CONTENT_STORE,
+                work.to_str().unwrap(),
             ],
         )
-        .purpose("send profile content");
-        let output = executor.execute_with_stdin(&command, &mut archive).unwrap();
+        .purpose("publish profile content");
+        let output = executor.execute(&command).unwrap();
         assert_eq!(output.status, PROFILE_CONTENT_MISSING);
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),

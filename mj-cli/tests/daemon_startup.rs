@@ -895,10 +895,17 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
         .stdout(fs::File::create(&log).unwrap())
         .stderr(fs::File::create(&log).unwrap());
     let mut client = command.spawn().unwrap();
-    // The handoff asks again each round; several asks with the record in place
-    // show that the client waits for the daemon instead of replacing it.
+    // The client asks again each round. One that took two unanswered pings
+    // as absence launched a replacement after its third connection, so the
+    // record is checked through several asks beyond that.
     let deadline = Instant::now() + Duration::from_secs(60);
-    while connections.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+    loop {
+        let kept: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(kept.token, stale.token, "the record was replaced");
+        if connections.load(std::sync::atomic::Ordering::SeqCst) >= 6 {
+            break;
+        }
         assert!(
             client.try_wait().unwrap().is_none(),
             "the client gave up: {}",
@@ -906,13 +913,10 @@ fn a_container_daemon_that_does_not_answer_is_not_replaced() {
         );
         assert!(
             Instant::now() < deadline,
-            "the client did not ask the daemon"
+            "the client did not keep asking the daemon"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let kept: mj_client::daemon::DaemonMetadata =
-        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-    assert_eq!(kept.token, stale.token, "the record was replaced");
     client.kill().unwrap();
     client.wait().unwrap();
 }

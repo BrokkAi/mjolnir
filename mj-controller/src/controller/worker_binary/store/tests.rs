@@ -166,7 +166,7 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
 // A real cancellation still ends it.
 // Hard-won: #1550: staging time consumed the caller's deadline, so the following stop never ran
 #[test]
-fn a_gate_wait_without_deadline_outlasts_the_callers_deadline_but_not_a_cancel() {
+fn a_gate_wait_outlasts_the_callers_deadline_but_not_a_cancel() {
     let temp = tempfile::tempdir().unwrap();
     let id = "66666666666666666666666666666666";
     let locator = target(temp.path(), id);
@@ -178,11 +178,8 @@ fn a_gate_wait_without_deadline_outlasts_the_callers_deadline_but_not_a_cancel()
     let (ready, waiting) = std::sync::mpsc::sync_channel(0);
     std::thread::scope(|scope| {
         let waiter = scope.spawn(|| {
-            let untimed = targets::WithoutDeadline::new(&caller);
-            // Nested scopes must exclude the union, not double the wait.
-            let nested = targets::WithoutDeadline::new(&untimed);
             ready.send(()).unwrap();
-            let result = lock_gate(&nested, &gate, id, "wait behind the holder").map(|_| ());
+            let result = lock_gate(&caller, &gate, id, "wait behind the holder").map(|_| ());
             waiter_done.store(true, Ordering::SeqCst);
             result
         });
@@ -400,7 +397,7 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
 
 // Hard-won: 7f871fd03: the wait deadline expired during setup before the installer reached the held store gate.
 #[test]
-fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner() {
+fn a_waiting_installer_observes_cancellation_without_cancelling_the_store_owner() {
     use std::sync::mpsc;
     struct HeldUpload {
         reached: mpsc::Sender<()>,
@@ -439,14 +436,14 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
                     .lock()
                     .unwrap()
                     .recv_timeout(Duration::from_secs(10))
-                    .expect("deadline test waiter did not finish before the deadlock watchdog");
+                    .expect("cancellation test waiter did not finish before the deadlock watchdog");
             }
             targets::ProcessExecutor.execute(command)
         }
     }
     #[derive(Default)]
-    struct DeadlineAtWait(OnceLock<targets::CancellableProcessExecutor>);
-    impl CommandExecutor for DeadlineAtWait {
+    struct CancelAtWait(OnceLock<targets::CancellableProcessExecutor>);
+    impl CommandExecutor for CancelAtWait {
         fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
             self.0
                 .get()
@@ -487,9 +484,11 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
 
         fn stage_started(&self, stage: targets::ProvisionStage) {
             if stage == targets::ProvisionStage::WaitingForWorkerStore {
-                // Expire only once queued, without racing setup or a clock.
+                // Cancel only once queued, without racing setup or a clock.
                 self.0.get_or_init(|| {
-                    targets::CancellableProcessExecutor::with_timeout(Duration::ZERO)
+                    targets::CancellableProcessExecutor::new(Arc::new(
+                        std::sync::atomic::AtomicBool::new(true),
+                    ))
                 });
             }
         }
@@ -513,7 +512,7 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         let running = scope.spawn(move || install(&owner, &a, first, owner_bytes));
         // If setup fails, dropping the owner's sender wakes this receive.
         reached_rx.recv().unwrap();
-        let executor = DeadlineAtWait::default();
+        let executor = CancelAtWait::default();
         let result = install_worker_binary(
             &executor,
             &b,
@@ -523,9 +522,11 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         );
         release.send(()).unwrap();
         running.join().unwrap();
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "timed out after 0 s while wait for the shared Mjolnir worker binary"
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled while wait to publish a worker build")
         );
         assert!(temp.path().join(first).join("hel").exists());
         assert!(!temp.path().join(second).join("hel").exists());
