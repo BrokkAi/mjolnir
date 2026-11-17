@@ -3871,11 +3871,11 @@ async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
     for _ in 0..24 {
         executor.stage_started(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        check_progress(&state, create::CREATE_STALL_BOUND)
+        check_progress(&state, LIFECYCLE_STALL_BOUND)
             .expect("a Create that is making progress is not stalled");
         executor.stage_finished(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        check_progress(&state, create::CREATE_STALL_BOUND)
+        check_progress(&state, LIFECYCLE_STALL_BOUND)
             .expect("a Create that is making progress is not stalled");
     }
 }
@@ -3916,7 +3916,7 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
         state.clone(),
         "session-1".into(),
     );
-    let bound = create::CREATE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND;
     for queue in [
         ProvisionStage::WaitingForImagePull,
         ProvisionStage::WaitingForStartSlot,
@@ -3958,7 +3958,7 @@ async fn a_create_watches_each_stream_for_byte_progress() {
     };
     let send_profile = "send profile content";
     let upload_worker = "stage replacement Mjolnir worker";
-    let bound = create::CREATE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND;
     let half = bound / 2;
 
     // The stream has to queue for SSH first. Its idle clock begins only after
@@ -4021,6 +4021,135 @@ async fn a_create_watches_each_stream_for_byte_progress() {
     assert!(error.contains("its Create was cancelled"), "{error}");
 }
 
+// Hard-won: #1571: removing the transfer deadline left an unattended wake unable to end when its stream stopped.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
+    use crate::recovery_gate::BackgroundWork;
+    use mj_core::targets::CommandActivity;
+
+    if !in_isolated_parked_test("a_stalled_unpark_stream_releases_admission_and_can_retry") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parked child stall").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent = "0123456789abcdef0123456789abcdef";
+    let child = "55555555555555555555555555555555";
+    crate::database::save_session(&runtime_test_session(
+        parent,
+        &workspace.id,
+        SessionState::Running,
+    ))
+    .unwrap();
+    parked_child(root.path(), child, parent, &workspace.id);
+    let (state, mut recovery, mut upgrades) =
+        test_runtime_state_loading_the_store_with_live_recovery();
+
+    let (admitted, started) = tokio::sync::oneshot::channel();
+    let (cancel_seen, mut cancelled) = tokio::sync::oneshot::channel();
+    let (finish, cleanup) = tokio::sync::oneshot::channel();
+    let caller = state
+        .start_or_join_lifecycle(child.into(), LifecycleKind::Unpark, {
+            |_, _, flag, _| async move {
+                admitted.send(()).unwrap();
+                crate::recovery_gate::wait_until_cancelled(&flag).await;
+                cancel_seen.send(()).unwrap();
+                cleanup.await.unwrap();
+                anyhow::bail!("stream cancelled")
+            }
+        })
+        .await
+        .unwrap();
+    started.await.unwrap();
+    drop(caller);
+    let (operation_id, result) = {
+        let owner = state.owner();
+        let active = &owner.lifecycle[child];
+        (active.operation_id.clone(), active.result.clone())
+    };
+    let stream = state
+        .allocate_lifecycle_stream_id(child, &operation_id)
+        .unwrap();
+    let report = |activity| {
+        state.record_lifecycle_command_activity(
+            child,
+            &operation_id,
+            stream,
+            "send profile content",
+            activity,
+        );
+    };
+
+    let bound = LIFECYCLE_STALL_BOUND;
+    report(CommandActivity::StageStarted(
+        ProvisionStage::WaitingForSshConnection,
+    ));
+    tokio::time::sleep(bound * 2).await;
+    assert!(matches!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    report(CommandActivity::StageFinished(
+        ProvisionStage::WaitingForSshConnection,
+    ));
+    report(CommandActivity::StdinStarted);
+    for _ in 0..4 {
+        tokio::time::sleep(bound / 2).await;
+        report(CommandActivity::StdinBytes(64 * 1024));
+    }
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    assert!(matches!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    tokio::time::timeout(Duration::from_secs(2), cancelled)
+        .await
+        .expect("the daemon cancels the stream without a waiter")
+        .unwrap();
+
+    // A cancelled command still owns admission until process cleanup ends.
+    let gate = state.session_gate();
+    let refusal = gate
+        .try_start(child, BackgroundWork::WorkerReplacement)
+        .err()
+        .expect("the cancelling Unpark still holds admission");
+    assert!(refusal.worker_owned, "{refusal:?}");
+    report(CommandActivity::StdinFinished);
+    finish.send(()).unwrap();
+    let error = RuntimeState::wait_lifecycle_result(result)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("send profile content made no progress for 10 minutes"),
+        "{error:#}"
+    );
+    assert_eq!(state.session_state(child), Some(SessionState::Parked));
+    assert!(
+        crate::database::load_worker_restart(child)
+            .unwrap()
+            .is_none()
+    );
+    drop(
+        gate.try_start(child, BackgroundWork::WorkerReplacement)
+            .unwrap(),
+    );
+
+    // With the original caller gone, its retained outcome cannot consume the
+    // next wake. The same child can take a new Unpark immediately.
+    let retry = state
+        .start_or_join_lifecycle(child.into(), LifecycleKind::Unpark, |_, _, _, _| async {
+            Ok(DaemonLifecycleResult::Done)
+        })
+        .await
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(retry).await.unwrap();
+    recovery.shutdown().await.unwrap();
+    upgrades.shutdown().await.unwrap();
+}
+
 /// Harness preparation reports its own progress and failure, and one step (a
 /// download) can be slow: it stays off the stall clock, as it is off the
 /// native startup deadline.
@@ -4035,7 +4164,7 @@ async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
         state.clone(),
         "session-1".into(),
     );
-    let bound = create::CREATE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND;
     let preparing = ProvisionStage::PreparingHarness {
         harness: mj_core::config::HarnessKind::Codex,
         step: "Downloading".into(),
@@ -4077,7 +4206,7 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
         "session-1".into(),
     );
     executor.stage_started(ProvisionStage::Syncing);
-    let bound = create::CREATE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND;
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
     check_progress(&state, bound).unwrap();
     assert!(!cancel_seen.load(Ordering::Acquire));
@@ -4122,21 +4251,21 @@ async fn a_readiness_wait_with_no_create_running_fails_at_the_startup_timeout() 
     tokio::task::yield_now().await;
     tokio::time::sleep(timeout * 4).await;
     state
-        .check_create_progress("session-1", create::CREATE_STALL_BOUND * 100, &mut waiting)
+        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND * 100, &mut waiting)
         .unwrap();
     // The Create ends; the wait now has the full bound from that moment.
     finish.notify_one();
     RuntimeState::wait_lifecycle_result(watch).await.unwrap();
     state
-        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
         .unwrap();
     tokio::time::sleep(timeout - Duration::from_secs(1)).await;
     state
-        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
         .unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let error = state
-        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .check_create_progress("session-1", LIFECYCLE_STALL_BOUND, &mut waiting)
         .unwrap_err()
         .to_string();
     assert!(
@@ -4166,7 +4295,7 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
         "session-1".into(),
     );
     executor.stage_started(ProvisionStage::Syncing);
-    let bound = create::CREATE_STALL_BOUND;
+    let bound = LIFECYCLE_STALL_BOUND;
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
     check_progress(&state, bound).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -15319,16 +15448,19 @@ esac
         let id = session.id.clone();
         async move {
             state
-                .start_resume_session(ResumeSessionRequest {
-                    session_id: id,
-                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                    profile_id: "unconfigured-profile".into(),
-                    target_template_id: "unconfigured-target".into(),
-                    additional_mounts: None,
-                    resource_allocation: None,
-                    discard_queue: false,
-                    repository_preflight: None,
-                })
+                .start_resume_session(
+                    ResumeSessionRequest {
+                        session_id: id,
+                        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
+                        profile_id: "unconfigured-profile".into(),
+                        target_template_id: "unconfigured-target".into(),
+                        additional_mounts: None,
+                        resource_allocation: None,
+                        discard_queue: false,
+                        repository_preflight: None,
+                    },
+                    LifecycleControl::default(),
+                )
                 .await
         }
     });
@@ -15765,4 +15897,45 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     older.status().await.unwrap();
     drop(older);
     server.await.unwrap();
+}
+
+// Hard-won: 41e5b2ddd: a phone Resume could outlive cancellation while queued for workspace admission.
+#[tokio::test]
+async fn cancelling_resume_retires_its_workspace_wait_without_admission() {
+    let state = test_runtime_state();
+    let workspace_id = "resume-cancellation";
+    let _closing = state
+        .workspace_resume_gate(workspace_id)
+        .write_owned()
+        .await;
+    let control = LifecycleControl::default();
+    let resume = state.start_resume_session(
+        ResumeSessionRequest {
+            session_id: "waiting-resume".into(),
+            workspace_id: workspace_id.into(),
+            profile_id: "profile".into(),
+            target_template_id: "target".into(),
+            additional_mounts: None,
+            resource_allocation: None,
+            discard_queue: false,
+            repository_preflight: None,
+        },
+        control.clone(),
+    );
+    tokio::pin!(resume);
+    assert!(futures::poll!(&mut resume).is_pending());
+    assert!(control.request_cancel("phone cancellation"));
+    let Err(error) = tokio::time::timeout(Duration::from_secs(5), resume)
+        .await
+        .unwrap()
+    else {
+        panic!("cancelled Resume admitted a lifecycle");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("cancelled before workspace admission"),
+        "{error:#}"
+    );
+    assert!(state.owner().lifecycle.is_empty());
 }

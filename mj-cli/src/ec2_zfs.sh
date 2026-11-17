@@ -56,7 +56,10 @@ systemctl enable --now mj-ec2-cache.service
 # cannot add directories beside these (mbx setup creates ~/.config/rust-analyzer).
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config/mbx
-printf 'cache_dir = "/mnt/nvme/mbx"\n\n[linker]\ndefault = "path:/usr/bin/mold"\n' > /home/ubuntu/.config/mbx/config.toml
+# No [linker]: containers read this file as-is, and any mbx linker selection
+# makes rustc link through clang, which the session image may lack. A project
+# chooses its linker in its own .mbx.toml and installs clang in its recipe.
+printf 'cache_dir = "/mnt/nvme/mbx"\n' > /home/ubuntu/.config/mbx/config.toml
 chown ubuntu:ubuntu /home/ubuntu/.config/mbx/config.toml
 
 # Configure storage before the first Podman command initializes its database.

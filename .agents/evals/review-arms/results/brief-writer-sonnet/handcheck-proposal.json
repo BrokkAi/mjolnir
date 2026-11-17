@@ -1,0 +1,437 @@
+{
+  "019a4e614d864ca7": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "019fca3542f307e5": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only flag depending on nonempty review refs, allowing an empty-ref metadata capture to take the full checkout restore path and alter a shared checkout."
+  },
+  "01fca8b25e723d16": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "04ba9ea19c369c38": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "09f9da9a9d114851": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "0f6436e950b60d4c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies interrupt finding no active turn while a prompt waits for readiness, leaving that prompt pending and submitting unwanted work after worker attachment."
+  },
+  "0fbf8aa72b5dbfd4": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "12a97090d56f8787": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "167ca3c9ef0e872d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "16e495c6bf7651e2": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "1dc36e7991b6b0b6": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "1f7c5b45164b547c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "23f343cb0c421bed": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "253261066aa67cd0": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "2782bddd06ce80dc": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Identifies an overly broad parent-directory security boundary and sibling-file exposure, but never states that an agent-relative filename resolves against the wrong directory or returns a wrong/missing file. This is the distinct path-access problem in the near misses, not the required lookup symptom; sharing the root argument and a potential fix is insufficient under SPEC. Agree with judge A; disagree with judge B."
+  },
+  "2dae73c0ebbad08e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "2ecfe6437857b72d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "2f8f2403fc9555b8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "30bde9d2c9b2d430": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only flag depending on nonempty review refs, allowing an empty-ref metadata capture to take the full checkout restore path and alter a shared checkout."
+  },
+  "3861e95a0da2b773": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "3c3bf0aa7f988ac1": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "3c81568ce7bb59e9": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "406400deab1c3d95": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies interrupt finding no active turn while a prompt waits for readiness, leaving that prompt pending and submitting unwanted work after worker attachment."
+  },
+  "4086e9a2c126bbd9": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "40c0ce7aca2116b8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "4317d2101c3f9e2d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "43f9a04d67438d7d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "4469b496cce16970": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "44aa38a084a3b335": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "46abe8e4e94f09db": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "475c29cc52f0540f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies separate projection reads crossing a concurrent commit, mixing frontier and transcript generations, and the need for one read transaction. The different downstream consequence does not change the mechanism."
+  },
+  "493205a9a811b0f9": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "49aaf5d887ebdae9": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "4a2a8fb9dd1aef84": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "4a92ad8ca5e3ce3d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "4b50ddd056fc8647": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "4f3c7f57d23981c5": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies startup-only model pinning in a persisted supervisor specification reused after later accepted model changes, causing a restarted bridge to reopen on a stale model."
+  },
+  "507e59256fc5c73c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "5869d4cfd360d22f": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Identifies an overly broad parent-directory security boundary and sibling-file exposure, but never states that an agent-relative filename resolves against the wrong directory or returns a wrong/missing file. This is the distinct path-access problem in the near misses, not the required lookup symptom; sharing the root argument and a potential fix is insufficient under SPEC. Agree with judge A; disagree with judge B."
+  },
+  "5f0b2b6d221a9c32": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "65a0ea645f013068": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter reset, reused terminal IDs on reconnect, and association of new output with earlier durable transcript tool calls."
+  },
+  "6665e1b8eef30cad": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "6737ccee9f81e575": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "679f66f62df1880f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "68181396de78bf0f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "68e3a180ee0c065c": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Identifies an overly broad parent-directory security boundary and sibling-file exposure, but never states that an agent-relative filename resolves against the wrong directory or returns a wrong/missing file. This is the distinct path-access problem in the near misses, not the required lookup symptom; sharing the root argument and a potential fix is insufficient under SPEC. Agree with judge A; disagree with judge B."
+  },
+  "6ccd73af3d0fe477": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "6dea41fd47c5aed6": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "6eb10fef7e522d31": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "742b9ea7240683d8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "74533928390102e1": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "791b5945746e5281": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "7c8a89b94fb8e254": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "7cfbb068a4b1caee": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "804d48e70e2d0a9c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "82e74b3e480fa9f7": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "84406c661ff2d9d3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "87759e83b966c83c": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "8b4eb4f5db7ce436": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "8cac20aa5c074987": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies session_projection holding the controller mutex while active_lifecycles reacquires that same non-reentrant mutex, deadlocking web publication."
+  },
+  "8ddf4e4a304acbd4": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies canonical-only restore lookups omitting archived harness-specific effort IDs and losing the selected effort on native resume; another effort ID illustrates the same mechanism."
+  },
+  "8fc08fb3f01cc31d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "902fe28dc0cc6d00": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "9a9b59b2351c55e8": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies startup-only model pinning in a persisted supervisor specification reused after later accepted model changes, causing a restarted bridge to reopen on a stale model."
+  },
+  "9cdb090acaad4c7d": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "a1dc881f98721e39": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the workspace parent used as the read root and explicitly states that ordinary project-relative filenames consequently resolve outside the project or fail unless prefixed with the checkout directory."
+  },
+  "a330f1ee080e5518": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies validation or inheritance using the profile default model effort choices instead of the requested child model choices, allowing an unsupported effort to fail child startup."
+  },
+  "a36e08df966140d3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only flag depending on nonempty review refs, allowing an empty-ref metadata capture to take the full checkout restore path and alter a shared checkout."
+  },
+  "ad09a4c81cdbf129": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "ae1943cc08fc546e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "aec6dc875bb9c78a": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "b545dfeff712afbb": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "b7659a775470ded7": {
+    "label": "partial",
+    "agrees_with_judges": true,
+    "why": "At the restore selector extraction, identifies noncanonical model IDs being omitted and discusses advertised versus accepted configuration. This is related selector loss at the right code, but it never identifies an effort alias being ignored or selected effort being lost on resume, so it does not establish the known effort defect."
+  },
+  "c01452129872881f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "c5bd7f9b72132373": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "c8b804c66205cb82": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Identifies an overly broad parent-directory security boundary and sibling-file exposure, but never states that an agent-relative filename resolves against the wrong directory or returns a wrong/missing file. This is the distinct path-access problem in the near misses, not the required lookup symptom; sharing the root argument and a potential fix is insufficient under SPEC. Agree with judge A; disagree with judge B."
+  },
+  "cb4a87d744a41235": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the metadata-only flag depending on nonempty review refs, allowing an empty-ref metadata capture to take the full checkout restore path and alter a shared checkout."
+  },
+  "d36ec13ae717221a": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  },
+  "d7351f5cbcc66a88": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies interrupt finding no active turn while a prompt waits for readiness, leaving that prompt pending and submitting unwanted work after worker attachment."
+  },
+  "d9c66e173238f57a": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter reset, reused terminal IDs on reconnect, and association of new output with earlier durable transcript tool calls."
+  },
+  "e17f786d983bd953": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies startup-only model pinning in a persisted supervisor specification reused after later accepted model changes, causing a restarted bridge to reopen on a stale model."
+  },
+  "e1b829e227b421ee": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the literal GitHub token embedded in container or SSH process arguments and exposed through process inspection."
+  },
+  "e55bd1ed8304b47e": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies catalog and default-model discovery writes sharing the profile/empty-model primary key, replacing each other and removing the cached fallback."
+  },
+  "e9598648d49529ee": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies registration-order hit testing giving covered later controls priority over the visible popup, routing clicks to the wrong control."
+  },
+  "f097f20882850116": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the per-connection counter reset, reused terminal IDs on reconnect, and association of new output with earlier durable transcript tool calls."
+  },
+  "f91ca5cc1aa299da": {
+    "label": "missed",
+    "agrees_with_judges": false,
+    "why": "Identifies an overly broad parent-directory security boundary and sibling-file exposure, but never states that an agent-relative filename resolves against the wrong directory or returns a wrong/missing file. This is the distinct path-access problem in the near misses, not the required lookup symptom; sharing the root argument and a potential fix is insufficient under SPEC. Agree with judge A; disagree with judge B."
+  },
+  "fad78a042c6f35f3": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies symbol-set changes failing to invalidate cached transcript rows because the cache omits that dependency, retaining old glyphs."
+  }
+}

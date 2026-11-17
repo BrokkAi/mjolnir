@@ -2,7 +2,10 @@
 # the user's own first; otherwise ubuntu cannot create directories beside these.
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config/mbx
-printf 'cache_dir = "/mnt/ebs/mbx"\n\n[linker]\ndefault = "path:/usr/bin/mold"\n' > /home/ubuntu/.config/mbx/config.toml
+# No [linker]: containers read this file as-is, and any mbx linker selection
+# makes rustc link through clang, which the session image may lack. A project
+# chooses its linker in its own .mbx.toml and installs clang in its recipe.
+printf 'cache_dir = "/mnt/ebs/mbx"\n' > /home/ubuntu/.config/mbx/config.toml
 chown ubuntu:ubuntu /home/ubuntu/.config/mbx/config.toml
 
 # Configure storage before the first Podman command initializes its database.
