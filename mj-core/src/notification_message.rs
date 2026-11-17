@@ -5,12 +5,7 @@
 //! surfaces cannot drift: each supplies what it knows and resolves the sources
 //! this returns, in order, to the first one that yields text.
 
-/// The two notification levels whose card shows a message from the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationKind {
-    NeedsInput,
-    Important,
-}
+pub use crate::attention::NotificationKind;
 
 /// What a surface knows about the session. Every field is optional because
 /// each surface learns different things at different times.

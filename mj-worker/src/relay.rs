@@ -469,6 +469,9 @@ impl DurableRelay {
             {
                 snapshot.continuation.withdrawn_ordinal = Some(snapshot.latest_ordinal);
             }
+            if snapshot.format_version < 27 {
+                seed_legacy_notification_stack(&mut snapshot);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -509,6 +512,11 @@ impl DurableRelay {
                     }
                 }
                 snapshot.latest_ordinal = restored.event_frontier;
+                if let Some(stack) = restored.notification_stack {
+                    snapshot.notification_stack = Arc::new(stack);
+                } else {
+                    seed_legacy_notification_stack(&mut snapshot);
+                }
                 snapshot.latest_digest = restored.event_frontier_digest.clone();
                 snapshot.acknowledged_through = restored.event_frontier;
                 snapshot.acknowledged_digest = restored.event_frontier_digest.clone();
@@ -771,6 +779,21 @@ impl DurableRelay {
         relay.recover_nonterminal_commands()?;
         relay.ensure_initial_commands_succeeded()?;
         relay.promote_next_queued_command()?;
+        if !checkpoint_only {
+            // No locator task survives a worker process. Record the final
+            // no-result observation for any request interrupted by the restart.
+            let pending: Vec<_> = relay
+                .snapshot
+                .notification_stack
+                .entries
+                .iter()
+                .filter(|entry| entry.message == mj_core::attention::EntryMessage::Locating)
+                .map(|entry| entry.completed_ordinal)
+                .collect();
+            for completed in pending {
+                relay.finish_question_locator(completed, None)?;
+            }
+        }
         Ok(relay)
     }
 
@@ -1984,6 +2007,51 @@ fn seed_legacy_open_request(snapshot: &mut RelaySnapshot) {
                 .question_message
                 .clone()
                 .or_else(|| snapshot.completed_reply_message.clone()),
+        });
+    }
+}
+
+fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
+    use mj_core::attention::{
+        EntryMessage, NotificationKind, NotificationStack, NotificationStackEntry,
+    };
+    let mut entries = Vec::new();
+    if let Some(request) = snapshot.open_request() {
+        entries.push(NotificationStackEntry {
+            completed_ordinal: request.question.completed_ordinal,
+            kind: NotificationKind::NeedsInput,
+            message: request
+                .question_message
+                .clone()
+                .map_or(EntryMessage::None, EntryMessage::Found),
+        });
+    }
+    if let Some(assessment) = snapshot.assessment.as_deref()
+        && assessment.current()
+        && assessment.attention == Some(mj_core::attention::AssessmentAttention::Important)
+        && assessment.completed_ordinal > snapshot.person_input_through
+        && snapshot.turn_completion.as_ref().is_none_or(|turn| {
+            turn.completed_ordinal == assessment.completed_ordinal
+                && turn.command_id == assessment.turn_id
+        })
+        && !entries
+            .iter()
+            .any(|entry| entry.completed_ordinal == assessment.completed_ordinal)
+    {
+        entries.push(NotificationStackEntry {
+            completed_ordinal: assessment.completed_ordinal,
+            kind: NotificationKind::Important,
+            message: snapshot
+                .completed_reply_message
+                .clone()
+                .map_or(EntryMessage::None, EntryMessage::Found),
+        });
+        entries.sort_by_key(|entry| entry.completed_ordinal);
+    }
+    if !entries.is_empty() {
+        snapshot.notification_stack = Arc::new(NotificationStack {
+            revision: snapshot.latest_ordinal,
+            entries,
         });
     }
 }

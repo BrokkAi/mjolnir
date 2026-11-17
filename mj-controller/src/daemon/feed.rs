@@ -341,6 +341,7 @@ impl RuntimeState {
         history.publish(full.clone())?;
         source.metadata.unread_frontiers = full.metadata.unread_frontiers.clone();
         source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
+        source.metadata.notification_cards = full.metadata.notification_cards.clone();
         source.metadata.form_holders = full.metadata.form_holders.clone();
         source.metadata.session_attention = full.metadata.session_attention.clone();
         history.attention_source = source;
@@ -949,6 +950,7 @@ mod tests {
                     projection_ordinal: 0,
                     projection_digest: String::new(),
                     pending_input: false,
+                    pending_input_message: None,
                 },
             )
         };
@@ -1158,6 +1160,7 @@ mod tests {
             projection_ordinal: 0,
             projection_digest: String::new(),
             pending_input: false,
+            pending_input_message: None,
         };
         full.native_agents.insert(view_id.clone(), summary.clone());
         let mut native_owners = NativeOwners::new();

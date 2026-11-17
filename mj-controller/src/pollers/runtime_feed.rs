@@ -45,6 +45,7 @@ pub struct RuntimeStateUpdate {
     /// Session creation history for project-list ordering and the legacy fallback; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    pub notification_cards: Option<SnapshotMap<String, mj_client::runtime_feed::NotificationCard>>,
     pub unread_frontiers: SnapshotMap<String, u64>,
     pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     pub form_holders: SnapshotMap<String, String>,

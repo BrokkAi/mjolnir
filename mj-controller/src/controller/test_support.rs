@@ -218,6 +218,7 @@ pub(crate) fn checkpoint_archive_input(
         },
         canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
             command_ledger: None,
+            notification_stack: None,
             assessment_state: Some(
                 serde_json::to_value(mj_core::assessment::Checkpoint {
                     open_request: None,

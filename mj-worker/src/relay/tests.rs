@@ -8529,6 +8529,10 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
             upgraded.snapshot.person_input_through,
             if later_prompt { 11 } else { 0 }
         );
+        assert_eq!(
+            !upgraded.snapshot.notification_stack.entries.is_empty(),
+            upgraded.snapshot.open_request().is_some(),
+        );
         // Both modern exact-empty and exact-open checkpoint envelopes survive restoration.
         let state = Checkpoint {
             version: 1,
@@ -8548,11 +8552,26 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
             if legacy {
                 encoded.as_object_mut().unwrap().remove("open_request");
             }
+            let mut stack = (*upgraded.snapshot.notification_stack).clone();
+            stack.revision = 20;
+            stack.entries.insert(
+                0,
+                mj_core::attention::NotificationStackEntry {
+                    completed_ordinal: 5,
+                    kind: mj_core::attention::NotificationKind::Important,
+                    message: mj_core::attention::EntryMessage::Found(
+                        "agent:retained-important".into(),
+                    ),
+                },
+            );
+            let mut seed = serde_json::json!({"event_frontier": 20,
+                "event_frontier_digest": "a".repeat(64), "assessment_state": encoded});
+            if !legacy {
+                seed["notification_stack"] = serde_json::to_value(&stack).unwrap();
+            }
             fs::write(
                 mj_core::relay::restored_relay_seed_path(destination.path()),
-                serde_json::to_vec(&serde_json::json!({"event_frontier": 20,
-                    "event_frontier_digest": "a".repeat(64), "assessment_state": encoded}))
-                .unwrap(),
+                serde_json::to_vec(&seed).unwrap(),
             )
             .unwrap();
             let restored = DurableRelay::open(destination.path(), SESSION, "test").unwrap();
@@ -8561,6 +8580,7 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
                 !dismissed && (legacy || !later_prompt)
             );
             if !legacy {
+                assert_eq!(*restored.snapshot.notification_stack, stack);
                 assert_eq!(
                     restored.snapshot.person_input_through,
                     state.open_request.as_ref().unwrap().person_input_through
@@ -8639,6 +8659,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
     let seed = mj_core::relay::RestoredRelaySeed {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: 7,
         event_frontier_digest: "a".repeat(64),
         queued_prompts: vec![mj_core::archive::CanonicalQueuedPrompt {

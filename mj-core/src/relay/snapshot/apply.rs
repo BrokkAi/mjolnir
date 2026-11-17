@@ -3,6 +3,9 @@
 use anyhow::{Result, anyhow, bail};
 
 use super::*;
+use crate::attention::{
+    AssessmentAttention, EntryMessage, NotificationKind, NotificationStackEntry,
+};
 
 /// Whether applying this observation moves durable relay state beyond the
 /// event frontier.
@@ -14,6 +17,7 @@ use super::*;
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
         RelayObservation::QuestionTargetUpdated { .. }
+        | RelayObservation::QuestionLocatorFinished { .. }
         | RelayObservation::ManagedSubagentConfigured { .. }
         | RelayObservation::WorkLivenessChanged { .. }
         | RelayObservation::HandbackCheckStarted { .. }
@@ -61,6 +65,91 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => false,
+    }
+}
+
+fn clear_notifications(snapshot: &mut RelaySnapshot, ordinal: u64) {
+    snapshot.person_input_through = ordinal;
+    snapshot.request = None;
+    if !snapshot.notification_stack.entries.is_empty() {
+        let stack = Arc::make_mut(&mut snapshot.notification_stack);
+        stack.entries.clear();
+        stack.revision = ordinal;
+    }
+}
+
+fn record_notification(
+    snapshot: &mut RelaySnapshot,
+    completed_ordinal: u64,
+    kind: NotificationKind,
+    message: EntryMessage,
+    ordinal: u64,
+) {
+    let entry = NotificationStackEntry {
+        completed_ordinal,
+        kind,
+        message,
+    };
+    let search = snapshot
+        .notification_stack
+        .entries
+        .binary_search_by_key(&completed_ordinal, |entry| entry.completed_ordinal);
+    if let Ok(index) = search {
+        let current = &snapshot.notification_stack.entries[index];
+        if *current == entry || (current.kind == kind && entry.message == EntryMessage::Locating) {
+            return;
+        }
+    }
+    let stack = Arc::make_mut(&mut snapshot.notification_stack);
+    match search {
+        Ok(index) => stack.entries[index] = entry,
+        Err(index) => stack.entries.insert(index, entry),
+    }
+    stack.revision = ordinal;
+}
+
+fn settle_question_target(
+    snapshot: &mut RelaySnapshot,
+    completed_ordinal: u64,
+    target: Option<&str>,
+    ordinal: u64,
+) {
+    if completed_ordinal <= snapshot.person_input_through {
+        return;
+    }
+    let entry = snapshot
+        .notification_stack
+        .entries
+        .binary_search_by_key(&completed_ordinal, |entry| entry.completed_ordinal)
+        .ok()
+        .map(|index| &snapshot.notification_stack.entries[index]);
+    if entry.is_some_and(|entry| {
+        entry.kind != NotificationKind::NeedsInput || entry.message != EntryMessage::Locating
+    }) {
+        return;
+    }
+    if entry.is_some() {
+        record_notification(
+            snapshot,
+            completed_ordinal,
+            NotificationKind::NeedsInput,
+            target.map_or(EntryMessage::None, |id| EntryMessage::Found(id.to_owned())),
+            ordinal,
+        );
+    }
+    if let Some(request) = snapshot
+        .request
+        .as_mut()
+        .filter(|request| request.question.completed_ordinal == completed_ordinal)
+    {
+        request.question_message = target.map(str::to_owned);
+    }
+    if let Some(assessment) = snapshot
+        .assessment
+        .as_mut()
+        .filter(|assessment| assessment.completed_ordinal == completed_ordinal)
+    {
+        Arc::make_mut(assessment).question_message = target.map(str::to_owned);
     }
 }
 
@@ -240,19 +329,23 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             question,
             question_message,
         } => {
-            if let Some(request) = snapshot
-                .request
-                .as_mut()
-                .filter(|request| request.question == *question)
-            {
-                request.question_message = Some(question_message.clone());
-            }
-            if let Some(assessment) = snapshot.assessment.as_mut().filter(|assessment| {
-                assessment.turn_id == question.turn_id
-                    && assessment.completed_ordinal == question.completed_ordinal
-            }) {
-                Arc::make_mut(assessment).question_message = Some(question_message.clone());
-            }
+            settle_question_target(
+                snapshot,
+                question.completed_ordinal,
+                Some(question_message),
+                event.ordinal,
+            );
+        }
+        RelayObservation::QuestionLocatorFinished {
+            completed_ordinal,
+            question_message,
+        } => {
+            settle_question_target(
+                snapshot,
+                *completed_ordinal,
+                question_message.as_deref(),
+                event.ordinal,
+            );
         }
         RelayObservation::HandbackCheckStarted { assignment_id } => {
             snapshot
@@ -291,16 +384,50 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Only consecutive provider refusals share a retry backoff.
                 snapshot.capacity_retry = None;
             }
-            if !snapshot.managed_subagent
-                && let Some(question) = assessment.inferred_question()
-            {
-                snapshot.request = Some(crate::assessment::OpenRequest {
-                    question,
-                    question_message: assessment
+            if assessment.completed_ordinal > snapshot.person_input_through {
+                if !snapshot.managed_subagent
+                    && let Some(question) = assessment.inferred_question()
+                {
+                    let completed = question.completed_ordinal;
+                    if snapshot
+                        .open_request()
+                        .is_none_or(|request| request.question.completed_ordinal < completed)
+                    {
+                        snapshot.request = Some(crate::assessment::OpenRequest {
+                            question,
+                            question_message: assessment
+                                .question_message
+                                .clone()
+                                .or_else(|| snapshot.completed_reply_message.clone()),
+                        });
+                    }
+                    let message = assessment
                         .question_message
                         .clone()
-                        .or_else(|| snapshot.completed_reply_message.clone()),
-                });
+                        .map_or(EntryMessage::Locating, EntryMessage::Found);
+                    record_notification(
+                        snapshot,
+                        completed,
+                        NotificationKind::NeedsInput,
+                        message,
+                        event.ordinal,
+                    );
+                } else if assessment.current()
+                    && assessment.attention == Some(AssessmentAttention::Important)
+                    && assessment.completed_ordinal > snapshot.notifications_read_through
+                {
+                    let message = snapshot
+                        .completed_reply_message
+                        .clone()
+                        .map_or(EntryMessage::None, EntryMessage::Found);
+                    record_notification(
+                        snapshot,
+                        assessment.completed_ordinal,
+                        NotificationKind::Important,
+                        message,
+                        event.ordinal,
+                    );
+                }
             }
             snapshot.retry_assessment = None;
             snapshot.assessment = Some(std::sync::Arc::new((**assessment).clone()));
@@ -376,6 +503,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command,
             created_at_ms,
         } => {
+            snapshot
+                .validate_notification_command(command)
+                .map_err(anyhow::Error::msg)?;
             if command.prompt_blocks().is_some() {
                 snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
             }
@@ -459,7 +589,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                             .join("\n"),
                     ) =>
                 {
-                    snapshot.person_input_through = event.ordinal;
+                    clear_notifications(snapshot, event.ordinal);
                     let context = crate::acp::context_command(prompt).is_some();
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
@@ -508,9 +638,33 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     if snapshot.open_request().map(|request| &request.question) != Some(question) {
                         bail!("dismissed question no longer matches the open request");
                     }
-                    snapshot.person_input_through = event.ordinal;
+                    clear_notifications(snapshot, event.ordinal);
                     if let Some(context) = &mut snapshot.assessment_context {
                         Arc::make_mut(context).set_aside_replies(false);
+                    }
+                }
+                RelayCommand::ClearNotifications { .. } => {
+                    if snapshot.open_request().is_some()
+                        && let Some(context) = &mut snapshot.assessment_context
+                    {
+                        Arc::make_mut(context).set_aside_replies(false);
+                    }
+                    clear_notifications(snapshot, event.ordinal);
+                }
+                RelayCommand::NotificationsRead { through } => {
+                    if *through > snapshot.notifications_read_through {
+                        snapshot.notifications_read_through = *through;
+                        if snapshot.notification_stack.entries.iter().any(|entry| {
+                            entry.kind == NotificationKind::Important
+                                && entry.completed_ordinal <= *through
+                        }) {
+                            let stack = Arc::make_mut(&mut snapshot.notification_stack);
+                            stack.entries.retain(|entry| {
+                                entry.kind != NotificationKind::Important
+                                    || entry.completed_ordinal > *through
+                            });
+                            stack.revision = event.ordinal;
+                        }
                     }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
@@ -922,6 +1076,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (
                     RelayCommand::SeedAssessmentContext { .. }
                     | RelayCommand::DismissQuestion { .. }
+                    | RelayCommand::ClearNotifications { .. }
+                    | RelayCommand::NotificationsRead { .. }
                     | RelayCommand::InstallPromptContext { .. },
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
@@ -2032,7 +2188,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             snapshot.assessment_questions.remove(elicitation_id);
             if reply.is_some() {
-                snapshot.person_input_through = event.ordinal;
+                clear_notifications(snapshot, event.ordinal);
                 if let Some(context) = &mut snapshot.assessment_context {
                     Arc::make_mut(context).set_aside_replies(true);
                 }
@@ -2093,6 +2249,17 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                     },
                     question_message: snapshot.completed_reply_message.clone(),
                 });
+                let message = snapshot
+                    .completed_reply_message
+                    .clone()
+                    .map_or(EntryMessage::None, EntryMessage::Found);
+                record_notification(
+                    snapshot,
+                    event.ordinal,
+                    NotificationKind::NeedsInput,
+                    message,
+                    event.ordinal,
+                );
             }
             snapshot.assessment = Some(std::sync::Arc::new(a));
             if let Some(context) = &mut snapshot.assessment_context {
@@ -2115,7 +2282,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             snapshot.assessment = None;
             // The conversation that held any open request is gone, so fence it
             // like person input; a fresh conversation inherits no question.
-            snapshot.person_input_through = event.ordinal;
+            clear_notifications(snapshot, event.ordinal);
             snapshot.completed_reply_message = None;
         }
         RelayObservation::CommandQueued {

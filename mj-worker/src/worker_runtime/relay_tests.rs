@@ -6279,6 +6279,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
             command_ledger: None,
             assessment_state: None,
+            notification_stack: None,
             event_frontier: 0,
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             queued_prompts: Vec::new(),
@@ -6313,6 +6314,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
             command_ledger: None,
             assessment_state: None,
+            notification_stack: None,
             event_frontier: 0,
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             queued_prompts: Vec::new(),
@@ -6352,6 +6354,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
             serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
                 command_ledger: None,
                 assessment_state: None,
+                notification_stack: None,
                 event_frontier: 7,
                 event_frontier_digest: "b".repeat(64),
                 queued_prompts: Vec::new(),

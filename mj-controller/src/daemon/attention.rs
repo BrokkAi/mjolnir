@@ -1,6 +1,9 @@
 //! The sole person-facing classification, applied at the common runtime publication.
-use mj_client::runtime_feed::RuntimeProjection;
-use mj_core::attention::{AssessmentAttention, SessionAttention};
+use mj_client::runtime_feed::{CardForm, NotificationCard, RuntimeProjection};
+use mj_core::attention::{
+    AssessmentAttention, EntryMessage, NotificationDismissal, NotificationKind,
+    NotificationStackEntry, SessionAttention,
+};
 use mj_core::review::{driver::TurnReviewPhase, verdict::ReviewVerdict};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,6 +66,13 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
         next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
         next.metadata.session_attention = previous.metadata.session_attention.clone();
         next.metadata.form_holders = previous.metadata.form_holders.clone();
+        next.metadata.notification_cards = Some(
+            previous
+                .metadata
+                .notification_cards
+                .clone()
+                .unwrap_or_default(),
+        );
         return;
     }
     for id in ids.clone() {
@@ -85,12 +95,28 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
         states,
         targets,
         holders,
+        cards,
+        held_questions,
     } = project_states(next, ids.clone());
     next.metadata.form_holders = previous.metadata.form_holders.clone();
     next.metadata.session_attention = previous.metadata.session_attention.clone();
     next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
     next.metadata.unread_frontiers = previous.metadata.unread_frontiers.clone();
+    let mut published_cards = previous
+        .metadata
+        .notification_cards
+        .clone()
+        .unwrap_or_default();
     for id in ids {
+        match cards.get(&id) {
+            Some(card) if published_cards.get(&id) != Some(card) => {
+                published_cards.insert(id.clone(), card.clone());
+            }
+            Some(_) => {}
+            None => {
+                published_cards.remove(&id);
+            }
+        }
         if let Some(holder) = holders.get(&id) {
             if next.metadata.form_holders.get(&id) != Some(holder) {
                 next.metadata
@@ -114,11 +140,11 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             .and_then(|live| live.open_request.as_ref())
         {
             let work = request_hold(next, &id);
-            let held = states.get(&id) == Some(&SessionAttention::Working)
-                && semantic_question(next, &id).is_some()
-                && !work.is_empty();
-            let was_held = previous.metadata.session_attention.get(&id)
-                == Some(&SessionAttention::Working)
+            let held = held_questions.contains(&id);
+            let was_held = matches!(
+                previous.metadata.session_attention.get(&id),
+                Some(SessionAttention::Working | SessionAttention::Important)
+            ) && semantic_question(previous, &id).is_some()
                 && previous
                     .sessions
                     .get(&id)
@@ -130,7 +156,7 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             if held && !was_held {
                 tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, ?work, "holding open request");
             } else if states.get(&id) == Some(&SessionAttention::NeedsInput)
-                && previous.metadata.session_attention.get(&id) == Some(&SessionAttention::Working)
+                && was_held
                 && previous
                     .sessions
                     .get(&id)
@@ -158,6 +184,87 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             }
         } else {
             next.metadata.session_attention.remove(&id);
+        }
+    }
+    next.metadata.notification_cards = Some(published_cards);
+}
+
+/// Read receipts are durable before the worker reclaims any entries. The
+/// publication filters them immediately; losing a prune only delays cleanup.
+pub(super) async fn prune_read_notifications(
+    state: std::sync::Arc<super::RuntimeState>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    use mj_core::snapshot_map::SnapshotMap;
+    let mut revisions = state.revisions.subscribe();
+    let mut previous_records = SnapshotMap::default();
+    let mut previous_views = SnapshotMap::default();
+    let mut attempted = BTreeMap::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        revisions.borrow_and_update();
+        let (records, views) = {
+            let owner = state.owner();
+            (
+                owner.controller().state.sessions.clone(),
+                owner.sessions.clone(),
+            )
+        };
+        let changed: BTreeSet<_> = previous_records
+            .changes(&records)
+            .map(|(id, _)| id)
+            .chain(previous_views.changes(&views).map(|(id, _)| id))
+            .collect();
+        for id in changed {
+            let candidate = records
+                .get(id)
+                .zip(views.get(id))
+                .and_then(|(record, view)| {
+                    let live = view.operational.as_deref()?;
+                    let through = record.viewed_through_event_ordinal;
+                    let has_read_entry = live.notification_stack.entries.iter().any(|entry| {
+                        entry.kind == NotificationKind::Important
+                            && entry.completed_ordinal <= through
+                    });
+                    (view.connected && record.state.is_active() && has_read_entry)
+                        .then(|| crate::session_manager::notifications_read(live, through))
+                        .flatten()
+                });
+            let Some((command_id, command, through)) = candidate else {
+                attempted.remove(id);
+                continue;
+            };
+            if attempted.get(id) == Some(&through) {
+                continue;
+            }
+            attempted.insert(id.clone(), through);
+            let id = id.clone();
+            let manager = state.session_manager.clone();
+            tasks.spawn(async move {
+                let result = async {
+                    manager.session(&id).await?.submit(command_id, command).await
+                }.await;
+                if let Err(error) = result {
+                    tracing::warn!(session_id = %id, %error, "could not prune read notification entries");
+                }
+            });
+        }
+        previous_records = records;
+        previous_views = views;
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    tasks.shutdown().await;
+                    return Ok(());
+                }
+                changed = revisions.changed() => {
+                    changed?;
+                    break;
+                }
+                Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                    joined?;
+                }
+            }
         }
     }
 }
@@ -364,6 +471,8 @@ struct AttentionProjection {
     states: BTreeMap<String, SessionAttention>,
     targets: BTreeMap<String, mj_core::attention::NotificationDismissal>,
     holders: BTreeMap<String, String>,
+    cards: BTreeMap<String, NotificationCard>,
+    held_questions: BTreeSet<String>,
 }
 
 fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> AttentionProjection {
@@ -379,9 +488,10 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
         .map(|operation| operation.session_id.as_str())
         .collect();
     let mut questions = BTreeSet::new();
+    let mut native_forms = BTreeMap::new();
     // Native children never receive semantic assessments. Only an actual
     // harness form reaches their owner and its managed ancestors.
-    for native in runtime.native_agents.values().filter(|native| {
+    for (source, native) in runtime.native_agents.iter().filter(|(_, native)| {
         native.pending_input
             && native.agent.state == mj_core::native_agent::NativeAgentState::Running
     }) {
@@ -394,6 +504,19 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 .is_some_and(|record| record.state.is_active())
         {
             questions.insert(current.to_owned());
+            // A session's own request takes precedence over any descendant.
+            native_forms
+                .entry(current)
+                .and_modify(
+                    |selected: &mut (&String, &mj_core::native_agent::NativeAgentSummary)| {
+                        if current == native.agent.owner_session_id
+                            && selected.1.agent.owner_session_id != current
+                        {
+                            *selected = (source, native);
+                        }
+                    },
+                )
+                .or_insert((source, native));
             let Some(parent) = runtime.subagents.get(current) else {
                 break;
             };
@@ -456,6 +579,8 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 .or_insert_with(|| id.clone());
         }
     }
+    let mut cards = BTreeMap::new();
+    let mut held_questions = BTreeSet::new();
     let mut attention: BTreeMap<_, _> = ids
         .iter()
         .filter_map(|id| runtime.records.get(id).map(|record| (id, record)))
@@ -471,6 +596,7 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 .is_some_and(|failure| record.dismissed_failure.as_ref() == Some(failure));
             // Archiving removes the session from the dashboard; nothing about
             // it needs a person any more.
+            let mut raised_question = None;
             let state = if record.archived {
                 Inactive
             } else if current_condition_failure(runtime, id) || (failure.is_some() && !dismissed) {
@@ -513,25 +639,28 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                     _ => Working,
                 }
             } else if let Some(live) = live {
-                if semantic_question(runtime, id).is_some() {
-                    let held = !request_hold(runtime, id).is_empty();
-                    return (id.clone(), if held { Working } else { NeedsInput });
-                }
-                let activity = live.activity_state();
-                if activity.is_idle() {
+                if let Some(question) = semantic_question(runtime, id) {
+                    if request_hold(runtime, id).is_empty() {
+                        raised_question = Some(question);
+                        NeedsInput
+                    } else {
+                        held_questions.insert(id.clone());
+                        Working
+                    }
+                } else if live.activity_state().is_idle() {
                     let tail = runtime.transcripts.get(id);
-                    match live.assessment.as_deref().filter(|assessment| {
-                        tail.and_then(|tail| tail.header.last_turn_outcome.as_ref())
-                            .is_some_and(|outcome| assessment.applies_to(outcome))
-                    }) {
-                        Some(assessment)
-                            if assessment.attention == Some(AssessmentAttention::Important)
+                    if !live.supports_notification_stack()
+                        && live.assessment.as_deref().is_some_and(|assessment| {
+                            tail.and_then(|tail| tail.header.last_turn_outcome.as_ref())
+                                .is_some_and(|outcome| assessment.applies_to(outcome))
+                                && assessment.attention == Some(AssessmentAttention::Important)
                                 && record.viewed_through_event_ordinal
-                                    < assessment.completed_ordinal =>
-                        {
-                            Important
-                        }
-                        _ => Idle,
+                                    < assessment.completed_ordinal
+                        })
+                    {
+                        Important
+                    } else {
+                        Idle
                     }
                 } else {
                     Working
@@ -539,6 +668,34 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
             } else {
                 Unknown
             };
+            let holder = holders.get(id).filter(|_| state == NeedsInput);
+            let card = if matches!(state, NeedsInput | Important | Idle | Working)
+                && !transitioning
+                && record.state != mj_core::state::SessionState::Checkpointing
+            {
+                notification_card(
+                    runtime,
+                    id,
+                    state,
+                    raised_question.as_ref(),
+                    holder,
+                    native_forms.get(id.as_str()).copied(),
+                    record,
+                )
+            } else {
+                None
+            };
+            let state = match card.as_ref().map(|card| card.badge) {
+                Some(NotificationKind::NeedsInput) => NeedsInput,
+                Some(NotificationKind::Important) => Important,
+                None => state,
+            };
+            if let Some(card) = card
+                && !record.notifications_ignored
+                && !runtime.subagents.contains_key(id)
+            {
+                cards.insert(id.clone(), card);
+            }
             let state = if state == Idle && unread_frontier(runtime, id).is_some() {
                 Unread
             } else {
@@ -563,15 +720,214 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
     }
     let targets = attention
         .iter()
-        .filter(|(id, _)| !questions.contains(id.as_str()))
-        .filter_map(|(id, state)| dismissal(runtime, id, *state).map(|target| (id.clone(), target)))
+        .filter_map(|(id, state)| {
+            let target = if matches!(state, NeedsInput | Important) {
+                cards
+                    .get(id)
+                    .and_then(|card| card.dismissal.clone())
+                    .or_else(|| {
+                        let supports_stack = runtime
+                            .sessions
+                            .get(id)
+                            .and_then(|view| view.operational.as_deref())
+                            .is_some_and(|live| live.supports_notification_stack());
+                        (!supports_stack && !questions.contains(id))
+                            .then(|| dismissal(runtime, id, *state))
+                            .flatten()
+                    })
+            } else if !questions.contains(id) {
+                dismissal(runtime, id, *state)
+            } else {
+                None
+            };
+            target.map(|target| (id.clone(), target))
+        })
         .collect();
     holders.retain(|id, _| ids.contains(id) && attention.get(id) == Some(&NeedsInput));
     AttentionProjection {
         states: attention,
         targets,
         holders,
+        cards,
+        held_questions,
     }
+}
+
+/// Older workers did not publish their completed reply id. The current
+/// turn's last text item can name its native id when it is in the projection.
+fn legacy_completed_reply(runtime: &RuntimeProjection, id: &str, completed: u64) -> EntryMessage {
+    let Some(tail) = runtime.transcripts.get(id) else {
+        return EntryMessage::None;
+    };
+    let Some(turn) = tail
+        .header
+        .last_turn_outcome
+        .as_ref()
+        .filter(|turn| turn.completed_ordinal == completed)
+    else {
+        return EntryMessage::None;
+    };
+    let Some(start) = turn.turn_start_position.or(turn.accepted_ordinal) else {
+        return EntryMessage::None;
+    };
+    let last = tail
+        .items
+        .values()
+        .filter_map(|item| {
+            let latest = item
+                .latest_content_event_ordinal
+                .filter(|ordinal| *ordinal > start && *ordinal <= completed)?;
+            let mj_core::state::TranscriptBody::Agent { chunks, .. } = &item.body else {
+                return None;
+            };
+            let text_chunk = chunks
+                .iter()
+                .rev()
+                .find(|chunk| chunk["content"]["type"].as_str() == Some("text"))?;
+            Some((latest, text_chunk["messageId"].as_str()))
+        })
+        .max_by_key(|(latest, _)| *latest);
+    last.and_then(|(_, message_id)| message_id)
+        .and_then(mj_core::activity::question_locator::transcript_stable_id)
+        .map_or(EntryMessage::None, EntryMessage::Found)
+}
+
+fn notification_card(
+    runtime: &RuntimeProjection,
+    id: &str,
+    attention: SessionAttention,
+    raised_question: Option<&mj_core::assessment::InferredQuestion>,
+    holder: Option<&String>,
+    native: Option<(&String, &mj_core::native_agent::NativeAgentSummary)>,
+    record: &mj_core::state::SessionRecord,
+) -> Option<NotificationCard> {
+    let live = runtime
+        .sessions
+        .get(id)
+        .and_then(|view| view.operational.as_deref())
+        // A parked parent can still own a child's form.
+        .filter(|_| record.state != mj_core::state::SessionState::Parked);
+    let (entries, dismissal) =
+        if let Some(live) = live.filter(|live| live.supports_notification_stack()) {
+            let stack = &live.notification_stack;
+            let entries: Vec<_> = stack
+                .entries
+                .iter()
+                .filter(|entry| match entry.kind {
+                    NotificationKind::Important => {
+                        entry.completed_ordinal > record.viewed_through_event_ordinal
+                    }
+                    NotificationKind::NeedsInput => raised_question.is_some(),
+                })
+                .cloned()
+                .collect();
+            let dismissal = if entries
+                .iter()
+                .any(|entry| entry.kind == NotificationKind::NeedsInput)
+            {
+                Some(NotificationDismissal::Stack {
+                    revision: stack.revision,
+                })
+            } else {
+                entries
+                    .last()
+                    .map(|entry| NotificationDismissal::ReadThrough(entry.completed_ordinal))
+            };
+            (entries, dismissal)
+        } else {
+            let entry = if let Some(question) = raised_question {
+                let message = if let Some(target) = live.and_then(|live| live.question_message()) {
+                    EntryMessage::Found(target.to_owned())
+                } else if live.is_some_and(|live| live.supports_open_request()) {
+                    EntryMessage::None
+                } else {
+                    legacy_completed_reply(runtime, id, question.completed_ordinal)
+                };
+                Some(NotificationStackEntry {
+                    completed_ordinal: question.completed_ordinal,
+                    kind: NotificationKind::NeedsInput,
+                    message,
+                })
+            } else if attention == SessionAttention::Important {
+                live.and_then(|live| live.assessment.as_ref())
+                    .map(|assessment| NotificationStackEntry {
+                        completed_ordinal: assessment.completed_ordinal,
+                        kind: NotificationKind::Important,
+                        message: legacy_completed_reply(runtime, id, assessment.completed_ordinal),
+                    })
+            } else {
+                None
+            };
+            let dismissal = entry
+                .as_ref()
+                .and_then(|_| dismissal(runtime, id, attention));
+            (entry.into_iter().collect(), dismissal)
+        };
+    let badge = if attention == SessionAttention::NeedsInput {
+        NotificationKind::NeedsInput
+    } else if entries.is_empty() {
+        return None;
+    } else {
+        NotificationKind::Important
+    };
+    let direct_form = holder.and_then(|holder| {
+        runtime
+            .transcripts
+            .get(holder)
+            .and_then(|tail| {
+                tail.header
+                    .pending_elicitations
+                    .iter()
+                    .rev()
+                    .find(|request| {
+                        !runtime.subagents.contains_key(holder) || !request.goes_to_parent()
+                    })
+                    .map(|request| CardForm {
+                        request_id: request.id.clone(),
+                        message: request.message.clone(),
+                    })
+            })
+            .or_else(|| {
+                runtime
+                    .metadata
+                    .reviews
+                    .iter()
+                    .flat_map(|review| review.questions.iter())
+                    .rev()
+                    .find(|question| question.role == *holder && !question.request.goes_to_parent())
+                    .map(|question| {
+                        let request = question.session_request();
+                        CardForm {
+                            request_id: request.id,
+                            message: request.message,
+                        }
+                    })
+            })
+    });
+    let native_is_own = native.is_some_and(|(_, native)| native.agent.owner_session_id == id);
+    let (holder, form) = if let Some(form) = direct_form
+        && (holder.is_some_and(|holder| holder == id) || !native_is_own)
+    {
+        (holder.cloned(), Some(form))
+    } else if let Some((source, native)) = native.filter(|_| badge == NotificationKind::NeedsInput)
+    {
+        (
+            Some(native.agent.owner_session_id.clone()),
+            Some(CardForm {
+                request_id: format!("native.{source}.{}", native.generation_ordinal),
+                message: native.pending_input_message.clone().unwrap_or_default(),
+            }),
+        )
+    } else {
+        (holder.cloned(), None)
+    };
+    Some(NotificationCard {
+        badge,
+        entries,
+        dismissal,
+        holder,
+        form,
+    })
 }
 
 #[cfg(test)]
@@ -579,6 +935,7 @@ mod tests {
     use super::*;
     use mj_core::state::{MaterializedSession, ProjectionWindow, SessionState};
 
+    // Hard-won: 8dd7f6384: clearing a visible Important entry dismissed a held question.
     #[test]
     fn open_request_releases_when_only_the_managed_child_changes() {
         use mj_core::assessment::{InferredQuestion, OpenRequest};
@@ -622,6 +979,22 @@ mod tests {
             },
             question_message: None,
         });
+        parent.notification_stack = mj_core::attention::NotificationStack {
+            revision: 11,
+            entries: vec![
+                NotificationStackEntry {
+                    completed_ordinal: 7,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
+                NotificationStackEntry {
+                    completed_ordinal: 10,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::None,
+                },
+            ],
+        }
+        .into();
         next.sessions.get_mut("parent").unwrap().operational = Some(parent.into());
         let mut materialized = MaterializedSession::empty("parent");
         materialized
@@ -650,9 +1023,30 @@ mod tests {
         child.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
         next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
         update(&RuntimeProjection::default(), &mut next);
+        let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
+        assert_eq!(card.badge, NotificationKind::Important);
+        assert_eq!(card.entries.len(), 1);
+        let Some(NotificationDismissal::ReadThrough(through)) = card.dismissal else {
+            panic!("Clear must leave the held question intact");
+        };
+        assert_eq!(through, 7);
+        let before_clear = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = through;
+        update(&before_clear, &mut next);
         assert_eq!(
             next.metadata.session_attention["parent"],
             SessionAttention::Working
+        );
+        assert!(
+            !next
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .contains_key("parent")
         );
         // A pre-64 worker cannot retain the request, so it is never held.
         let mut legacy_runtime = next.clone();
@@ -713,8 +1107,14 @@ mod tests {
             next.metadata.session_attention["parent"],
             SessionAttention::NeedsInput
         );
-        assert!(
-            matches!(next.metadata.notification_dismissals.get("parent"), Some(mj_core::attention::NotificationDismissal::Question(question)) if question.completed_ordinal == 10)
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::Stack { revision: 11 },
+        );
+        assert_eq!(
+            next.metadata.notification_cards.as_ref().unwrap()["parent"].entries[0]
+                .completed_ordinal,
+            10,
         );
         let original = next.sessions["parent"].operational.clone().unwrap();
         let mut with_background = (*original).clone();
@@ -779,16 +1179,132 @@ mod tests {
                 projection_ordinal: 0,
                 projection_digest: String::new(),
                 pending_input: true,
+                pending_input_message: Some("Approve the native action?".into()),
             },
         );
         let attention = project(&runtime);
         assert_eq!(attention[&id], SessionAttention::NeedsInput);
         assert_eq!(attention["parent"], SessionAttention::NeedsInput);
+        let projection =
+            project_states(&runtime, BTreeSet::from(["parent".to_owned(), id.clone()]));
+        let card = &projection.cards["parent"];
+        assert_eq!(card.holder.as_deref(), Some("parent"));
+        let form = card.form.as_ref().unwrap();
+        assert_eq!(form.request_id, format!("native.{id}.1"));
+        assert_eq!(form.message, "Approve the native action?");
+        assert!(!projection.cards.contains_key(&id));
         let native = runtime.native_agents.get_mut(&id).unwrap();
         native.agent.state = NativeAgentState::Completed;
         native.pending_input = false;
+        native.pending_input_message = None;
         assert_eq!(project(&runtime)[&id], SessionAttention::Idle);
         assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+    }
+
+    #[test]
+    fn notification_stack_is_latched_during_work_but_failure_keeps_precedence() {
+        use mj_core::assessment::{InferredQuestion, OpenRequest};
+        use mj_core::attention::NotificationStack;
+        use mj_core::relay::{HarnessTurn, RELAY_NOTIFICATION_STACK_PROTOCOL, RelaySnapshot};
+
+        let mut next = runtime();
+        let mut worker = RelaySnapshot::new("parent".into()).operational_state();
+        worker.relay_protocol_version = Some(RELAY_NOTIFICATION_STACK_PROTOCOL);
+        worker.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
+        worker.open_request = Some(OpenRequest {
+            question: InferredQuestion {
+                completed_ordinal: 11,
+                turn_id: "question".into(),
+            },
+            question_message: Some("agent:question".into()),
+        });
+        worker.notification_stack = NotificationStack {
+            revision: 14,
+            entries: vec![
+                NotificationStackEntry {
+                    completed_ordinal: 10,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::Found("agent:earlier".into()),
+                },
+                NotificationStackEntry {
+                    completed_ordinal: 11,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::Found("agent:question".into()),
+                },
+            ],
+        }
+        .into();
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
+        let materialized = MaterializedSession::empty("parent");
+        next.transcripts.insert(
+            "parent".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &materialized,
+                &ProjectionWindow::of(&materialized),
+                0,
+            ),
+        );
+        let mut previous = RuntimeProjection::default();
+        let publish = |previous: &mut RuntimeProjection, next: &mut RuntimeProjection| {
+            update(previous, next);
+            *previous = next.clone();
+            next.metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .get("parent")
+                .cloned()
+        };
+        let card = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(card.badge, NotificationKind::Important);
+        assert_eq!(card.entries, &worker.notification_stack.entries[..1]);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Important
+        );
+
+        next.records.get_mut("parent").unwrap().state = SessionState::Error;
+        assert!(publish(&mut previous, &mut next).is_none());
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Failed
+        );
+        assert!(matches!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::Failure(_)
+        ));
+
+        next.records.get_mut("parent").unwrap().state = SessionState::Running;
+        assert_eq!(publish(&mut previous, &mut next), Some(card));
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .notifications_ignored = true;
+        assert!(publish(&mut previous, &mut next).is_none());
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .notifications_ignored = false;
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 12;
+        assert!(publish(&mut previous, &mut next).is_none());
+
+        worker.harness_turn = None;
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
+        let card = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(card.badge, NotificationKind::NeedsInput);
+        assert_eq!(card.entries, &worker.notification_stack.entries[1..]);
+
+        worker.relay_protocol_version = Some(RELAY_NOTIFICATION_STACK_PROTOCOL - 1);
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.into());
+        let legacy = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(legacy.entries, card.entries);
+        assert!(matches!(
+            legacy.dismissal,
+            Some(NotificationDismissal::Question(_))
+        ));
     }
 
     #[test]
@@ -915,6 +1431,18 @@ mod tests {
                     .holders
                     .iter()
                     .collect::<BTreeMap<_, _>>()
+            );
+            assert_eq!(
+                next.metadata
+                    .notification_cards
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .collect::<BTreeMap<_, _>>(),
+                project_states(&next, next.records.keys().cloned().collect())
+                    .cards
+                    .iter()
+                    .collect::<BTreeMap<_, _>>(),
             );
             let expected = project(&next);
             assert_eq!(
@@ -1338,6 +1866,35 @@ mod tests {
                 .get("parent"),
             Some(&mj_core::attention::NotificationDismissal::ReadThrough(10))
         );
+        materialized
+            .last_turn_outcome
+            .as_mut()
+            .unwrap()
+            .turn_start_position = Some(5);
+        materialized.transcript.push(std::sync::Arc::new(TranscriptItem {
+            stable_id: "agent:retained-reply".into(),
+            position: 8,
+            latest_content_event_ordinal: Some(8),
+            created_at_ms: 8,
+            last_changed_at_ms: 8,
+            body: TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text","text":"Important result"},"messageId":"retained-reply"})],
+                streaming: false,
+            },
+        }));
+        publish(&mut runtime, &materialized, &relay);
+        runtime.transcripts.get_mut("parent").unwrap().publish(
+            &materialized,
+            &ProjectionWindow::of(&materialized),
+            10,
+        );
+        let projection = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(
+            projection.cards["parent"].entries[0].message,
+            EntryMessage::Found("agent:retained-reply".into()),
+        );
+        materialized.transcript.clear();
+        publish(&mut runtime, &materialized, &relay);
         runtime
             .records
             .get_mut("parent")
@@ -1488,6 +2045,7 @@ mod tests {
                 projection_ordinal: 0,
                 projection_digest: String::new(),
                 pending_input: true,
+                pending_input_message: None,
             },
         );
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);

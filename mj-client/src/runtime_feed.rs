@@ -321,9 +321,28 @@ pub struct RuntimeContainerCapacity {
     pub capacity: mj_core::state::HostContainerCapacity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationCard {
+    pub badge: mj_core::attention::NotificationKind,
+    /// Visible entries, oldest first.
+    pub entries: Vec<mj_core::attention::NotificationStackEntry>,
+    pub dismissal: Option<mj_core::attention::NotificationDismissal>,
+    pub holder: Option<String>,
+    pub form: Option<CardForm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardForm {
+    pub request_id: String,
+    pub message: String,
+}
+
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    /// Absent on daemons that do not publish cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_cards: Option<SnapshotMap<String, NotificationCard>>,
     #[serde(default)]
     pub unread_frontiers: SnapshotMap<String, u64>,
     #[serde(default)]
