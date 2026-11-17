@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Stop the detached worker daemon at `worker_root` without deleting its files.
 ///
@@ -24,8 +25,12 @@ pub(in crate::controller) fn kill_retired_worker(
 ) -> Result<()> {
     run_owned_worker_stop(owner, executor, locator, worker_root, |locator, root| {
         let script = targets::kill_worker_daemon_script(root);
-        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("kill retired Mjolnir worker daemon")
+        targets::locator_command(
+            SshTrafficClass::Control,
+            locator,
+            vec!["sh".into(), "-c".into(), script],
+        )
+        .purpose("kill retired Mjolnir worker daemon")
     })
 }
 
@@ -64,8 +69,12 @@ pub(super) fn stop_worker_command(
     worker_root: &str,
 ) -> CommandSpec {
     let script = targets::stop_worker_daemon_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("stop Mjolnir worker daemon")
+    targets::locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec!["sh".into(), "-c".into(), script],
+    )
+    .purpose("stop Mjolnir worker daemon")
 }
 
 pub(in crate::controller) fn worker_liveness_command(
@@ -73,8 +82,12 @@ pub(in crate::controller) fn worker_liveness_command(
     worker_root: &str,
 ) -> CommandSpec {
     let script = targets::worker_daemon_liveness_script(worker_root);
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("probe Mjolnir worker daemon liveness")
+    targets::locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec!["sh".into(), "-c".into(), script],
+    )
+    .purpose("probe Mjolnir worker daemon liveness")
 }
 
 /// Whether a session's worker root holds anything a worker could recover.
@@ -162,7 +175,11 @@ MJ_ENTRIES
          else {missing} exit 1; fi",
         root = targets::posix_quote(directory),
     );
-    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+    targets::locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec!["sh".into(), "-c".into(), script],
+    )
 }
 
 /// Ask the target whether `worker_root` holds anything to recover. Only the
@@ -208,6 +225,7 @@ pub(in crate::controller) fn worker_exit_record_command(
         mj_core::relay::WORKER_EXIT_FILE
     )]);
     targets::locator_command(
+        SshTrafficClass::Control,
         locator,
         vec![
             "sh".into(),
@@ -388,12 +406,15 @@ pub(super) fn start_worker_command(
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
         targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            crate::targets::ssh_command(ssh, ["sh", "-c", &detached_script])
-        }
+        | targets::TargetLocator::SshBare { ssh, .. } => crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            ["sh", "-c", &detached_script],
+        ),
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => crate::targets::ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "podman",
@@ -408,6 +429,7 @@ pub(super) fn start_worker_command(
         targets::TargetLocator::SshDocker {
             ssh, container_id, ..
         } => crate::targets::ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "docker",
@@ -422,6 +444,7 @@ pub(super) fn start_worker_command(
         targets::TargetLocator::SshAppleContainer {
             ssh, container_id, ..
         } => crate::targets::ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "container",
@@ -436,6 +459,7 @@ pub(super) fn start_worker_command(
         targets::TargetLocator::SshNitro {
             ssh, container_id, ..
         } => crate::targets::ssh_engine_command(
+            SshTrafficClass::Control,
             ssh,
             targets::MICROVM_ENGINE,
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
@@ -475,8 +499,12 @@ pub(super) fn worker_binary_probe_failure(
     worker_root: &str,
 ) -> Option<String> {
     let binary = format!("{worker_root}/hel");
-    let command = targets::locator_command(locator, vec![binary.clone(), "--version".into()])
-        .purpose("probe installed worker binary");
+    let command = targets::locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec![binary.clone(), "--version".into()],
+    )
+    .purpose("probe installed worker binary");
     match executor.execute(&command) {
         Ok(output) if output.status == 0 => None,
         Ok(output) => {
@@ -613,6 +641,7 @@ pub(in crate::controller) fn probe_worker(
     worker_root: &str,
 ) -> Result<WorkerProbe> {
     let command = targets::locator_command(
+        SshTrafficClass::Control,
         locator,
         vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
     )

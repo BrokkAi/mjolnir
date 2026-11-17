@@ -4,6 +4,7 @@ use crate::targets::CommandSpec;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::Config;
 use mj_core::state::{ManagedWorktree, SessionRecord};
+use mj_core::targets::SshTrafficClass;
 use std::path::PathBuf;
 
 use super::backend::recorded_backend_locator;
@@ -896,7 +897,7 @@ fn target_availability_with_start(
         ];
         let list = match &locator {
             mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
-                crate::targets::ssh_command_owned(ssh, arguments)
+                crate::targets::ssh_command_owned(SshTrafficClass::Control, ssh, arguments)
             }
             _ => {
                 let mut arguments = arguments.into_iter();
@@ -928,6 +929,7 @@ fn target_availability_with_start(
         }
     } else {
         let probe = crate::targets::command_on_locator(
+            SshTrafficClass::Control,
             &locator,
             session_id,
             vec!["true".into()],
@@ -974,7 +976,7 @@ fn start_retained_apple_for_resume(
     };
     let command = |args: Vec<String>, purpose| {
         match ssh {
-            Some(ssh) => targets::ssh_command_owned(ssh, args),
+            Some(ssh) => targets::ssh_command_owned(SshTrafficClass::Control, ssh, args),
             None => CommandSpec::new(&args[0], args[1..].to_vec()),
         }
         .purpose(purpose)

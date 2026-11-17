@@ -1,5 +1,6 @@
 //! Backend target, locator, and capacity conversion for provisioned sessions.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ impl Controller {
             return Ok((launch.cwd, "not a git checkout".to_owned()));
         }
         let output = executor.execute(&targets::command_on_locator(
+            SshTrafficClass::Control,
             &backend,
             session_id,
             vec![
@@ -111,7 +113,11 @@ impl Controller {
             let mut command = vec!["git".to_owned(), "-C".to_owned(), cwd_text.clone()];
             command.extend(args.iter().map(|arg| (*arg).to_owned()));
             let output = executor.execute(&targets::command_on_locator(
-                &backend, session_id, command, purpose,
+                SshTrafficClass::Control,
+                &backend,
+                session_id,
+                command,
+                purpose,
             )?)?;
             Ok((output.status == 0).then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
         };
@@ -1132,7 +1138,7 @@ fn wait_for_ssh_ready(
 pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Result<()> {
     wait_for_ssh_ready(
         executor,
-        &crate::targets::ssh_command(ssh, ["true"])
+        &crate::targets::ssh_command(SshTrafficClass::Control, ssh, ["true"])
             .purpose("wait for EC2 SSH availability")
             .stage(ProvisionStage::Booting),
         AWS_SSH_READY_TIMEOUT,
@@ -1152,6 +1158,7 @@ pub fn wait_for_ec2_reboot(
     wait_for_ssh_ready(
         executor,
         &crate::targets::ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "sh",

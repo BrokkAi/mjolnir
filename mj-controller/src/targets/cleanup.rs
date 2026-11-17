@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
     close_plan_scoped(locator, session_id, true, None)
@@ -74,7 +75,7 @@ fn close_plan_scoped(
             commands: local
                 .commands
                 .into_iter()
-                .map(|command| command_over_ssh(command, ssh))
+                .map(|command| command_over_ssh(SshTrafficClass::Control, command, ssh))
                 .collect(),
         });
     }
@@ -240,7 +241,7 @@ exit "$status""#;
                 posix_quote(&session_worker_root),
                 posix_quote(&session_profile_home),
             );
-            ssh_command(ssh, ["sh", "-c", script.as_str()]).purpose(
+            ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()]).purpose(
                 if stopped.is_some() { "remove exact stopped SSH session workspace and runtime state" } else { "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state" },
             )
         }
@@ -295,6 +296,7 @@ fn borrowed_worker_cleanup_plan_scoped(
         ));
     }
     let command = command_on_locator(
+        SshTrafficClass::Control,
         locator,
         child_session_id,
         vec!["sh".into(), "-c".into(), script],
@@ -355,6 +357,7 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
     );
     let command = match ssh {
         Some(ssh) => ssh_command(
+            SshTrafficClass::Control,
             ssh,
             [
                 "sh",
@@ -447,7 +450,7 @@ fi
     .purpose("confirm owned container writers stopped through the engine")
     .stage(ProvisionStage::StoppingTarget);
     let command = match ssh {
-        Some(ssh) => command_over_ssh(command, ssh),
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
         None => command,
     };
     Ok(Some(CommandPlan {
@@ -478,7 +481,7 @@ pub(super) fn podman_cleanup_plan(
         "{PODMAN_CONTAINER_IDENTITY_SCRIPT}rm_err=$(podman rm --force --ignore \"$container\" 2>&1 >/dev/null) || true\n[ -z \"$rm_err\" ] || printf '%s\\n' \"$rm_err\" >&2\n# `container exists` exits 1 only for a definite absence; 125 is an error.\nstatus=0\npodman container exists \"$container\" || status=$?\ncase $status in\n    1) ;;\n    0) echo 'Podman session container is still present' >&2; exit 1 ;;\n    *) echo 'could not determine whether the Podman session container was removed' >&2; exit 1 ;;\nesac\n"
     );
     let at_host = |args: Vec<String>| match ssh {
-        Some(ssh) => ssh_command_owned(ssh, args),
+        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, args),
         None => {
             let mut args = args;
             CommandSpec::new(args.remove(0), args)
@@ -651,7 +654,7 @@ pub fn cleanup_target_is_confirmed_absent(
     };
     let command = match locator {
         TargetLocator::SshDocker { ssh, .. } | TargetLocator::SshAppleContainer { ssh, .. } => {
-            command_over_ssh(command, ssh)
+            command_over_ssh(SshTrafficClass::Control, command, ssh)
         }
         _ => command,
     };
@@ -743,7 +746,7 @@ esac
         container_temporary_volume_name(container_id),
     ];
     match ssh {
-        Some(ssh) => ssh_command_owned(ssh, args),
+        Some(ssh) => ssh_command_owned(SshTrafficClass::Control, ssh, args),
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
     }
     .purpose("confirm exact Podman session resources are absent")

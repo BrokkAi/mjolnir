@@ -1,5 +1,6 @@
 use super::*;
 use crate::targets::CommandOutput;
+use mj_core::targets::SshTrafficClass;
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub(super) fn append_hel_target_environment(
@@ -511,7 +512,7 @@ pub(super) fn install_mbx_shims(
     let args = targets::step_script(steps);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-        Some(ssh) => crate::targets::ssh_command(ssh, args),
+        Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
     .purpose("install the shared-cache mbx shims")
     .stage(ProvisionStage::Syncing);
@@ -554,7 +555,7 @@ pub(super) fn remove_generated_mbx_shims(
     ];
     let container_command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-        Some(ssh) => crate::targets::ssh_command(ssh, args),
+        Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
     .purpose("remove marked mbx shims after cache verification failed")
     .stage(ProvisionStage::Syncing);
@@ -600,7 +601,7 @@ pub(super) fn verify_mbx_binary(
     ];
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-        Some(ssh) => crate::targets::ssh_command(ssh, args),
+        Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
     .purpose("verify the synchronized mbx inside the session container")
     .stage(ProvisionStage::Syncing);
@@ -699,7 +700,7 @@ pub(super) fn link_legacy_mbx_configuration(
     );
     let container_command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-        Some(ssh) => crate::targets::ssh_command(ssh, args),
+        Some(ssh) => crate::targets::ssh_command(SshTrafficClass::Control, ssh, args),
     }
     .purpose("inspect legacy mbx and relink its shared configuration")
     .stage(ProvisionStage::Syncing);
@@ -933,8 +934,12 @@ pub(super) fn install_worker_profile_files(
             let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
             execute_checked(
                 executor,
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", &upload])
-                    .purpose("create remote upload staging"),
+                crate::targets::ssh_command(
+                    SshTrafficClass::Control,
+                    ssh,
+                    ["mkdir", "-p", &upload],
+                )
+                .purpose("create remote upload staging"),
             )?;
             for (source, name) in [
                 (launch_config, "launch.json"),
@@ -1027,8 +1032,12 @@ pub(super) fn install_worker_profile_files(
             });
             execute_checked(
                 executor,
-                crate::targets::ssh_command_owned(ssh, targets::step_script(steps))
-                    .purpose("install remote container worker"),
+                crate::targets::ssh_command_owned(
+                    SshTrafficClass::Bulk,
+                    ssh,
+                    targets::step_script(steps),
+                )
+                .purpose("install remote container worker"),
             )?;
         }
     }
@@ -1082,6 +1091,7 @@ pub(super) fn clear_profile_configuration(
     execute_checked(
         executor,
         targets::command_on_locator(
+            SshTrafficClass::Control,
             locator,
             session_id,
             vec!["sh".into(), "-c".into(), script],
@@ -1106,8 +1116,12 @@ pub(super) fn install_worker_over_ssh(
 ) -> Result<()> {
     execute_checked(
         executor,
-        crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root, profile_home])
-            .purpose("create SSH worker directories"),
+        crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            ["mkdir", "-p", worker_root, profile_home],
+        )
+        .purpose("create SSH worker directories"),
     )?;
     for (source, remote) in [
         (launch_config, format!("{worker_root}/launch.json")),
@@ -1130,6 +1144,7 @@ pub(super) fn install_worker_over_ssh(
     execute_checked(
         executor,
         crate::targets::ssh_command(
+            SshTrafficClass::Bulk,
             ssh,
             ["cp", "-R", &format!("{incoming_profile}/."), profile_home],
         )
@@ -1137,13 +1152,21 @@ pub(super) fn install_worker_over_ssh(
     )?;
     execute_checked(
         executor,
-        crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &incoming_profile])
-            .purpose("remove SSH profile staging"),
+        crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            ["rm", "-rf", "--", &incoming_profile],
+        )
+        .purpose("remove SSH profile staging"),
     )?;
     execute_checked(
         executor,
-        crate::targets::ssh_command(ssh, ["chmod", "-R", "go-rwx", profile_home])
-            .purpose("restrict SSH harness profile permissions"),
+        crate::targets::ssh_command(
+            SshTrafficClass::Control,
+            ssh,
+            ["chmod", "-R", "go-rwx", profile_home],
+        )
+        .purpose("restrict SSH harness profile permissions"),
     )?;
     Ok(())
 }
@@ -1385,6 +1408,7 @@ fn upload_profile_archive(
     let gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
     let _guard = super::store::lock_gate(executor, &gate, destination, "send profile content")?;
     let query = targets::ssh_command(
+        SshTrafficClass::Control,
         ssh,
         [
             "sh",
@@ -1419,6 +1443,7 @@ fn upload_profile_archive(
             "send profile content"
         );
         let command = targets::ssh_command(
+            SshTrafficClass::Bulk,
             ssh,
             [
                 "sh",
@@ -1892,6 +1917,7 @@ mod profile_archive_tests {
         fs::remove_file(executor.store().join(&key)).unwrap();
         let destination = temp.path().join("missing");
         let command = targets::ssh_command(
+            SshTrafficClass::Control,
             &SshTarget {
                 destination: "unused".into(),
                 ssh_args: vec![],

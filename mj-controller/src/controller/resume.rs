@@ -1,5 +1,6 @@
 //! Resuming a stopped session onto a profile and target.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -826,6 +827,7 @@ impl Controller {
                         execute_checked(
                             syncing,
                             targets::command_on_locator(
+                                SshTrafficClass::Control,
                                 &backend,
                                 session_id,
                                 vec!["mkdir".into(), "-p".into(), worker_root.clone()],

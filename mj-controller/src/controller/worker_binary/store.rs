@@ -1,6 +1,7 @@
 //! Immutable target binaries. Session installation only creates new directory
 //! entries; it never writes executable bytes through an existing inode.
 use super::*;
+use mj_core::targets::SshTrafficClass;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// Beside the session roots, in their target filesystem (inside containers).
@@ -15,7 +16,7 @@ pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> 
 /// Key of one target store: this daemon's data directory, the target's command
 /// prefix and the store path.
 fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
-    let command = targets::locator_command(locator, vec!["true".into()]);
+    let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
         data_dir(),
@@ -177,12 +178,13 @@ pub(super) fn lock_gate<'a>(
 }
 
 fn script(
+    class: targets::SshTrafficClass,
     locator: &targets::TargetLocator,
     body: &str,
     args: &[&str],
     purpose: &str,
 ) -> CommandSpec {
-    targets::locator_command(locator, script_argv(body, args)).purpose(purpose)
+    targets::locator_command(class, locator, script_argv(body, args)).purpose(purpose)
 }
 
 fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
@@ -245,6 +247,7 @@ fn collect(
     execute_checked(
         executor,
         script(
+            targets::SshTrafficClass::Control,
             locator,
             COLLECT,
             &[root, keep.unwrap_or("")],
@@ -419,6 +422,7 @@ pub(super) fn install_worker_binary_at(
         }
         let command = |mode| {
             script(
+                targets::SshTrafficClass::Bulk,
                 locator,
                 r#"set -eu
 source=$1; temporary=$2; destination=$3
@@ -527,8 +531,12 @@ fn ensure_published(
     let transfer = (|| -> Result<()> {
         execute_checked(
             executor,
-            targets::locator_command(locator, vec!["mkdir".into(), "-p".into(), upload.clone()])
-                .purpose("create private worker store upload"),
+            targets::locator_command(
+                SshTrafficClass::Control,
+                locator,
+                vec!["mkdir".into(), "-p".into(), upload.clone()],
+            )
+            .purpose("create private worker store upload"),
         )?;
         transfer_binary(executor, locator, session_id, worker, &temporary)?;
         let steps = [
@@ -571,8 +579,9 @@ fi
             )
             .best_effort_cleanup(),
         ];
-        let command = targets::locator_command(locator, targets::step_script(steps))
-            .purpose("publish shared Mjolnir worker");
+        let command =
+            targets::locator_command(SshTrafficClass::Bulk, locator, targets::step_script(steps))
+                .purpose("publish shared Mjolnir worker");
         // A failed or disconnected batch may not have reached its EXIT trap.
         // Retry its idempotent discard through the executor's cleanup path.
         let output = executor.execute(&command)?;
@@ -586,6 +595,7 @@ fi
     if !batch_completed {
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
+                SshTrafficClass::Control,
                 locator,
                 vec!["rm".into(), "-rf".into(), "--".into(), upload],
             )
@@ -636,6 +646,7 @@ fn transfer_binary(
             execute_checked(
                 executor,
                 targets::locator_command(
+                    SshTrafficClass::Control,
                     &host,
                     vec!["mkdir".into(), "-p".into(), transport.clone()],
                 )
@@ -654,6 +665,7 @@ fn transfer_binary(
         })();
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
+                SshTrafficClass::Control,
                 &host,
                 vec!["rm".into(), "-rf".into(), "--".into(), transport],
             )

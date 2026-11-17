@@ -10,6 +10,7 @@
 //! only profile configuration and the relay continuation seed are replaced.
 
 use anyhow::{Context, Result, ensure};
+use mj_core::targets::SshTrafficClass;
 use tokio_util::sync::CancellationToken;
 
 use mj_core::state::{MaterializedSession, SessionState};
@@ -514,6 +515,7 @@ impl Controller {
             super::super::execute_checked(
                 executor,
                 crate::targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &backend,
                     session_id,
                     vec!["test".into(), "-d".into(), worker_root],
@@ -630,6 +632,7 @@ impl Controller {
                         std::time::Duration::from_secs(15),
                     ),
                     crate::targets::command_on_locator(
+                        SshTrafficClass::Control,
                         &backend,
                         session_id,
                         vec![

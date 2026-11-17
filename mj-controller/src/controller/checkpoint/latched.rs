@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 impl Controller {
     #[allow(clippy::too_many_arguments)]
@@ -946,7 +947,7 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
         }
         let mut args = vec!["rm".to_owned(), "-rf".to_owned(), "--".to_owned()];
         args.extend(self.paths.iter().cloned());
-        let command = targets::locator_command(self.backend, args)
+        let command = targets::locator_command(SshTrafficClass::Control, self.backend, args)
             .purpose("remove unused target checkpoint files");
         match self.executor.execute(&command) {
             Ok(output) if output.status == 0 => {}

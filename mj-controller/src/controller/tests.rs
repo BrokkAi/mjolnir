@@ -1,3 +1,4 @@
+use mj_core::targets::SshTrafficClass;
 use std::path::Path;
 
 use crate::targets::ProcessExecutor;
@@ -2506,6 +2507,7 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
         .expect("a shared-connection session");
     assert!(
         shared
+            .target
             .ssh_args
             .contains(&"ServerAliveInterval=15".to_owned())
     );
@@ -2611,6 +2613,7 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     assert_eq!(backend, original_backend);
     // The branch-export worker command uses the same resolved destination as checkpoint/bundle export.
     let command = targets::command_on_locator(
+        SshTrafficClass::Control,
         &backend,
         &id,
         vec!["hel".into(), "worker".into(), "push-branch".into()],

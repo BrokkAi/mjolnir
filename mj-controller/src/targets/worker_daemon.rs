@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Shell that runs `hel worker <subcommand> --root <root>` from the worker
 /// root's own installed binary, the session's worker build. The worker holds an
@@ -82,7 +83,7 @@ pub fn clear_relay_state_plan(
                 .purpose("stop a leaked local Mjolnir worker and clear its relay state"),
         ),
         TargetLocator::SshBare { ssh, .. } => Some(
-            ssh_command(ssh, ["sh", "-c", script.as_str()])
+            ssh_command(SshTrafficClass::Control, ssh, ["sh", "-c", script.as_str()])
                 .purpose("stop a leaked remote Mjolnir worker and clear its relay state"),
         ),
         TargetLocator::LocalPodman { .. }
@@ -170,11 +171,13 @@ fn worker_reset_plan(
             posix_quote(&session_worker_root),
         ));
     }
-    Ok(
-        locator_command(locator, vec!["sh".into(), "-c".into(), script])
-            .purpose("reset the worker root for an in-place harness replacement")
-            .stage(ProvisionStage::Syncing),
+    Ok(locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec!["sh".into(), "-c".into(), script],
     )
+    .purpose("reset the worker root for an in-place harness replacement")
+    .stage(ProvisionStage::Syncing))
 }
 
 #[cfg(test)]

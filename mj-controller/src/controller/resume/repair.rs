@@ -2,6 +2,7 @@
 use super::*;
 use crate::controller::worker_binary::{WorkerInstall, prepare_managed_harness_for_upgrade};
 use crate::controller::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
+use mj_core::targets::SshTrafficClass;
 use sha2::Digest;
 
 /// Installation is a completed action under the lifecycle owner, not another
@@ -240,6 +241,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &backend,
                 session_id,
                 vec!["mkdir".into(), "-p".into(), root.clone()],
@@ -314,6 +316,7 @@ impl Controller {
         // Build the argv before SSH/container wrapping. Old workers reject
         // this explicit mode rather than treating it as a whole restore.
         let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
             &backend,
             session_id,
             vec![
@@ -379,6 +382,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec![
@@ -465,6 +469,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec!["cat".into(), format!("{root}/{filename}")],
@@ -503,6 +508,7 @@ impl Controller {
                 execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec![
@@ -522,6 +528,7 @@ impl Controller {
                     execute_checked(
                         executor,
                         super::super::worktree::managed_git_command(
+                            SshTrafficClass::Control,
                             &worktree.target,
                             &worktree.source_repository,
                             ["worktree", "prune"],
@@ -533,6 +540,7 @@ impl Controller {
             execute_checked(
                 executor,
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     session_id,
                     vec!["rm".into(), "--".into(), format!("{root}/{filename}")],
@@ -636,6 +644,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         &backend,
                         session_id,
                         vec!["cat".into(), remote_spec.clone()],
@@ -801,6 +810,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &backend,
                 session_id,
                 vec!["mkdir".into(), "-p".into(), root.clone()],
@@ -891,6 +901,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Bulk,
                 &backend,
                 session_id,
                 vec![
@@ -1028,6 +1039,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Bulk,
                 &backend,
                 session_id,
                 vec![

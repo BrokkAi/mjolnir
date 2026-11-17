@@ -1,5 +1,6 @@
 //! Session provisioning, rollback, and worker-side Git bootstrap.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1451,6 +1452,7 @@ pub(super) fn install_attached_resources(
     }
     for resource in &session.additional_mounts {
         let install = targets::command_on_locator(
+            SshTrafficClass::Bulk,
             backend,
             session_id,
             vec![
@@ -2056,6 +2058,7 @@ fn inherited_git_setting_commands(
         )
     });
     Ok(vec![targets::command_on_locator(
+        SshTrafficClass::Control,
         locator,
         session_id,
         targets::step_script(steps),

@@ -1,5 +1,6 @@
 //! Orphan-worker discovery, adoption, and destruction.
 
+use mj_core::targets::SshTrafficClass;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -487,6 +488,7 @@ fn adopted_container_workspace(
     }
     let workspace = targets::new_container_workspace(session_id).ok()?;
     let command = targets::command_on_locator(
+        SshTrafficClass::Control,
         backend,
         session_id,
         vec![
@@ -1081,7 +1083,7 @@ fn execute_scan(
 }
 
 fn ssh_spec(ssh: &SshConnection, remote: Vec<String>) -> CommandSpec {
-    targets::ssh_command_owned(&SshTarget::from(ssh), remote)
+    targets::ssh_command_owned(SshTrafficClass::Control, &SshTarget::from(ssh), remote)
 }
 
 fn read_recovery_ownership(
@@ -1113,6 +1115,7 @@ fn read_recovery_ownership(
         }
     };
     let command = match targets::command_on_locator(
+        SshTrafficClass::Control,
         &backend,
         &candidate.session_id,
         vec!["cat".into(), format!("{root}/ownership.json")],

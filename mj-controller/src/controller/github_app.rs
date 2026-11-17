@@ -1,5 +1,6 @@
 //! GitHub App JWTs and installation access tokens owned by the controller.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -899,6 +900,7 @@ mv -f -- "$temporary" "$path"
     let mut bytes = token.into_bytes();
     bytes.push(b'\n');
     let command = crate::targets::locator_command(
+        SshTrafficClass::Bulk,
         locator,
         vec![
             "sh".into(),

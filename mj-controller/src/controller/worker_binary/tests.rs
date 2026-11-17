@@ -1,5 +1,6 @@
 use super::launch::*;
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 use crate::targets::tests::unwrapped_remote_line;
 
@@ -1780,6 +1781,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
         execute_checked(
             &ProcessExecutor,
             targets::locator_command(
+                SshTrafficClass::Control,
                 &locator,
                 vec![
                     "sh".into(),

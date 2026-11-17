@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -3455,9 +3456,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -3526,7 +3532,13 @@ fn worker_command_spec(
     let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
-    targets::command_on_locator(&layout.backend, session, argv, purpose)
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {

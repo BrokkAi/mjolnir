@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Every top-level session of every harness gets the message-only `mj-agents`
 /// server, and that server carries ask_oracle; a child never does.
@@ -244,6 +245,7 @@ impl Controller {
             let output = execute_checked(
                 executor,
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     session_id,
                     vec![
