@@ -8900,3 +8900,36 @@ fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
         1
     );
 }
+
+// A ReadThrough card names the agent message complete at its ordinal; a newer
+// reply must never answer for it.
+#[test]
+fn agent_message_through_an_ordinal_ignores_newer_replies() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut materialized = materialized_session("session-1");
+    materialized.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "agent:6".into(),
+        position: 6,
+        latest_content_event_ordinal: Some(7),
+        created_at_ms: 1_700,
+        last_changed_at_ms: 1_700,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "Newer reply"}})],
+            streaming: false,
+        },
+    }));
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let connection = open(&database).unwrap();
+    let through = |ordinal| {
+        materialized::last_materialized_agent_message_in(&connection, "session-1", 0, None, ordinal)
+            .unwrap()
+            .map(|(_, text)| text)
+    };
+    assert_eq!(through(Some(2)).as_deref(), Some("Working on it"));
+    assert_eq!(through(Some(6)).as_deref(), Some("Working on it"));
+    assert_eq!(through(Some(7)).as_deref(), Some("Newer reply"));
+    assert_eq!(through(None).as_deref(), Some("Newer reply"));
+    assert_eq!(through(Some(1)), None);
+}
