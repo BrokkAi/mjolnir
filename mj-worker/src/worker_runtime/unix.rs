@@ -87,8 +87,8 @@ struct RunningHarness {
     /// replacement gaps as well as the lifetime of any individual supervisor.
     _managed_harness: Option<super::harness::ManagedHarness>,
     _managed_node: Option<super::harness::ManagedNodeRuntime>,
-    /// Dropped with the session, which terminates a running installation.
-    _project_tools: Option<super::project_tools::BackgroundInstall>,
+    /// Stopped when the harness ends, before a closed session is checkpointed.
+    project_tools: Option<super::project_tools::BackgroundInstall>,
 }
 
 struct HarnessPreparationCompletion {
@@ -208,7 +208,7 @@ impl StartedBridgeTasks {
                 .expect("shell tracker was prepared"),
             _managed_harness: None,
             _managed_node: None,
-            _project_tools: None,
+            project_tools: None,
         }
     }
 }
@@ -1306,8 +1306,7 @@ pub async fn run_daemon_owned(
         shell_cleanup,
         _managed_harness,
         _managed_node,
-        // Held to the end of the session: dropping it stops the install.
-        _project_tools,
+        project_tools,
         ..
     } = running_harness;
 
@@ -1407,6 +1406,11 @@ pub async fn run_daemon_owned(
         .operational_state()
         .execution
         == mj_core::relay::RelayExecutionState::Closed;
+    // The install belongs to the harness: a closed relay stays attachable for
+    // checkpointing, which must not see an installer still writing files.
+    if let Some(mut install) = project_tools {
+        install.stop().await;
+    }
     shell_cleanup.close();
     shell_cleanup.wait().await;
     drop(subagent_socket_guard);
@@ -2234,7 +2238,7 @@ async fn prepare_and_start_harness(
     let mut running = started.into_running();
     running._managed_harness = managed_harness;
     running._managed_node = managed_node;
-    running._project_tools = project_tools_install.map(|install| {
+    running.project_tools = project_tools_install.map(|install| {
         super::project_tools::BackgroundInstall::spawn(install, root.to_owned(), install_relay)
     });
 

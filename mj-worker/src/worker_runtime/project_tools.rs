@@ -439,9 +439,9 @@ impl Install {
     }
 }
 
-/// The background installation, owned by the running session: dropping it
-/// (session close, worker exit) aborts the task, which terminates the running
-/// command's process group.
+/// The background installation, owned by the running harness: stopping or
+/// dropping it aborts the task, which terminates the running command's process
+/// group.
 pub(super) struct BackgroundInstall(tokio::task::JoinHandle<()>);
 
 impl BackgroundInstall {
@@ -449,6 +449,19 @@ impl BackgroundInstall {
         Self(tokio::spawn(async move {
             install.run(&worker_root, &relay).await;
         }))
+    }
+}
+
+impl BackgroundInstall {
+    /// Stop a running installation and wait until its task, and with it the
+    /// command's process group, is gone.
+    pub(super) async fn stop(&mut self) {
+        self.0.abort();
+        if let Err(error) = (&mut self.0).await
+            && error.is_panic()
+        {
+            tracing::warn!(%error, "project tools installation panicked");
+        }
     }
 }
 
