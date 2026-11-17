@@ -1303,21 +1303,12 @@ pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Resu
     if let Some(command) = find_command_path(Path::new("mise"), environment)? {
         return Ok(command);
     }
-    let metadata: serde_json::Value =
-        serde_json::from_str(include_str!("../assets/mise/runtime.json"))?;
     ensure!(
-        metadata["version"] == crate::harness_runtime::MISE_VERSION,
-        "mise download metadata does not match the managed runtime pin"
+        std::env::consts::OS == "linux",
+        "mise has no managed runtime for {}",
+        std::env::consts::OS
     );
-    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let platform = metadata["platforms"]
-        .get(&key)
-        .with_context(|| format!("mise has no managed runtime for {key}"))?;
-    let field = |name: &str| {
-        platform[name]
-            .as_str()
-            .with_context(|| format!("missing mise artifact field {name}"))
-    };
+    let artifact = crate::session_image::pinned_mise(std::env::consts::ARCH)?;
     let root = managed_harness_cache_root(
         environment.get("XDG_CACHE_HOME").map(OsStr::new),
         environment.get("HOME").map(OsStr::new),
@@ -1341,7 +1332,7 @@ pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Resu
         .prefix(".install-")
         .tempdir_in(&root)?;
     let downloaded = staging.path().join("mise");
-    download_verified_async(field("url")?, &downloaded, field("sha256")?, environment).await?;
+    download_verified_async(&artifact.url, &downloaded, &artifact.sha256, environment).await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&downloaded, std::fs::Permissions::from_mode(0o755))?;
     std::fs::create_dir_all(&install)?;

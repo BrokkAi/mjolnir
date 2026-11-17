@@ -7,7 +7,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Files mise reads at the repository root. Ordering is fixed by the map.
+/// Files mise reads at the repository root: the one list both the worker's
+/// post-clone step (which checkouts have a recipe) and the image generator
+/// (which files an image is built from) use. `go.mod` is deliberately absent:
+/// it changes with every dependency update, which would rebuild the image.
+/// Ordering is fixed by the map.
 pub const RECIPE_FILES: &[&str] = &[
     "mise.toml",
     ".mise.toml",
@@ -15,6 +19,7 @@ pub const RECIPE_FILES: &[&str] = &[
     ".config/mise.toml",
     ".tool-versions",
     "mise.lock",
+    "rust-toolchain",
     "rust-toolchain.toml",
     ".nvmrc",
     ".node-version",
@@ -28,6 +33,32 @@ pub struct MiseArtifact {
     pub version: String,
     pub url: String,
     pub sha256: String,
+}
+
+/// The pinned static mise download for a Linux CPU architecture (Rust's
+/// `std::env::consts::ARCH` spelling: `x86_64`, `aarch64`), read from
+/// `assets/mise/runtime.json`. The worker installs it into containers and the
+/// image generator adds it to built images, so both use this one reader.
+pub fn pinned_mise(arch: &str) -> Result<MiseArtifact> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/mise/runtime.json"))?;
+    let version = manifest["version"].as_str().unwrap_or_default();
+    ensure!(
+        version == crate::harness_runtime::MISE_VERSION,
+        "mise download metadata does not match the managed runtime pin"
+    );
+    let platform = &manifest["platforms"][format!("linux-{arch}")];
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("mise has no pinned {name} for linux-{arch}"))
+    };
+    Ok(MiseArtifact {
+        version: version.to_owned(),
+        url: field("url")?,
+        sha256: field("sha256")?,
+    })
 }
 
 #[derive(Debug, Clone)]

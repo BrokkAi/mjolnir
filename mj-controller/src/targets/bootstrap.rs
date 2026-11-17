@@ -131,7 +131,7 @@ mj_home_engine exec --user 0 "$container" sh -c 'set -eu; mkdir -p -- "$1"; chow
     );
     let command = CommandSpec::new("sh", ["-c", &script, "mj-container-home", container]);
     let command = match ssh {
-        Some(ssh) => command_over_ssh(command, ssh),
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
         None => command,
     }
     .purpose("initialize session container home")

@@ -245,26 +245,12 @@ fn select(request: &ImageRequest, status: bool) -> Result<Selection> {
 /// Only the manifest owner supplies production artifacts. This fixture is a
 /// temporary integration seam until Milestone 1 is merged by the parent.
 fn mise_artifact(platform: &str) -> Result<MiseArtifact> {
-    // TODO: switch to mj-core/assets/mise/runtime.json after Milestone 1 lands.
-    let manifest: serde_json::Value =
-        serde_json::from_str(include_str!("../tests/fixtures/mise-runtime.json"))?;
-    let key = match platform {
-        "linux/amd64" => "linux-x86_64",
-        "linux/arm64" => "linux-aarch64",
+    let arch = match platform {
+        "linux/amd64" => "x86_64",
+        "linux/arm64" => "aarch64",
         _ => bail!("no pinned mise artifact for {platform}"),
     };
-    let artifact = &manifest["platforms"][key];
-    Ok(MiseArtifact {
-        version: manifest["version"]
-            .as_str()
-            .context("mise version missing")?
-            .into(),
-        url: artifact["url"].as_str().context("mise URL missing")?.into(),
-        sha256: artifact["sha256"]
-            .as_str()
-            .context("mise checksum missing")?
-            .into(),
-    })
+    mj_core::session_image::pinned_mise(arch)
 }
 
 async fn platform(config: &Config, target: &str, cancel: &CancellationToken) -> Result<String> {

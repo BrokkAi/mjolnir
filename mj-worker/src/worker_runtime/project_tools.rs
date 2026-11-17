@@ -6,21 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
 
-const RECIPE_FILES: &[&str] = &[
-    "mise.toml",
-    ".mise.toml",
-    "mise/config.toml",
-    ".config/mise.toml",
-    ".tool-versions",
-    "rust-toolchain",
-    "rust-toolchain.toml",
-    ".nvmrc",
-    ".node-version",
-    ".python-version",
-    ".ruby-version",
-    ".go-version",
-    "go.mod",
-];
+use mj_core::session_image::RECIPE_FILES;
 pub(super) const LOG_FILE: &str = "project-tools.log";
 
 /// Only the controller's explicit launch directive opts a worker in. Bare
