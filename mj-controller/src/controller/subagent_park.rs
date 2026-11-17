@@ -89,9 +89,13 @@ pub(super) fn explain_process_exhaustion(
     anyhow::anyhow!(targets::process_exhaustion_message(usage.as_ref(), &error))
 }
 
-/// How long the admitted launch of a woken sub-agent may run; the same bound
-/// as a park, the other short admitted worker operation.
+/// How long one short command of a wake (liveness probe, launch configuration,
+/// the admitted launch) may run; the same bound as a park, the other short
+/// worker operation. Only the worker and profile transfer is unbounded (#1571).
 const ADMITTED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Readiness observation keeps the 600 s the whole wake had before #1571.
+const WAKE_READINESS_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Controller {
     /// Stop a running sub-agent's worker while it is idle, and record it as
@@ -238,6 +242,7 @@ impl Controller {
                 .into_iter()
                 .next()
                 .context("reconnect plan is empty")?;
+            executor.bound_admitted_work(Some(ADMITTED_LAUNCH_TIMEOUT));
             // An older failed wake may have left a parked record and boot
             // intent. Only proved death permits retiring that intent.
             if crate::database::load_worker_restart(session_id)?.is_some() {
@@ -257,10 +262,15 @@ impl Controller {
                 )?;
             }
             let launch = self.current_worker_launch_config(session_id, &backend)?;
+            // The binary and profile transfer takes as long as the link needs.
+            executor.bound_admitted_work(None);
             refresh_installed_worker_binary(executor, &backend, session_id)
                 .context(RESTART_FROM_PARKED.replace)?;
+            executor.bound_admitted_work(Some(ADMITTED_LAUNCH_TIMEOUT));
             replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
                 .context("install the current Mjolnir worker launch configuration")?;
+            // Waiting for the start gate is queue time, not command time.
+            executor.bound_admitted_work(None);
             // Keep container startup concurrency bounded through native readiness,
             // while cancellation releases this observation without stopping a worker.
             let gate = super::provisioning::container_start_gate(&backend);
@@ -304,8 +314,8 @@ impl Controller {
             // The active record and boot intent are durable. Handoff may cancel
             // this wait; the next daemon attaches to the same live worker.
             executor.begin_resumable_work()?;
-            // Readiness observation has its own allowance and holds no admission.
-            executor.bound_admitted_work(None);
+            // Readiness holds no admission; its commands keep the old bound.
+            executor.bound_admitted_work(Some(WAKE_READINESS_TIMEOUT));
             self.observe_started_worker(
                 session_id,
                 executor,
