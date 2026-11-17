@@ -1692,10 +1692,16 @@ impl Controller {
             checked.selection.workspace.validate(assessment)?;
         }
         let old_operation = crate::database::load_move_operation(&id)?;
-        let retry = old_operation.filter(|op| {
+        let retry = old_operation.clone().filter(|op| {
             op.selection == prepared.selection && op.checkpoint_retained()
         });
+        // A different Move replaces the old one, which can no longer resume
+        // its copy: its staging on the destination host is abandoned.
+        let abandoned = old_operation.filter(|_| retry.is_none());
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
+            if let Some(abandoned) = &abandoned {
+                self.remove_abandoned_move_stage(abandoned, executor);
+            }
             crate::database::accept_unchanged_move(&checked.selection)?;
             let latest = crate::database::load_session_record(&id)?.context("Move session disappeared")?;
             let record = self.state.sessions.get_mut(&id).unwrap();
@@ -1793,6 +1799,9 @@ impl Controller {
         if let Some((reason, continuation)) = quota_move {
             operation.quota_stop_reason = Some(reason);
             operation.quota_continuation = Some(continuation);
+        }
+        if let Some(abandoned) = &abandoned {
+            self.remove_abandoned_move_stage(abandoned, executor);
         }
         operation.capture_container_settings(&source);
         operation.accepted_preparation = Some(Box::new(checked.clone()));
