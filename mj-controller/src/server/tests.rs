@@ -705,6 +705,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),
@@ -868,6 +869,7 @@ fn public_snapshot_exposes_only_review_status_configuration() {
     config.review = mj_core::config::ReviewConfig {
         legacy: None,
         disabled: false,
+        brief_writer: None,
         reviewers: vec![
             mj_core::config::SubagentChoice {
                 model: "private-review-model".into(),

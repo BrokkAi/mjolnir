@@ -8,6 +8,7 @@ fn seed() -> TurnReviewSeed {
         task: "add a retry".to_string(),
         user_messages: vec![UserMessage::prompt("add a retry")],
         declined: Vec::new(),
+        brief: None,
     }
 }
 
@@ -335,4 +336,131 @@ fn restart_replays_original_prompt_only_for_unsettled_roles() {
     let mut restored = TurnReviewDriver::restore(serde_json::from_str(&stored).unwrap()).unwrap();
     assert_eq!(restored.recovery_requests(), settled);
     assert_eq!(restored.last_verdict(), Some(&ReviewVerdict::Clean));
+}
+
+fn writing_driver(id: &str) -> (TurnReviewDriver, Vec<ReviewRequest>) {
+    let (mut driver, _) = TurnReviewDriver::start(seed(), id.into(), NonZeroUsize::new(2).unwrap());
+    let requests = driver.delta_captured_with_writer(changed_delta(), true);
+    (driver, requests)
+}
+
+fn started_roles(requests: &[ReviewRequest]) -> Vec<&str> {
+    requests
+        .iter()
+        .filter_map(|request| match request {
+            ReviewRequest::StartReviewer { role, .. } => Some(role.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_brief_writer_runs_alone_and_its_brief_reaches_every_reviewer_prompt() {
+    let (mut driver, requests) = writing_driver("brief-written");
+    let [ReviewRequest::StartBriefWriter { command_id, prompt }] = requests.as_slice() else {
+        panic!("only the writer starts first: {requests:?}");
+    };
+    assert_eq!(command_id, &brief_writer_command_id("brief-written"));
+    assert!(prompt.contains("base-tree new-tree"), "{prompt}");
+    assert!(prompt.contains("add a retry"));
+    assert_eq!(driver.phase(), &TurnReviewPhase::WritingBrief);
+    assert_eq!(
+        driver.awaited_commands(),
+        vec![(BRIEF_WRITER_ROLE.to_owned(), command_id.clone())]
+    );
+    // A reviewer report or failure cannot settle a role before it starts.
+    assert!(driver.role_failed("reviewer-1", None, "early").is_empty());
+
+    let started = driver.brief_written("## Paths\n- `a.rs:1` calls `b.rs:2`".into());
+    assert_eq!(started_roles(&started), ["reviewer-1", "reviewer-2"]);
+    assert_eq!(started.last(), Some(&ReviewRequest::CloseBriefWriter));
+    for role in ["reviewer-1", "reviewer-2"] {
+        let text = prompt_text(&started, role);
+        assert!(text.contains("## Relations computed from the repository"));
+        assert!(text.contains("`a.rs:1` calls `b.rs:2`"));
+    }
+    assert!(matches!(driver.phase(), TurnReviewPhase::Running { .. }));
+    assert_eq!(driver.awaited_commands().len(), 2);
+    // A second handback changes nothing.
+    assert!(driver.brief_written("again".into()).is_empty());
+    assert!(driver.brief_failed("late".into()).is_empty());
+}
+
+#[test]
+fn a_failed_or_empty_brief_starts_the_reviewers_without_one_and_says_why() {
+    for (failure, reason) in [
+        (
+            Some("the writer ended without a handback"),
+            "the writer ended without a handback",
+        ),
+        (None, "empty brief"),
+    ] {
+        let (mut driver, _) = writing_driver("brief-failed");
+        let requests = match failure {
+            Some(reason) => driver.brief_failed(reason.into()),
+            None => driver.brief_written("  \n".into()),
+        };
+        let [ReviewRequest::NoteBriefSkipped { reason: noted }, rest @ ..] = requests.as_slice()
+        else {
+            panic!("the notice comes first: {requests:?}");
+        };
+        assert!(noted.contains(reason), "{noted}");
+        assert_eq!(started_roles(rest), ["reviewer-1", "reviewer-2"]);
+        assert_eq!(rest.last(), Some(&ReviewRequest::CloseBriefWriter));
+        assert!(!prompt_text(rest, "reviewer-1").contains("Relations computed"));
+        // The review then settles like any other.
+        for (index, role) in ["reviewer-1", "reviewer-2"].into_iter().enumerate() {
+            driver.role_turn_completed(&prompted(rest, role), &format!("s{index}"), "No findings.");
+        }
+        assert_eq!(driver.last_verdict(), Some(&ReviewVerdict::Clean));
+    }
+}
+
+#[test]
+fn cancelling_while_the_writer_works_closes_it_and_starts_no_reviewer() {
+    let (mut driver, _) = writing_driver("brief-cancelled");
+    let requests = driver.cancel();
+    assert!(requests.contains(&ReviewRequest::CloseBriefWriter));
+    assert_eq!(requests.last(), Some(&ReviewRequest::Close));
+    assert!(started_roles(&requests).is_empty());
+    assert!(driver.finished());
+    // The writer's late answer cannot start reviewers in a cancelled review.
+    assert!(driver.brief_written("late".into()).is_empty());
+    assert!(driver.brief_failed("late".into()).is_empty());
+}
+
+#[test]
+fn a_group_wide_failure_while_the_writer_works_closes_the_writer() {
+    let (mut driver, _) = writing_driver("brief-group-failure");
+    let requests = driver.request_failed("the worker is gone");
+    assert!(requests.contains(&ReviewRequest::CloseBriefWriter));
+    assert!(started_roles(&requests).is_empty());
+}
+
+// Restart during WritingBrief relaunches or reattaches the writer, never the
+// reviewers; restart after the brief starts the reviewers once and not the writer.
+#[test]
+fn a_restart_during_the_brief_replays_the_writer_and_never_starts_reviewers_early() {
+    let (driver, requests) = writing_driver("brief-restart");
+    let stored = serde_json::to_string(&driver.snapshot()).unwrap();
+    let mut restored = TurnReviewDriver::restore(serde_json::from_str(&stored).unwrap()).unwrap();
+    assert_eq!(restored.phase(), &TurnReviewPhase::WritingBrief);
+    assert_eq!(restored.recovery_requests(), requests);
+    assert_eq!(
+        restored.status(),
+        "writing a relation brief for the reviewers…"
+    );
+
+    restored.brief_written("## Paths\n- none".into());
+    let stored = serde_json::to_string(&restored.snapshot()).unwrap();
+    let mut again = TurnReviewDriver::restore(serde_json::from_str(&stored).unwrap()).unwrap();
+    let replay = again.recovery_requests();
+    assert_eq!(started_roles(&replay), ["reviewer-1", "reviewer-2"]);
+    assert!(
+        replay
+            .iter()
+            .all(|request| matches!(request, ReviewRequest::StartReviewer { .. })),
+        "the finished writer is not started again: {replay:?}"
+    );
+    assert!(prompt_text(&replay, "reviewer-1").contains("## Paths\n- none"));
 }

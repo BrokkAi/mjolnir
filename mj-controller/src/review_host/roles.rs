@@ -20,6 +20,20 @@ impl HostState {
                 command_id: _,
                 prompt,
             } => self.register_reviewer_child(session_id, role, prompt),
+            ReviewRequest::StartBriefWriter {
+                command_id: _,
+                prompt,
+            } => self.register_reviewer_child(
+                session_id,
+                mj_core::review::driver::BRIEF_WRITER_ROLE.to_owned(),
+                prompt,
+            ),
+            ReviewRequest::CloseBriefWriter => {
+                self.close_reviewer_role(session_id, mj_core::review::driver::BRIEF_WRITER_ROLE);
+            }
+            ReviewRequest::NoteBriefSkipped { reason } => {
+                self.record_notice(session_id, super::persist::brief_skipped_notice(&reason));
+            }
             ReviewRequest::CloseReviewer { role } => {
                 self.close_reviewer_role(session_id, &role);
             }

@@ -27,6 +27,15 @@ pub trait ReviewEnvironment: Send + Sync {
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     >;
 
+    /// Resolves one model choice, such as the brief writer's, to a profile.
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    >;
+
     fn register_child(
         &self,
         session_id: &str,
@@ -166,6 +175,23 @@ pub(crate) type SharedReviewerRuntime =
     Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;
 
 impl ControllerEnvironment {
+    /// The daemon's reviewer profile service, once it has started.
+    async fn profile_backend(&self) -> Result<Arc<crate::server_runtime::api::ApiBackend>, String> {
+        let runtime = self.runtime().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(backend) = runtime.report_backend.get() {
+                    return backend
+                        .upgrade()
+                        .ok_or_else(|| "reviewer profile service stopped".to_owned());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| "reviewer profile service did not start".to_owned())?
+    }
+
     async fn runtime(&self) -> Result<Arc<crate::daemon::RuntimeState>, String> {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -377,20 +403,24 @@ impl ReviewEnvironment for ControllerEnvironment {
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         Box::pin(async move {
-            let runtime = self.runtime().await?;
-            let backend = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    if let Some(backend) = runtime.report_backend.get() {
-                        return backend
-                            .upgrade()
-                            .ok_or_else(|| "reviewer profile service stopped".to_owned());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .map_err(|_| "reviewer profile service did not start".to_owned())??;
+            let backend = self.profile_backend().await?;
             crate::review_selection::resolve(handle, Some(config), backend)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    fn resolve_choice<'a>(
+        &'a self,
+        choice: mj_core::config::SubagentChoice,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    > {
+        Box::pin(async move {
+            let backend: Arc<dyn crate::server::api::SubagentBackend> =
+                self.profile_backend().await?;
+            crate::review_selection::resolve_choice(&backend, choice)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

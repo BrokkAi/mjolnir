@@ -5189,6 +5189,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
             task: "inspect the parser".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "async-review".into(),
         std::num::NonZeroUsize::new(3).unwrap(),
@@ -5210,6 +5211,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
     let mut state = TurnReviewState {
         active: Some("async-review".into()),
         active_group: Some(ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![Default::default(); 3],
             registrations: (1..=3)
@@ -5304,6 +5306,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
         declined: Vec::new(),
+        brief: None,
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,
@@ -5311,6 +5314,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         std::num::NonZeroUsize::new(2).unwrap(),
     );
     let group = mj_core::storage::ActiveReviewGroup {
+        brief_writer: None,
         driver: driver.snapshot(),
         reviewers: vec![Default::default(); 2],
         registrations: vec![

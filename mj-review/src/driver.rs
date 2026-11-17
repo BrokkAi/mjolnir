@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use mj_core::relay::RepoDelta;
 
 use super::delta;
-use super::lanes::{RepositoryCapture, ReviewJob, review_prompt};
+use super::lanes::{RepositoryCapture, ReviewJob, brief_writer_prompt, review_prompt};
 use super::verdict::{ReviewPassEvidence, ReviewVerdict, ReviewerFailure, review_output_verdict};
 
 pub use mj_core::review::driver::*;
@@ -24,6 +24,7 @@ pub struct TurnReviewDriver {
     /// Frozen launch order and the sole owner of per-role terminal outcomes.
     roles: Vec<ReviewerOutcomeSlot>,
     sequence: u64,
+    brief_writer: Option<RoleState>,
     status: String,
     replay_requests: Vec<ReviewRequest>,
 }
@@ -52,6 +53,7 @@ impl TurnReviewDriver {
             deltas: Vec::new(),
             roles,
             sequence: 0,
+            brief_writer: None,
             status: "capturing committed work…".to_string(),
             replay_requests: requests.clone(),
         };
@@ -68,6 +70,7 @@ impl TurnReviewDriver {
             deltas: self.deltas.clone(),
             roles: self.roles.clone(),
             sequence: self.sequence,
+            brief_writer: self.brief_writer,
             replay_requests: self.replay_requests.clone(),
         }
     }
@@ -80,6 +83,12 @@ impl TurnReviewDriver {
                 .replay_requests
                 .iter()
                 .filter(|request| matches!(request, ReviewRequest::CaptureDelta))
+                .cloned()
+                .collect(),
+            TurnReviewPhase::WritingBrief => self
+                .replay_requests
+                .iter()
+                .filter(|request| matches!(request, ReviewRequest::StartBriefWriter { .. }))
                 .cloned()
                 .collect(),
             TurnReviewPhase::Running { .. } => self
@@ -135,6 +144,12 @@ impl TurnReviewDriver {
         {
             return Err("capturing review snapshot already has outcomes or a target".into());
         }
+        if matches!(snapshot.phase, TurnReviewPhase::WritingBrief)
+            && (snapshot.roles.iter().any(|slot| slot.outcome.is_some())
+                || snapshot.deltas.is_empty())
+        {
+            return Err("brief-writing review snapshot has outcomes or no target".into());
+        }
         if let TurnReviewPhase::Verdict(verdict) = &snapshot.phase
             && (snapshot.last_verdict.as_ref() != Some(verdict)
                 || snapshot.roles.iter().any(|slot| slot.outcome.is_none()))
@@ -149,6 +164,7 @@ impl TurnReviewDriver {
             deltas: snapshot.deltas,
             roles: snapshot.roles,
             sequence: snapshot.sequence,
+            brief_writer: snapshot.brief_writer,
             status: String::new(),
             replay_requests: snapshot.replay_requests,
         };
@@ -177,6 +193,12 @@ impl TurnReviewDriver {
     /// message in a role's journal when its next command starts.
     #[must_use]
     pub fn awaited_commands(&self) -> Vec<(String, String)> {
+        if matches!(self.phase, TurnReviewPhase::WritingBrief) {
+            return vec![(
+                BRIEF_WRITER_ROLE.to_owned(),
+                brief_writer_command_id(&self.review_id),
+            )];
+        }
         if !matches!(self.phase, TurnReviewPhase::Running { .. }) {
             return Vec::new();
         }
@@ -216,9 +238,25 @@ impl TurnReviewDriver {
     /// The rows the review pane's strip shows.
     #[must_use]
     pub fn roles(&self) -> Vec<RoleStatus> {
-        match &self.phase {
+        let reviewers = match &self.phase {
             TurnReviewPhase::Running { .. } | TurnReviewPhase::Verdict(_) => self.role_statuses(),
             _ => Vec::new(),
+        };
+        // The writer's row comes first, so a user can see it working and open
+        // its session, and after it ends see what became of its brief.
+        match (self.brief_writer, &self.phase) {
+            (Some(state), TurnReviewPhase::WritingBrief | TurnReviewPhase::Running { .. })
+            | (Some(state), TurnReviewPhase::Verdict(_)) => {
+                let mut rows = vec![RoleStatus {
+                    role: BRIEF_WRITER_ROLE.to_owned(),
+                    label: "Brief writer".to_owned(),
+                    state,
+                    child_session_id: None,
+                }];
+                rows.extend(reviewers);
+                rows
+            }
+            _ => reviewers,
         }
     }
 
@@ -247,6 +285,7 @@ impl TurnReviewDriver {
         match &self.phase {
             TurnReviewPhase::CapturingDelta => "capturing committed work…".into(),
             TurnReviewPhase::LaunchingReviewer => "starting reviewers…".into(),
+            TurnReviewPhase::WritingBrief => "writing a relation brief for the reviewers…".into(),
             TurnReviewPhase::Running { .. } => "reviewers are reading the change…".into(),
             TurnReviewPhase::Verdict(ReviewVerdict::Clean) => "no material findings".into(),
             TurnReviewPhase::Verdict(ReviewVerdict::Findings { .. }) => {
@@ -284,31 +323,87 @@ impl TurnReviewDriver {
             changed_files: delta::changed_files_table(&self.deltas),
             changed_lines: delta::changed_line_count(&self.deltas),
             declined: self.seed.declined.clone(),
+            brief: self.seed.brief.clone(),
         }
     }
 
     /// The capture landed. An empty capture ends the review before any agent
     /// runs; anything else starts the first agent.
     pub fn delta_captured(&mut self, deltas: Vec<RepoDelta>) -> Vec<ReviewRequest> {
+        self.delta_captured_with_writer(deltas, false)
+    }
+
+    /// The capture landed. With a brief writer, it runs first and the
+    /// reviewers wait for its brief; without one, the reviewers start now.
+    pub fn delta_captured_with_writer(
+        &mut self,
+        deltas: Vec<RepoDelta>,
+        brief_writer: bool,
+    ) -> Vec<ReviewRequest> {
         if !matches!(self.phase, TurnReviewPhase::CapturingDelta) {
             return Vec::new();
         }
         self.deltas = deltas;
+        if brief_writer {
+            self.brief_writer = Some(RoleState::Running);
+            self.phase = TurnReviewPhase::WritingBrief;
+            self.status = self.phase_status();
+            let request = ReviewRequest::StartBriefWriter {
+                command_id: brief_writer_command_id(&self.review_id),
+                prompt: brief_writer_prompt(&self.job()),
+            };
+            return self.emit(vec![request]);
+        }
+        let requests = self.start_reviewers();
+        self.emit(requests)
+    }
+
+    /// Enters `Running` and returns the start request of every reviewer.
+    fn start_reviewers(&mut self) -> Vec<ReviewRequest> {
         let prompt = review_prompt(&self.job());
         self.phase = TurnReviewPhase::Running { roles: Vec::new() };
         self.phase = TurnReviewPhase::Running {
             roles: self.role_statuses(),
         };
         self.status = self.phase_status();
-        let requests = self
-            .roles
+        self.roles
             .iter()
             .map(|slot| ReviewRequest::StartReviewer {
                 role: slot.role.clone(),
                 command_id: slot.command_id.clone(),
                 prompt: prompt.clone(),
             })
-            .collect();
+            .collect()
+    }
+
+    /// The brief writer handed back. Its text goes to every reviewer's prompt
+    /// and the reviewers start. An empty brief counts as a failed writer.
+    pub fn brief_written(&mut self, text: String) -> Vec<ReviewRequest> {
+        if !matches!(self.phase, TurnReviewPhase::WritingBrief) {
+            return Vec::new();
+        }
+        if text.trim().is_empty() {
+            return self.brief_failed("the writer handed back an empty brief".into());
+        }
+        self.seed.brief = Some(text);
+        self.brief_writer = Some(RoleState::Clean);
+        let mut requests = self.start_reviewers();
+        requests.push(ReviewRequest::CloseBriefWriter);
+        self.emit(requests)
+    }
+
+    /// The brief writer could not start, ended without a handback, or failed.
+    /// The review goes on without a brief: reviewers start as they would have,
+    /// and the requester is told why there is none.
+    pub fn brief_failed(&mut self, reason: String) -> Vec<ReviewRequest> {
+        if !matches!(self.phase, TurnReviewPhase::WritingBrief) {
+            return Vec::new();
+        }
+        self.seed.brief = None;
+        self.brief_writer = Some(RoleState::Failed);
+        let mut requests = vec![ReviewRequest::NoteBriefSkipped { reason }];
+        requests.extend(self.start_reviewers());
+        requests.push(ReviewRequest::CloseBriefWriter);
         self.emit(requests)
     }
 
@@ -464,6 +559,7 @@ impl TurnReviewDriver {
     }
 
     fn reach_verdict(&mut self, verdict: ReviewVerdict) -> Vec<ReviewRequest> {
+        let writer_open = matches!(self.phase, TurnReviewPhase::WritingBrief);
         // Empty captures and group-wide failures finish without individual
         // reports. Persist their terminal outcomes before delivery can race
         // daemon replacement.
@@ -481,7 +577,10 @@ impl TurnReviewDriver {
         self.phase = TurnReviewPhase::Verdict(verdict);
         // Every role is reaped before the review resolves, whichever way it
         // resolves: a reviewing harness must never outlive the review.
-        let requests = self.pause_every_role();
+        let mut requests = self.pause_every_role();
+        if writer_open {
+            requests.push(ReviewRequest::CloseBriefWriter);
+        }
         self.emit(requests)
     }
 
@@ -508,6 +607,9 @@ impl TurnReviewDriver {
             return Vec::new();
         }
         let mut requests = self.pause_every_role();
+        if matches!(self.phase, TurnReviewPhase::WritingBrief) {
+            requests.push(ReviewRequest::CloseBriefWriter);
+        }
         self.phase = TurnReviewPhase::Resolved(Resolution::Cancelled);
         self.status = "review cancelled".to_string();
         requests.push(ReviewRequest::Close);

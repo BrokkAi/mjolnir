@@ -3625,7 +3625,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 100: a one-shot quota probe can be forced off the profile's
 // schedule; the daemon answers one all-workspaces draft listing.
 // Version 101: the daemon answers the capacity service's per-host readings.
-pub const PROTOCOL_VERSION: u32 = 101;
+// Version 102: review views carry the writing_brief phase and brief-writer role.
+pub const PROTOCOL_VERSION: u32 = 102;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

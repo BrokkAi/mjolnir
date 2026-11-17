@@ -147,6 +147,35 @@ pub struct ReviewConfig {
     /// Set only by [`ReviewConfig::for_session`] for a session that chose
     /// Off. Never read from or written to a file.
     pub disabled: bool,
+    /// An optional session that writes a relation brief before the reviewers
+    /// start. Global only: a session's own review choice does not change it.
+    pub brief_writer: Option<BriefWriterConfig>,
+}
+
+/// The `[review] brief_writer` table: a writer session reads the change and
+/// hands back relations between it and the rest of the repository, which every
+/// reviewer's prompt then carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BriefWriterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required while `enabled`. Resolved to a profile like a reviewer's.
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl BriefWriterConfig {
+    /// The writer's model choice when the table turns the stage on.
+    #[must_use]
+    pub fn choice(&self) -> Option<SubagentChoice> {
+        self.enabled.then(|| SubagentChoice {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        })
+    }
 }
 
 pub const MAX_REVIEWERS: usize = 3;
@@ -193,6 +222,8 @@ struct ReviewConfigOutput {
     profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brief_writer: Option<BriefWriterConfig>,
 }
 
 impl From<ReviewConfig> for ReviewConfigOutput {
@@ -204,6 +235,7 @@ impl From<ReviewConfig> for ReviewConfigOutput {
             count: legacy.as_ref().and_then(|old| old.count),
             profile: legacy.as_ref().and_then(|old| old.profile.clone()),
             effort: legacy.and_then(|old| old.effort),
+            brief_writer: value.brief_writer,
         }
     }
 }
@@ -264,6 +296,8 @@ struct ReviewConfigInput {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    #[serde(default)]
+    brief_writer: Option<BriefWriterConfig>,
 }
 
 impl From<ReviewConfigInput> for ReviewConfig {
@@ -279,6 +313,7 @@ impl From<ReviewConfigInput> for ReviewConfig {
             profile,
             model,
             effort,
+            brief_writer,
         } = input;
         // Review is on exactly when reviewers are configured. A table that
         // names none but asked for review (the removed `trigger` or `enabled`
@@ -294,6 +329,7 @@ impl From<ReviewConfigInput> for ReviewConfig {
             legacy,
             reviewers: legacy_reviewers(reviewers, count, model, effort).unwrap_or_default(),
             disabled: false,
+            brief_writer,
         }
     }
 }
@@ -645,6 +681,12 @@ impl ReviewConfig {
             .any(|reviewer| reviewer.model.trim().is_empty())
         {
             bail!("[review] reviewer model must not be empty");
+        }
+        if let Some(writer) = &self.brief_writer
+            && writer.enabled
+            && writer.model.trim().is_empty()
+        {
+            bail!("[review] brief_writer needs a model while it is enabled");
         }
         Ok(())
     }

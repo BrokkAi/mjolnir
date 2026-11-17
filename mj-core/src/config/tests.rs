@@ -1440,6 +1440,11 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
             };
             3
         ],
+        brief_writer: Some(BriefWriterConfig {
+            enabled: true,
+            model: "brief-model".into(),
+            effort: Some("high".into()),
+        }),
     };
     let saved = Config::save_review_to(&path, review.clone()).unwrap();
     assert_eq!(saved.version, CONFIG_VERSION);

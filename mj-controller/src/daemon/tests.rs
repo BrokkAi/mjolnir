@@ -10221,6 +10221,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
                 declined: Vec::new(),
+                brief: None,
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -10237,6 +10238,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             parent_id,
             &crate::database::TurnReviewState {
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    brief_writer: None,
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
                     registrations: vec![mj_core::storage::ReviewerRegistration {

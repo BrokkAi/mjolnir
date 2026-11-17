@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 132;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 135;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2560,6 +2560,19 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: older daemons cannot decode the writing_brief review phase, a seed's
+    // brief, or a brief-writer registration in a stored active review group.
+    // Refuse their reads and writes before any can be stored.
+    if version < 135 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 135 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (135, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 135;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4111,7 +4124,7 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
-        assert!(state.ensure_supported_by(132).is_ok());
+        assert!(state.ensure_supported_by(132).is_err());
         assert_eq!(upgraded.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
         let preserved: String = upgraded
             .query_row(
@@ -4928,6 +4941,11 @@ mod reader_tests {
         if version >= COMPATIBILITY_METADATA_VERSION {
             connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=min(minimum_compatible_version, ?1)", [version]).unwrap();
         }
+        // Rewinding before the brief-writer fence restores the historical
+        // floor, including compatible revisions 133 and 134.
+        if (132..135).contains(&version) {
+            connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1", []).unwrap();
+        }
         if version == 30 {
             connection
                 .execute(
@@ -5415,8 +5433,10 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
         assert_eq!(schema.revision, SCHEMA_VERSION);
-        assert_eq!(schema.minimum_compatible, Some(132));
-        assert!(schema.ensure_supported_by(132).is_ok());
+        // The later brief-writer fence refuses older daemons; the column
+        // preservation checks below still exercise revision-132 SQL.
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(schema.ensure_supported_by(132).is_err());
         let intent = |session: &str| {
             writer
                 .query_row(
@@ -5477,7 +5497,7 @@ mod reader_tests {
         assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
         assert_eq!(
             read_schema_state(&writer).unwrap().minimum_compatible,
-            Some(132)
+            Some(MINIMUM_COMPATIBLE_VERSION)
         );
         drop(writer);
         let intents = |path: &Path| -> Vec<String> {
