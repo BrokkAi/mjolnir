@@ -63,6 +63,23 @@ class ScoringEvidenceTests(unittest.TestCase):
         later["glide"]["failure"] = {"probabilities": {"quota": 0.99}}
         self.assertFalse(score.missing_rule_answers(bad_episode, lab, score.C_WORDING_GRID[0], answers))
 
+    # Hard-won: c05c9676d: full-trace wording C answers were never loaded, so complete episodes counted as missing.
+    def test_full_trace_wording_c_answer_completes_an_unlabeled_firing_turn(self):
+        first, later, good = turn(1), turn(2), turn(3)
+        episodes = [dict(session="fake-session", turns=[first, later]), dict(session="fake-session", turns=[good])]
+        lab = {("fake-session", n): dict(glyph="?", cls="blocking") for n in (1, 3)}
+        labeled = {w: {("fake-session", 1): probabilities("optional_or_default"),
+                       ("fake-session", 3): probabilities("blocking")} for w in ("A", "B", "C")}
+        # The unlabeled firing turn has answers only in the full-trace files.
+        full = {w: {("fake-session", 2): probabilities("blocking")} for w in ("A", "B", "C")}
+        text = score.ask_score_block(episodes, lab, labeled, random.Random(1), full)
+        self.assertIn("Kept 2/2 full-trace episodes; 0 declared exclusions; 0 pending answers.", text)
+        with tempfile.TemporaryDirectory(prefix="attention-full-trace-") as directory:
+            Path(directory, "scoring").mkdir()
+            score.r3_selection(directory, episodes, lab, score.merged_answers(labeled, full), {"C": set()})
+            record = json.loads(Path(directory, "scoring/r3-selection.json").read_text())
+            self.assertEqual((record["status"], record["missing_answer_episodes"]), ("development v2 fit", 0))
+
     # Hard-won: 5c117f19d: missing-wire record dictionaries were used as hash keys.
     def test_missing_wire_fallback_resolves_item_and_unlabeled_turn_records(self):
         rows = [turn(1), turn(2), turn(3, required=0)]

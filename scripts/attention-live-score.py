@@ -583,7 +583,7 @@ def write_scores(out, sc, key, labels, zero, pops_of, queue, adj_partial, seed, 
                 lines.append(score_block(eps, labset, rng))
                 lines.append(ask_score_block(eps, labset, answers, ask_rng, all_answers, b_status, exclusions))
                 if lname == "development v2" and sname.startswith("PRIMARY") and vname == "pooled":
-                    lines.append(r3_selection(out, eps, labset, answers, exclusions))
+                    lines.append(r3_selection(out, eps, labset, merged_answers(answers, all_answers), exclusions))
     lines.append(confusion_tables(answers, lab_audit if corrections is not None else lab))
     lines.append("\n## Weighted estimate for the unsampled [0.01, 0.05) band\n")
     band = [i for i, v in key.items() if "P4" in v["populations"] and v["weights"].get("P4")]
@@ -796,11 +796,18 @@ ASK_GRID = {"B": [("B", w, b, o) for w in ("A", "B") for b in (0.3, 0.5, 0.7) fo
 C_WORDING_GRID = [("C", "C", corpus.CUTS[2], d) for d in (0.5, 0.7, 0.9)]
 
 
+def merged_answers(answers, all_answers):
+    """Labeled-item answers over full-trace answers, per wording: the one place
+    every family C path gets its ask_kind evidence from."""
+    all_answers = all_answers or {}
+    return {w: all_answers.get(w, {}) | answers.get(w, {}) for w in ("A", "B", "C")}
+
+
 def read_answers(out, key, by_turn, directory="familyB", full_trace=False):
     """Validate identity and probabilities before joining by the label key."""
     result = {}
     by_id = {(r["session"], r["turn_id"]): k for k, r in by_turn.items()}
-    for wording in (("A", "B") if full_trace else ("A", "B", "C")):
+    for wording in ("A", "B", "C"):
         joined = {}
         path = os.path.join(out, directory, f"answers-{'all-' if full_trace else ''}{wording}.jsonl")
         if os.path.exists(path):
@@ -908,11 +915,12 @@ def answer_ready_episodes(eps, lab, points, answers, exclusions=()):
 
 
 def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exclusions=None):
-    all_answers = all_answers or {"A": {}, "B": {}}
+    all_answers = all_answers or {"A": {}, "B": {}, "C": {}}
     exclusions = exclusions or {"B": set(), "C": set()}
     lines = ["\n### Amendments 5–6: full-trace B/C\n"]
     summaries = {}
-    c_answers = {w: all_answers[w] | answers[w] for w in ("A", "B")}
+    merged = merged_answers(answers, all_answers)
+    c_answers = {w: merged[w] for w in ("A", "B")}
     for family, available in (("C", c_answers), ("B", all_answers)):
         if family == "B" and b_status and b_status[1]:
             lines.append(f"\n#### Family B\n\npending labels for {b_status[1]} onset turns (all scopes); B is not selectable.\n")
@@ -938,7 +946,7 @@ def ask_score_block(eps, lab, answers, rng, all_answers=None, b_status=None, exc
         lines.append(text)
         summaries[family] = summary and len(eligible) + excluded_wire == len(eps) and (family != "B" or b_status is None or b_status[0])
     lines.append("\n#### Family C, wording C (Amendment 8; input cut fixed)\n")
-    c_available = {"C": answers.get("C", {})}
+    c_available = {"C": merged["C"]}
     ready, c_wire, c_missing = answer_ready_episodes(eps, lab, C_WORDING_GRID, c_available, exclusions["C"])
     lines.append(f"Kept {len(ready)}/{len(eps)} full-trace episodes; {c_wire} declared exclusions; {c_missing} pending answers.\n")
     if c_missing:
