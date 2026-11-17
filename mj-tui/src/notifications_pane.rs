@@ -54,8 +54,6 @@ pub(crate) struct NotificationMessageRead {
 pub(crate) struct NotificationGesture {
     pub(crate) command: CommandId,
     card: crate::NotificationCard,
-    holder: String,
-    position: crate::NotificationPosition,
 }
 
 pub(crate) struct NotificationEntry {
@@ -182,12 +180,12 @@ impl DashboardState {
         if entry.level != AttentionLevel::Waiting {
             return None;
         }
-        let crate::NotificationPosition::Message(stable_id) =
-            self.notification_position(&entry.session_id, entry.level)
-        else {
-            return None;
-        };
         let session_id = self.notification_content_session(&entry.session_id, entry.level);
+        let detail = self.session_details.get(&session_id)?;
+        if !detail.pending_elicitations.is_empty() {
+            return None;
+        }
+        let stable_id = detail.question_message.clone()?;
         if self.session_details.get(&session_id).is_some_and(|detail| {
             detail
                 .projection
@@ -230,37 +228,6 @@ impl DashboardState {
         }
     }
 
-    /// Metadata from the same message read that supplies the displayed text.
-    pub fn notification_message_position(
-        &self,
-        session_id: &str,
-        stable_id: &str,
-    ) -> Option<Result<u64, String>> {
-        if let Some(item) = self.session_details.get(session_id).and_then(|detail| {
-            detail
-                .projection
-                .transcript
-                .iter()
-                .find(|item| item.stable_id == stable_id)
-        }) {
-            return Some(Ok(item.position));
-        }
-        self.notifications
-            .message_read
-            .as_ref()
-            .filter(|read| {
-                read.session_id == session_id
-                    && read.stable_id == stable_id
-                    && read.status == crate::ingest::TranscriptHydration::Ready
-            })
-            .map(|read| {
-                read.item
-                    .as_ref()
-                    .map(|item| item.position)
-                    .ok_or_else(|| "message not available".to_owned())
-            })
-    }
-
     pub fn notification_message_read_finished(
         &mut self,
         session_id: &str,
@@ -295,8 +262,6 @@ impl DashboardState {
                 session_id: entry.session_id.clone(),
                 target: entry.target.clone(),
             },
-            holder: self.notification_content_session(&entry.session_id, entry.level),
-            position: self.notification_position(&entry.session_id, entry.level),
         }
     }
 
@@ -304,12 +269,7 @@ impl DashboardState {
         &mut self,
         gesture: NotificationGesture,
     ) -> DashboardAction {
-        let NotificationGesture {
-            command,
-            card,
-            holder,
-            position,
-        } = gesture;
+        let NotificationGesture { command, card } = gesture;
         match command {
             CommandId::NotificationClear => {
                 let Some(target) = card.target else {
@@ -336,15 +296,6 @@ impl DashboardState {
                 self.notifications.later.push(card.clone());
                 self.notifications.scroll = 0;
                 DashboardAction::NotificationLater { card }
-            }
-            CommandId::NotificationOpen => {
-                self.focus_session_from_cpu_report(&holder);
-                self.focus = Focus::Prompt;
-                DashboardAction::OpenAtMessage {
-                    card,
-                    session_id: holder,
-                    position,
-                }
             }
             _ => DashboardAction::None,
         }
@@ -375,13 +326,6 @@ impl DashboardState {
             })
             .collect();
         DashboardAction::DismissNotifications { dismissals }
-    }
-
-    pub(crate) fn notification_open(&mut self) -> DashboardAction {
-        self.notification_gesture(CommandId::NotificationOpen)
-            .map_or(DashboardAction::None, |gesture| {
-                self.activate_notification(gesture)
-            })
     }
 
     pub(crate) fn scroll_notification(&mut self, delta: i16) {
@@ -500,14 +444,10 @@ pub(crate) fn render(
         .iter()
         .filter(|entry| entry.level == AttentionLevel::Important && entry.target.is_some())
         .count();
-    dashboard.notifications.controls = [
-        CommandId::NotificationClear,
-        CommandId::NotificationLater,
-        CommandId::NotificationOpen,
-    ]
-    .into_iter()
-    .map(|command| dashboard.gesture_for_notification(entry, command))
-    .collect();
+    dashboard.notifications.controls = [CommandId::NotificationClear, CommandId::NotificationLater]
+        .into_iter()
+        .map(|command| dashboard.gesture_for_notification(entry, command))
+        .collect();
     let mut x = inner.x;
     let mut form = dashboard.surface_form.borrow_mut();
     for (id, label, enabled) in [
@@ -517,11 +457,6 @@ pub(crate) fn render(
             entry.target.is_some(),
         ),
         (CommandId::NotificationLater, "Later".to_owned(), true),
-        (
-            CommandId::NotificationOpen,
-            "Go To Message".to_owned(),
-            true,
-        ),
         (
             CommandId::NotificationClearImportant,
             format!("Clear all ! ({important})"),
@@ -678,7 +613,7 @@ pub(crate) mod tests {
         // An update after the press may replace the card or just its target.
         // Release always carries the pressed identity, never a recomputed top.
         use crossterm::event::{MouseButton, MouseEventKind};
-        for label in ["Clear & Next", "Later", "Go To Message"] {
+        for label in ["Clear & Next", "Later"] {
             for replace_target in [false, true] {
                 let mut race = self::dashboard();
                 race.set_question_message("q1", Some("old-question".into()), true);
@@ -731,19 +666,6 @@ pub(crate) mod tests {
                             );
                         }
                     }
-                    DashboardAction::OpenAtMessage {
-                        card,
-                        session_id,
-                        position,
-                    } => {
-                        assert_eq!(card.session_id, "q1");
-                        assert_eq!(card.target, target);
-                        assert_eq!(session_id, "q1");
-                        assert_eq!(
-                            position,
-                            crate::NotificationPosition::Message("old-question".into())
-                        );
-                    }
                     other => panic!("captured {label}: {other:?}"),
                 }
             }
@@ -776,12 +698,8 @@ pub(crate) mod tests {
             body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text":"The buried question"}})], streaming: false },
         })));
         assert_eq!(
-            old.notification_message("q1", AttentionLevel::Waiting).0,
+            old.notification_message("q1", AttentionLevel::Waiting),
             "The buried question"
-        );
-        assert_eq!(
-            old.notification_position("q1", AttentionLevel::Waiting),
-            crate::NotificationPosition::Message("outside-tail".into())
         );
         old.notifications.later.push(crate::NotificationCard {
             session_id: "q1".into(),
@@ -823,31 +741,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn notifications_keys_navigate_without_dismissing_and_keep_sizes_exclusive() {
+    fn notifications_keys_keep_enter_inert_and_sizes_exclusive() {
         let mut dashboard = dashboard();
         dashboard.notification_dismissals.remove("q1");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('d'))),
             DashboardAction::None
         );
-        dashboard
-            .session_details
-            .get_mut("q1")
-            .unwrap()
-            .question_message = Some("agent:question".into());
-        let action = dashboard.handle_key(key(KeyCode::Enter));
         assert_eq!(
-            action,
-            DashboardAction::OpenAtMessage {
-                card: crate::NotificationCard {
-                    session_id: "q1".into(),
-                    target: None
-                },
-                session_id: "q1".into(),
-                position: crate::NotificationPosition::Message("agent:question".into())
-            }
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
         );
-        assert_eq!(dashboard.focus, Focus::Prompt);
+        assert_eq!(dashboard.focus, Focus::Notifications);
         assert_eq!(dashboard.notification_entries().len(), 3);
         dashboard.focus = Focus::Quota;
         dashboard.handle_key(key(KeyCode::Tab));
@@ -1014,9 +919,7 @@ pub(crate) mod tests {
             .unwrap()
             .pending_elicitations = vec![approval.clone()];
         assert_eq!(
-            family
-                .notification_message(&parent, AttentionLevel::Waiting)
-                .0,
+            family.notification_message(&parent, AttentionLevel::Waiting),
             approval.message
         );
         let entries = family.notification_entries();
@@ -1029,15 +932,8 @@ pub(crate) mod tests {
         family.focus = Focus::Notifications;
         assert_eq!(
             family.handle_key(key(KeyCode::Enter)),
-            DashboardAction::OpenAtMessage {
-                card: crate::NotificationCard {
-                    session_id: parent.clone(),
-                    target: family.notification_dismissal_target(&parent)
-                },
-                session_id: "child-session".into(),
-                position: crate::NotificationPosition::End
-            }
+            DashboardAction::None
         );
-        assert_eq!(family.subagent_parent_id(), Some(parent.as_str()));
+        assert_eq!(family.focus, Focus::Notifications);
     }
 }

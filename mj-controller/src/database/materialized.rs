@@ -1031,19 +1031,8 @@ pub(super) fn load_materialized_actor_projection_from(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let mut omitted_ranges = Vec::new();
-    let mut covered_through = 1;
-    for &(begin, end) in &ranges {
-        if covered_through < begin {
-            omitted_ranges.push(covered_through..begin);
-        }
-        covered_through = covered_through.max(end);
-    }
-    if covered_through < start {
-        omitted_ranges.push(covered_through..start);
-    }
     let mut transcript = Vec::new();
-    for &(begin, end) in &ranges {
+    for (begin, end) in ranges {
         let before = mj_core::storage::TranscriptCursor {
             position: end,
             stable_id: String::new(),
@@ -1072,7 +1061,6 @@ pub(super) fn load_materialized_actor_projection_from(
     let window = ProjectionWindow {
         latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items,
-        omitted_ranges,
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
         latest_turn_start_position: latest_turn,
@@ -1282,30 +1270,6 @@ pub(super) fn load_materialized_projection_tail_from(
     session_id: &str,
     transcript_limit: usize,
 ) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
-    load_materialized_projection_range_from(
-        path,
-        session_id,
-        TranscriptSelection::Last(transcript_limit),
-    )
-}
-
-/// Read through the current database snapshot, using the existing position index.
-pub fn load_materialized_projection_from_position(
-    session_id: &str,
-    start_position: u64,
-) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
-    load_materialized_projection_range_from(
-        &database_path(),
-        session_id,
-        TranscriptSelection::FromPosition(start_position),
-    )
-}
-
-fn load_materialized_projection_range_from(
-    path: &Path,
-    session_id: &str,
-    selection: TranscriptSelection,
-) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
     let mut reader = open_reader(path)?;
     // Frontier, mutable transcript bodies, and window metadata must describe
     // one WAL snapshot even if the daemon commits between these queries.
@@ -1313,34 +1277,19 @@ fn load_materialized_projection_range_from(
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
-    let transcript = read_materialized_transcript_range(&connection, session_id, selection)?;
+    let transcript = read_materialized_transcript(&connection, session_id, Some(transcript_limit))?;
     let total_items = connection.query_row(
         "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id = ?1",
         [session_id],
         |row| row.get::<_, usize>(0),
     )?;
-    let mut window = ProjectionWindow {
+    let window = ProjectionWindow {
         latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items: total_items.saturating_sub(transcript.len()),
-        omitted_ranges: Vec::new(),
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
         latest_turn_start_position: last_materialized_turn_start(&connection, session_id)?,
     };
-    let excluded_before = match selection {
-        TranscriptSelection::FromPosition(start) if window.omitted_items > 0 => Some(start),
-        TranscriptSelection::Last(_) if window.omitted_items > 0 => Some(
-            transcript
-                .first()
-                .map_or(fields.applied_event_ordinal.saturating_add(1), |item| {
-                    item.position
-                }),
-        ),
-        _ => None,
-    };
-    if let Some(start) = excluded_before {
-        window.omit_ranges(std::iter::once(0..start));
-    }
     let materialized = MaterializedSession {
         session_id: session_id.to_owned(),
         applied_event_ordinal: fields.applied_event_ordinal,
@@ -1671,13 +1620,6 @@ pub(super) fn read_materialized_session_fields(
     }))
 }
 
-#[derive(Clone, Copy)]
-enum TranscriptSelection {
-    All,
-    Last(usize),
-    FromPosition(u64),
-}
-
 /// Read a session's transcript, oldest first. `limit` reads only that many
 /// items from the end, walking the `materialized_transcript_position` index
 /// backwards so the read costs the rows it returns.
@@ -1686,20 +1628,8 @@ pub(super) fn read_materialized_transcript(
     session_id: &str,
     limit: Option<usize>,
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    read_materialized_transcript_range(
-        connection,
-        session_id,
-        limit.map_or(TranscriptSelection::All, TranscriptSelection::Last),
-    )
-}
-
-fn read_materialized_transcript_range(
-    connection: &Connection,
-    session_id: &str,
-    selection: TranscriptSelection,
-) -> Result<Vec<Arc<TranscriptItem>>> {
-    let mut statement = connection.prepare(match selection {
-        TranscriptSelection::Last(_) => {
+    let mut statement = connection.prepare(match limit {
+        Some(_) => {
             "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                     last_changed_at_ms, body_json
              FROM materialized_transcript_items
@@ -1707,18 +1637,11 @@ fn read_materialized_transcript_range(
              ORDER BY position DESC, stable_id DESC
              LIMIT ?2"
         }
-        TranscriptSelection::All => {
+        None => {
             "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                     last_changed_at_ms, body_json
              FROM materialized_transcript_items
              WHERE session_id = ?1
-             ORDER BY position, stable_id"
-        }
-        TranscriptSelection::FromPosition(_) => {
-            "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
-                    last_changed_at_ms, body_json
-             FROM materialized_transcript_items
-             WHERE session_id = ?1 AND position >= ?2
              ORDER BY position, stable_id"
         }
     })?;
@@ -1732,14 +1655,11 @@ fn read_materialized_transcript_range(
             row.get::<_, String>(5)?,
         ))
     };
-    let rows = match selection {
-        TranscriptSelection::Last(limit) => statement
+    let rows = match limit {
+        Some(limit) => statement
             .query_map(params![session_id, limit as i64], read)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
-        TranscriptSelection::FromPosition(position) => statement
-            .query_map(params![session_id, position], read)?
-            .collect::<rusqlite::Result<Vec<_>>>()?,
-        TranscriptSelection::All => statement
+        None => statement
             .query_map([session_id], read)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
     };
@@ -1765,7 +1685,7 @@ fn read_materialized_transcript_range(
             },
         )
         .collect::<Result<Vec<_>>>()?;
-    if matches!(selection, TranscriptSelection::Last(_)) {
+    if limit.is_some() {
         // The bounded query walks the index backwards to bound what it reads;
         // every caller wants the transcript in the order it was written.
         transcript.reverse();

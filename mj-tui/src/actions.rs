@@ -24,7 +24,6 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     NotificationClear,
     NotificationLater,
-    NotificationOpen,
     NotificationClearImportant,
     NotificationScrollUp,
     NotificationScrollDown,
@@ -581,18 +580,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         pane_keys: &[KeyHint::plain(KeyCode::Char('l'), "l")],
         action: None,
         footer: footer_word!("later"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: notification_available,
-    },
-    CommandSpec {
-        id: CommandId::NotificationOpen,
-        label: "Go To Message",
-        description: "Go To Message in the Notifications pane.",
-        scope: Scope::Notifications,
-        pane_keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
-        action: None,
-        footer: footer_word!("message"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: notification_available,
@@ -2001,7 +1988,6 @@ impl DashboardState {
             }
             CommandId::NotificationClear => self.notification_clear(),
             CommandId::NotificationLater => self.notification_later(),
-            CommandId::NotificationOpen => self.notification_open(),
             CommandId::NotificationClearImportant => self.notification_clear_important(),
             CommandId::NotificationScrollUp => {
                 self.scroll_notification(-1);

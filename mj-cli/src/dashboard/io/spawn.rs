@@ -794,57 +794,6 @@ pub(crate) fn spawn_stopped_subagent_transcript(
     );
 }
 
-pub(crate) fn spawn_notification_history(
-    session_id: String,
-    stable_id: String,
-    start_position: u64,
-    generation: u64,
-    permits: Arc<tokio::sync::Semaphore>,
-    updates: UnboundedSender<DashboardIoUpdate>,
-) -> JoinHandle<()> {
-    let reported_session_id = session_id.clone();
-    tokio::spawn(async move {
-        let _permit = permits
-            .acquire_owned()
-            .await
-            .expect("summary read permits remain open");
-        let task = spawn_background_async(
-            "load notification history",
-            updates,
-            SAVE_ACK_TIMEOUT,
-            async move {
-                let materialized = match daemon::connect_or_start()
-                    .await?
-                    .stored_projection_from_position(session_id.clone(), start_position)
-                    .await?
-                {
-                    mj_client::daemon::StoredProjectionHistory::Found(history) => history,
-                    mj_client::daemon::StoredProjectionHistory::Missing => {
-                        anyhow::bail!("session {session_id} has no stored history")
-                    }
-                    mj_client::daemon::StoredProjectionHistory::Unsupported => {
-                        anyhow::bail!("this daemon does not support stored history by position")
-                    }
-                };
-                tokio::task::spawn_blocking(move || {
-                    mj_chat::chat::TranscriptSnapshot::from_materialized(&materialized)
-                })
-                .await
-                .context("convert notification history task failed")
-            },
-            move |result| DashboardIoUpdate::NotificationHistory {
-                session_id: reported_session_id,
-                stable_id,
-                generation,
-                result,
-            },
-        );
-        if let Err(error) = tokio_util::task::AbortOnDropHandle::new(task).await {
-            tracing::error!(%error, "notification history supervisor failed");
-        }
-    })
-}
-
 pub(crate) fn spawn_stored_transcript_item(
     session_id: String,
     stable_id: String,

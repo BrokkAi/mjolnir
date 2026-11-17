@@ -692,30 +692,14 @@ pub(super) async fn handle_action(
         DaemonAction::StoredSessionMetadata => Ok(DaemonReply::StoredSessionMetadata(
             blocking(dashboard_reads::stored_session_metadata).await?,
         )),
-        DaemonAction::StoredProjectionTail {
-            session_id,
-            items,
-            start_position,
-        } => {
-            let tail = blocking(move || match (items, start_position) {
-                (Some(items), None) => {
-                    crate::database::load_materialized_projection_tail(&session_id, items)
-                }
-                (None, Some(position)) => {
-                    crate::database::load_materialized_projection_from_position(
-                        &session_id,
-                        position,
-                    )
-                }
-                _ => bail!("choose either an item count or a start position for stored history"),
+        DaemonAction::StoredProjectionTail { session_id, items } => {
+            let tail = blocking(move || {
+                crate::database::load_materialized_projection_tail(&session_id, items)
             })
             .await?;
-            let projection = tail.map(|(session, _)| Box::new(session));
-            Ok(if start_position.is_some() {
-                DaemonReply::StoredProjectionRange(projection)
-            } else {
-                DaemonReply::StoredProjectionTail(projection)
-            })
+            Ok(DaemonReply::StoredProjectionTail(
+                tail.map(|(session, _)| Box::new(session)),
+            ))
         }
         DaemonAction::StoredTranscriptItem {
             session_id,

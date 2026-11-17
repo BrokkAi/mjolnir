@@ -359,7 +359,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         state.set_prompt_images_supported(snapshot.operational.accepts_prompt_images());
         state.apply_materialized_with_goal(
             &snapshot.materialized,
-            &snapshot.window,
             &snapshot.operational.config_options,
             &snapshot.operational.available_commands,
             &snapshot.operational.goal,
@@ -618,9 +617,6 @@ impl ActiveChat {
                     .as_ref()
                     .map_or(&[][..], |snapshot| &snapshot.operational.available_commands),
             );
-            if let Some(snapshot) = snapshot.as_ref() {
-                state.projection_window.clone_from(&snapshot.window);
-            }
             state.clear_context_supported = snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.operational.clear_context);

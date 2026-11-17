@@ -426,12 +426,6 @@ pub(super) enum TranscriptAnchor {
 pub struct TranscriptPosition(SavedTranscriptAnchor);
 
 impl TranscriptPosition {
-    /// Follow the newest transcript content without routing a navigation key
-    /// through the composer or an open form.
-    pub fn bottom() -> Self {
-        Self(SavedTranscriptAnchor::Bottom)
-    }
-
     /// Start an opening view at a materialized transcript item. Resolution can
     /// wait for the older prefix to finish loading.
     pub fn at_stable_id(stable_id: String) -> Self {
@@ -682,49 +676,6 @@ impl TranscriptRenderCache {
     }
 }
 
-/// Canonical entry identity also distinguishes items at the same position.
-pub(super) fn transcript_entry_identity(entry: &ChatEntry) -> (u64, Option<&str>) {
-    (
-        entry.start_seq,
-        entry
-            .source
-            .0
-            .as_ref()
-            .map(|item| item.stable_id.as_str())
-            .or(entry.message_id.as_deref())
-            .or(entry.tool_call_id.as_deref()),
-    )
-}
-
-/// Both inputs are ordered by position/identity. A live projection may contain
-/// retained old turns and a recent tail with holes between them. Keep history
-/// in every hole, and replace only the identities actually present in live.
-pub(super) fn merge_transcript_history(
-    history: Vec<ChatEntry>,
-    live: Vec<ChatEntry>,
-) -> Vec<ChatEntry> {
-    if history.is_empty() {
-        return live;
-    }
-    let mut entries = Vec::with_capacity(history.len() + live.len());
-    let mut history = history.into_iter().peekable();
-    let mut live = live.into_iter().peekable();
-    while let (Some(old), Some(update)) = (history.peek(), live.peek()) {
-        match transcript_entry_identity(old).cmp(&transcript_entry_identity(update)) {
-            std::cmp::Ordering::Less => entries.push(history.next().unwrap()),
-            std::cmp::Ordering::Greater => entries.push(live.next().unwrap()),
-            std::cmp::Ordering::Equal => {
-                history.next();
-                entries.push(live.next().unwrap());
-            }
-        }
-    }
-    entries.extend(history);
-    entries.extend(live);
-    apply_entry_list_rules(&mut entries);
-    entries
-}
-
 impl ChatState {
     /// Where the reader is, independent of the tail-first loading window.
     pub fn transcript_position(&self) -> TranscriptPosition {
@@ -749,49 +700,10 @@ impl ChatState {
         }
     }
 
-    /// A notification jump succeeds only after its actual entry is anchored.
-    pub fn restore_transcript_message(&mut self, stable_id: &str) -> bool {
-        let Some(entry) = self.transcript_message_entry(stable_id) else {
-            return false;
-        };
-        self.restore_transcript_position(TranscriptPosition::at_stable_id(stable_id.to_owned()));
-        matches!(self.anchor, TranscriptAnchor::Row { entry: anchored, .. } if anchored == entry)
-    }
-
     fn transcript_message_entry(&self, stable_id: &str) -> Option<usize> {
         self.entries
             .iter()
             .position(|entry| entry.message_id.as_deref() == Some(stable_id))
-    }
-
-    pub(super) fn projection_omits_position(&self, position: u64) -> bool {
-        // An older live frontier cannot remove history not observed yet.
-        position > self.latest_seq || self.projection_window.omits_position(position)
-    }
-
-    /// Install history already converted off the event loop. Live identities
-    /// win overlaps; keep loaded entries across gaps, without replacing forms
-    /// or the composer. Same-frontier reads can widen the loaded history.
-    pub fn hydrate_transcript_history(&mut self, snapshot: TranscriptSnapshot) {
-        let position = self.transcript_position();
-        let mut history = Arc::unwrap_or_clone(snapshot.entries);
-        let identities: BTreeSet<_> = self
-            .projection_items
-            .iter()
-            .map(|item| (item.position, Some(item.stable_id.as_str())))
-            .collect();
-        // A canonical item still awaiting local prefix conversion is present,
-        // not removed. Otherwise retain history only in declared omissions.
-        history.retain(|entry| {
-            self.projection_omits_position(entry.start_seq)
-                || identities.contains(&transcript_entry_identity(entry))
-        });
-        self.entries = merge_transcript_history(history, std::mem::take(&mut self.entries));
-        self.retain_loaded_history = true;
-        self.unconverted_prefix = 0;
-        self.prefix_seam = None;
-        self.invalidate_render_cache();
-        self.restore_transcript_position(position);
     }
 
     pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {

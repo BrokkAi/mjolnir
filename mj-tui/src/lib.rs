@@ -260,26 +260,6 @@ impl DashboardAction {
     }
 }
 
-/// A side effect requested by the dashboard.
-/// A local notification navigation request; never persisted or sent to the daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NotificationPosition {
-    Message(String),
-    /// The host is loading enough stored history to contain this located item.
-    History {
-        message_id: String,
-        position: u64,
-    },
-    End,
-    /// Resolve the displayed reply through its captured completion boundary.
-    AgentMessageThrough {
-        card: NotificationCard,
-        ordinal: u64,
-    },
-    /// Wait for the question locator rather than consuming an end anchor.
-    Question(NotificationCard),
-}
-
 /// The daemon-published identity of the card on which an action began.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationCard {
@@ -313,11 +293,6 @@ pub enum DashboardAction {
     },
     NotificationLater {
         card: NotificationCard,
-    },
-    OpenAtMessage {
-        card: NotificationCard,
-        session_id: String,
-        position: NotificationPosition,
     },
     /// Open a session in a new conversation pane beside or under the focused
     /// one. `Horizontal` puts the new pane to the right, `Vertical` below.

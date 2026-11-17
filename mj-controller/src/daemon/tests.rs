@@ -14754,8 +14754,7 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
         .unwrap();
     assert_eq!(count_tail.transcript.first().unwrap().position, 89);
     assert_eq!(count_tail.transcript.last().unwrap().position, 600);
-    // Local navigation observed position 600 and located target 30. The store
-    // advances before its range query; the daemon, not the client, owns the end.
+    // A single stored item can exceed the transport frame boundary.
     let large_text = "x".repeat(MAX_FRAME_BYTES + 128 * 1024);
     for position in 601..=610 {
         history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
@@ -14767,40 +14766,14 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     history.applied_event_ordinal = 610;
     history.applied_event_digest = format!("{:064x}", 610);
     crate::database::save_materialized_session(&history).unwrap();
-    // The actual reply, not just the fixture allocation, exceeds one frame.
     assert!(
-        serde_json::to_vec(&DaemonReply::StoredProjectionRange(Some(Box::new(
-            history.clone()
+        serde_json::to_vec(&DaemonReply::StoredTranscriptItem(Some(Box::new(
+            history.transcript.last().unwrap().as_ref().clone()
         ))))
         .unwrap()
         .len()
             > MAX_FRAME_BYTES
     );
-    let StoredProjectionHistory::Found(range) = client
-        .stored_projection_from_position("notification-history".into(), 22)
-        .await
-        .unwrap()
-    else {
-        panic!("position range must be available");
-    };
-    assert_eq!(range.transcript.first().unwrap().position, 22);
-    assert_eq!(range.transcript.last().unwrap().position, 610);
-    assert!(
-        range
-            .transcript
-            .iter()
-            .any(|item| item.stable_id == "reply-30"),
-        "new stored output cannot push the target outside a position range"
-    );
-    assert!(
-        range
-            .transcript
-            .iter()
-            .eq(history.transcript.iter().filter(|item| item.position >= 22)),
-        "chunk reassembly must preserve all history bodies and positions"
-    );
-    // Single-item bodies use the same chunked transport and can also exceed
-    // a frame. Consume another reply on this connection after the range.
     let StoredTranscriptItem::Found(large) = client
         .stored_transcript_item("notification-history".into(), "reply-610".into())
         .await
@@ -14819,13 +14792,6 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             .await
             .unwrap(),
         StoredTranscriptItem::Unsupported
-    ));
-    assert!(matches!(
-        older
-            .stored_projection_from_position("notification-history".into(), 22)
-            .await
-            .unwrap(),
-        StoredProjectionHistory::Unsupported
     ));
     // No unknown action was sent and no error/reconnect loop was entered.
     // The frozen management operation still works on the same connection.

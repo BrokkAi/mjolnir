@@ -1381,29 +1381,6 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::NotificationLater { .. } => {}
-        DashboardAction::OpenAtMessage {
-            card,
-            session_id,
-            mut position,
-        } => {
-            if let mj_tui::NotificationPosition::AgentMessageThrough { card: captured, .. } =
-                &mut position
-            {
-                *captured = card;
-            }
-            context
-                .notification_positions
-                .insert(session_id.clone(), position);
-            if let Some(workspace_id) = context
-                .dashboard
-                .session_record(&session_id)
-                .map(|session| session.workspace_id.clone())
-            {
-                context.select_workspace(Some(workspace_id));
-            }
-            context.open_chat_session(&session_id);
-            context.dashboard.focus_prompt();
-        }
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }

@@ -30,14 +30,6 @@ pub enum StoredTranscriptItem {
     Unsupported,
 }
 
-/// A stored history range, or a terminal compatibility/missing result.
-#[derive(Debug)]
-pub enum StoredProjectionHistory {
-    Found(Box<MaterializedSession>),
-    Missing,
-    Unsupported,
-}
-
 /// Durable terminal results for caller-owned startup prompt identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -1042,14 +1034,10 @@ pub enum DaemonAction {
     },
     /// Mount history and remembered container sizes.
     StoredSessionMetadata,
-    /// One stored projection window: either the last `items` entries, or
-    /// everything from `start_position` through its database snapshot's end.
+    /// The last `items` entries of a stored projection.
     StoredProjectionTail {
         session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        items: Option<usize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        start_position: Option<u64>,
+        items: usize,
     },
     /// One stored transcript item, addressed by its stable identity.
     StoredTranscriptItem {
@@ -1407,11 +1395,6 @@ pub enum DaemonReply {
         #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
         Option<Box<MaterializedSession>>,
     ),
-    /// Protocol-103 start-position ranges may outgrow a frame.
-    StoredProjectionRange(
-        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
-        Option<Box<MaterializedSession>>,
-    ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
     StoredTranscriptItem(Option<Box<TranscriptItem>>),
     SavedSetup(Box<Config>),
@@ -1462,7 +1445,6 @@ impl DaemonReply {
                 | Self::DashboardStartup(_)
                 | Self::RuntimeChanges(_)
                 | Self::SessionTail(_)
-                | Self::StoredProjectionRange(_)
                 | Self::StoredTranscriptItem(_)
                 | Self::ResumeCandidates(_)
         )
@@ -2967,52 +2949,12 @@ impl DaemonClient {
         session_id: String,
         items: usize,
     ) -> Result<Option<MaterializedSession>> {
-        self.stored_projection_window(session_id, Some(items), None)
-            .await
-    }
-
-    /// The daemon chooses the end on the same snapshot as the start-position
-    /// query, so activity after the client's last view cannot omit the target.
-    pub async fn stored_projection_from_position(
-        &mut self,
-        session_id: String,
-        start_position: u64,
-    ) -> Result<StoredProjectionHistory> {
-        if self.metadata.protocol_version < STORED_TRANSCRIPT_READ_PROTOCOL {
-            return Ok(StoredProjectionHistory::Unsupported);
-        }
-        Ok(
-            match self
-                .stored_projection_window(session_id, None, Some(start_position))
-                .await?
-            {
-                Some(history) => StoredProjectionHistory::Found(Box::new(history)),
-                None => StoredProjectionHistory::Missing,
-            },
-        )
-    }
-
-    async fn stored_projection_window(
-        &mut self,
-        session_id: String,
-        items: Option<usize>,
-        start_position: Option<u64>,
-    ) -> Result<Option<MaterializedSession>> {
         match self
-            .request(DaemonAction::StoredProjectionTail {
-                session_id,
-                items,
-                start_position,
-            })
+            .request(DaemonAction::StoredProjectionTail { session_id, items })
             .await?
         {
-            DaemonReply::StoredProjectionTail(tail) if start_position.is_none() => {
-                Ok(tail.map(|tail| *tail))
-            }
-            DaemonReply::StoredProjectionRange(tail) if start_position.is_some() => {
-                Ok(tail.map(|tail| *tail))
-            }
-            reply => bail!("unexpected stored projection window reply {reply:?}"),
+            DaemonReply::StoredProjectionTail(tail) => Ok(tail.map(|tail| *tail)),
+            reply => bail!("unexpected stored projection reply {reply:?}"),
         }
     }
 
@@ -3721,11 +3663,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // schedule; the daemon answers one all-workspaces draft listing.
 // Version 101: the daemon answers the capacity service's per-host readings.
 // Version 102: review views carry the writing_brief phase and brief-writer role.
-// Version 103: indexed item and start-position history reads for notifications;
-// start-position range and item replies participate in chunked transport;
-// legacy count-mode replies remain unchunked.
+// Version 103: indexed single-item reads for notification text use chunked
+// replies; legacy count-mode stored projection tails remain unchunked.
 pub const PROTOCOL_VERSION: u32 = 103;
-/// The first protocol with stored item and start-position history reads.
+/// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 103;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.

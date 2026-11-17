@@ -40,9 +40,9 @@
 │                                      ││? Newest question · hel · age unknown                                         │
 │                                      ││Which approach should we take?                                                │
 │                                      ││The question stays here until you answer or clear it.                         │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (1)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (1)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-d clear & next · l later · Enter message · c clear all ! · ↑ scroll · Tab pane │ ctrl+b then g sessions · : / ? palette
+d clear & next · l later · c clear all ! · ↑ scroll · Tab pane │ ctrl+b then g sessions · o next (?2) · : / ? palette
 open Rename action: None
 === Rename modal over dashboard (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮

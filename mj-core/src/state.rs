@@ -642,12 +642,8 @@ pub struct ProjectionWindow {
     /// Clients consume served attention rather than this daemon-local fact.
     #[serde(skip)]
     pub latest_unread_event_ordinal: Option<u64>,
-    /// Excluded transcript items, including trim gaps. Zero for a whole projection.
+    /// Transcript items before the window. Zero when the projection is whole.
     pub omitted_items: usize,
-    /// Position intervals deliberately excluded by the projection owner.
-    /// Half-open and normalized; holes within covered turns are removals.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub omitted_ranges: Vec<std::ops::Range<u64>>,
     /// The title derived from the first user message.
     pub provisional_title: Option<String>,
     /// Position of the newest turn start — a user message or the marker for a
@@ -657,62 +653,8 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
-    /// Coverage is declared by selection/trimming, never inferred by readers
-    /// from missing transcript identities.
-    pub fn omits_position(&self, position: u64) -> bool {
-        let index = self
-            .omitted_ranges
-            .partition_point(|range| range.end <= position);
-        self.omitted_ranges
-            .get(index)
-            .is_some_and(|range| range.contains(&position))
-    }
-
-    pub fn omit_ranges(&mut self, ranges: impl IntoIterator<Item = std::ops::Range<u64>>) {
-        let mut all = std::mem::take(&mut self.omitted_ranges);
-        all.extend(ranges);
-        // Valid transcript positions are positive, regardless of producer.
-        all.retain_mut(|range| {
-            range.start = range.start.max(1);
-            range.start < range.end
-        });
-        all.sort_by_key(|range| range.start);
-        for range in all {
-            if let Some(last) = self.omitted_ranges.last_mut()
-                && range.start <= last.end
-            {
-                last.end = last.end.max(range.end);
-            } else {
-                self.omitted_ranges.push(range);
-            }
-        }
-    }
-
-    fn cover_positions(&mut self, positions: impl Iterator<Item = u64>) {
-        let positions: BTreeSet<_> = positions.collect();
-        let mut omitted = Vec::new();
-        for range in self.omitted_ranges.drain(..) {
-            let mut start = range.start;
-            for &position in positions.range(range.clone()) {
-                if start < position {
-                    omitted.push(start..position);
-                }
-                start = position.saturating_add(1);
-            }
-            if start < range.end {
-                omitted.push(start..range.end);
-            }
-        }
-        self.omitted_ranges = omitted;
-    }
-
     /// Keep the tail and complete turns containing unsettled content.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
-        // Restoring the whole canonical projection ends every earlier omission,
-        // including holes at positions the canonical projection removed.
-        if self.omitted_items == 0 {
-            self.omitted_ranges.clear();
-        }
         let observed = Self::of(session);
         self.latest_unread_event_ordinal = self
             .latest_unread_event_ordinal
@@ -761,26 +703,14 @@ impl ProjectionWindow {
             start = end;
         }
         let mut index = 0;
-        let mut omitted_start = None;
-        let mut omitted = Vec::new();
-        session.transcript.retain(|item| {
+        session.transcript.retain(|_| {
             let retain = index >= cut || keep[index];
-            if !retain && omitted_start.is_none() {
-                omitted_start = Some(if index == 0 { 0 } else { item.position });
-            }
-            if retain && let Some(start) = omitted_start.take() {
-                omitted.push(start..item.position);
-            }
             index += 1;
             if !retain {
                 self.omitted_items += 1;
             }
             retain
         });
-        self.omit_ranges(omitted);
-        // A referenced historical item may have been loaded into an earlier
-        // omission before this trim. Its retained position is covered again.
-        self.cover_positions(session.transcript.iter().map(|item| item.position));
     }
 
     /// The window of a projection that omits nothing.
@@ -795,7 +725,6 @@ impl ProjectionWindow {
                 .chain(session.interruption_event_ordinals())
                 .max(),
             omitted_items: 0,
-            omitted_ranges: Vec::new(),
             provisional_title: session.transcript.iter().find_map(|item| {
                 if !item.is_user_prompt() {
                     return None;

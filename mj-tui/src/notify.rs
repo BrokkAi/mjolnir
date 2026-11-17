@@ -213,94 +213,6 @@ impl DashboardState {
         }
     }
 
-    /// The message identity used by both the card and delayed host navigation.
-    pub fn notification_position(
-        &self,
-        session_id: &str,
-        level: AttentionLevel,
-    ) -> crate::NotificationPosition {
-        use crate::NotificationPosition;
-        let holder = self.notification_content_session(session_id, level);
-        let detail = self.session_details.get(&holder);
-        let message_id = match level {
-            AttentionLevel::Waiting => detail
-                .filter(|detail| detail.pending_elicitations.is_empty())
-                .and_then(|detail| detail.question_message.clone()),
-            AttentionLevel::Important => {
-                let card = crate::NotificationCard {
-                    session_id: session_id.to_owned(),
-                    target: self.notification_dismissal_target(session_id),
-                };
-                let ordinal = match card.target {
-                    Some(mj_core::attention::NotificationDismissal::ReadThrough(ordinal)) => {
-                        ordinal
-                    }
-                    _ => detail
-                        .and_then(|detail| detail.materialized_applied_event_ordinal)
-                        .unwrap_or(0),
-                };
-                return self.resolve_notification_position(
-                    session_id,
-                    &NotificationPosition::AgentMessageThrough { card, ordinal },
-                );
-            }
-            _ => None,
-        };
-        message_id.map_or_else(
-            || {
-                if level == AttentionLevel::Waiting
-                    && detail.is_none_or(|detail| detail.pending_elicitations.is_empty())
-                {
-                    NotificationPosition::Question(crate::NotificationCard {
-                        session_id: session_id.to_owned(),
-                        target: self.notification_dismissal_target(session_id),
-                    })
-                } else {
-                    NotificationPosition::End
-                }
-            },
-            NotificationPosition::Message,
-        )
-    }
-
-    /// Keep pending navigation tied to the request that was actually opened.
-    pub fn resolve_notification_position(
-        &self,
-        _session_id: &str,
-        target: &crate::NotificationPosition,
-    ) -> crate::NotificationPosition {
-        use crate::NotificationPosition;
-        match target {
-            NotificationPosition::AgentMessageThrough { card, ordinal } => {
-                let Some(detail) = self.session_details.get(&card.session_id).filter(|detail| {
-                    detail.transcript_hydration == crate::ingest::TranscriptHydration::Ready
-                }) else {
-                    return target.clone();
-                };
-                // A newer reply must not retarget the card that began this jump.
-                detail
-                    .projection
-                    .transcript
-                    .iter()
-                    .rev()
-                    .find_map(|item| {
-                        (item.position <= *ordinal
-                            && matches!(&item.body, mj_core::state::TranscriptBody::Agent { chunks, .. }
-                                if !mj_core::transcript::materialized_chunks_text(chunks).trim().is_empty()))
-                        .then(|| NotificationPosition::Message(item.stable_id.clone()))
-                    })
-                    .unwrap_or(NotificationPosition::End)
-            }
-            NotificationPosition::Question(card)
-                if self.notification_dismissal_target(&card.session_id) == card.target =>
-            {
-                self.notification_position(&card.session_id, AttentionLevel::Waiting)
-            }
-            NotificationPosition::Question(_) => NotificationPosition::End,
-            other => other.clone(),
-        }
-    }
-
     pub(crate) fn notification_card_text(&self, session_id: &str, level: AttentionLevel) -> String {
         let holder = self.notification_content_session(session_id, level);
         let detail = self.session_details.get(&holder);
@@ -315,17 +227,13 @@ impl DashboardState {
         if loading && missing_content {
             "loading…".to_owned()
         } else {
-            self.notification_message(session_id, level).0
+            self.notification_message(session_id, level)
         }
     }
 
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
-    pub(crate) fn notification_message(
-        &self,
-        session_id: &str,
-        level: AttentionLevel,
-    ) -> (String, Option<String>) {
+    pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
         let holder = self.notification_content_session(session_id, level);
         let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
@@ -335,7 +243,7 @@ impl DashboardState {
                     detail.question_message.as_deref() == Some(read.stable_id.as_str())
                 })
         });
-        let text = match level {
+        match level {
             AttentionLevel::Waiting => detail
                 .and_then(|detail| detail.pending_elicitations.last())
                 .map(|request| request.message.clone())
@@ -394,16 +302,11 @@ impl DashboardState {
                 .and_then(|detail| detail.last_agent_message.as_deref())
                 .map(str::to_owned)
                 .unwrap_or_else(|| "Finished".to_owned()),
-        };
-        let message_id = match self.notification_position(session_id, level) {
-            crate::NotificationPosition::Message(id) => Some(id),
-            _ => None,
-        };
-        (text, message_id)
+        }
     }
 
     fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
-        let (text, _) = self.notification_message(session_id, level);
+        let text = self.notification_message(session_id, level);
         let line = text.lines().next().unwrap_or_default().trim();
         let mut body = line.chars().take(120).collect::<String>();
         if line.chars().count() > 120 {

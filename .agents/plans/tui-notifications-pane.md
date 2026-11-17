@@ -5,18 +5,16 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 ## Purpose / Big Picture
 
-In the Mjolnir (`mj`) terminal dashboard (the TUI), every session row carries an attention glyph. `?` means the agent needs the user's input. It stays until the user answers or dismisses it. `!` means the agent delivered something the user should read, and it clears when the user views it. When many sessions are open, the user has to scan the session list, open each session, and scroll back to find the message that needs them. Questions are often buried in long replies, or in an earlier reply.
+The Notifications pane shows the question or reply that needs attention without requiring a search through session history. It lists managed parent sessions across workspaces, resolves child-originated requests through the existing form-holder helper, and fetches one buried question by stable id when needed. Text is shared with host notifications and resolved lazily for the displayed card. Clear & Next dismisses the captured daemon target, Later defers that exact card locally, and Clear all ! dismisses only Important entries. The pane does not navigate the transcript; Enter has no action here. Notifications size and Later order are process-local.
 
-After this change, the dashboard has a bordered **Notifications** pane. It shows one card at a time from a stack of every session whose attention is `?` or `!`, and each card shows the message that needs the user. The user works through the stack with four actions:
-- **Clear & Next** dismisses this notification and shows the next card.
-- **Later** moves this card to the back of the stack and changes nothing else.
-- **Go To Message** opens that session scrolled to the message, with the composer focused.
-- **Clear All !** dismisses every `!` card at once and leaves the `?` cards.
-
-To see it working, start an isolated instance with a session that ends a turn by asking a question, open the dashboard, and focus the Notifications pane. The card shows the question. Clear & Next removes it, and the glyph on the session row disappears.
-
+The user removed Go To Message on 2026-11-17. Earlier navigation and history-merge notes below record superseded implementation history, not the current design.
 
 ## Progress
+
+- [x] Restore this round's uncommitted Earlier-messages-reader experiment to HEAD 428c8f9f0 before implementing the user's replacement decision.
+- [x] Remove Go To Message, its Enter binding/button/footer, pending navigation state, summary-boundary/locator navigation, stored-range reads, loaded-history merging and omission metadata. Preserve one-item question text reads, legacy count tails and Clear/Later identity.
+- [x] Delete the CLI navigation test and retained-history gap/removal extensions; adjust notification state and read-owner tests, retain the one-item transport integration and legacy unchunked count assertion.
+- [x] Twenty unique affected tests passed, including four reviewed golden updates. Dev/all-targets clippy passed for all six touched crates with warnings denied. No commit; parent runs boundary suites.
 
 - [x] 11619f2aa issue #2: capture the displayed Important card's ReadThrough boundary and identity in pending navigation; resolve the newest nonempty agent message at or before that boundary, retaining the captured card in the CLI action path.
 - [x] Extend the existing CLI navigation regression: summary A, capture Go To, then hydrate newer reply B; navigation must anchor A while a newly opened card targets B.
@@ -71,6 +69,8 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Surprises & Discoveries
 
+The abandoned reader experiment was fully restored before this removal. Removing Go To also removes the second transcript input: ChatState again derives its entries only from the live projection, with its ordinary asynchronous prefix conversion. No missing-entry reconciliation or extra coverage metadata remains necessary. The card's one-item read remains independent of chat entries and still provides buried question text.
+
 Summary-only navigation previously saved a query for the latest agent message, rather than the displayed reply's boundary. That query could resolve against a later projection. The existing daemon-published ReadThrough ordinal supplies the immutable completion boundary without extending the summary wire shape; the pending position now carries that boundary and the original NotificationCard. When no daemon dismissal target exists, the already-loaded summary frontier supplies the boundary at capture time.
 
 The live snapshot already carries ProjectionWindow, but the chat discarded it; the old metadata carried only an omitted-item count and could not distinguish trim gaps from removals. ProjectionWindow now publishes normalized half-open omission intervals, rebuilt at the database actor reader from its selected turn ranges and extended by actual trims/feed clipping. Within covered positions, a missing identity is authoritative removal. The chat also retains its canonical input handles so rows awaiting local prefix conversion are not mistaken for removals while a stored history read completes. The terminal regression drives the existing transcript projector's consumption path; no terminal-content inference or special fallback-tool rule is added to the chat.
@@ -124,6 +124,9 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: User decision 2026-11-17: drop Go To Message.
+  Rationale: reaching old messages needed either a history merge that failed six review rounds or a modal Earlier messages reader the user found not useful ("that's not very useful"). Remove navigation and all machinery that existed only for it. A buried question's full text still shows on the card through the protocol-103 one-item read. Clear and Later keep their captured card identity; legacy count-mode StoredProjectionTail stays unchanged and unchunked.
 
 - Decision: resolve pending Important navigation to the newest nonempty agent message at or before the captured ReadThrough boundary, preserving NotificationCard through the CLI; never recompute the boundary from the current card after hydration.
   Rationale: the parent accepted issue #2 and explicitly allowed boundary-based resolution. This keeps message selection in the shared notification-position owner and needs no daemon, schema or persisted-format change. Issue #1 is deferred; do not touch history merge or prefix hydration for this round.
@@ -215,6 +218,8 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 ## Outcomes & Retrospective
 
+User decision 2026-11-17 to drop Go To Message is implemented without committing. Removed its Enter action, button/footer, pending CLI navigation, summary-boundary and locator wait, start-position stored reads, history merge, omission metadata, navigation-only chat methods and tests. The rejected reader experiment was first restored to HEAD 428c8f9f0; the existing Earlier messages reader is unchanged. Buried question text still uses the indexed, chunked protocol-103 one-item read, with existing loading/unavailable states; count-mode StoredProjectionTail retains its shipped request shape and unchunked reply. Clear/Later identity, child request text, cross-workspace hydration, recency, shared attention and pane sizing remain. Twenty unique scoped tests passed: notification/host state (3), prefix (10), window (1), read owner (1), daemon/client integration (1) and four goldens. The integration retains found/missing/Unsupported and actual over-8-MiB item transport plus a legacy count single-frame check. Six-crate dev/all-targets clippy and whitespace checks passed. Only four golden files changed: 33 button rows and one footer row; the shorter footer also reveals the existing next shortcut in newly available width. No card text, age, dialog or height differences. Details, resolved expected-comparison failures, logs and a text capture are in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/drop-goto-report.md` and `drop-goto-pane.txt`. Parent owns boundary-suite validation and committing; no live/default-instance operations or schema/persisted-format changes.
+
 The accepted 11619f2aa issue #2 is fixed without committing. Summary-only Important navigation now captures NotificationCard plus its ReadThrough completion boundary, retaining both in the CLI pending-position path. The shared notification-position owner resolves the newest nonempty agent message at or before that captured boundary after hydration; a newer reply cannot retarget it. The existing CLI regression captures summary A (position 3), then receives reply B (position 4) and its updated dismissal target, and verifies the pending jump anchors A while a fresh card targets B. The focused regression (one test) and dev/all-targets clippy for brokk-mj-tui and brokk-mjolnir passed outside the sandbox; diff whitespace checks passed. No protocol, schema, summary wire shape or persisted format changed. Issue #1 remains deferred and history merge/prefix hydration code is untouched. Evidence: `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/summary-boundary-fix.md`.
 
 The accepted 64316e6d3 removal finding is fixed without committing. ProjectionWindow now declares normalized omitted position ranges from the trim, SQL selection and client clipping owners. ActiveChat carries that authority into updates; history merges preserve missing entries only in declared omissions or beyond an older live frontier. Covered missing identities are removed, including when a stale stored-history result arrives. Canonical identities awaiting local prefix conversion still count as present. Restoring a complete projection clears earlier omissions. The existing gap regression drives real fallback-terminal creation and ACP replacement, proving the covered fallback disappears while a middle-gap message and its anchor survive; it also checks stale hydration and full-window restoration. Eleven unique scoped tests passed across the initial prefix run and corrected failing-test reruns, plus CLI navigation. Dev/all-targets clippy passed for brokk-mj-chat and brokk-mjolnir. Mechanical fixes: parent-visible helper scope, fixture streaming reset and canonical tool identity, and single-range iterator lint. Evidence and resolved failure logs are in `.mj/agents/6ba3b2b07be9ab739a4e8e4af0412bba/coverage-removals-fix.md`. No mj-transcript source, schema, persisted format, protocol number, golden, or live instance changed.
@@ -259,35 +264,34 @@ Tests: render tests use Ratatui's `TestBackend` (`mj-tui/src/test_support.rs` 75
 
 ## Plan of Work
 
-Milestone 1 builds the model with no rendering. First, move the body-building code in `mj-tui/src/notify.rs` (the `?` and `!` branches, 203-234) into one function that both host notifications and the pane call. It returns the text of the message that needs the user, plus that message's stable id when one is known: the question locator's message for `?`, and the latest agent message for `!`. Then add a small model, in a new module `mj-tui/src/notifications_pane.rs` or near the dashboard state, that derives the entries from the served attention map and the published dismissal targets. Each entry carries the session id, glyph, title, recency, text, message id and dismissal target. Exclude managed sub-agents, as the web view does. A `?` with no dismissal target, such as a pending form, is still shown, but Clear is disabled with a short reason. The model also keeps the pane's own "Later" order, which lives only in memory for the TUI process. Order entries by band (`?` then `!`), then newest first, then title, then id. Test the transitions directly: Clear & Next starts the session's dismissal and moves the selection to the next entry; Later rotates; a failed dismissal brings the card back with its error; Clear All ! starts dismissals for `!` entries only.
+The current pane uses one shared notification-text owner, existing cross-workspace background summary hydration, and a one-item stable-id read under SummaryReads when the displayed question is outside the runtime tail. Render and input handling perform no blocking I/O. Keep the four-pane layout, process-local Notifications sizing, shared presentation_attention and captured Clear/Later gestures. Remove the Go To command and all chat-history navigation and merge additions, including start-position wire modes and omission metadata. Keep the existing Earlier messages reader unchanged; it is not part of this feature.
 
-Milestone 2 adds the pane. Register a Notifications pane kind next to Sessions, Targets and Quota: pane state, size presets, render and focus, so Tab reaches it. Pane-size storage was checked and the parent ruled that Notifications size stays in TUI memory beside the persisted three-pane `PaneSizes`. Do not add a serialized field or change the store/API. Notifications starts at Standard and resets to Standard on TUI restart. One TUI pane-size transition owner enforces the exclusive maximum: maximizing Notifications demotes any persisted maximum, and maximizing a persisted pane demotes Notifications. Stored layouts always remain valid for older readers and writers. Render a bordered block titled "Notifications (n)". It holds the card header (glyph, session title, project, age), the message text, scrollable inside the card, and a button row and footer hints for the four actions. Bind keys in the command registry with pane scope; choose keys that do not collide, and list them in the footer. While a dismissal is in flight the card shows "clearing…", and the stack has already advanced. An empty stack shows "Nothing needs you". Wire actions through the existing background dashboard action path; Clear All ! reuses the batch dismissal used by workspace clear.
-
-Milestone 3 makes Go To Message exact. Today an already open chat keeps its position. Add an explicit "open at message" action that forces the position to the given stable id even when the chat is warm, and focuses the composer. If the message id is unknown, the chat opens at its end and says the message could not be located. Viewing a `!` session already clears it through the read cursor, so the stack loses that card on its own.
-
+Extend only existing state and transport tests. Delete navigation-only tests and loaded-history assertions; retain prefix-splicing assertions that apply to the ordinary live chat. Refresh affected render goldens only for the removed button and footer hint, inspecting every diff. Run affected tests and clippy for all touched crates outside the sandbox; the parent owns boundary-suite validation and committing.
 
 ## Concrete Steps
 
-Work from the repository root, `/home/jonathan/Projects/mjolnir/.mj/clones/5201272a9025f4709aabd57b3cdd68e0`.
+From the repository root, run the affected tests outside the sandbox using the dev profile and normal Cargo target directory:
 
-    cargo test -p brokk-mj-tui notifications
-    cargo test -p brokk-mjolnir dashboard
-    cargo clippy -p brokk-mj-tui -p brokk-mjolnir --all-targets -- -D warnings
+    cargo test -p brokk-mj-tui notifications_
+    cargo test -p brokk-mj-tui golden_dashboard_layout_render
+    cargo test -p brokk-mj-tui golden_attention_navigation
+    cargo test -p brokk-mj-tui golden_session_action_menu
+    cargo test -p brokk-mj-tui golden_operator_away_dialog
+    cargo test -p brokk-mj-chat prefix
+    cargo test -p brokk-mj-core projection_window_keeps_whole_turns_and_unsettled_content
+    cargo test -p brokk-mjolnir leaving_a_family_cancels_queued_reads_and_rejects_previous_visits
+    cargo test -p brokk-mj-controller notification_item_read_crosses_the_daemon_client_boundary
+    cargo clippy -p brokk-mj-core -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir --all-targets -- -D warnings
 
-Live check in an isolated instance (never the default instance). Drive the TUI in tmux, with its own MJ_CONFIG_DIR and MJ_DATA_DIR. Start a session that ends with a question, focus the Notifications pane, and exercise each action. Stop the test daemon afterwards with `mj --instance <name> daemon stop`.
-
+The parent runs boundary suites before committing. No additional live check is required for this removal; preserve the earlier isolated-instance evidence as historical validation.
 
 ## Validation and Acceptance
 
-- A golden render shows the pane with a `?` card: header, message text, buttons and footer. Extend an existing render golden rather than adding a family of cases.
-- State tests cover Clear & Next, Later, a dismissal failure returning the card, and Clear All ! leaving `?` cards in place.
-- `cargo test` passes for the touched crates, and clippy is clean for them.
-- In the live check, Clear & Next removes the session's glyph once the daemon accepts the dismissal. Go To Message opens an already open chat at the message, with the composer focused. Clear All ! leaves `?` sessions marked.
-
+Run the existing notification state tests, SummaryReads cancellation/generation regression, daemon/client item integration (found, missing, Unsupported, item beyond 8 MiB, legacy single-frame count tail), and affected live-chat prefix/window tests. Compare the affected layout, attention, menu and operator-away goldens; update only Go To button/hint removals and associated button spacing. Run dev/all-targets clippy with warnings denied for mj-core, mj-client, mj-controller, mj-chat, mj-tui and mj-cli. Do not run boundary suites or commit; the parent will do both. No live/default-instance access is required for this removal.
 
 ## Idempotence and Recovery
 
-The pane changes no daemon state except through the existing dismissal actions, which the daemon validates ("notification is no longer current" is refused). Repeating an action is safe. Reverting the change removes the pane. Saved layouts that contain it must still load in an older TUI, as Milestone 2 requires.
+The pane changes no daemon state except through the existing dismissal actions, which the daemon validates ("notification is no longer current" is refused). Repeating an action is safe. Reverting the change removes the pane. Notifications size and Later ordering reset at process restart; the persisted three-pane sizes remain valid for older clients.
 
 
 ## Artifacts and Notes
@@ -297,7 +301,7 @@ Web reference: `mj-controller/src/web/viewer.js` 1007-1014 (Notifications worksp
 
 ## Interfaces and Dependencies
 
-Use the existing crates and patterns only: Ratatui widgets, the command registry, the dashboard background action path, and `NotificationDismissal` targets. No daemon protocol or schema change is expected; if one becomes necessary, stop and report first. The shared notification text function lives in `mj-tui` and is the only builder of that text.
+Use the existing crates and patterns only: Ratatui widgets, the command registry, the dashboard background action path, and `NotificationDismissal` targets. Protocol 103 retains only the new read-only StoredTranscriptItem operation, using chunked replies; legacy count-mode StoredProjectionTail remains unchunked. No store schema or persisted format changes. The shared notification text function lives in `mj-tui` and is the only builder of that text.
 
 Revision note (2026-11-17): recorded the fixed-column pane-size storage and the required parent decision before implementation, following the assignment's explicit stop condition.
 
@@ -330,3 +334,5 @@ Revision note (2026-11-17): recorded the f7b8ed60b review stop condition and dec
 Revision note (2026-11-17): completed the parent-approved indexed read and captured-card/deferred-question follow-ups. Eight focused tests and four-crate clippy pass; no golden refresh, migration or commit.
 
 Revision note (2026-11-17): fixed 1d2150be0 buried-question Go To by retaining pending navigation until the target is installed and anchored. Existing count-limited tail reads now run under the same generation/cancellation owner. Fifteen focused tests and three-crate clippy pass; no commit.
+
+Revision note (2026-11-17): user removed Go To Message; navigation-only machinery and tests are gone, all 20 scoped tests and six-crate clippy pass, and the pane retains buried question text. No commit.

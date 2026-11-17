@@ -36,7 +36,7 @@
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Waiting, remote:Waiting, done:Unread]
@@ -79,7 +79,7 @@ attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
 
@@ -165,7 +165,7 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││Choose a path                                                                 │
 │                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (0)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
 workspace summary: Some((Waiting, 1))
@@ -209,7 +209,7 @@ workspace badge cells: ?1; marker fg=Rgb(240, 205, 145); failure color=false
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││Choose a path                                                                 │
 │                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (0)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
 workspace summary: Some((Unreachable, 1))
@@ -253,7 +253,7 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││Choose a path                                                                 │
 │                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (0)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
 workspace summary: Some((Failed, 1))
@@ -340,7 +340,7 @@ workspace summary: None; badge: absent
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: true
@@ -383,7 +383,7 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "other" }
@@ -426,7 +426,7 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("remote")
@@ -469,7 +469,7 @@ selected: Some("remote")
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "default" }
@@ -512,7 +512,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("asks")
@@ -555,7 +555,7 @@ selected: Some("asks")
 │                                            ││? ACP pretty name · asks · age unknown                                                      │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks")
@@ -598,7 +598,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││? ACP pretty name · remote · age unknown                                                    │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?3) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [done:Waiting, asks:Waiting, remote:Waiting]
@@ -650,7 +650,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 
@@ -692,7 +692,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 
@@ -734,7 +734,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││? ACP pretty name · remote · <age>                                                          │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; folded projects: {}
@@ -820,7 +820,7 @@ action: None; notice: Some("Nothing is waiting for you.")
 │                                                                ││? ACP pretty name · asks · <age>                                                                                                    │
 │                                                                ││Choose a path                                                                                                                       │
 │                                                                ││Clear unavailable: answer this request in the session.                                                                              │
-│                                                                ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                                                             │
+│                                                                ││ Clear & Next   Later   Clear all ! (0)                                                                                             │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
@@ -906,7 +906,7 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││Choose a path                                                                 │
 │                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (0)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
 workspace tabs: │ Default ?1  Other ?1               ≡ ││                                                                              │
@@ -949,7 +949,7 @@ workspace tabs: │ Default ?1  Other ?1               ≡ ││               
 │                                      ││? ACP pretty name · asks · <age>                                              │
 │                                      ││Choose a path                                                                 │
 │                                      ││Clear unavailable: answer this request in the session.                        │
-│                                      ││ Clear & Next   Later   Go To Message   Clear all ! (0)                       │
+│                                      ││ Clear & Next   Later   Clear all ! (0)                                       │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
 folded heading: │[2] done ✓1 ──────────────────────────││                                                                              │
@@ -992,7 +992,7 @@ folded heading: │[2] done ✓1 ───────────────�
 │                  ││? ACP pretty name · asks · <age>                                                                  │
 │                  ││Choose a path                                                                                     │
 │                  ││Clear unavailable: answer this request in the session.                                            │
-│                  ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                           │
+│                  ││ Clear & Next   Later   Clear all ! (0)                                                           │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · : / ? palette
 
@@ -1034,7 +1034,7 @@ Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u w
 │                  ││? ACP pretty name · asks · <age>                                                                  │
 │                  ││Choose a path                                                                                     │
 │                  ││Clear unavailable: answer this request in the session.                                            │
-│                  ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                           │
+│                  ││ Clear & Next   Later   Clear all ! (0)                                                           │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (×1) · b panes · q detach · u web · shift+r refresh · : / ? palette
 attention dropdown action: SelectWorkspace { workspace_id: "other" }
@@ -1077,7 +1077,7 @@ attention dropdown action: SelectWorkspace { workspace_id: "other" }
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 priority session ids: ["asks", "done", "quiet"]; project headings: false
@@ -1120,7 +1120,7 @@ priority session ids: ["asks", "done", "quiet"]; project headings: false
 │                                            ││? ACP pretty name · asks · <age>                                                            │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Projects are not grouped in priority order; see Settings → Advanced.
 notice: Some("Projects are not grouped in priority order; see Settings → Advanced."); collapsed projects: {}
@@ -1163,7 +1163,7 @@ notice: Some("Projects are not grouped in priority order; see Settings → Advan
 │                                            ││? ACP pretty name · remote · <age>                                                          │
 │                                            ││Choose a path                                                                               │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Projects are not grouped in priority order; see Settings → Advanced.
 priority session ids after answer: ["done", "quiet", "asks"]
@@ -1207,7 +1207,7 @@ Important notices: [Notification { session_id: "done", session_title: "ACP prett
 │                                            ││! ACP pretty name · done · <age>                                                            │
 │                                            ││Review the deployment result                                                                │
 │                                            ││Clear unavailable: answer this request in the session.                                      │
-│                                            ││ Clear & Next   Later   Go To Message   Clear all ! (0)                                     │
+│                                            ││ Clear & Next   Later   Clear all ! (0)                                                     │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!1) · b panes · q detach · : / ? palette
 next Important action: Open { session_id: "done" }
