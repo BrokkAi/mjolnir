@@ -945,10 +945,12 @@ pub(super) fn install_worker_profile_files(
                 (launch_config, "launch.json"),
                 (ownership, "ownership.json"),
             ] {
-                execute_checked(
+                upload_worker_file(
                     executor,
-                    crate::targets::scp_upload(ssh, source, &format!("{upload}/{name}"), false)
-                        .purpose("upload remote container worker file"),
+                    ssh,
+                    source,
+                    &format!("{upload}/{name}"),
+                    "upload remote container worker file",
                 )?;
             }
             upload_profile_archive(
@@ -1101,6 +1103,35 @@ pub(super) fn clear_profile_configuration(
     Ok(())
 }
 
+/// Stream a file into private staging, where the caller owns partial-file
+/// cleanup. OpenSSH's scp reads its input itself, outside the lifecycle's byte
+/// accounting. Carry the bytes on the same supervised stdin path as profiles.
+pub(super) fn upload_worker_file(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+    purpose: &str,
+) -> Result<()> {
+    let command = targets::ssh_command(
+        SshTrafficClass::Bulk,
+        ssh,
+        [
+            "sh",
+            "-c",
+            "umask 077; exec cat > \"$1\"",
+            "mj-upload",
+            destination,
+        ],
+    )
+    .purpose(purpose);
+    let mut input = std::fs::File::open(source)
+        .with_context(|| format!("open worker upload {}", source.display()))?;
+    let output = executor.execute_with_stdin(&command, &mut input)?;
+    targets::checked_command_output(&command, output)?;
+    Ok(())
+}
+
 /// Install the session-private SSH metadata; binary installation is shared
 /// with creation, upgrades and recovery in `install_worker_binary`.
 #[allow(clippy::too_many_arguments)]
@@ -1127,11 +1158,7 @@ pub(super) fn install_worker_over_ssh(
         (launch_config, format!("{worker_root}/launch.json")),
         (ownership, format!("{worker_root}/ownership.json")),
     ] {
-        execute_checked(
-            executor,
-            crate::targets::scp_upload(ssh, source, &remote, false)
-                .purpose("upload SSH worker file"),
-        )?;
+        upload_worker_file(executor, ssh, source, &remote, "upload SSH worker file")?;
     }
     let incoming_profile = format!("{profile_home}.incoming");
     upload_profile_archive(

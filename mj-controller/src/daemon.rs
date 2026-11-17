@@ -597,6 +597,27 @@ struct StartupQueue {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct LifecycleProgress {
+    last_stage_change: tokio::time::Instant,
+    next_stream: u64,
+    streams: BTreeMap<u64, ActiveStream>,
+}
+
+struct ActiveStream {
+    purpose: String,
+    last_byte: tokio::time::Instant,
+}
+
+impl LifecycleProgress {
+    fn new() -> Self {
+        Self {
+            last_stage_change: tokio::time::Instant::now(),
+            next_stream: 0,
+            streams: BTreeMap::new(),
+        }
+    }
+}
+
 struct ActiveLifecycle {
     origin: lifecycle::LifecycleOrigin,
     move_operation_id: Option<String>,
@@ -610,9 +631,7 @@ struct ActiveLifecycle {
     kind: LifecycleKind,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
-    /// When a stage last started or finished: the one record of whether this
-    /// operation is making progress. Set by `change_lifecycle_stage` only.
-    last_stage_change: tokio::time::Instant,
+    progress: LifecycleProgress,
     /// The workspace a resume is claiming before its durable record changes.
     /// Workspace deletion consults this so it cannot race the claim.
     resume_workspace_id: Option<String>,

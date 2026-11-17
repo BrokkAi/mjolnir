@@ -1063,7 +1063,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: Some("workspace-a".into()),
             resume_destination: None,
             notice: None,
@@ -1094,7 +1094,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3033,7 +3033,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
             kind,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3087,7 +3087,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             kind: LifecycleKind::Suspend,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3936,6 +3936,89 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     check_progress(&state, bound).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(check_progress(&state, bound).is_err());
+}
+
+// Hard-won: #1583: a reviewer Create cancelled a profile stream that was still moving bytes.
+#[tokio::test(start_paused = true)]
+async fn a_create_watches_each_stream_for_byte_progress() {
+    use mj_core::targets::CommandActivity;
+
+    let state = test_runtime_state();
+    start_idle_create(&state).await;
+    tokio::task::yield_now().await;
+    let operation_id = state.owner().lifecycle["session-1"].operation_id.clone();
+    let profile = state
+        .allocate_lifecycle_stream_id("session-1", &operation_id)
+        .unwrap();
+    let worker = state
+        .allocate_lifecycle_stream_id("session-1", &operation_id)
+        .unwrap();
+    let report = |id, purpose, activity| {
+        state.record_lifecycle_command_activity("session-1", &operation_id, id, purpose, activity);
+    };
+    let send_profile = "send profile content";
+    let upload_worker = "stage replacement Mjolnir worker";
+    let bound = create::CREATE_STALL_BOUND;
+    let half = bound / 2;
+
+    // The stream has to queue for SSH first. Its idle clock begins only after
+    // admission, even when queueing takes more than ten minutes.
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageStarted(ProvisionStage::WaitingForSshConnection),
+    );
+    tokio::time::advance(bound * 2).await;
+    check_progress(&state, bound).unwrap();
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageFinished(ProvisionStage::WaitingForSshConnection),
+    );
+    report(profile, send_profile, CommandActivity::StdinStarted);
+    for _ in 0..4 {
+        tokio::time::advance(half).await;
+        report(
+            profile,
+            send_profile,
+            CommandActivity::StdinBytes(32 * 1024),
+        );
+        check_progress(&state, bound).expect("the profile is still transferring");
+    }
+
+    // A second stream stops moving bytes. Profile bytes and a queue on
+    // another lane must not hide the stalled worker upload.
+    report(worker, upload_worker, CommandActivity::StdinStarted);
+    tokio::time::advance(half).await;
+    report(
+        worker,
+        upload_worker,
+        CommandActivity::StdinBytes(16 * 1024),
+    );
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StdinBytes(32 * 1024),
+    );
+    tokio::time::advance(half).await;
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StdinBytes(32 * 1024),
+    );
+    check_progress(&state, bound).unwrap();
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageStarted(ProvisionStage::WaitingForWorkerStore),
+    );
+    tokio::time::advance(half).await;
+    let error = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(
+        error.contains("stage replacement Mjolnir worker moved no bytes for 600 s"),
+        "{error}"
+    );
+    assert!(error.contains("its Create was cancelled"), "{error}");
 }
 
 /// Harness preparation reports its own progress and failure, and one step (a
@@ -10918,7 +11001,6 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
-                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };
@@ -11356,7 +11438,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
             kind: LifecycleKind::Move,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,

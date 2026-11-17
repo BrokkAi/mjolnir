@@ -412,16 +412,8 @@ pub(super) fn install_worker_binary_at(
         |root| format!("{root}/{name}"),
     );
     let Some((source, digest)) = binary else {
-        super::upgrade::execute_worker_upload_plan(
-            executor,
-            &super::upgrade::worker_binary_upload_plan(
-                locator,
-                session_id,
-                worker,
-                destination,
-                None,
-            )?,
-        )?;
+        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
+            .execute(executor)?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
         collect_if_due(executor, locator, session_id, &store, None);
@@ -465,6 +457,9 @@ fi
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$temporary");; *) actual=$(sha256sum -- "$temporary");; esac
 [ "${actual%% *}" = "$4" ] || { echo 'shared worker digest mismatch' >&2; exit 77; }
 promote_worker_binary "$temporary" "$destination"
+# This build serves every control subcommand, so a staged control worker has
+# nothing left to do; its link would only pin a store entry.
+case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
 "#,
                 &[&cached, &temporary, destination, &digest, mode],
                 "link shared Mjolnir worker into session",
@@ -639,6 +634,26 @@ fn transfer_binary(
     worker: &WorkerInstall,
     destination: &str,
 ) -> Result<()> {
+    if let targets::TargetLocator::AwsEc2 { ssh, .. } | targets::TargetLocator::SshBare { ssh, .. } =
+        locator
+        && let WorkerInstall::Host(source) = worker
+    {
+        // This path already belongs to the private store upload. Stream the
+        // worker without the deadline reserved for the surrounding commands.
+        super::install::upload_worker_file(
+            &targets::WithoutDeadline::new(executor),
+            ssh,
+            source,
+            destination,
+            "stage replacement Mjolnir worker",
+        )?;
+        execute_checked(
+            executor,
+            targets::ssh_command(SshTrafficClass::Control, ssh, ["chmod", "700", destination])
+                .purpose("make replaced Mjolnir worker executable"),
+        )?;
+        return Ok(());
+    }
     let remote = match locator {
         targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
@@ -674,16 +689,15 @@ fn transfer_binary(
                 .purpose("create private host worker transport"),
             )?;
             install_worker_binary_at(executor, &host, session_id, worker, &pin, None)?;
-            super::upgrade::execute_worker_upload_plan(
-                executor,
-                &super::upgrade::worker_binary_upload_plan(
-                    locator,
-                    session_id,
-                    worker,
-                    destination,
-                    Some(&pin),
-                )?,
-            )
+            super::upgrade::worker_binary_upload_plan(
+                locator,
+                session_id,
+                worker,
+                destination,
+                Some(&pin),
+            )?
+            .execute(executor)?;
+            Ok(())
         })();
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
@@ -699,16 +713,9 @@ fn transfer_binary(
         }
         result
     } else {
-        super::upgrade::execute_worker_upload_plan(
-            executor,
-            &super::upgrade::worker_binary_upload_plan(
-                locator,
-                session_id,
-                worker,
-                destination,
-                None,
-            )?,
-        )
+        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
+            .execute(executor)?;
+        Ok(())
     }
 }
 

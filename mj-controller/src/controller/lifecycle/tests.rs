@@ -330,10 +330,9 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         vec![SessionState::Destroying, SessionState::Stopped]
     );
     let commands = executor.commands.lock().unwrap().clone();
-    assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].purpose, "check the control worker");
-    assert_eq!(commands[1].purpose, "kill retired Mjolnir worker daemon");
-    assert!(commands[2].args.iter().any(|arg| arg.contains("rm -rf")));
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker daemon");
+    assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
     assert!(stopped.target.is_none());
@@ -1088,11 +1087,6 @@ impl CommandExecutor for RootProbeExecutor {
                 stdout: format!("{}\n", self.worker).into_bytes(),
                 stderr: Vec::new(),
             }),
-            "check the control worker" => Ok(CommandOutput {
-                status: 0,
-                stdout: b"present\n".to_vec(),
-                stderr: Vec::new(),
-            }),
             "probe Mjolnir worker root" | "stop Mjolnir worker daemon" => {
                 ProcessExecutor.execute(command)
             }
@@ -1141,7 +1135,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         .await
         .unwrap_err();
     assert_eq!(
-        unreachable.purposes.lock().unwrap()[1],
+        unreachable.purposes.lock().unwrap()[0],
         "probe Mjolnir worker daemon liveness",
         "a missing worker binary is a dead relay, so the close judges the worker next"
     );
@@ -1179,12 +1173,9 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     assert_eq!(
         *answered.purposes.lock().unwrap(),
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1220,8 +1211,8 @@ async fn close_child_with_partial_root(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // Control commands run this build's control worker in the root; this
-    // stand-in answers them.
+    // Control commands run a control worker staged in the root; this stand-in
+    // answers them.
     #[cfg(unix)]
     {
         let control =
@@ -1312,12 +1303,9 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     assert_eq!(
         purposes,
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1342,9 +1330,8 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
         return;
     };
     assert_eq!(
-        purposes[..3],
+        purposes[..2],
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root"
         ]
@@ -1379,13 +1366,7 @@ async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() 
     };
     // The worker is not confirmed dead, so the close stops at the liveness
     // probe: it neither reads the root nor cleans it up.
-    assert_eq!(
-        purposes,
-        [
-            "check the control worker",
-            "probe Mjolnir worker daemon liveness"
-        ]
-    );
+    assert_eq!(purposes, ["probe Mjolnir worker daemon liveness"]);
     assert!(
         !purposes
             .iter()

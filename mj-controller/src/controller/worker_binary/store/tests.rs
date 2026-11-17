@@ -257,8 +257,7 @@ fn a_gate_wait_outlasts_the_callers_deadline_but_not_a_cancel() {
 // Hard-won: #1577: the upgrade deadline killed a slow worker upload, and the next session restarted it from zero
 #[test]
 fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_keep_it() {
-    // Models an executor whose deadline has already passed: `execute` fails,
-    // `execute_without_deadline` runs.
+    // Record which commands consume the operation deadline.
     struct Expired(std::cell::RefCell<Vec<String>>);
     impl CommandExecutor for Expired {
         fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
@@ -271,26 +270,32 @@ fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_
             &self,
             command: &CommandSpec,
         ) -> anyhow::Result<targets::CommandOutput> {
+            panic!(
+                "only the byte stream may ignore the deadline: {}",
+                command.purpose
+            )
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<targets::CommandOutput> {
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes)?;
+            assert_eq!(bytes, vec![b'x'; 128 * 1024]);
             self.0
                 .borrow_mut()
-                .push(format!("untimed {}", command.program));
+                .push(format!("untimed {}", command.purpose));
             Ok(targets::CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             })
         }
-        fn execute_with_stdin_without_deadline(
-            &self,
-            _: &CommandSpec,
-            _: &mut (dyn std::io::Read + Send),
-        ) -> anyhow::Result<targets::CommandOutput> {
-            unreachable!()
-        }
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<targets::CommandOutput> {
             self.0
                 .borrow_mut()
-                .push(format!("timed {}", command.program));
+                .push(format!("timed {}", command.purpose));
             Ok(targets::CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -298,19 +303,32 @@ fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_
             })
         }
     }
-    let plan = targets::CommandPlan {
-        description: "upload".into(),
-        commands: vec![
-            CommandSpec::new("ssh", ["mkdir"]),
-            CommandSpec::new("scp", ["worker", "host:path"]),
-            CommandSpec::new("ssh", ["mv"]),
-        ],
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("worker");
+    std::fs::write(&file, vec![b'x'; 128 * 1024]).unwrap();
+    let locator = targets::TargetLocator::SshBare {
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: "workspace".into(),
+        worker_id: None,
     };
     let executor = Expired(Default::default());
-    super::upgrade::execute_worker_upload_plan(&executor, &plan).unwrap();
+    transfer_binary(
+        &executor,
+        &locator,
+        "session",
+        &WorkerInstall::Host(file),
+        "store/.upload/hel",
+    )
+    .unwrap();
     assert_eq!(
         *executor.0.borrow(),
-        ["timed ssh", "untimed scp", "timed ssh"]
+        [
+            "untimed stage replacement Mjolnir worker",
+            "timed make replaced Mjolnir worker executable"
+        ]
     );
 }
 
