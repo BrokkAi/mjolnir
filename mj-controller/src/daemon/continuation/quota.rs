@@ -223,12 +223,9 @@ pub(super) async fn prepare(
                 .and_then(|text| crate::quota::message_reset(&text, turn.completed_at_ms))
         });
     let c = &snapshot.operational.continuation;
-    let consumed = c
-        .quota_recovery
-        .as_ref()
-        .filter(|r| r.submitted)
-        .and_then(|r| r.reset_at_ms)
-        .map(|t| t / 1000);
+    let previous = c.quota_recovery.as_ref().filter(|r| r.submitted);
+    let consumed = previous.and_then(|r| r.reset_at_ms).map(|t| t / 1000);
+    let consumed_from_duration = previous.is_some_and(|r| r.retry_from_duration);
     let model = mj_core::acp::AcceptedSessionConfig::from_configuration(
         &snapshot.operational.config,
         &snapshot.operational.config_options,
@@ -243,8 +240,18 @@ pub(super) async fn prepare(
         })
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
-    let reset = crate::quota::retry_deadline(&windows, stated, now_ms / 1000, consumed);
-    let retried = consumed.is_some();
+    let reset = crate::quota::retry_deadline(
+        &windows,
+        stated,
+        now_ms / 1000,
+        consumed,
+        consumed_from_duration,
+    );
+    // The one fact a later refusal needs: whether this retry was set from a
+    // duration the provider stated, which the same limit repeats. An elapsed
+    // duration schedules the retry now, and is still what scheduled it.
+    let retry_from_duration = stated.is_some_and(|stated| stated.relative)
+        && reset == stated.map(|stated| stated.at.max(now_ms / 1000));
     if reset.is_none()
         && let Some(wait) = wait
     {
@@ -267,14 +274,15 @@ pub(super) async fn prepare(
         retry_at_ms,
         notice,
         submitted: false,
+        retry_from_duration,
     };
-    // A duration was read against the retry that followed it and refused
-    // again. A repeat cannot be told from the same limit sliding its reset,
-    // and no reading of the report distinguishes them, so this session does
-    // not retry on one more time. Say so rather than dropping it silently.
-    if retried
+    // The refused retry was itself scheduled from a duration, and the provider
+    // repeated one. Nothing tells that apart from the same limit sliding its
+    // reset, so this session does not retry on it again. Say so rather than
+    // dropping it silently.
+    if consumed_from_duration
         && stated.is_some_and(|stated| stated.relative)
-        && reset != stated.map(|stated| stated.at)
+        && !retry_from_duration
     {
         append_bounded(
             &mut fallback.notice,

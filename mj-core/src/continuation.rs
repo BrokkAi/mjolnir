@@ -81,6 +81,14 @@ pub struct QuotaRecovery {
     pub retry_at_ms: Option<i64>,
     pub notice: String,
     pub submitted: bool,
+    /// This record's retry was scheduled from a duration the provider stated
+    /// ("Resets in 40s") rather than from its quota report. A duration repeats
+    /// on every refusal from the same exhausted limit, so it may schedule one
+    /// retry: the flag is what tells a later refusal whether that one is
+    /// already spent. Absent from records written before it existed, which
+    /// reads as a retry from the report.
+    #[serde(default)]
+    pub retry_from_duration: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

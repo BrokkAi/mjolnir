@@ -234,25 +234,29 @@ pub(crate) fn recovery_reset(
 /// earliest reset otherwise. An available allowance's reset never shortens the
 /// wait, because nothing says that allowance is what refused the turn.
 ///
-/// A duration is read against the refusal that stated it, and the same limit
-/// repeats it on every refusal, so repeating one is not evidence that a
-/// different limit is out. Once a retry made from a duration is refused, only
-/// the report can schedule another automatic attempt; the notice tells the
-/// user how to resume if the quota is back sooner. Honoring the repeat instead
-/// retries the same exhausted limit forever, and no reading of the report
-/// distinguishes that from a genuinely new limit.
+/// A stated deadline already in the past has arrived, so the wait is over now:
+/// the quota it named is back, whatever a report read earlier still says.
+///
+/// A duration is read against the refusal that stated it, and the same
+/// exhausted limit repeats it on every refusal, so honoring a repeat would
+/// retry that limit forever. `consumed_from_duration` names the one fact that
+/// distinguishes a repeat: whether the retry already refused was scheduled
+/// from a duration. While the retry being refused came from the report or a
+/// wall-clock statement, the first duration is new evidence and schedules one.
 pub(crate) fn retry_deadline(
     windows: &[QuotaWindow],
     stated: Option<StatedReset>,
     now_seconds: i64,
     consumed: Option<i64>,
+    consumed_from_duration: bool,
 ) -> Option<i64> {
-    let stated = stated
-        .filter(|stated| stated.at > now_seconds && consumed.is_none_or(|old| stated.at > old))
-        .filter(|stated| !stated.relative || consumed.is_none());
-    stated
-        .map(|stated| stated.at)
-        .or_else(|| recovery_reset(windows, None, now_seconds, consumed))
+    let stated = stated.filter(|stated| consumed.is_none_or(|old| stated.at > old));
+    let stated = match stated {
+        Some(stated) if stated.relative && consumed_from_duration => None,
+        Some(stated) => Some(stated.at.max(now_seconds)),
+        None => None,
+    };
+    stated.or_else(|| recovery_reset(windows, None, now_seconds, consumed))
 }
 
 #[cfg(test)]
@@ -472,7 +476,7 @@ mod tests {
         let weekly = window("Week", 0, Some(now + 6 * 86_400));
         let windows = vec![five_hour, weekly];
         assert_eq!(
-            retry_deadline(&windows, stated, now, None),
+            retry_deadline(&windows, stated, now, None, false),
             Some(now + 40),
             "the five-hour limit's 40s must replace the weekly window's six days"
         );
@@ -482,19 +486,47 @@ mod tests {
         // automatically.
         let consumed = Some(now + 40);
         assert_eq!(
-            retry_deadline(&windows, stated, now + 100, consumed),
+            retry_deadline(&windows, stated, now + 100, consumed, true),
             Some(now + 6 * 86_400),
             "a repeated duration must not schedule another retry"
         );
         // With no report at all the guard still holds, because the deadline is
         // never read back from the statement that stated it.
-        assert_eq!(retry_deadline(&[], stated, now, None), Some(now + 40));
-        assert_eq!(retry_deadline(&[], stated, now + 100, consumed), None);
+        assert_eq!(
+            retry_deadline(&[], stated, now, None, false),
+            Some(now + 40)
+        );
+        assert_eq!(retry_deadline(&[], stated, now + 100, consumed, true), None);
+        // The first duration after a retry set from the report or a wall-clock
+        // statement is new evidence: that retry proves nothing about durations.
+        let fresh = message_reset(refusal, (now + 100) * 1_000);
+        assert_eq!(
+            retry_deadline(&windows, fresh, now + 100, Some(now - 3_600), false),
+            Some(now + 140),
+            "a first duration after a report-based retry still schedules one"
+        );
+        assert_eq!(
+            retry_deadline(&[], fresh, now + 100, Some(now - 3_600), false),
+            Some(now + 140),
+            "a duration that arrived after a wall-clock retry still counts"
+        );
+        assert_eq!(
+            retry_deadline(&windows, fresh, now + 100, Some(now - 3_600), true),
+            Some(now + 6 * 86_400),
+            "the same duration after a duration-based retry does not"
+        );
+        // A duration that already elapsed means the wait is over now, so the
+        // weekly window's six days never replaces it.
+        assert_eq!(
+            retry_deadline(&windows, stated, now + 200, None, false),
+            Some(now + 200),
+            "an elapsed duration retries now, not at the weekly reset"
+        );
         // An available allowance's earlier reset never shortens the deadline
         // the message gave: nothing says that allowance refused the turn.
         let available_soon = [window("Week", 80, Some(now + 600))];
         assert_eq!(
-            retry_deadline(&available_soon, stated, now, None),
+            retry_deadline(&available_soon, stated, now, None, false),
             Some(now + 40)
         );
         assert_eq!(
@@ -505,13 +537,13 @@ mod tests {
                     relative: false
                 }),
                 now,
-                None
+                None,
+                false
             ),
             Some(now + 7_200),
             "a stated deadline is never shortened by a window with quota left"
         );
-        // Once the statement is unusable the report decides, and an elapsed
-        // statement is no deadline at all.
+        // Once the statement is unusable the report decides.
         let reported = [window("Week", 0, Some(now + 600))];
         assert_eq!(
             retry_deadline(
@@ -520,27 +552,25 @@ mod tests {
                     at: now,
                     relative: true
                 }),
-                now,
-                None
+                now + 100,
+                None,
+                false
             ),
-            Some(now + 600)
+            Some(now + 100),
+            "an elapsed duration is the wait that just ended"
         );
         // An absolute statement is used once too: retrying at that time leaves
         // it in the past, and a report that cannot name a reset schedules none.
         let absolute = message_reset("resets at 2026-11-17T02:00:00Z", observed);
+        let absolute_at = now + 2 * 3_600 + 28 * 60;
         assert_eq!(
-            retry_deadline(&[], absolute, now, None),
-            Some(now + 2 * 3_600 + 28 * 60)
+            retry_deadline(&[], absolute, now, None, false),
+            Some(absolute_at)
         );
         assert_eq!(
-            retry_deadline(
-                &[],
-                absolute,
-                now + 2 * 3_600 + 28 * 60 + 60,
-                Some(now + 2 * 3_600 + 28 * 60)
-            ),
+            retry_deadline(&[], absolute, now + 100, Some(absolute_at), false),
             None
         );
-        assert_eq!(retry_deadline(&[], None, now, None), None);
+        assert_eq!(retry_deadline(&[], None, now, None, false), None);
     }
 }

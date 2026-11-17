@@ -6007,6 +6007,7 @@ fn a_quota_stop_ends_the_turn_as_quota_limit_whether_or_not_a_resume_is_schedule
         retry_at_ms: Some(61000),
         notice: "Resumes after the reset".into(),
         submitted: false,
+        retry_from_duration: false,
     });
     let on_the_turn = WaitRequest {
         turn_id: Some(10),
