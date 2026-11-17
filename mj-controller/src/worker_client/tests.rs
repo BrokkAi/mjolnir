@@ -1467,6 +1467,18 @@ for line in sys.stdin:
             open(fail_first, "w").close()
             sys.exit(1)
         payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "credential-fixture", "session_id": session}}
+    elif method == "status" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "status", "data": json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])}
+    elif method == "attach" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        state = json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])
+        payload = {"type": "attached", "data": {"state": state, "events": [], "through_ordinal": 0, "through_digest": state["latest_digest"]}}
+    elif method == "acknowledge" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        state = json.loads(os.environ["MJ_TEST_CREDENTIAL_ACTOR_STATE"])
+        payload = {"type": "acknowledged", "data": {"through_ordinal": 0, "through_digest": state["latest_digest"]}}
+    elif method == "history_requests" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "history_requests", "data": {"requests": []}}
+    elif method == "subagent_requests" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
+        payload = {"type": "subagent_requests", "data": {"requests": [], "results": []}}
     elif method == "credential_state":
         if os.path.exists(received):
             data = open(received, "rb").read()
@@ -5104,7 +5116,7 @@ async fn a_new_login_reaches_a_session_while_its_recovery_copy_runs() {
     drop(replacement);
 
     let copy = gate
-        .try_start(SESSION_ID, BackgroundWork::RecoveryCopy)
+        .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
         .unwrap();
     let outcomes = sync().await;
     assert_eq!(
@@ -5794,4 +5806,114 @@ async fn project_memory_queueing_has_no_deadline_and_remains_cancellable() {
             assert!(peer.await.unwrap_err().is_cancelled());
         }
     }
+}
+
+/// The periodic pass must be woken by lease return, without retaining an actor job.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
+    const CHILD: &str = "MJ_TEST_CREDENTIAL_ACTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "credential-lease-wake")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&crate::controller::test_support::checkpoint_test_session(
+        SESSION_ID,
+    ))
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    let mut target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+    // This fixture needs no newer feeds; its actor still owns the real relay connection.
+    target.spec.args[2] = "16".into();
+    target.spec.env.insert(
+        "MJ_TEST_CREDENTIAL_ACTOR_STATE".into(),
+        serde_json::to_string(
+            &mj_core::relay::RelaySnapshot::new(SESSION_ID.into()).operational_state(),
+        )
+        .unwrap(),
+    );
+    let login = codex_login("2026-09-25T22:49:05.000Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+    credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![crate::session_manager::RelaySessionTarget {
+            session_id: SESSION_ID.into(),
+            spec: target.spec.clone(),
+            worker_recovery: None,
+            project_memory: None,
+        }])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(SESSION_ID, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let copy = gate
+        .try_start(
+            SESSION_ID,
+            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+        )
+        .unwrap();
+    let lease = handle.lease_connection(&copy).await.unwrap();
+    let sync = CredentialSyncCoordinator::spawn_inner(
+        SessionRelays::Actors(channels.control.clone()),
+        Some(gate.clone()),
+        None,
+        credential_sync::unknown_slopcop_login,
+        mj_core::credentials::SYNC_INTERVAL,
+    );
+    let sync_handle = sync.handle();
+    sync_handle.set_targets(vec![target]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !gate.credentials_deferred_for_test(SESSION_ID) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the actor must defer the initial pass while capture holds its connection");
+    assert!(!received.exists());
+    assert!(!copy.load(Ordering::Acquire));
+    let released = tokio::time::Instant::now();
+    lease.release();
+    copy.narrow(crate::recovery_gate::BackgroundWork::RecoveryCopyTransferring)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !received.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("lease return must wake the profile pass immediately");
+    assert!(released.elapsed() < mj_core::credentials::SYNC_INTERVAL);
+    assert_eq!(std::fs::read(&received).unwrap(), login);
+    assert!(
+        !copy.load(Ordering::Acquire),
+        "credential wake must not preempt the copy"
+    );
+    sync_handle.set_targets(Vec::new());
+    drop(sync_handle);
+    drop(sync);
+    drop(copy);
+    channels.shutdown.shutdown().await.unwrap();
 }

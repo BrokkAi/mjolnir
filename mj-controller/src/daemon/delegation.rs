@@ -674,13 +674,28 @@ async fn deliver(
     parent: &str,
     stored_result: StoredDelegationResult,
 ) -> Result<()> {
+    let admission = runtime
+        .recovery_observer
+        .gate
+        .try_start(
+            parent,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
+        )
+        .map_err(|refusal| {
+            anyhow::anyhow!(
+                "delegation delivery deferred by {}",
+                refusal.holders.join(" and ")
+            )
+        })?;
     let handle = runtime.workspace_session_handle(parent).await?;
-    let mut lease = handle.lease_connection().await?;
+    let mut lease = handle.lease_connection(&admission).await?;
     let request_id = stored_result.result.request_id.clone();
-    let delivered = lease
-        .connection_mut()
-        .complete_subagent_request(stored_result.result.clone())
-        .await;
+    let delivered = tokio::select! {
+        result = lease.connection_mut().complete_subagent_request(stored_result.result.clone()) => result,
+        () = crate::recovery_gate::wait_until_cancelled(&admission) => {
+            return Err(anyhow::anyhow!("delegation delivery preempted"));
+        }
+    };
     lease.release();
     delivered?;
     if let Err(error) = runtime.reconcile_parent_reports(parent).await {

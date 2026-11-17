@@ -29,8 +29,10 @@ impl Controller {
     /// Replace an explicitly selected container under the worker's atomic idle
     /// reservation. The private journal and profile are transferred separately from retained
     /// workspace/cache mounts; no checkpoint or worker-root reset is involved.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(crate) async fn upgrade_container_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         plan: &mut targets::RetainedContainer,
         recovering: bool,
@@ -83,7 +85,7 @@ impl Controller {
                         } else {
                             let handle = while_upgrade_active(executor, manager.wait_for_session(session_id, Duration::from_secs(5))).await?;
                             executor.end_resumable_work("container worker swap")?;
-                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_upgrade(&handle, record.harness_kind)).await? else {
+                            let Some(mut lease) = while_upgrade_active(executor, super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, record.harness_kind)).await? else {
                                 executor.begin_resumable_work()?;
                                 return Ok(false);
                             };

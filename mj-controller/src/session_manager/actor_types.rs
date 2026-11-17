@@ -43,8 +43,10 @@ pub(super) enum ActorCommand {
     /// that must decide whether to restart the worker needs the typed cause,
     /// which formatting the error to a string would destroy.
     Lease {
+        admission: crate::recovery_gate::RelayLeaseAdmission,
         idle_harness: Option<mj_core::config::HarnessKind>,
-        reply: oneshot::Sender<Result<(u64, StandaloneSession)>>,
+        reply: oneshot::Sender<Result<ManagedSessionLease>>,
+        returns: mpsc::UnboundedSender<ReturnedConnection>,
     },
     /// Periodic work on the actor's own connection. See [`RelayConnectionJob`].
     RelayJob { job: Box<dyn RelayConnectionJob> },
@@ -54,6 +56,7 @@ pub(super) enum ActorCommand {
 /// actor's other relay traffic. A periodic exchange such as credential sync
 /// uses this instead of opening a connection of its own to every worker.
 pub trait RelayConnectionJob: Send + Sync + 'static {
+    fn deferred_by_lease(&self, _lease: &crate::recovery_gate::RelayLeaseAdmission) {}
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()>;
 
     /// The actor did not run the job; `error` says why.
@@ -182,9 +185,9 @@ pub(super) struct DeferredSubmit {
     pub(super) reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct ActorLifecycle {
-    pub(super) active_lease: Option<u64>,
+    pub(super) active_lease: Option<(u64, crate::recovery_gate::RelayLeaseAdmission)>,
     pub(super) retirement_requested: bool,
 }
 
@@ -205,13 +208,17 @@ impl ActorLifecycle {
         !self.retirement_requested
     }
 
-    pub(super) fn activate_lease(&mut self, lease_id: u64) {
+    pub(super) fn activate_lease(
+        &mut self,
+        lease_id: u64,
+        admission: crate::recovery_gate::RelayLeaseAdmission,
+    ) {
         debug_assert!(self.active_lease.is_none());
-        self.active_lease = Some(lease_id);
+        self.active_lease = Some((lease_id, admission));
     }
 
     pub(super) fn return_lease(&mut self, lease_id: u64) -> bool {
-        if self.active_lease != Some(lease_id) {
+        if self.active_lease.as_ref().map(|(id, _)| *id) != Some(lease_id) {
             return false;
         }
         self.active_lease = None;

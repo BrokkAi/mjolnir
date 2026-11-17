@@ -14,6 +14,7 @@ impl Controller {
     /// closed child is not resumed independently of its parent.
     pub(crate) async fn suspend_subagent_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
@@ -63,7 +64,8 @@ impl Controller {
                 // whatever its root looks like. Only a worker proven dead is
                 // judged by its root.
                 let connected =
-                    connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
+                    connect_checkpoint_relay(admission, session_id, manager, &reconnect, None)
+                        .await;
                 match connected {
                     Ok(relay) => Some(relay),
                     Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
@@ -109,8 +111,10 @@ impl Controller {
                                     "recover dead child worker without starting its harness",
                                 )?;
                             Some(
-                                adopt_restarted_checkpoint_relay(session_id, manager, connection)
-                                    .await?,
+                                adopt_restarted_checkpoint_relay(
+                                    admission, session_id, manager, connection,
+                                )
+                                .await?,
                             )
                         }
                     }
@@ -186,7 +190,7 @@ impl Controller {
                                     .await?;
                                 if let BarrierRecoveryOutcome::CloseRejected(error) = recovery {
                                     self.restore_child_after_uncommitted_close(
-                                        session_id, &previous, relay,
+                                        admission, session_id, &previous, relay,
                                     )
                                     .await?;
                                     return Err(error);
@@ -210,8 +214,10 @@ impl Controller {
                 if barrier.is_some()
                     && let Some(relay) = &mut relay
                 {
-                    self.restore_child_after_uncommitted_close(session_id, &previous, relay)
-                        .await?;
+                    self.restore_child_after_uncommitted_close(
+                        admission, session_id, &previous, relay,
+                    )
+                    .await?;
                 }
                 return Err(error);
             }
@@ -281,12 +287,13 @@ impl Controller {
 
     async fn restore_child_after_uncommitted_close(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         previous: &SessionRecord,
         relay: &mut ControllerRelayLease,
     ) -> Result<()> {
         relay
-            .cancel_abandoned_barrier()
+            .cancel_abandoned_barrier(admission)
             .await
             .context("release the barrier of a sub-agent whose close did not commit")?;
         let closing = self.state.sessions[session_id].clone();

@@ -148,9 +148,10 @@ impl WorkerUpgradeCoordinator {
                                     config: observation.config,
                                     state,
                                 };
-                                let executor = CancellableProcessExecutor::new(cancelled)
+                                let executor = CancellableProcessExecutor::new(cancelled.cancellation())
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
                                 let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &crate::recovery_gate::SessionAdmission::Background(cancelled.clone()),
                                     &task_session_id,
                                     &executor,
                                     &session_manager,
@@ -650,7 +651,7 @@ mod tests {
     fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
         let gate = Arc::new(RecoveryGate::default());
         let recovery_copy = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopy)
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
             .expect("the slot starts free");
 
         assert!(

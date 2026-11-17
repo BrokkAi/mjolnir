@@ -405,6 +405,9 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             .unwrap();
         let outcome = runtime
             .block_on(controller.recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 &ProcessExecutor,
                 &manager.control,
@@ -2015,6 +2018,7 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
             };
             let error = controller
                 .prepare_move_source_checkpoint(
+                    &crate::controller::test_support::session_admission(&session.id),
                     &session.id,
                     &executor,
                     &manager.control,
@@ -3240,6 +3244,9 @@ fn run_in_place_move(
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 None,
                 executor,
@@ -3375,6 +3382,9 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         let admitted = std::sync::atomic::AtomicBool::new(false);
         let outcome = controller
             .move_session_managed_controlled_with_admission(
+                &crate::controller::test_support::session_admission(
+                    request.preparation.selection.session_id.as_str(),
+                ),
                 &crate::server_runtime::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
@@ -4081,7 +4091,14 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
     let outcome = runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let outcome = controller
-            .recover_move_managed_controlled(operation, &executor, &channels.control)
+            .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
+                operation,
+                &executor,
+                &channels.control,
+            )
             .await;
         channels.shutdown.shutdown().await.unwrap();
         outcome.unwrap()
@@ -4329,6 +4346,9 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 None,
                 &executor,
@@ -4473,6 +4493,9 @@ fn in_place_move_reopens_the_queue_of_a_native_source_after_a_failure() {
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 None,
                 &executor,
@@ -4561,6 +4584,9 @@ fn in_place_closing_source_recovery_reopens_gate_after_restoring_running_session
             let channels = start_source_relay_manager(&source_relay);
             let outcome = controller
                 .recover_move_managed_controlled(
+                    &crate::controller::test_support::session_admission(
+                        &operation.selection.session_id,
+                    ),
                     operation,
                     &RecordingProcessExecutor::default(),
                     &channels.control,
@@ -5502,6 +5528,9 @@ fn in_place_move_failure_retains_environment_for_retry() {
         );
         controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 Some(&preparation),
                 &RecordingProcessExecutor::default(),
@@ -5563,6 +5592,7 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
         let channels = start_source_relay_manager(&source_relay);
         let deferred = controller
             .suspend_session_for_move(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,
@@ -5584,7 +5614,14 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
     let outcome = runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let outcome = controller
-            .recover_move_managed_controlled(operation, &executor, &channels.control)
+            .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
+                operation,
+                &executor,
+                &channels.control,
+            )
             .await;
         channels.shutdown.shutdown().await.unwrap();
         outcome.unwrap()
@@ -5660,6 +5697,7 @@ fn in_place_move_killed_at(
         let channels = start_source_relay_manager(source_relay);
         let deferred = controller
             .suspend_session_for_move(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &RecordingProcessExecutor::default(),
                 &channels.control,
@@ -5736,6 +5774,9 @@ fn restart_daemon_and_recover_move(controller: &mut Controller) -> mj_core::stat
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let outcome = controller
             .recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 operation,
                 &RecordingProcessExecutor::default(),
                 &channels.control,
@@ -5879,6 +5920,9 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
             let result = fixture
                 .controller
                 .execute_move(
+                    &crate::controller::test_support::session_admission(
+                        &operation.selection.session_id,
+                    ),
                     &mut operation,
                     Some(&preparation),
                     &RecordingProcessExecutor::default(),
@@ -6047,6 +6091,9 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
         let result = fixture
             .controller
             .execute_move(
+                &crate::controller::test_support::session_admission(
+                    &operation.selection.session_id,
+                ),
                 &mut operation,
                 Some(&preparation),
                 &RecordingProcessExecutor::default(),
@@ -6257,6 +6304,7 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
         let result = fixture
             .controller
             .suspend_session_for_restart(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,

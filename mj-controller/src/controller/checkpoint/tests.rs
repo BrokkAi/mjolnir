@@ -1747,7 +1747,12 @@ async fn latch_a_live_checkpoint(
         .await
         .unwrap();
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let mut relay = ControllerRelayLease::Managed {
         handle: handle.clone(),
         lease: Some(lease),
@@ -1816,10 +1821,14 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         .await
         .unwrap();
     assert!(
-        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-            .await
-            .unwrap()
-            .is_none()
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     handle
         .submit(
@@ -2095,10 +2104,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     let reviewer = root.path().join("upgrade-held-reviewer");
     std::fs::write(&reviewer, b"review capture still running").unwrap();
     assert!(
-        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-            .await
-            .unwrap()
-            .is_none()
+        IdleWorkspaceLease::acquire_for_upgrade(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert!(
         reviewer.exists(),
@@ -2111,10 +2124,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     );
     std::fs::remove_file(reviewer).unwrap();
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-        .await
-        .unwrap()
-        .expect("idle worker");
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("idle worker");
     assert_eq!(lease.protocol_version(), protocol);
     assert!(lease.verify_for_upgrade().await.unwrap());
     assert_eq!(
@@ -2132,10 +2149,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     assert_eq!(operational.goal, preserved_goal);
     drop(lease);
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
-    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
-        .await
-        .unwrap()
-        .expect("abandoned barrier recovered");
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap()
+    .expect("abandoned barrier recovered");
     assert!(lease.verify_for_upgrade().await.unwrap());
     assert_eq!(
         lease.lease.connection_mut().operational().goal,
@@ -2864,6 +2885,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let executor = RecordingExecutor::default();
     let latched = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2918,12 +2940,18 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         )
         .await
         .unwrap();
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let before = connection.connection_mut().sync().await.unwrap();
     assert_eq!(before.operational.execution, RelayExecutionState::Running);
     connection.release();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -2937,7 +2965,12 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         matches!(deferred, Err(ref error) if error.downcast_ref::<CheckpointDeferred>().is_some())
     );
     wait_until_the_actor_serves_again(&handle).await;
-    let mut connection = handle.lease_connection().await.unwrap();
+    let mut connection = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let after = connection.connection_mut().sync().await.unwrap();
     assert_eq!(after.operational.execution, RelayExecutionState::Running);
     assert!(after.operational.checkpoint_barrier.is_none());
@@ -2995,6 +3028,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 
     let changed = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -3215,6 +3249,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let executor = StagingExecutor::default();
     let deferred = controller
         .checkpoint_session_latched_for_operation(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
@@ -3262,6 +3297,7 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
+        admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
         _worker_owner: crate::worker_lifecycle::WorkerPermit::try_acquire(
             LATCH_RELAY_SESSION,
             "test checkpoint",
@@ -3477,9 +3513,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
         .unwrap()
         .operational
         .recovery_floor_ordinal;
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     workspace.verify().await.unwrap();
     drop(workspace);
     wait_until_the_actor_serves_again(&handle).await;
@@ -3492,9 +3532,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
             .checkpoint_barrier
             .is_none()
     );
-    let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-        .await
-        .unwrap();
+    let mut workspace = IdleWorkspaceLease::acquire(
+        &crate::controller::test_support::session_admission(handle.session_id()),
+        &handle,
+        HarnessKind::Codex,
+    )
+    .await
+    .unwrap();
     let submitting = handle.clone();
     let mut prompt = tokio::spawn(async move {
         submitting
@@ -3524,9 +3568,13 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
     assert!(after.operational.checkpoint_barrier.is_none());
     assert_eq!(after.operational.recovery_floor_ordinal, before);
     assert!(
-        IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
-            .await
-            .is_err(),
+        IdleWorkspaceLease::acquire(
+            &crate::controller::test_support::session_admission(handle.session_id()),
+            &handle,
+            HarnessKind::Codex
+        )
+        .await
+        .is_err(),
         "a queued or running prompt must prevent file injection"
     );
 }
@@ -3754,6 +3802,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let executor = RecordingExecutor::default();
     let deferred = controller
         .suspend_session_for_move(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4103,6 +4152,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     let (mut controller, channels, _handle) = close_cut_controller(SessionState::Running).await;
     let suspended = controller
         .suspend_session_managed_controlled(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4183,6 +4233,7 @@ async fn ignoring_nested_repositories_requires_a_fresh_checkpoint_before_teardow
     let executor = RefuseExport::default();
     let error = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4224,6 +4275,7 @@ async fn an_automatic_restart_stands_down_instead_of_cancelling_a_running_turn()
     wait_until_the_actor_serves_again(&handle).await;
     let error = controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4385,6 +4437,7 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
     };
     let error = controller
         .upgrade_container_worker(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &mut plan,
             false,
@@ -4513,6 +4566,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     };
     controller
         .suspend_session_for_restart(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,
@@ -4592,6 +4646,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     let (mut controller, channels, handle) = close_cut_controller(SessionState::Closing).await;
     let suspended = controller
         .recover_interrupted_close_managed(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
             LATCH_RELAY_SESSION,
             &SucceedingExecutor,
             &channels.control,
@@ -4627,7 +4682,12 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
     // The barrier is gone and the relay was never sealed, so the session can
     // take work again.
     wait_until_the_actor_serves_again(&handle).await;
-    let mut lease = handle.lease_connection().await.unwrap();
+    let mut lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let snapshot = lease.connection_mut().sync().await.unwrap();
     lease.release();
     assert_eq!(snapshot.operational.checkpoint_barrier, None);
@@ -4660,11 +4720,13 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         config: Default::default(),
         state: State::default(),
     };
-    let entry = controller.checkpoint_session("session-1");
+    let admission = crate::controller::test_support::session_admission("session-1");
+    let entry = controller.checkpoint_session(&admission, "session-1");
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
     let latched = controller.checkpoint_session_latched_with_recovery_stage(
+        &admission,
         "session-1",
         &executor,
         None,
@@ -4761,7 +4823,12 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
         "the job must use the actor's connection, not open another"
     );
 
-    let lease = handle.lease_connection().await.unwrap();
+    let lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let deferred = run_status(&handle).await.unwrap_err();
     assert!(
         crate::session_manager::RelayJobDeferred::marks(&deferred),

@@ -1042,7 +1042,8 @@ pub(super) async fn run_session_actor(
                     ActorCommand::RelayJob { job } => {
                         // The actor alone decides when its connection is
                         // free; a job never opens or reopens one.
-                        if lifecycle.is_leased() {
+                        if let Some((_, lease)) = &lifecycle.active_lease {
+                            job.deferred_by_lease(lease);
                             job.refuse(
                                 RelayJobDeferred(
                                     "a lifecycle operation holds the relay connection",
@@ -1113,6 +1114,8 @@ pub(super) async fn run_session_actor(
                         }
                     }
                     ActorCommand::Lease {
+                        admission,
+                        returns,
                         idle_harness,
                         reply,
                     } => {
@@ -1122,7 +1125,8 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         if idle_harness.is_some()
-                            && (lifecycle.is_leased() || !reviewer_tasks.is_empty())
+                            && !lifecycle.is_leased()
+                            && !reviewer_tasks.is_empty()
                         {
                             if reply
                                 .send(Err(super::handle::SessionNotIdle.into()))
@@ -1133,10 +1137,11 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         if lifecycle.is_leased() {
-                            tracing::debug!(
+                            tracing::error!(
                                 session_id = %target.session_id,
-                                operation = "lease",
-                                "rejecting duplicate session lifecycle lease"
+                                requested = admission.label,
+                                active = lifecycle.active_lease.as_ref().map(|(_, a)| a.label),
+                                "owner granted conflicting session relay leases"
                             );
                             if reply
                                 .send(Err(anyhow::anyhow!(
@@ -1190,12 +1195,19 @@ pub(super) async fn run_session_actor(
                         reviewer_connections.clear();
                         reviewer_tails.clear();
                         next_lease_id = next_lease_id.wrapping_add(1).max(1);
-                        match reply.send(Ok((
-                            lease_id,
-                            connection.take().expect("synced connection"),
-                        ))) {
-                            Ok(()) => lifecycle.activate_lease(lease_id),
-                            Err(Ok((_lease_id, returned))) => connection = Some(returned),
+                        // The reply owns the return guard too: cancellation
+                        // after send but before receive cannot strand the actor.
+                        match reply.send(Ok(ManagedSessionLease {
+                            session_id: target.session_id.clone(),
+                            lease_id: Some(lease_id),
+                            connection: Some(connection.take().expect("synced connection")),
+                            releases: returns,
+                        })) {
+                            Ok(()) => lifecycle.activate_lease(lease_id, admission),
+                            Err(Ok(mut returned)) => {
+                                returned.lease_id.take();
+                                connection = returned.connection.take();
+                            }
                             Err(Err(_)) => {}
                         }
                     }

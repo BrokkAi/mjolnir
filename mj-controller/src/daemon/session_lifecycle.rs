@@ -198,7 +198,7 @@ mod tests {
                 Some(preparation),
                 {
                     let release = release.clone();
-                    move |_, _, cancelled| async move {
+                    move |_, _, cancelled, _session_admission| async move {
                         release.notified().await;
                         assert!(
                             !cancelled.load(Ordering::Acquire),
@@ -240,7 +240,7 @@ mod tests {
                     None,
                 ),
                 None,
-                |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
+                |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
             )
             .await
             .unwrap();
@@ -267,7 +267,9 @@ mod tests {
                     None,
                 ),
                 None,
-                |_, _, _| async { bail!("captured checkpoint verification failure") },
+                |_, _, _, _session_admission| async {
+                    bail!("captured checkpoint verification failure")
+                },
             )
             .await
             .unwrap();

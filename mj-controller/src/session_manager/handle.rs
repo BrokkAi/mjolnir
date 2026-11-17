@@ -305,16 +305,20 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
-    pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
-        self.lease_connection_for(None).await
+    pub async fn lease_connection(
+        &self,
+        admission: &impl crate::recovery_gate::HoldsSession,
+    ) -> Result<ManagedSessionLease> {
+        self.lease_connection_for(None, admission).await
     }
 
     /// Background replacement must never take a busy session's control channel.
     pub async fn lease_idle_connection(
         &self,
         harness: mj_core::config::HarnessKind,
+        admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<Option<ManagedSessionLease>> {
-        match self.lease_connection_for(Some(harness)).await {
+        match self.lease_connection_for(Some(harness), admission).await {
             Ok(lease) => Ok(Some(lease)),
             Err(error) if error.is::<SessionNotIdle>() => Ok(None),
             Err(error) => Err(error),
@@ -324,22 +328,19 @@ impl ManagedSessionHandle {
     async fn lease_connection_for(
         &self,
         idle_harness: Option<mj_core::config::HarnessKind>,
+        admission: &impl crate::recovery_gate::HoldsSession,
     ) -> Result<ManagedSessionLease> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ActorCommand::Lease {
+                admission: admission.admission().lease(&self.session_id).await?,
+                returns: self.releases.clone(),
                 idle_harness,
                 reply,
             })
             .await
             .context("session manager stopped")?;
-        let (lease_id, connection) = response.await.context("session manager stopped")??;
-        Ok(ManagedSessionLease {
-            session_id: self.session_id.clone(),
-            lease_id: Some(lease_id),
-            connection: Some(connection),
-            releases: self.releases.clone(),
-        })
+        response.await.context("session manager stopped")?
     }
 }
 

@@ -1074,7 +1074,7 @@ mod tests {
                 let reserve_now = reserve_now.clone();
                 let finish = finish.clone();
                 let allocation = allocation(16);
-                move |state, id, _| async move {
+                move |state, id, _, _session_admission| async move {
                     reserve_now.notified().await;
                     let admitted = state
                         .admit_container_launch(
