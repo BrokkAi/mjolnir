@@ -20,6 +20,8 @@ struct Entry {
     /// deferred attempt waits on its holder, so it does not occupy a slot
     /// that other sessions' work needs.
     deferred: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    failures: u32,
+    last_failure: Option<String>,
 }
 impl Entry {
     fn occupies_slot(&self) -> bool {
@@ -56,7 +58,7 @@ impl SubagentDispatch {
                     tracing::debug!(parent_session_id = parent, request_id = %request.request_id,
                         age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(request.created_at_ms),
                         "delegation request observed");
-                    Entry { request: request.clone(), phase: Phase::Pending(Instant::now()), deferred: Default::default() }
+                    Entry { request: request.clone(), phase: Phase::Pending(Instant::now()), deferred: Default::default(), failures: 0, last_failure: None }
                 });
         }
     }
@@ -152,6 +154,8 @@ impl SubagentDispatch {
     }
     pub fn executed(&mut self, id: &Identity, result: StoredDelegationResult) {
         if let Some(entry) = self.entries.get_mut(id) {
+            entry.failures = 0;
+            entry.last_failure = None;
             entry.phase = Phase::Delivery(result, Instant::now());
         }
     }
@@ -160,27 +164,49 @@ impl SubagentDispatch {
             entry.phase = Phase::Pending(Instant::now() + Duration::from_secs(1));
         }
     }
-    pub fn delivered(&mut self, id: &Identity, success: bool) {
+    pub fn delivered(&mut self, id: &Identity, success: bool, cause: Option<String>) -> bool {
         if let Some(entry) = self.entries.get_mut(id) {
             if success {
+                entry.failures = 0;
+                entry.last_failure = None;
                 entry.phase = Phase::Finished;
             } else if let Phase::Delivering(result) | Phase::Delivery(result, _) = &entry.phase {
-                entry.phase =
-                    Phase::Delivery(result.clone(), Instant::now() + Duration::from_secs(1));
+                let cause = cause.unwrap_or_else(|| "delivery failed".into());
+                let report = entry.last_failure.as_ref() != Some(&cause);
+                entry.failures = entry.failures.saturating_add(1);
+                entry.last_failure = Some(cause);
+                let delay = crate::recovery::backoff_delay(
+                    super::COMPLETION_RETRY_BASE,
+                    super::COMPLETION_FAILURE_CAP,
+                    entry.failures,
+                );
+                entry.phase = Phase::Delivery(result.clone(), Instant::now() + delay);
+                return report;
             }
         }
+        false
     }
-    pub fn failed_task(&mut self, id: &Identity) {
+    pub fn failed_task(&mut self, id: &Identity, cause: String) -> bool {
         if let Some(entry) = self.entries.get(id) {
             if matches!(entry.phase, Phase::Delivering(_)) {
-                self.delivered(id, false);
+                return self.delivered(id, false, Some(cause));
             } else {
                 // A task failure is not an effect result. Recover its durable
                 // phase on retry; never fabricate an answer after uncertain IO.
-                self.entries.get_mut(id).expect("failed entry").phase =
-                    Phase::Recovery(Instant::now() + Duration::from_secs(1));
+                let entry = self.entries.get_mut(id).expect("failed entry");
+                let report = entry.last_failure.as_ref() != Some(&cause);
+                entry.failures = entry.failures.saturating_add(1);
+                entry.last_failure = Some(cause);
+                let delay = crate::recovery::backoff_delay(
+                    super::COMPLETION_RETRY_BASE,
+                    super::COMPLETION_FAILURE_CAP,
+                    entry.failures,
+                );
+                entry.phase = Phase::Recovery(Instant::now() + delay);
+                return report;
             }
         }
+        false
     }
 }
 
@@ -244,12 +270,12 @@ mod tests {
         assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
         queue.executed(&first, result("first"));
         assert_eq!(ids(queue.ready(now)), ["first"]);
-        queue.delivered(&first, true);
+        queue.delivered(&first, true, None);
         assert_eq!(ids(queue.ready(now)), ["second"]);
         let second = ("p".into(), "second".into());
         queue.executed(&second, result("second"));
         assert_eq!(ids(queue.ready(now)), ["second"]);
-        queue.delivered(&second, true);
+        queue.delivered(&second, true, None);
         assert_eq!(ids(queue.ready(now)), ["message"]);
     }
     // Hard-won: #1287: removing a worker request is not a delivery acknowledgement.
@@ -268,7 +294,7 @@ mod tests {
             queue.ready(Instant::now()).pop().unwrap().1,
             Job::Deliver(_)
         ));
-        queue.delivered(&id, false);
+        queue.delivered(&id, false, Some("unreachable".into()));
         queue.observe("p", &[]);
         assert!(queue.ready(Instant::now()).is_empty());
         assert!(matches!(
@@ -279,7 +305,7 @@ mod tests {
                 .1,
             Job::Deliver(_)
         ));
-        queue.delivered(&id, true);
+        queue.delivered(&id, true, None);
         // A snapshot captured before delivery must not resurrect executed work.
         queue.observe("p", &[request]);
         assert!(queue.ready(Instant::now()).is_empty());
@@ -319,7 +345,7 @@ mod tests {
             queue.ready(Instant::now()).pop().unwrap().1,
             Job::Deliver(_)
         ));
-        queue.delivered(&id, true);
+        queue.delivered(&id, true, None);
         assert!(queue.ready(Instant::now()).is_empty());
         queue.observe("p", &[]);
         assert!(queue.entries.is_empty());
@@ -361,7 +387,7 @@ mod tests {
         let mut queue = SubagentDispatch::default();
         queue.observe("parent", &[input("request", "child", 1)]);
         let id = queue.ready(Instant::now()).pop().unwrap().0;
-        queue.failed_task(&id);
+        queue.failed_task(&id, "failed".into());
         assert!(queue.ready(Instant::now()).is_empty());
         assert!(matches!(
             queue
@@ -371,6 +397,44 @@ mod tests {
                 .1,
             Job::Execute(_)
         ));
+    }
+
+    // Hard-won: #1574: real delivery failures retried every second without backoff.
+    #[test]
+    fn delivery_failures_back_off_and_success_resets_the_count() {
+        let mut queue = SubagentDispatch::default();
+        queue.observe("parent", &[input("retry", "child", 1)]);
+        let id = ("parent".into(), "retry".into());
+        queue.ready(Instant::now());
+        queue.executed(&id, result("retry"));
+        let mut previous = Duration::ZERO;
+        for failure in 1..=12 {
+            let before = Instant::now();
+            // Only a new cause is reported; repeats are not.
+            assert_eq!(
+                queue.delivered(&id, false, Some("unreachable".into())),
+                failure == 1
+            );
+            let Phase::Delivery(_, at) = queue.entries[&id].phase else {
+                panic!("a failed delivery keeps its result for retry");
+            };
+            let expected = crate::recovery::backoff_delay(
+                super::super::COMPLETION_RETRY_BASE,
+                super::super::COMPLETION_FAILURE_CAP,
+                failure,
+            );
+            let delay = at.duration_since(before);
+            assert!(
+                delay >= expected && delay < expected + Duration::from_secs(1),
+                "failure {failure}: {delay:?} is not about {expected:?}"
+            );
+            assert!(expected >= previous);
+            previous = expected;
+        }
+        assert_eq!(previous, super::super::COMPLETION_FAILURE_CAP);
+        assert!(queue.delivered(&id, false, Some("refused".into())));
+        queue.delivered(&id, true, None);
+        assert_eq!(queue.entries[&id].failures, 0);
     }
 
     // Hard-won: #1574: attempts waiting on a held session kept dispatch slots from other sessions.
