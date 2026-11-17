@@ -298,6 +298,7 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
+                    supports_open_request: false,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -607,6 +608,11 @@ pub struct ViewerSession {
     /// viewer or API JSON contract.
     #[serde(skip, default)]
     pub(crate) is_subagent_session: bool,
+    /// Whether the session's worker keeps a persistent open request (relay
+    /// protocol 64 and later). In-process only, like `is_subagent_session`:
+    /// the notification message rule needs it, the JSON contract does not.
+    #[serde(skip, default)]
+    pub(crate) supports_open_request: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

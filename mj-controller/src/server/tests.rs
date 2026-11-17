@@ -5584,3 +5584,30 @@ async fn github_relevance_daemon_notices_snapshot_golden() {
         &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
     );
 }
+
+// A worker without open requests (relay protocol before 64) has no question
+// target, so its question is the last thing the agent wrote.
+#[test]
+fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    let facts = |supports_open_request| NotificationMessageFacts {
+        pending_request: None,
+        review_activity: None,
+        question_message: None,
+        supports_open_request,
+    };
+    let read = |facts| {
+        super::handlers::notification_message_text(
+            NotificationKind::NeedsInput,
+            &facts,
+            |_| unreachable!("no question target"),
+            || Ok(Some("the agent's last words".to_owned())),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read(facts(false)).as_deref(),
+        Some("the agent's last words")
+    );
+    assert_eq!(read(facts(true)), None);
+}

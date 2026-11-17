@@ -1206,8 +1206,10 @@ function liveSessions() {
 // workspaces). Sub-agents are left out; a parent promoted by a child's pending
 // form opens that child.
 
-/// Card ids the person skipped, oldest skip first. Skipping rotates a card to
-/// the back, so an id is in the list at most once.
+/// Cards the person skipped, oldest skip first, by card identity: the session
+/// and the notification it shows. Skipping rotates a card to the back, so a key
+/// is in the list at most once, and a new notification from a skipped session is
+/// a new card that is not deferred.
 const inboxSkipped = [];
 const LAUNCH_FAILURE_TEXT = 'A session could not be started. Check the project and target, then retry. Details are in the daemon logs.';
 
@@ -1223,6 +1225,34 @@ function launchFailureEntries() {
     }));
 }
 
+/// The session a card is about: it shows that session's message, Quick reply
+/// sends to it and Go to Session opens it. A parent promoted by a child's
+/// pending request is about the child (the form holder); a launch failure is
+/// about the session it was for, when there is one.
+function inboxDestination(entry) {
+  if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
+  const holder = childFormHolder(entry);
+  return holder && sessionById(holder) ? holder : entry.id;
+}
+
+/// The identity of a card: its session and the notification it shows.
+function inboxKey(entry) {
+  return `${entry.id}|${JSON.stringify(entry.notification_dismissal ?? null)}`;
+}
+
+/// What a gesture on a card acts on, captured when the gesture starts so a
+/// snapshot that changes the first card meanwhile cannot redirect it.
+function inboxCard(entry) {
+  return {
+    key: inboxKey(entry),
+    id: entry.id,
+    destination: inboxDestination(entry),
+    dismissal: entry.notification_dismissal ?? null,
+    launchFailureId: entry.launchFailure?.id ?? null,
+    important: entry.attention === 'important',
+  };
+}
+
 /// Every card, in order. The one place the list, the count and the bulk clear
 /// read from, so they cannot disagree.
 function inboxEntries() {
@@ -1236,27 +1266,14 @@ function inboxEntries() {
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id));
   const all = [...rows, ...launchFailureEntries().sort((left, right) => left.id.localeCompare(right.id))];
-  const byId = new Map(all.map(entry => [entry.id, entry]));
+  const byKey = new Map(all.map(entry => [inboxKey(entry), entry]));
   for (let index = inboxSkipped.length - 1; index >= 0; index -= 1) {
-    if (!byId.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
+    if (!byKey.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
   }
   return [
-    ...all.filter(entry => !inboxSkipped.includes(entry.id)),
-    ...inboxSkipped.map(id => byId.get(id)),
+    ...all.filter(entry => !inboxSkipped.includes(inboxKey(entry))),
+    ...inboxSkipped.map(key => byKey.get(key)),
   ];
-}
-
-/// What a card refers to. Dismissing names the session and the target its card
-/// showed, so the daemon can refuse a card that went stale.
-function inboxIdentity(row) {
-  return { session_id: row.id, target: row.notification_dismissal ?? null };
-}
-
-/// The session a card opens: the holder of a pending form, else the session; a
-/// launch failure opens the session it was for, when there is one.
-function inboxOpenTarget(entry) {
-  if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
-  return childFormHolder(entry) || entry.id;
 }
 
 // The full message per card, read from the daemon because a summary row
@@ -1265,7 +1282,7 @@ function inboxOpenTarget(entry) {
 // is not kept: it is tried again when the card is shown again or on Retry.
 const inboxTexts = new Map();
 function inboxTextKey(row) {
-  const holder = childFormHolder(row) || row.id;
+  const holder = inboxDestination(row);
   const holderRow = sessionById(holder) || row;
   const requests = holderRow.pending_elicitations?.map(request => request.id)
     ?? holderRow.pending_elicitation_ids ?? [];
@@ -1277,6 +1294,7 @@ function inboxText(row, key) {
   if (known) return known;
   const entry = { state: 'loading', text: '' };
   inboxTexts.set(key, entry);
+  // The daemon resolves the same destination from the card's session.
   request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message`)
     .then(answer => {
       entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
@@ -1291,10 +1309,10 @@ function inboxText(row, key) {
 
 /// Quick-reply drafts belong to the session they were typed for.
 const inboxDrafts = new Map();
-const inboxSending = new Set(); // session ids with a submission in flight
-let inboxError = null; // { id, text }: the refusal the card shows
+const inboxSending = new Set(); // destinations with a submission in flight
+let inboxError = null; // { key, text }: the refusal the card shows
 let inboxBusy = false;
-let inboxShown = null; // the card id the quick-reply line currently holds
+let inboxShown = null; // the destination the quick-reply line currently holds
 let inboxShownKey = null; // the text key last rendered, to retry a failed read
 
 const inboxNodes = (() => {
@@ -1333,8 +1351,25 @@ const inboxNodes = (() => {
   return { card, empty, glyph, headerText, body, retry, input, send, open, clear, skip, clearAll, cardError, reply };
 })();
 
-function inboxCurrent() {
-  return inboxEntries()[0];
+/// The persistent buttons outlive the card they show, so a gesture acts on the
+/// card its control showed when the press began (as `bindTurnControlButton`
+/// does), never on whichever card a snapshot has put first since.
+function bindInboxControl(target, act) {
+  target._binding = null;
+  target._press = null;
+  for (const start of ['pointerdown', 'keydown']) {
+    target.addEventListener?.(start, event => {
+      if (start === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+      target._press = target._binding;
+    });
+  }
+  target.addEventListener?.('pointercancel', () => { target._press = null; });
+  target.onclick = event => {
+    event?.preventDefault?.();
+    const owned = target._press || target._binding;
+    target._press = null;
+    if (owned) void act(owned);
+  };
 }
 
 async function inboxDismiss(identity) {
@@ -1351,37 +1386,34 @@ async function inboxDismiss(identity) {
   }
 }
 
-async function inboxClearNext() {
-  const entry = inboxCurrent();
-  if (!entry || inboxBusy) return;
-  if (entry.launchFailure) {
+async function inboxClearNext(card) {
+  if (inboxBusy) return;
+  if (card.launchFailureId) {
     // A launch failure is only a notice: its dismissal is the viewer's own.
-    dismissedLaunchFailures.add(entry.launchFailure.id);
+    dismissedLaunchFailures.add(card.launchFailureId);
     renderRoute();
     return;
   }
-  if (!entry.notification_dismissal) return;
-  const identity = inboxIdentity(entry);
+  if (!card.dismissal) return;
+  const identity = { session_id: card.id, target: card.dismissal };
   inboxBusy = true;
   inboxError = null;
   renderInbox();
   try {
     await inboxDismiss(identity);
   } catch (error) {
-    inboxError = { id: identity.session_id, text: error.message };
+    inboxError = { key: card.key, text: error.message };
   }
   inboxBusy = false;
   renderInbox();
   await refresh();
 }
 
-/// Dismiss every `!` card. A `?` dismissal sets the ask aside for the turn
-/// classifier, so a bulk clear leaves questions alone.
-async function inboxClearAll() {
-  if (inboxBusy) return;
-  const rows = inboxEntries().filter(entry => entry.attention === 'important' && entry.notification_dismissal);
-  if (!rows.length) return;
-  const identities = rows.map(inboxIdentity);
+/// Dismiss every `!` card the control showed. A `?` dismissal sets the ask
+/// aside for the turn classifier, so a bulk clear leaves questions alone.
+async function inboxClearAll(cards) {
+  if (inboxBusy || !cards.length) return;
+  const identities = cards.map(card => ({ session_id: card.id, target: card.dismissal }));
   inboxBusy = true;
   inboxError = null;
   renderInbox();
@@ -1395,53 +1427,53 @@ async function inboxClearAll() {
   await refresh();
 }
 
-/// Rotate the shown card to the back of the stack.
-function inboxSkip() {
-  const entries = inboxEntries();
-  if (entries.length < 2) return;
-  const id = entries[0].id;
-  const at = inboxSkipped.indexOf(id);
+/// Rotate a card to the back of the stack.
+function inboxSkip(card) {
+  if (inboxEntries().length < 2) return;
+  const at = inboxSkipped.indexOf(card.key);
   if (at >= 0) inboxSkipped.splice(at, 1);
-  inboxSkipped.push(id);
+  inboxSkipped.push(card.key);
   renderInbox();
 }
 
-function inboxOpen(entry) {
-  const target = inboxOpenTarget(entry);
-  if (target) navigate({ name: 'conversation', sessionId: target, from: 'notifications' });
+function inboxOpen(card) {
+  if (card.destination) navigate({ name: 'conversation', sessionId: card.destination, from: 'notifications' });
 }
 
 /// Drop what was sent, but only if the line still holds exactly that text: a
 /// newer edit made while the request was in flight stays.
-function inboxClearSubmitted(sessionId, submitted) {
-  if (inboxDrafts.get(sessionId) !== submitted) return;
-  inboxDrafts.delete(sessionId);
-  if (inboxShown === sessionId && inboxNodes.input.value === submitted) inboxNodes.input.value = '';
+function inboxClearSubmitted(destination, submitted) {
+  if (inboxDrafts.get(destination) !== submitted) return;
+  inboxDrafts.delete(destination);
+  if (inboxShown === destination && inboxNodes.input.value === submitted) inboxNodes.input.value = '';
 }
 
-async function inboxSend() {
-  const entry = inboxCurrent();
-  const submitted = inboxNodes.input.value;
-  if (!entry || entry.launchFailure || !submitted.trim() || inboxSending.has(entry.id)) return;
-  const sessionId = entry.id;
+async function inboxSend(card) {
+  const destination = card.destination;
+  const submitted = inboxDrafts.get(destination) ?? '';
+  if (!destination || card.launchFailureId || !submitted.trim()) {
+    if (!submitted.trim()) inboxOpen(card);
+    return;
+  }
+  if (inboxSending.has(destination)) return;
   inboxError = null;
   // A slash command is the conversation composer's to run: it needs the
   // session's own settings. The line goes there as its draft, unsent.
   if (submitted.startsWith('/')) {
-    await queueDraftSave(sessionId, submitted);
-    inboxClearSubmitted(sessionId, submitted);
-    navigate({ name: 'conversation', sessionId, from: 'notifications' });
+    await queueDraftSave(destination, submitted);
+    inboxClearSubmitted(destination, submitted);
+    navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
     return;
   }
   let body;
   try {
-    body = submissionBody(sessionId, submitted, []);
+    body = submissionBody(destination, submitted, []);
   } catch (error) {
-    inboxError = { id: sessionId, text: `Not sent: ${error.message}` };
+    inboxError = { key: card.key, text: `Not sent: ${error.message}` };
     renderInbox();
     return;
   }
-  inboxSending.add(sessionId);
+  inboxSending.add(destination);
   renderInbox();
   try {
     // The composer's own submission: the command id is minted once, and a lost
@@ -1450,42 +1482,52 @@ async function inboxSend() {
     if (pending.failed) {
       // Refused before the daemon accepted it: nothing was sent, keep the line.
       pendingSubmissions.delete(pending.id);
-      inboxError = { id: sessionId, text: pending.status };
+      inboxError = { key: card.key, text: pending.status };
     } else {
-      inboxClearSubmitted(sessionId, submitted);
+      inboxClearSubmitted(destination, submitted);
       if (pending.status.startsWith('Delivery unconfirmed')) {
         inboxError = {
-          id: sessionId,
+          key: card.key,
           text: `${pending.status}. It may have arrived; open the session to check before sending again.`,
         };
       }
     }
   } finally {
-    inboxSending.delete(sessionId);
+    inboxSending.delete(destination);
   }
   renderInbox();
 }
 
+bindInboxControl(inboxNodes.open, inboxOpen);
+bindInboxControl(inboxNodes.clear, inboxClearNext);
+bindInboxControl(inboxNodes.skip, inboxSkip);
+bindInboxControl(inboxNodes.clearAll, inboxClearAll);
+bindInboxControl(inboxNodes.retry, card => {
+  const entry = inboxEntries().find(item => inboxKey(item) === card.key);
+  if (entry && !entry.launchFailure) inboxTexts.delete(inboxTextKey(entry));
+  renderInbox();
+});
+// Send and Enter in the line are one gesture on the card the form showed. An
+// empty line is Go to Session.
+bindInboxControl(inboxNodes.send, inboxSend);
+inboxNodes.input.addEventListener?.('keydown', event => {
+  if (event.key === 'Enter') inboxNodes.send._press = inboxNodes.send._binding;
+});
 inboxNodes.reply.onsubmit = event => {
   event.preventDefault();
-  // Enter on an empty line goes to the session instead of sending nothing.
-  if (inboxNodes.input.value.trim()) void inboxSend();
-  else { const entry = inboxCurrent(); if (entry) inboxOpen(entry); }
+  inboxNodes.send.onclick();
 };
 inboxNodes.input.oninput = () => {
   if (!inboxShown) return;
   if (inboxNodes.input.value) inboxDrafts.set(inboxShown, inboxNodes.input.value);
   else inboxDrafts.delete(inboxShown);
 };
-inboxNodes.open.onclick = () => { const entry = inboxCurrent(); if (entry) inboxOpen(entry); };
-inboxNodes.clear.onclick = () => void inboxClearNext();
-inboxNodes.skip.onclick = () => inboxSkip();
-inboxNodes.clearAll.onclick = () => void inboxClearAll();
-inboxNodes.retry.onclick = () => {
-  const entry = inboxCurrent();
-  if (entry && !entry.launchFailure) inboxTexts.delete(inboxTextKey(entry));
-  renderInbox();
-};
+
+/// Assign text only when it differs: replacing the text node of the message
+/// would collapse a selection the person is making in it.
+function setInboxText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
 
 function renderInbox() {
   const entries = inboxEntries();
@@ -1494,18 +1536,21 @@ function renderInbox() {
   nodes.card.hidden = !entry;
   nodes.empty.hidden = Boolean(entry);
   if (!entry) { inboxShown = null; inboxShownKey = null; return; }
+  const card = inboxCard(entry);
+  const cards = entries.filter(item => item.attention === 'important' && item.notification_dismissal).map(inboxCard);
+  for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.retry, nodes.send]) control._binding = card;
+  nodes.clearAll._binding = cards;
   const failure = entry.launchFailure;
-  const important = entries.filter(item => item.attention === 'important' && item.notification_dismissal).length;
   const waiting = entry.attention === 'needs_input';
-  nodes.glyph.textContent = failure ? '×' : waiting ? '?' : '!';
+  setInboxText(nodes.glyph, failure ? '×' : waiting ? '?' : '!');
   nodes.glyph.className = `session-attention-item alert inbox-glyph ${failure ? 'failed' : waiting ? 'waiting' : 'important'}`;
   nodes.glyph.setAttribute('aria-label', failure ? 'Launch failed' : waiting ? 'Input needed' : 'Important');
   const age = failure ? '' : `${formatClock(serverClockMs() - sessionMessageMs(entry))} ago`;
-  nodes.headerText.textContent = [entry.title || entry.id, entry.project_label, age, `${entries.length} left`]
-    .filter(Boolean).join(' · ');
+  setInboxText(nodes.headerText, [entry.title || entry.id, entry.project_label, age, `${entries.length} left`]
+    .filter(Boolean).join(' · '));
   let retryable = false;
   if (failure) {
-    nodes.body.textContent = failure.error || LAUNCH_FAILURE_TEXT;
+    setInboxText(nodes.body, failure.error || LAUNCH_FAILURE_TEXT);
   } else {
     const key = inboxTextKey(entry);
     // Showing a card again tries a failed read again; the same card never loops.
@@ -1513,27 +1558,27 @@ function renderInbox() {
     inboxShownKey = key;
     const text = inboxText(entry, key);
     retryable = text.state === 'error';
-    nodes.body.textContent = text.state === 'loading' ? 'loading…'
+    setInboxText(nodes.body, text.state === 'loading' ? 'loading…'
       : text.state === 'missing' ? 'message not available'
       : text.state === 'error' ? `Could not read the message: ${text.text}`
-      : text.text || (waiting ? 'Waiting for your input' : 'Important update');
+      : text.text || (waiting ? 'Waiting for your input' : 'Important update'));
   }
   nodes.retry.hidden = !retryable;
   nodes.reply.hidden = Boolean(failure);
-  if (inboxShown !== entry.id) {
-    inboxShown = entry.id;
-    nodes.input.value = inboxDrafts.get(entry.id) || '';
+  if (inboxShown !== card.destination) {
+    inboxShown = card.destination;
+    nodes.input.value = inboxDrafts.get(card.destination) || '';
   }
-  const error = inboxError?.id === entry.id ? inboxError.text : '';
-  nodes.cardError.textContent = error;
+  const error = inboxError?.key === card.key ? inboxError.text : '';
+  setInboxText(nodes.cardError, error);
   nodes.cardError.hidden = !error;
-  nodes.send.disabled = inboxSending.has(entry.id);
-  nodes.open.hidden = !inboxOpenTarget(entry);
-  nodes.clear.disabled = inboxBusy || (!failure && !entry.notification_dismissal);
+  nodes.send.disabled = inboxSending.has(card.destination);
+  nodes.open.hidden = !card.destination;
+  nodes.clear.disabled = inboxBusy || (!failure && !card.dismissal);
   nodes.skip.disabled = inboxBusy || entries.length < 2;
-  nodes.clearAll.hidden = !important;
+  nodes.clearAll.hidden = !cards.length;
   nodes.clearAll.disabled = inboxBusy;
-  nodes.clearAll.textContent = `Clear all ! (${important})`;
+  setInboxText(nodes.clearAll, `Clear all ! (${cards.length})`);
 }
 
 function renderSessions() {

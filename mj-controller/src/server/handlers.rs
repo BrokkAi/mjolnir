@@ -157,6 +157,26 @@ pub(super) async fn session_row(
     Ok(response)
 }
 
+/// Resolve the first source of the shared rule to text. A question read that
+/// finds nothing is "not available", not a reason to show another message.
+pub(super) fn notification_message_text(
+    kind: mj_core::notification_message::NotificationKind,
+    facts: &mj_core::notification_message::NotificationMessageFacts<'_>,
+    question_item: impl FnOnce(&str) -> anyhow::Result<Option<String>>,
+    last_agent_message: impl FnOnce() -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<String>> {
+    use mj_core::notification_message::{NotificationMessageSource, notification_message_sources};
+    match notification_message_sources(kind, facts).into_iter().next() {
+        None => Ok(None),
+        Some(
+            NotificationMessageSource::PendingRequest(text)
+            | NotificationMessageSource::ReviewActivity(text),
+        ) => Ok(Some(text.to_owned())),
+        Some(NotificationMessageSource::QuestionMessage(target)) => question_item(target),
+        Some(NotificationMessageSource::LastAgentMessage) => last_agent_message(),
+    }
+}
+
 /// The full message a notification card shows for one session. Which message
 /// that is comes from `mj_core::notification_message`, the rule the terminal
 /// pane uses too. A parent promoted by a child's pending form reads the child's
@@ -166,13 +186,10 @@ pub(super) async fn notification_message(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Response<Body>, ApiError> {
-    use mj_core::notification_message::{
-        NotificationKind, NotificationMessageFacts, NotificationMessageSource,
-        notification_message_sources,
-    };
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
     validate_public_id(&session_id)?;
     // Copy what the snapshot holds, then release it before any database read.
-    let (holder, kind, pending_request, review_activity, question_message) = {
+    let (holder, kind, pending_request, review_activity, question_message, supports_open_request) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         let holder = session
@@ -198,6 +215,7 @@ pub(super) async fn notification_message(
                 .as_ref()
                 .map(|review| review.status.clone()),
             holder_session.question_message.clone(),
+            holder_session.supports_open_request,
         )
     };
     let reader = holder.clone();
@@ -206,19 +224,12 @@ pub(super) async fn notification_message(
             pending_request: pending_request.as_deref(),
             review_activity: review_activity.as_deref(),
             question_message: question_message.as_deref(),
-            // The viewer does not carry the legacy no-open-request flag; those
-            // harnesses are only reachable from the terminal pane.
-            supports_open_request: true,
+            supports_open_request,
         };
-        // The first source is the card's message: a read that finds nothing is
-        // "not available", not a reason to show another message.
-        let Some(source) = notification_message_sources(kind, &facts).into_iter().next() else {
-            return Ok(None);
-        };
-        match source {
-            NotificationMessageSource::PendingRequest(text)
-            | NotificationMessageSource::ReviewActivity(text) => Ok(Some(text.to_owned())),
-            NotificationMessageSource::QuestionMessage(target) => {
+        notification_message_text(
+            kind,
+            &facts,
+            |target| {
                 let item = crate::database::load_materialized_transcript_item(&reader, target)?;
                 Ok(item.and_then(|item| {
                     mj_core::transcript::materialized_agent_message_text(
@@ -226,12 +237,12 @@ pub(super) async fn notification_message(
                         target,
                     )
                 }))
-            }
-            NotificationMessageSource::LastAgentMessage => {
+            },
+            || {
                 Ok(crate::database::load_materialized_session_summary(&reader)?
                     .and_then(|summary| summary.last_agent_message))
-            }
-        }
+            },
+        )
     })
     .await
     .map_err(|error| {

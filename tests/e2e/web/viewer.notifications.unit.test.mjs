@@ -29,7 +29,10 @@ class Node {
     this.dataset = {};
     this.children = [];
     this.attributes = {};
+    this.listeners = {};
   }
+  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  fire(type, event = {}) { for (const listener of this.listeners[type] || []) listener(event); }
   append(...nodes) { this.children.push(...nodes); }
   insertBefore(node, reference) { this.children.splice(this.children.indexOf(reference), 0, node); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
@@ -37,10 +40,10 @@ class Node {
 
 /// The notifications screen running on its real source with hand-built fakes
 /// for the daemon (`request`), the router and the DOM.
-function screen(rows, { launchFailures = [] } = {}) {
+function screen(rows, { launchFailures = [], texts = {} } = {}) {
   const requests = [];
   const drafts = [];
-  const answers = new Map();
+  const answers = new Map(Object.entries(texts));
   const nav = [];
   const container = new Node('div');
   const context = vm.createContext({
@@ -91,6 +94,7 @@ function screen(rows, { launchFailures = [] } = {}) {
   vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
   vm.runInContext(sourceBetween('// The notifications screen\n', 'function renderSessions() {'), context);
   const read = expression => vm.runInContext(expression, context);
+  read('renderInbox()'); // the screen is drawn before anyone can press a button
   return {
     context, requests, answers, nav, container, drafts,
     read,
@@ -125,7 +129,7 @@ test('skip moves the card to the back and is held in the page only', () => {
   assert.deepEqual(view.ids(), ['c', 'a', 'b']);
   view.context.viewerState.rows.delete('a');
   assert.deepEqual(view.ids(), ['c', 'b']);
-  assert.equal(view.read('inboxSkipped.includes("a")'), false, 'a gone session leaves the skip list');
+  assert.equal(view.read('inboxSkipped.some(key => key.startsWith("a|"))'), false, 'a gone session leaves the skip list');
 });
 
 test('Clear & Next dismisses the identity captured when it starts and shows a stale refusal', async () => {
@@ -266,7 +270,8 @@ test('quick reply builds the composer\'s own action: ! runs a shell command and 
 });
 
 test('Go to Session opens a pending form\'s holder and returns here on Back', () => {
-  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' })]);
+  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' }),
+    row('child', 'working', 1, { subagent_parent_id: 'parent' })]);
   view.render();
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
@@ -277,16 +282,14 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
 });
 
 test('the full message loads from the daemon: loading, text, and not available', async () => {
-  const view = screen([row('a', 'needs_input', 3, { question_message: 'agent:1' })]);
-  view.answers.set('/api/sessions/a/notification-message', { session_id: 'a', text: 'Line one\n\nLine two' });
-  view.render();
+  const view = screen([row('a', 'needs_input', 3, { question_message: 'agent:1' })],
+    { texts: { '/api/sessions/a/notification-message': { session_id: 'a', text: 'Line one\n\nLine two' } } });
   assert.equal(view.nodes.body.textContent, 'loading…');
   await settle();
   assert.equal(view.nodes.body.textContent, 'Line one\n\nLine two');
 
-  const missing = screen([row('m', 'important', 3)]);
-  missing.answers.set('/api/sessions/m/notification-message', { session_id: 'm', text: null });
-  missing.render();
+  const missing = screen([row('m', 'important', 3)],
+    { texts: { '/api/sessions/m/notification-message': { session_id: 'm', text: null } } });
   await settle();
   assert.equal(missing.nodes.body.textContent, 'message not available');
 });
@@ -312,9 +315,8 @@ test('skip rotates through unique cards however many times it is pressed', () =>
 });
 
 test('a failed message read is not cached: it retries when the card is shown again, not in a loop', async () => {
-  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)]);
-  view.answers.set('/api/sessions/a/notification-message', new Error('offline'));
-  view.render();
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)],
+    { texts: { '/api/sessions/a/notification-message': new Error('offline') } });
   await settle();
   const reads = () => view.requests.filter(r => r.url.endsWith('/a/notification-message')).length;
   assert.equal(reads(), 1);
@@ -329,9 +331,8 @@ test('a failed message read is not cached: it retries when the card is shown aga
   assert.equal(view.nodes.body.textContent, 'back again');
 
   // A failure is also retried on the next visit to the card.
-  const other = screen([row('a', 'needs_input', 3)]);
-  other.answers.set('/api/sessions/a/notification-message', new Error('offline'));
-  other.render();
+  const other = screen([row('a', 'needs_input', 3)],
+    { texts: { '/api/sessions/a/notification-message': new Error('offline') } });
   await settle();
   other.answers.set('/api/sessions/a/notification-message', { text: 'recovered' });
   other.read('inboxShownKey = null');
@@ -383,4 +384,66 @@ test('launch failures are cards after the ! cards, counted, openable and dismiss
   view.render();
   assert.equal(view.nodes.open.hidden, true, 'a failure with no session has nothing to open');
   assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)', 'only the ! card counts for Clear all !');
+});
+
+test('text, Quick reply and Go to Session all name the form holder', async () => {
+  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' }),
+    row('child', 'working', 1, { subagent_parent_id: 'parent', pending_elicitation_ids: ['r1'] })]);
+  view.render();
+  view.nodes.input.value = 'yes';
+  view.nodes.input.oninput();
+  assert.equal(view.read('inboxDrafts.has("child")'), true, 'the draft belongs to the destination');
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  assert.equal(view.requests.find(r => r.body?.action === 'prompt').body.session_id, 'child');
+  view.nodes.open.onclick();
+  assert.equal(plain(view.nav).at(-1).sessionId, 'child');
+  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'child');
+});
+
+// Hard-won: review of 045f5fe81: persistent buttons acted on the new first card after a snapshot reordered the stack.
+test('a gesture acts on the card it started on, even if a snapshot changes the first card meanwhile', async () => {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)]);
+  view.render();
+  view.nodes.clear.fire('pointerdown');
+  // A newer question arrives and sorts first before the click lands.
+  view.context.viewerState.rows.set('n', row('n', 'needs_input', 9));
+  view.render();
+  assert.equal(view.ids()[0], 'n');
+  view.nodes.clear.onclick();
+  await settle();
+  const dismissal = view.requests.find(r => r.body?.action === 'dismiss-notification').body;
+  assert.equal(dismissal.session_id, 'a', 'not the new first card');
+  assert.deepEqual(plain(dismissal.target), { question: { turn_id: 'a' } });
+
+  view.nodes.open.fire('pointerdown');
+  view.context.viewerState.rows.set('z', row('z', 'needs_input', 10));
+  view.render();
+  view.nodes.open.onclick();
+  assert.equal(plain(view.nav).at(-1).sessionId, 'n');
+});
+
+test('the message text node is replaced only when the text changes', async () => {
+  const view = screen([row('a', 'needs_input', 3, { question_message: 'q' })],
+    { texts: { '/api/sessions/a/notification-message': { text: 'long message' } } });
+  let writes = 0;
+  let current = view.nodes.body.textContent;
+  Object.defineProperty(view.nodes.body, 'textContent', {
+    get: () => current,
+    set: value => { writes += 1; current = value; },
+  });
+  await settle();
+  const settled = writes;
+  assert.equal(current, 'long message');
+  view.render(); view.render();
+  assert.equal(writes, settled, 'a snapshot that changes nothing leaves the selection alone');
+});
+
+test('a new notification from a skipped session is not deferred', () => {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)]);
+  view.nodes.skip.onclick();
+  assert.deepEqual(view.ids(), ['b', 'a']);
+  view.context.viewerState.rows.get('a').notification_dismissal = { question: { turn_id: 'a2' } };
+  assert.deepEqual(view.ids(), ['a', 'b'], 'the new question is a new card and comes first');
+  assert.equal(view.read('inboxSkipped.length'), 0, 'the old deferral is dropped');
 });
