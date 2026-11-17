@@ -105,9 +105,24 @@ impl HostState {
         let events = self.events.clone();
         let owner = session_id.clone();
         let operation = run(control, persistence, events.clone(), owner.clone());
+        let environment = self.environment.clone();
         let (completed, result) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(operation)
+            let held = {
+                let owner = owner.clone();
+                async move {
+                    // Each of these operations sends reviewer work to the
+                    // worker. A recovery copy already running is waited for,
+                    // and the next one stays out until the operation ends.
+                    let deadline =
+                        tokio::time::Instant::now() + super::reviewer::BACKGROUND_WORK_WAIT;
+                    let _background =
+                        super::reviewer::hold_background_work(&environment, &owner, deadline)
+                            .await?;
+                    operation.await
+                }
+            };
+            let result = std::panic::AssertUnwindSafe(held)
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| {

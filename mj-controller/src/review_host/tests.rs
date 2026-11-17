@@ -5747,6 +5747,55 @@ async fn push_state_changes_do_not_block_daemon_handoff() {
     assert!(environment.state().push_findings.is_some());
 }
 
+// Hard-won: Reliability soak 2026-11-16: a review-off start sent its capture into a recovery copy's checkpoint barrier and the worker refused it.
+#[tokio::test(start_paused = true)]
+async fn a_review_off_request_waits_for_background_work_before_reaching_the_worker() {
+    let session = session_id("reviewoff-background");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .background_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let off: ReviewConfigSource = Arc::new(|_| ReviewConfig::default());
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), off, environment.clone());
+    manager
+        .publisher
+        .publish(
+            session.clone(),
+            view(
+                &session,
+                MaterializedExecutionState::Running { started_at_ms: 1 },
+            ),
+        )
+        .await
+        .unwrap();
+    let request = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        async move { host.begin_push(&session, None).await }
+    });
+    // A copy that never ends: the request must be waiting on the hold, having
+    // sent the worker nothing.
+    let request_to_worker = tokio::time::timeout(
+        super::reviewer::BACKGROUND_WORK_WAIT / 2,
+        manager.requests.recv(),
+    )
+    .await;
+    assert!(
+        request_to_worker.is_err(),
+        "the worker was sent work under running background work"
+    );
+    assert_eq!(environment.background_holds(), 1);
+    tokio::time::advance(super::reviewer::BACKGROUND_WORK_WAIT).await;
+    let refusal = request.await.unwrap().unwrap_err().0;
+    assert!(
+        refusal.contains("waiting for background work") && refusal.contains("deadline"),
+        "{refusal}"
+    );
+    assert_eq!(environment.live_holds(), 0);
+    host.shutdown().await.unwrap();
+}
+
 // Hard-won: 8481d8a51: review admission ignored its existing background-work deadline.
 #[tokio::test(start_paused = true)]
 async fn review_admission_deadline_reports_refusal_and_releases_its_hold() {
