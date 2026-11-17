@@ -85,7 +85,6 @@ fn quota_schedule(relay: &mut DurableRelay, reset_at_ms: Option<i64>) -> RelayCo
             retry_at_ms: reset_at_ms.map(|t| t + 60_000),
             notice: "Quota reset scheduled".into(),
             submitted: false,
-            retry_from_duration: false,
         })),
     }
 }

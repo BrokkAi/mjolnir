@@ -3369,7 +3369,6 @@ fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
                 retry_at_ms: None,
                 notice: "quota stopped".into(),
                 submitted: false,
-                retry_from_duration: false,
             })),
         },
     );

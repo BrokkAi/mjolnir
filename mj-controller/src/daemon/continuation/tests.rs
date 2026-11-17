@@ -147,7 +147,6 @@ fn recovery_for(
         retry_at_ms,
         notice: "Quota limit; waiting for reset".into(),
         submitted: false,
-        retry_from_duration: false,
     }
 }
 

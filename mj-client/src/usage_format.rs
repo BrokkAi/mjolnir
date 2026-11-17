@@ -645,7 +645,6 @@ mod tests {
                 retry_at_ms: Some(120_000),
                 notice: "waiting".into(),
                 submitted: false,
-                retry_from_duration: false,
             }),
             ..Default::default()
         };
