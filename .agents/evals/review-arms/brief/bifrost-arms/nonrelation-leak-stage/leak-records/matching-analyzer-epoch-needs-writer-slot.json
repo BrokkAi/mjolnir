@@ -1,0 +1,28 @@
+{
+  "id": "matching-analyzer-epoch-needs-writer-slot",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "7b158e915a5c0924b3390ab08ca6c6a7d5a009d6c516da24a6658d4bb8d874ea",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes epoch publication and generation handling, but never identifies an Immediate writer reservation on the matching-epoch path or contention behind unrelated writers.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output discusses epoch comparison and generation publication but does not identify the unconditional Immediate transaction or matching-epoch contention with unrelated writers.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

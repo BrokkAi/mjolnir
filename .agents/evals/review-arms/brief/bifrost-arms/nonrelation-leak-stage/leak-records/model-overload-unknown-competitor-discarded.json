@@ -1,0 +1,28 @@
+{
+  "id": "model-overload-unknown-competitor-discarded",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "095d969883c542bed9410af52914b2bfb949d4def86d2dd7f75233490b58de5d",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes model selection and conversion projection, but never identifies ignored unresolved competitors or the resulting unjustified singleton selection. Its code-path observations do not identify a defect.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes model selection callers and error propagation but never identifies unresolved competitors being discarded when one candidate succeeds. It asserts no defect in overload certainty.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "stage": "non-relation13 final briefs and round0 paired leak checks before reviews",
+  "frozen_at": "2026-11-17T06:44:36.707352+00:00",
+  "files": {
+    "README.md": "694f45520ca6d886d66d7beeca4430b5bd871ad888d5ae51a287c255c42e8ee7",
+    "completion-manifest.json": "e135b46bf449728df7666332dd33f29205de901944b46258c9126ded15d6f49d",
+    "leak-records/csharp-single-file-namespace-prunes-usages.json": "ca939c574449689f4e18edb37c7f665a254672c67ad6114fdfb36f17dc192c55",
+    "leak-records/javascript-object-method-indexed-as-field.json": "eadc6fe34ad996666c6b706d2409f50a749368769219ada245565d2701f0a56d",
+    "leak-records/maintainability-file-cap-missing-truncated.json": "ec1ae4b68cd4639a504538efc371e0639ba9274b831793c3909bc5d0ea4f39c1",
+    "leak-records/matching-analyzer-epoch-needs-writer-slot.json": "f068509304b779a12c351ad78475ba0506657edac2adb864f5f1f08ab96fc5dd",
+    "leak-records/mcp-timed-out-progress-survives-response.json": "34f265a4cc002ce52044895152f8604f2ed829d9c569e24a92b6f3cf8c5fc31e",
+    "leak-records/model-overload-unknown-competitor-discarded.json": "51c30d4bc98b08bc3eba99b25ee43feda5f1edc97f5683921170af3123f1418c",
+    "leak-records/ruby-constant-navigation-climbs-to-terminal.json": "b38b5bf41106d98a7c7a83de31ece183395342a8eac216a3f1dbb6b2a1cbe4fb",
+    "leak-records/rust-bare-value-admits-associated-constant.json": "83887414c506d824a4e7392cba39025a045ac5cd2a2a94f0d08e8e9f869b08c1",
+    "leak-records/rust-enum-variant-named-fields-omitted.json": "2b1da18da54d58b4c6d2b9cdfbdee5fcfb4f3d2e18f7498377091d5871b28575",
+    "leak-records/rust-importer-planning-widens-to-code-mentions.json": "3f1fc561a1d7ff44f29d55f5546020e5f7ad55cf3c0499b21893c01945df7a4d",
+    "leak-records/rust-item-macro-evades-plain-struct-drop-proof.json": "f247f27bcc3561fc8b3e43d0268f585dc6dbb2ae4a19f64adcc6f3e19aac2b97",
+    "leak-records/rust-option-return-implicitly-unwrapped.json": "0c54478dde8ce89fdc9331b2f133a117ecff071aa4fa4c79caf4330dfd22ae53",
+    "leak-records/rust-while-let-binder-body-field.json": "6dd40d734b44545e68a493eb4099c390aae4383f6b211c72ab295b99a28366d3",
+    "parent-admission.json": "2902f66aa5b4cc8bd8900129494af92e9a73f33ac06962acd9c20418e64d183c",
+    "round-freeze.json": "141f90b6945e4d3d2a00b4c6d272c5311fb36f44b37078379e10cec1fc6adfc3",
+    "workflow-out.json": "e5151d7d40ae78edc4b088c78aadff706b63c44a27855d7df326fc32c96cbe14"
+  },
+  "writer_freeze_sha256": "9e1a3a81a1868382a7b9e2e9fa03c4e73f0148cdc18672a9ce5810edb709e44e",
+  "raw_key_sha256": "4551ce04b40cfbbbde1bef4541868cbaf38e9aafd7d0da1263431d26714901f9",
+  "jobs_sha256": "8c046cdd9c41e42a0831931f1fb733ef00e7a66ee85b05c96da4867dc4434998",
+  "all13_original_texts_unchanged": true,
+  "all13_labels": "missed",
+  "remaining_flags": 0
+}

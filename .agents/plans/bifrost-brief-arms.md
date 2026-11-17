@@ -18,7 +18,8 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Report relation reading in e03007684: A9/51 versus BT4/51, paired −9.8 points (95% CI −19.6 to −2.0); all primary model roles ended or suspended. Lead authorized continuing after the reading, with the unchanged 25% floor.
 - [x] Register and complete one blinded contains diagnostic; read all four negative diffs and 12 brief-arm handbacks, and tabulate size/length from artifacts. Freeze these exploratory diagnostics separately; primary labels and reading remain unchanged.
 - [x] Complete and freeze all 13 non-relation writers; every session is suspended, final lint/inventory/hash checks pass, one historical-path scanner hit is classified from its captured own-workspace git diff.
-- [ ] Complete the 13 non-relation paired leak checks, reviews and judging with the frozen order and unchanged harness.
+- [x] Complete paired non-relation leak checks: all 13 briefs missed by both judges, 26 hash-bound verdicts, no flags or wording edits; both Sol/high judges suspended.
+- [ ] Run the 26 registered non-relation A/BT jobs with three Terra/high reviewers each, then paired catch judging and required parent handchecks.
 - [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
 
 ## Surprises & Discoveries
