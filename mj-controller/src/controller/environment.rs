@@ -831,15 +831,30 @@ mod tests {
         let environment = database::session_environment(&parent.id).unwrap().unwrap();
         let authority =
             Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
+        // The two workers stop concurrently, so their checks and kills may
+        // interleave in either order. What must hold: one check and one kill
+        // per worker, and no kill before a check has run for it.
+        let operations = executor.operations.lock().unwrap().clone();
+        let count = |purpose: &str| operations.iter().filter(|op| *op == purpose).count();
+        assert_eq!(count("check the control worker"), 2, "{operations:?}");
         assert_eq!(
-            executor.operations.lock().unwrap().as_slice(),
-            [
-                "check the control worker",
-                "kill retired Mjolnir worker daemon",
-                "check the control worker",
-                "kill retired Mjolnir worker daemon"
-            ]
+            count("kill retired Mjolnir worker daemon"),
+            2,
+            "{operations:?}"
         );
+        assert_eq!(operations.len(), 4, "{operations:?}");
+        let mut checks_ahead = 0_i32;
+        for operation in &operations {
+            checks_ahead += if operation == "check the control worker" {
+                1
+            } else {
+                -1
+            };
+            assert!(
+                checks_ahead >= 0,
+                "a kill ran before its check: {operations:?}"
+            );
+        }
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();
         assert!(
