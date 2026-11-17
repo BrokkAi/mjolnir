@@ -1,5 +1,5 @@
 {
-  "status": "source inventory corrected; awaiting amended Hard-won sampling order before any corpus freeze",
+  "status": "second source amendment approved; normalizing Hard-won groups before draw",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
@@ -40,5 +40,12 @@
     "attribute_inventory": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hard-won/attribute-inventory.json",
     "attribute_inventory_sha256": "7f927da7f193b33e44692857aa2453e8f7d92aa3d304983c0bae1fe82f989fa2",
     "reason": "Bifrost AGENTS.md defines #[hardwon(...)] as canonical defect metadata; initial22 included literal comments only."
+  },
+  "hardwon_group_seed": 20261118,
+  "hardwon_group_order": "not drawn yet",
+  "second_source_amendment": {
+    "plan": "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md",
+    "sha256": "82a56e2c8a7b3d8a0905d68400f20e6f2e12c7fcd8f57058e01cf85f81d4a0a2",
+    "method": "Group canonical comment/attribute markers by primary issue, else named commit (full SHA where resolvable); unreferenced comments use marker-added fix commit. Shuffle stable sorted groups with seed20261118, trace in order until30confirmed under unchanged SPEC. Existing bugissue order is fallback only if groups exhaust."
   }
 }
