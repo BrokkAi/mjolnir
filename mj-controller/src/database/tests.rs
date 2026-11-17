@@ -5189,6 +5189,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
             task: "inspect the parser".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "async-review".into(),
         std::num::NonZeroUsize::new(3).unwrap(),
@@ -5210,6 +5211,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
     let mut state = TurnReviewState {
         active: Some("async-review".into()),
         active_group: Some(ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![Default::default(); 3],
             registrations: (1..=3)
@@ -5304,6 +5306,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
         declined: Vec::new(),
+        brief: None,
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,
@@ -5311,6 +5314,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         std::num::NonZeroUsize::new(2).unwrap(),
     );
     let group = mj_core::storage::ActiveReviewGroup {
+        brief_writer: None,
         driver: driver.snapshot(),
         reviewers: vec![Default::default(); 2],
         registrations: vec![
@@ -5373,6 +5377,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
         declined: Vec::new(),
+        brief: None,
     };
     let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,
@@ -5446,6 +5451,7 @@ fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed(
                     child_session_id: Some((*child).to_owned()),
                 })
                 .collect(),
+            brief_writer: None,
         }),
         ..Default::default()
     };
@@ -5629,6 +5635,7 @@ fn a_failed_reviewer_keeps_no_handback_from_another_command() {
             task: "inspect the parser".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "failed-review".into(),
         std::num::NonZeroUsize::MIN,
@@ -5657,6 +5664,7 @@ fn a_failed_reviewer_keeps_no_handback_from_another_command() {
                 request_key: "review-key".into(),
                 child_session_id: Some(child.into()),
             }],
+            brief_writer: None,
         }),
         ..Default::default()
     };
@@ -5693,6 +5701,7 @@ fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
             task: "inspect the parser".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "cancelled-review".into(),
         std::num::NonZeroUsize::MIN,
@@ -5718,6 +5727,7 @@ fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
                 request_key: "review-key".into(),
                 child_session_id: Some(child.into()),
             }],
+            brief_writer: None,
         }),
         ..Default::default()
     };
@@ -6559,6 +6569,7 @@ fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
     launch.kind = mj_core::subagent::SubagentKind::Reviewer;
     launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
     launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        role: mj_core::worker_launch::ReviewChildRole::Reviewer,
         profile_id: "reviewer".into(),
         harness: mj_core::config::HarnessKind::Codex,
         bridge_command: "review-bridge".into(),

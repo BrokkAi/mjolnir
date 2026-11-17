@@ -224,6 +224,10 @@ pub(super) struct Prepared {
     pub seed: TurnReviewSeed,
     pub(super) state: TurnReviewState,
     pub(super) reviewers: Vec<ReviewerIdentity>,
+    /// The brief writer, when the settings enable one and it resolved.
+    pub(super) brief_writer: Option<ReviewerIdentity>,
+    /// Why a configured brief writer will not run, for the requester.
+    pub(super) brief_skipped: Option<String>,
     /// Committed work captured before choosing reviewers.
     pub(super) captured: Vec<mj_core::relay::RepoDelta>,
     /// Keeps recovery copies and worker upgrades off the session from

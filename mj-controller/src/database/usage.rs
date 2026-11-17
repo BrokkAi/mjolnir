@@ -564,7 +564,7 @@ mod tests {
         save_session_to(&path, &super::super::tests::session("child", "project"))?;
         let connection = open(&path)?;
         connection.execute(
-            "INSERT INTO subagent_accounting VALUES ('child','root','investigate')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('child','root','investigate')",
             [],
         )?;
         drop(connection);
@@ -763,7 +763,7 @@ mod tests {
         // Operational children cannot delegate today; retained accounting
         // still traverses deeper historical/imported relationships.
         open(&path)?.execute(
-            "INSERT INTO subagent_accounting VALUES ('grandchild','child','nested')",
+            "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name) VALUES ('grandchild','child','nested')",
             [],
         )?;
         let before = load_usage_tree_from(&path, "root")?.unwrap();

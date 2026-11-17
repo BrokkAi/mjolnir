@@ -1,0 +1,285 @@
+{
+  "recorded_epoch": 1794891398.2227097,
+  "status": "round1 collected; no further models launched",
+  "round1_briefs": 4,
+  "round1_verdicts": 8,
+  "round1_label_counts": {
+    "partial": 3,
+    "caught": 1
+  },
+  "final17_manifest": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-driver/final17-published-briefs.json",
+  "final17_manifest_sha256": "f68917089482da8b6244d33a56c6d869c8f3b110940ad8ba718e83e53bdb5cc0",
+  "final17_label_counts": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1
+  },
+  "remaining_neutral_flags": [
+    "mcp-default-advisory-reported-clean",
+    "go-receiver-poisons-package-result-contract-discovery",
+    "python-module-binding-representative-after-event",
+    "unproven-override-family-certifies-empty"
+  ],
+  "accepted4_match_raw_editor_outputs": true,
+  "original13_unchanged": true,
+  "original4_writer_bytes_preserved": true,
+  "sessions": [
+    {
+      "judge": "A",
+      "sid": "d4124408cdf5e08a060d73294e7f48c1",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-relation-leak-1-batch-0-A-d4124408cdf5",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 198,
+        "completed_at_ms": 1794891319631,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-driver/usage-d4124408cdf5e08a060d73294e7f48c1.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 190592,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 23271,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2349,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 812,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 216212,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 190592,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 23271,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2349,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 812,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 216212,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 890912000
+    },
+    {
+      "judge": "B",
+      "sid": "d12b4b7690909cdbc33a7744db1140c7",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-relation-leak-1-batch-0-B-d12b4b769090",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 174,
+        "completed_at_ms": 1794891301790,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/leak-round1-driver/usage-d12b4b7690909cdbc33a7744db1140c7.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 135680,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 41800,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 1750,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 540,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 179230,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_models": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 135680,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 41800,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 1750,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 540,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 179230,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1146680000
+    }
+  ],
+  "estimated_api_cost_usd": 0.2037592,
+  "usage_totals_sum": {
+    "cached_read_tokens": 326272,
+    "cached_write_tokens": 0,
+    "input_tokens": 65071,
+    "output_tokens": 4099,
+    "thought_tokens": 1352,
+    "total_tokens": 395442
+  },
+  "usage_accounting": "One global root once/SID; both complete full-turn usage pages, no pagination summation; API-equivalent estimates, not subscription charges",
+  "quota_before": {
+    "remaining_percent": 99,
+    "refreshed_epoch": 1794891172
+  },
+  "quota_after": {
+    "remaining_percent": 99,
+    "refreshed_epoch": 1794891172,
+    "refresh_after_last_model_completion": false,
+    "age_seconds": 226.22289156913757
+  },
+  "quota_note": "Ordinary cached quota recovered99; no profile/probe/restart/config change by this operator. Shared delta not isolated study usage.",
+  "hashes": {
+    "harness_files": {
+      "driver.py": "0aca7b9b18f79f15f8c606f5513000c9ab556db9cd9720e3e623c75c2343ed36",
+      "brief_driver.py": "efda957e92fad2cec0e34cafe6a8fdb11f8fd8b625522c05c1e0fd4b2a2a71cb",
+      "verify_driver.py": "e0a8d6f9a88b617125e2469afa246c4e71977a11f08c93f11975455faeca6abb",
+      "brief_oracle.py": "730716e02d4fe502fe33d9b4babe2d6acbe24c33cdfb46361f980b881d2f94da",
+      "brief_score.py": "4977cc022b7b2fb09161894a3c699860dc82079c0a053998611960dae5fa208a",
+      "brief_writer_terra.py": "6d61b76958a56d4e4a5834cac82a4abeb8ec499bc36cd58764de3c3d6ddcc5e7",
+      "build_verify.py": "ceb28ca62e815eece31eb6499c1e05b35639c95485f51d8a3a0d8968ea183058",
+      "score.py": "3659aaa994c631a3656f06b5308da3a09a1a77f6aab0913f2e1ee5bea5c1b896",
+      "carrier_test.py": "14e7e64f16665b5b461508b800050cf70b7133ec5c82fa221e8065efd540f66a",
+      "mjx": "03168f1bd86b5427964e5241d18255a46618c5f0446a61d0427a7beed435e714",
+      "brief/WRITER.md": "ce7ff171838c0c1071a01877844b56ea423d48cd7dd93be6b2fec9a244d333e5",
+      "judge/SPEC.md": "424d065e62c57a8d103262017fb2a4b9f401fdb3d02f4b27f6b1f334b2770a4c",
+      "inventory.py": "0bb074b955e56d8165237e29c87c2f32137b3993c7033107f7bc0f941f2114aa",
+      "test_runtime_source.py": "b5495b12f32926fe80058e2fc406efc059584cf98ac59d60cbcc3183c9ce3f09",
+      "test_scoring_interfaces.py": "8c4b551b53379b733bbe6fbe42c4d485d565f83029a3f1ed6a7bf8bfd70534be"
+    },
+    "input_files": {
+      "arms/sets.json": "3ac4178ce4cdff9465a77f1fb52f3d8c055386eb39828888a21479a031d77738",
+      "stageB-relation-jobs.json": "5bb088ac7115791f82874facef293a1ad72f762c3d910ba76406b6b5abb68eb5",
+      "arms/relation-writer-ids.json": "c85086313c319b0f0495e09bea682f267069ae3d27740fffa2fc4bb1fac20295",
+      "arms/environment.json": "0645458150e4b6bd0a423f1904355e2bb90784d479896551d51402af3b5c29b5",
+      "registration/PLAN-bifrost-bugs-before-arms.md": "befcfe3fa92de8ff44a1e6d8c5c315adf9d774ac415c19cd5bd481f22ae2dfa7"
+    },
+    "ready_to_recheck": "af7e8833020697da0e89e33edc3d31157c8954ec471237651001ae5759b84ae9",
+    "key": "10ac9c6649914026b7b8af2daf861f5203e92633e35e6b719a1843d23197d4b0",
+    "batch": "31f097d9c52eefa7a1fd561c08edee7aa59c3b484599877f0938c21597f7ea24",
+    "combined_raw_verdicts": "b645340ab11a9cf44ee4b5199c67451ae6755ca6ffbdc551333b6ba360008b08",
+    "per_judge_outputs": {
+      "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-leak-1/out/verdicts-0-A.json": "e6f66563b1b6f31ab54cfb3111796003d86e8f16630424e990d32f11174095c9",
+      "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-relation-leak-1/out/verdicts-0-B.json": "09a0587663b3b41236a05276c7f9813d1f73975fd464878466627ef2dc8bcd5d"
+    }
+  },
+  "watch_outcome": {
+    "status": "recheck_collected",
+    "epoch": 1794891342.2095258,
+    "polls": 7
+  },
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794891342.121337
+  },
+  "collector_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794891342.2091022
+  },
+  "limits": "Neutral remaining flags retained/listed per original StageB rule; no second rewrite; no reviews/carriers/catch judges/code/config edits/commits."
+}

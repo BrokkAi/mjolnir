@@ -351,6 +351,21 @@ impl ProjectMemoryMcpDelivery {
     }
 }
 
+/// The output contract a review child receives from its MCP server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewChildRole {
+    #[default]
+    Reviewer,
+    BriefWriter,
+}
+
+impl ReviewChildRole {
+    fn is_reviewer(&self) -> bool {
+        *self == Self::Reviewer
+    }
+}
+
 /// Harness launch settings for a reviewer child.
 ///
 /// The reviewer shares the primary's target and working directory and nothing
@@ -360,6 +375,10 @@ impl ProjectMemoryMcpDelivery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerLaunchConfig {
+    /// Omitted for reviewers so older workers keep reading their launches.
+    /// Older workers reject a writer's unknown field before starting a harness.
+    #[serde(default, skip_serializing_if = "ReviewChildRole::is_reviewer")]
+    pub role: ReviewChildRole,
     /// Configured profile this reviewer was staged from, for display and for
     /// deciding whether a saved reviewer still matches the user's choice.
     pub profile_id: String,
@@ -829,6 +848,43 @@ mod tests {
         std::fs::write(&path, b"not JSON").unwrap();
         let error = format!("{:#}", WorkerLaunchConfig::read(&path).unwrap_err());
         assert!(!error.contains("older than the daemon"), "{error}");
+    }
+
+    // Hard-won: 5fc728617: a brief writer must never silently receive the reviewer contract.
+    #[test]
+    fn reviewer_launch_roles_keep_old_reviewers_readable_and_reject_unknown_contracts() {
+        let mut value = serde_json::json!({
+            "profile_id":"reviewer", "harness":"codex", "bridge_command":"bridge",
+            "bridge_args":[], "execution_policy":"configured_approvals"
+        });
+        // Build from an existing launch fixture's policy representation.
+        value["execution_policy"] =
+            serde_json::to_value(ExecutionPolicy::ConfiguredApprovals).unwrap();
+        let reviewer: ReviewerLaunchConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(reviewer.role, ReviewChildRole::Reviewer);
+        assert!(
+            serde_json::to_value(&reviewer)
+                .unwrap()
+                .get("role")
+                .is_none()
+        );
+        value["role"] = serde_json::json!("brief_writer");
+        let writer: ReviewerLaunchConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(writer.role, ReviewChildRole::BriefWriter);
+        assert_eq!(
+            serde_json::to_value(writer).unwrap()["role"],
+            "brief_writer"
+        );
+        value["role"] = serde_json::json!("future_role");
+        assert!(serde_json::from_value::<ReviewerLaunchConfig>(value.clone()).is_err());
+        value.as_object_mut().unwrap().remove("role");
+        value["future_role"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<ReviewerLaunchConfig>(value)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
     }
 
     #[test]

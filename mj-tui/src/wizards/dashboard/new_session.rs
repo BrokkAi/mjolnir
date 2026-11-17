@@ -489,12 +489,18 @@ impl DashboardState {
         let policy = chooser.subagents.clone().unwrap_or_default();
         let mut delegation = subagents::SubagentDraft::new(policy.clone())
             .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned());
+        let yolo = self
+            .config
+            .targets
+            .get(&target_template_id)
+            .is_some_and(TargetTemplate::is_yolo);
         delegation.refresh_create(
             &profile_id,
             &self.config,
             &self.profile_capabilities,
             &policy,
             chooser.oracle,
+            yolo,
         );
         // The launch starts at once, so a choice the refresh could not keep is
         // reported, like the profile and workspace above. Native shown as None

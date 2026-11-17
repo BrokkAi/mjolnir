@@ -195,8 +195,7 @@ fn main() {
         let fixture = root.join("tests/fixtures/fake-command.sh");
         let script = tracked_read(&fixture).expect("fake command fixture");
         let stamped = format!(
-            "{script}\n#\0MJ-WORKER-BUILD:{}+{}\0\n",
-            version, worker_inputs_id
+            "{script}\n#MJ-BUILD-ID:{version}+{worker_inputs_id}\n#\0MJ-WORKER-BUILD:{version}+{worker_inputs_id}\0\n",
         );
         let destination =
             PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");

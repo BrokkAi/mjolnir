@@ -36,6 +36,7 @@ import threading
 import time
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
+MJX = pathlib.Path(__file__).resolve().parent / "mjx"
 # Subscription Claude Code profiles that offer opus; claude-aws bills Bedrock.
 # claude6 left out: its login failed with ACP auth_required on 2026-11-14.
 PROFILES = ["claude", "claude2", "claude3", "claude4", "claude5", "claude7"]
@@ -47,6 +48,7 @@ p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+p.add_argument("--quota-scope", help="model pool for REVIEW_ARMS_QUOTA_FLOOR (for example gemini)")
 # Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
 # session reads nothing of this host's filesystem and cannot reach the eval's results.
 p.add_argument("--target", default="localhost")
@@ -58,9 +60,13 @@ p.add_argument("--bundle")
 # which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
 p.add_argument("--repo-commit", default="3c3fa4b13")
 a = p.parse_args()
+instance = os.environ.get("REVIEW_ARMS_INSTANCE", "default")
+if instance != "default":
+    p.error("verify_driver supports only REVIEW_ARMS_INSTANCE=default; the private instance is retired and existing verifier IDs belong to the default daemon")
 if a.kind == "task" and not a.output:
     p.error("--kind task needs --output")
 PROFILES = a.profiles.split(",")
+REPO_NAME = a.bundle or os.environ.get("REVIEW_ARMS_REPO_DIR", "mjolnir")
 V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
@@ -78,14 +84,16 @@ for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
-if not (ROOT / "verify/workspace.json").exists():  # creates the workspace, or selects one with this name
-    r = subprocess.run(["mj", "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
-    (ROOT / "verify/workspace.json").write_bytes(r.stdout)
-WORKSPACE = json.loads((ROOT / "verify/workspace.json").read_text())["workspace"]["id"]
+WORKSPACE_RECORD = ROOT / "default-instance/verify/workspace.json"
+if not WORKSPACE_RECORD.exists():  # creates the workspace, or selects one with this name
+    WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
+    WORKSPACE_RECORD.write_bytes(r.stdout)
+WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
 def mj(*args, timeout=300):
-    r = subprocess.run(["mj", *map(str, args), "--json"], capture_output=True, timeout=timeout)
+    r = subprocess.run([str(MJX), *map(str, args), "--json"], capture_output=True, timeout=timeout)
     if r.returncode:
         raise RuntimeError(f"mj {args[0]}: {r.stderr.decode()[-1200:]}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -146,7 +154,7 @@ def prompt_text(batch_path, judge):
 
 Write {a.output} in your current working directory when you finish.
 
-The mjolnir checkout with full history is your current working directory. Read only {INPUT}/{batch_path.name}/ and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than {a.output}.
+The {REPO_NAME} checkout with full history is your current working directory. Read only {INPUT}/{batch_path.name}/ and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than {a.output}.
 """
     spec, batch = f"{INPUT}/SPEC.md", f"{INPUT}/{batch_path.name}"
     first = (f"Before you read anything, run `git checkout -q --detach {a.repo_commit}` in your working "
@@ -163,7 +171,7 @@ Read only {spec}, your batch file, and the repository in your working directory.
 Your batch: {batch}
 Judge every output in it.
 
-The mjolnir checkout with full history is your current working directory. Read only {spec}, your batch file, and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than verdicts.jsonl.
+The {REPO_NAME} checkout with full history is your current working directory. Read only {spec}, your batch file, and that repository; do not open anything outside your working directory. Do not build, run tests, or edit any file other than verdicts.jsonl.
 """
 
 
@@ -171,13 +179,13 @@ def upload_inputs(sid, batch_path):
     if a.kind == "task":
         for src in sorted(f for f in batch_path.rglob("*") if f.is_file() and f.name != a.output):
             rel = src.relative_to(batch_path)
-            r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
+            r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{batch_path.name}/{rel}",
                                 "--overwrite", str(src)], capture_output=True, timeout=300)
             if r.returncode:
                 raise RuntimeError(f"put-file {rel} into {sid}: {r.stderr.decode()[-400:]}")
         return
     for src in (V / "SPEC.md", batch_path):
-        r = subprocess.run(["mj", "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
+        r = subprocess.run([str(MJX), "put-file", "--session", sid, "--path", f"{INPUT}/{src.name}", "--overwrite",
                             str(src)], capture_output=True, timeout=300)
         if r.returncode:
             raise RuntimeError(f"put-file {src.name} into {sid}: {r.stderr.decode()[-400:]}")
@@ -185,7 +193,7 @@ def upload_inputs(sid, batch_path):
 
 def fetch_output(sid):
     name = a.output if a.kind == "task" else "verdicts.jsonl" if a.kind == "judge" else "verify-out.json"
-    r = subprocess.run(["mj", "fetch", "--session", sid, "--path", name, "--stdout"],
+    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", name, "--stdout"],
                        capture_output=True, timeout=300)
     if r.returncode:
         raise RuntimeError(f"session {sid} left no {name}: {r.stderr.decode()[-400:]}")
@@ -214,10 +222,17 @@ def run(batch_path, judge=None):
         sid = rec["session_id"]
     else:
         profile = pick_profile()
+        if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
+            # Share the experiment drivers' floor interpretation. Import only
+            # for guarded runs; older verifier data has no driver workspace.
+            from driver import quota_hold
+            hold = quota_hold(a.quota_scope)
+            if hold:
+                raise RuntimeError("held before verifier session start: " + hold)
         source = ["--bundle", a.bundle] if a.bundle else ["--project-directory", REPO]
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", a.target,
                  *source, "--effort", "high", "--review", "off", "--no-project-memory",
-                 "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
+                 "--no-github-events", "--no-github-credentials", "--subagents", "none", "--title", f"review-arms {V.name} {tag}",
                  timeout=900)["session_id"]
         rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
         save(rec_path, rec)

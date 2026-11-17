@@ -15,7 +15,8 @@ available choices can come from the provider's current catalog.
 Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
 when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
 you set it, choose a smarter model or higher effort than Straightforward. Subtle
-cannot be set without Straightforward. These choices apply globally. With both
+cannot be set without Straightforward. These choices apply to every target
+unless you split YOLO targets below. With both
 set, parents choose a task type each time they delegate work. With only
 Straightforward, parents delegate straightforward work and do work that
 needs judgment themselves.
@@ -25,8 +26,19 @@ model for read-only questions that the primary agent isn't sure about; sessions
 then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
+**Use the same subagents on all targets** is checked by default. Uncheck it to
+give SSH bare targets with `permissions = "yolo"` their own Straightforward,
+Subtle, and Oracle choices under **YOLO Target Subagents**. The maximum
+concurrent children limit stays shared. The YOLO group starts empty; an empty
+group means no Mjolnir sub-agents or oracle on YOLO targets. Checking the box
+again hides the group and makes its values do nothing, but keeps them: uncheck
+the box later to restore the same choices. Container targets are unconstrained
+inside their isolation boundary but have no YOLO permission setting, so they
+use the shared choices.
+
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task.
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task
+in the set the destination target uses.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice

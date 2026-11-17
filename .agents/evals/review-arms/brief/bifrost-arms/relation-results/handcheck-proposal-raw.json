@@ -1,0 +1,77 @@
+{
+  "07f60e503e05d025": {
+    "label": "partial",
+    "agrees_with_judges": false,
+    "why": "The shared Java memo, missing failure receipt, and later false absence are correctly identified, but the finding explicitly attributes the failed build to a transient store or source-read failure. The match rule requires StructureUnavailable or equivalent stable source incompleteness; that mechanism is not established by this transient-only trigger. Under the required lower-label rule this is partial."
+  },
+  "0dccc5d2f53401fe": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Traces the new subscript receiver inference through an unfinished indexed assignment into the identical RHS again, causing non-progressing recursion and stack overflow."
+  },
+  "1fec177b18443e06": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies repeated bindings sharing a CodeUnit whose sole retained range is later, so the new event cutoff removes the valid target for an intervening module read."
+  },
+  "7a7a8bdfc573d473": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies repeated bindings sharing a CodeUnit whose sole retained range is later, so the new event cutoff removes the valid target for an intervening module read."
+  },
+  "7d69459eea839714": {
+    "label": "partial",
+    "agrees_with_judges": false,
+    "why": "The first finding identifies the right Java memo and lost incompleteness across shared fills, but its concrete explanation is a declaration read recording a store failure, rather than StructureUnavailable or equivalent stable source incompleteness required by the match rule. The generic incomplete-read opening does not establish that stable-gap case. The separate generation-change finding is a different defect; partial is the lower supported label."
+  },
+  "88ecd411b54d7daa": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "97f529126b0ee920": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies repeated bindings sharing a CodeUnit whose sole retained range is later, so the new event cutoff removes the valid target for an intervening module read."
+  },
+  "b44108d3af0ea42f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Traces the new subscript receiver inference through an unfinished indexed assignment into the identical RHS again, causing non-progressing recursion and stack overflow."
+  },
+  "bf7ac647b2db1355": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "ca5c95bd2b507e4f": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "d2336695ab71bc78": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "d55615da017c69cd": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "d7cb9e72bcab7b20": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies equal whole-file spans for the real Python module and synthetic FileScope, unordered span-only selection of the synthetic owner, and resulting nondeterministic ownership and lookup behavior."
+  },
+  "dcf5a5d3c0d89809": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Explicitly connects the helper returning Some(empty) for an unproven family with the concrete caller interpreting emptiness as absence proof and incorrectly discharging the dispatch gap."
+  },
+  "e763e5e86adbd730": {
+    "label": "caught",
+    "agrees_with_judges": true,
+    "why": "Identifies the shared retained-fill Java index caching a failed declaration build without its failure receipt, then returning an incorrect absence as complete in a later fill. The finding does not restrict declaration failure to transient errors and covers the stable structural gap."
+  }
+}

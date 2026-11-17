@@ -1116,6 +1116,11 @@ pub(super) async fn run_session_actor(
                         idle_harness,
                         reply,
                     } => {
+                        // Cancelled callers must not create relay work behind
+                        // the request that is currently holding the actor.
+                        if reply.is_closed() {
+                            continue;
+                        }
                         if idle_harness.is_some()
                             && (lifecycle.is_leased() || !reviewer_tasks.is_empty())
                         {
@@ -1155,6 +1160,11 @@ pub(super) async fn run_session_actor(
                             if reply.send(Err(error)).is_err() {
                                 tracing::debug!(session_id = %target.session_id, "lease requester disconnected");
                             }
+                            continue;
+                        }
+                        // The caller may have gone away during synchronization.
+                        // Keep the connection here without reserving a lease.
+                        if reply.is_closed() {
                             continue;
                         }
                         // Decide before taking the control channel or cancelling

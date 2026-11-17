@@ -35,10 +35,22 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null},"use_same_on_all_targets":true,"yolo":{"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}}})
         }
         "subagents"
-            if path.len() == 2 && matches!(key, "straightforward" | "subtle" | "oracle") =>
+            if path.len() == 2
+                && (matches!(key, "straightforward" | "subtle" | "oracle") || key == "yolo") =>
+        {
+            if key == "yolo" {
+                json!({"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
+            } else {
+                json!({"model":null,"effort":null})
+            }
+        }
+        "subagents"
+            if path.len() == 3
+                && path[1] == "yolo"
+                && matches!(key, "straightforward" | "subtle" | "oracle") =>
         {
             json!({"model":null,"effort":null})
         }
@@ -287,6 +299,8 @@ pub fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
+        "use_same_on_all_targets" => "Use the same subagents on all targets",
+        "yolo" => "YOLO Target Subagents",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
         "oracle" => "Oracle",
@@ -363,6 +377,12 @@ pub fn field_label(path: &[String]) -> String {
         {
             format!("{} {}", label(task), field)
         }
+        ["subagents", "yolo", task, field]
+            if ["straightforward", "subtle", "oracle"].contains(task)
+                && ["model", "effort"].contains(field) =>
+        {
+            format!("{} {}", label(task), field)
+        }
         ["machines", _, "build_cache", "scheduler", "cpus"] => {
             "Concurrent compile permits".to_owned()
         }
@@ -373,6 +393,35 @@ pub fn field_label(path: &[String]) -> String {
     }
 }
 
+/// The `_subagent_options` key for a sub-agent task path. The shared set uses
+/// the task name; the YOLO set is prefixed so its model's efforts are
+/// discovered independently.
+pub fn subagent_options_key(path: &[String]) -> Option<String> {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["subagents", task, ..] if matches!(*task, "straightforward" | "subtle" | "oracle") => {
+            Some((*task).to_owned())
+        }
+        ["subagents", "yolo", task, ..]
+            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        {
+            Some(format!("yolo.{task}"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a subagent model/effort path belongs to the YOLO set.
+pub fn is_yolo_subagent_path(path: &[String]) -> bool {
+    path.len() >= 3 && path[0] == "subagents" && path[1] == "yolo"
+}
+
+/// Whether the Sub-agents page uses one set for every target. A missing value
+/// is the default, which shares.
+pub fn shared_subagents(value: &Value) -> bool {
+    value["use_same_on_all_targets"].as_bool().unwrap_or(true)
+}
+
 /// What an empty (JSON null) value means for this setting: the effect the
 /// value actually has, never a placeholder. A value the runtime resolves from
 /// the host is filled in by the caller through `value_summary`'s `automatic`
@@ -380,7 +429,7 @@ pub fn field_label(path: &[String]) -> String {
 pub fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
-        ["subagents", _, "model"] => "None".to_owned(),
+        ["subagents", _, "model"] | ["subagents", "yolo", _, "model"] => "None".to_owned(),
         ["machines", _, "build_cache", "tools_directory"] => {
             "~/.cache/mjolnir/build on the machine".to_owned()
         }
@@ -393,10 +442,13 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "effort"]
+        ["subagents", task, "effort"] | ["subagents", "yolo", task, "effort"]
             if matches!(*task, "straightforward" | "subtle" | "oracle") =>
         {
-            if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
+            let options = subagent_options_key(path)
+                .and_then(|key| draft["_subagent_options"].get(key))
+                .is_some_and(|options| options[super::discovery::EFFORTS_PENDING] == true);
+            if options {
                 "Discovering efforts…".into()
             } else {
                 "Harness default".into()
@@ -684,7 +736,7 @@ pub fn option_label(path: &[String], value: &Value, draft: &Value) -> String {
         }
         .to_owned()
     } else if value.is_null()
-        && matches!(path, [section, _, field] if section == "subagents" && field == "model")
+        && matches!(path, [section, .., field] if section == "subagents" && field == "model")
     {
         "None".to_owned()
     } else if value.is_null() {
@@ -721,25 +773,20 @@ pub fn build_cache_gigabytes_label(size: &str) -> String {
 
 pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    if ((path.len() == 3 && path[0] == "subagents")
-        || (path.len() == 4 && path[0] == "review" && path[1] == "reviewers"))
-        && matches!(key, "model" | "effort")
-    {
+    let subagent = subagent_options_key(path);
+    let reviewer = path.len() == 4 && path[0] == "review" && path[1] == "reviewers";
+    if (subagent.is_some() || reviewer) && matches!(key, "model" | "effort") {
         let mut choices = if path[0] == "review" && key == "model" {
             Vec::new()
         } else {
             vec![Value::Null]
         };
-        if let Some(values) = draft[if path[0] == "review" {
-            "_reviewer_options"
+        let options = if let Some(subagent) = subagent {
+            &draft["_subagent_options"][&subagent]
         } else {
-            "_subagent_options"
-        }][if path[0] == "review" {
-            &path[2]
-        } else {
-            &path[1]
-        }][if key == "model" { "models" } else { "efforts" }]
-        .as_array()
+            &draft["_reviewer_options"][&path[2]]
+        };
+        if let Some(values) = options[if key == "model" { "models" } else { "efforts" }].as_array()
         {
             choices.extend(
                 values
@@ -1005,6 +1052,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "subagents" => {
             "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
+        }
+        "use_same_on_all_targets" => {
+            "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
         }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {

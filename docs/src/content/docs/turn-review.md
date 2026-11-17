@@ -20,6 +20,19 @@ An empty list means no reviewers are configured. Press **Autoconfigure** in Sett
 
 Old `count`, `profile`, `model`, `effort`, `tier`, `trigger`, and `enabled` config keys remain readable; `trigger` and `enabled` are dropped when settings are saved. An existing config without `[review]`, or a `[review]` table without `reviewers` and `model`, retains the old Auto selection. The daemon saves reviewer rows after capability discovery succeeds; if discovery fails, it retries. Other settings saves preserve this pending selection. A fresh config starts with no reviewers. An explicit `reviewers = []` stays empty.
 
+### Relation brief
+
+A brief writer is an optional extra step before the reviewers start. It is off unless you enable it in `config.toml`:
+
+```toml
+[review]
+brief_writer = { enabled = true, model = "gpt-6.10-sol", effort = "high" }
+```
+
+With the writer enabled, a hidden writer session reads the change and the rest of the repository, then hands back a short list of relations between the changed code and its surroundings: who calls it, what else reads or writes the same state, and which other paths reach it. Each item carries `file:line` anchors. Every reviewer's prompt then includes the list under "Relations computed from the repository", labelled as relations and not findings. `model` is required while the writer is enabled, and it is resolved to an enabled profile like a reviewer model.
+
+The writer never blocks a review. If it cannot start, ends without handing back, or is cancelled with the review, the reviewers start without a brief and the requester sees a notice saying so. The writer's usage counts toward the requesting session like a reviewer's, and the session is closed when the writer is done. A session's own `--reviewer` choice does not change the writer.
+
 ### Per-session settings
 
 `mj new` and `mj import <harness>` accept `--review off|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). `--review off` disables review for that session. `--review push` enables it. `--review turn` is refused. A session-level reviewer choice replaces the global reviewer list. API `review.mode` accepts `off` or `push`; `turn` is refused.

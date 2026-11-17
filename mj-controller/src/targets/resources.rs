@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 pub(super) const HOST_RESOURCE_USAGE_SCRIPT: &str = r#"
 memory_proc_root=${1:-/proc}
@@ -73,7 +74,7 @@ pub fn ssh_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> C
         "mj-capacity".to_owned(),
     ];
     words.extend(storage_paths.iter().cloned());
-    ssh_command(ssh, words).purpose("sample deployment host capacity")
+    ssh_command(SshTrafficClass::Control, ssh, words).purpose("sample deployment host capacity")
 }
 
 /// [`ssh_host_capacity_command`] for a host that runs Nitro sandboxes: the
@@ -137,6 +138,7 @@ pub fn aws_allocated_capacity_command(
         bail!("AWS allocated-capacity probes require an EC2 locator");
     };
     command_on_locator(
+        SshTrafficClass::Control,
         locator,
         session_id,
         vec![

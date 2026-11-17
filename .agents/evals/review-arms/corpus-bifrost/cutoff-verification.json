@@ -1,0 +1,226 @@
+{
+  "checks": [
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (UTC, None)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (UTC, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (UTC, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (America/Chicago, None)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (America/Chicago, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (America/Chicago, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (Etc/GMT-9, None)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (Etc/GMT-9, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git selector runs",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "git strict boundary (Etc/GMT-9, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": "4 eligible, 4 sampled\n"
+    },
+    {
+      "name": "actual-git output and order invariant across three TZs and equivalent/default cutoffs",
+      "passed": true,
+      "detail": "2827f91e2928cc73194f74f841fa3a0cc0975f48bca0b76243b37073d6815f95"
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (UTC, None)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (UTC, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (UTC, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (America/Chicago, None)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (America/Chicago, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (America/Chicago, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (Etc/GMT-9, None)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (Etc/GMT-9, 2026-11-01T00:00:00Z)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue selector runs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "issue aware comparisons exclude exact boundary and offset-after dates (Etc/GMT-9, 2026-10-31T19:00:00-05:00)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "issue pool and seeded order invariant across TZs and equivalent/default cutoffs",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "select_diffs.py rejects ambiguous/invalid cutoff 2026-11-01T00:00:00",
+      "passed": true,
+      "detail": "usage: select_diffs.py [-h] [--branch BRANCH] [--cutoff CUTOFF]\n                       [--candidates CANDIDATES] [--seed SEED]\n                       repo count\nselect_diffs.py: error: argument --cutoff: timestamp '2026-11-01T00:00:00' needs an explicit timezone (Z or a UTC offset)"
+    },
+    {
+      "name": "select_diffs.py rejects ambiguous/invalid cutoff 2026-11-01",
+      "passed": true,
+      "detail": "usage: select_diffs.py [-h] [--branch BRANCH] [--cutoff CUTOFF]\n                       [--candidates CANDIDATES] [--seed SEED]\n                       repo count\nselect_diffs.py: error: argument --cutoff: timestamp '2026-11-01' needs an explicit timezone (Z or a UTC offset)"
+    },
+    {
+      "name": "select_diffs.py rejects ambiguous/invalid cutoff not-a-date",
+      "passed": true,
+      "detail": "usage: select_diffs.py [-h] [--branch BRANCH] [--cutoff CUTOFF]\n                       [--candidates CANDIDATES] [--seed SEED]\n                       repo count\nselect_diffs.py: error: argument --cutoff: invalid timestamp 'not-a-date'; use ISO 8601 with Z or an explicit UTC offset"
+    },
+    {
+      "name": "select_bug_issues.py rejects ambiguous/invalid cutoff 2026-11-01T00:00:00",
+      "passed": true,
+      "detail": "usage: select_bug_issues.py [-h] [--before BEFORE] repo out\nselect_bug_issues.py: error: argument --before: timestamp '2026-11-01T00:00:00' needs an explicit timezone (Z or a UTC offset)"
+    },
+    {
+      "name": "select_bug_issues.py rejects ambiguous/invalid cutoff 2026-11-01",
+      "passed": true,
+      "detail": "usage: select_bug_issues.py [-h] [--before BEFORE] repo out\nselect_bug_issues.py: error: argument --before: timestamp '2026-11-01' needs an explicit timezone (Z or a UTC offset)"
+    },
+    {
+      "name": "select_bug_issues.py rejects ambiguous/invalid cutoff not-a-date",
+      "passed": true,
+      "detail": "usage: select_bug_issues.py [-h] [--before BEFORE] repo out\nselect_bug_issues.py: error: argument --before: invalid timestamp 'not-a-date'; use ISO 8601 with Z or an explicit UTC offset"
+    }
+  ],
+  "passed": 44,
+  "failed": 0
+}

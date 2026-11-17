@@ -3,6 +3,7 @@ use super::*;
 use crate::controller::checkpoint::HOST_CHECKOUT_REPOSITORY;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
+use mj_core::targets::SshTrafficClass;
 use std::path::Path;
 
 fn repositories(
@@ -174,6 +175,7 @@ fn utility(
                 mj_core::worker_build::WORKER_BUILD_ID
             );
             let probe = executor.execute(&targets::command_on_locator(
+                SshTrafficClass::Control,
                 backend,
                 id,
                 vec!["test".into(), "-x".into(), helper.clone()],
@@ -186,6 +188,7 @@ fn utility(
         }
     };
     let command_spec = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         id,
         vec![executable, "worker".into(), "move-workspace".into()],
@@ -224,6 +227,7 @@ chmod 700 "$temporary"
 mv -f -- "$temporary" "$1"
 "#;
     let command = targets::command_on_locator(
+        SshTrafficClass::Bulk,
         backend,
         id,
         vec![
@@ -290,7 +294,11 @@ fn copy_workspace(
 ) -> Result<()> {
     std::fs::create_dir_all(local)?;
     let local_path = format!("{}/", local.display());
-    let base = targets::locator_command(backend, rsync_remote_arguments(remote));
+    let base = targets::locator_command(
+        SshTrafficClass::Bulk,
+        backend,
+        rsync_remote_arguments(remote),
+    );
     let command = CommandSpec::new("rsync", Vec::<String>::new())
         .purpose("transfer Move workspace with resumable files");
     let output = retry_refused_transport(
@@ -478,7 +486,7 @@ fn storage_probe(
 
 fn at_host(ssh: Option<&targets::SshTarget>, mut arguments: Vec<String>) -> CommandSpec {
     if let Some(ssh) = ssh {
-        targets::ssh_command_owned(ssh, arguments)
+        targets::ssh_command_owned(SshTrafficClass::Control, ssh, arguments)
     } else {
         let program = arguments.remove(0);
         CommandSpec::new(program, arguments)
@@ -751,6 +759,7 @@ impl Controller {
             ),
             (
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     &layout.backend,
                     id,
                     rsync_probe(),
@@ -775,6 +784,7 @@ impl Controller {
         storage_probe(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &layout.backend,
                 id,
                 storage_arguments(Path::new(&source_root)),
@@ -790,10 +800,16 @@ impl Controller {
             .container_engine()
             .and_then(container_storage_arguments)
         {
-            let host = targets::locator_command(&layout.backend, vec!["true".into()]).ssh_session;
+            let host = targets::locator_command(
+                SshTrafficClass::Control,
+                &layout.backend,
+                vec!["true".into()],
+            )
+            .ssh_session;
             storage_probe(
                 executor,
-                at_host(host.as_ref(), arguments).purpose("check source container backing storage"),
+                at_host(host.as_ref().map(|request| &request.target), arguments)
+                    .purpose("check source container backing storage"),
                 "Source backing storage",
                 "source",
                 1,
@@ -867,7 +883,11 @@ impl Controller {
                 rsync_probe()
             };
         let command = if let Some(ssh) = destination_ssh {
-            targets::ssh_command_owned(&targets::SshTarget::from(ssh), arguments)
+            targets::ssh_command_owned(
+                SshTrafficClass::Control,
+                &targets::SshTarget::from(ssh),
+                arguments,
+            )
         } else {
             let program = arguments.remove(0);
             CommandSpec::new(program, arguments)
@@ -1075,20 +1095,12 @@ impl Controller {
         if operation.workspace_transfer.as_ref().unwrap().phase
             == WorkspaceTransferPhase::Downloaded
         {
-            let root = targets::worker_root(&layout.backend, id)?;
-            super::super::execute_checked(
-                executor,
-                targets::command_on_locator(
-                    &layout.backend,
-                    id,
-                    vec![
-                        "sh".into(),
-                        "-c".into(),
-                        targets::stop_worker_daemon_script(&root),
-                    ],
-                    "stop sealed Move source worker, retaining workspace",
-                )?,
-            )?;
+            targets::stop_worker_plan(
+                &layout.backend,
+                id,
+                "stop sealed Move source worker, retaining workspace",
+            )?
+            .execute(executor)?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::SourceStopped;
             crate::database::save_move_operation(operation)?;
@@ -1131,6 +1143,7 @@ impl Controller {
         super::super::execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &layout.backend,
                 id,
                 vec![
@@ -1228,6 +1241,7 @@ impl Controller {
                 super::super::execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         &backend,
                         id,
                         vec![
@@ -1463,6 +1477,29 @@ mod tests {
     fn shared_filesystem_capacity_counts_allocations_once_and_changes_with_selection() {
         struct Disk;
         impl CommandExecutor for Disk {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<targets::CommandOutput> {
                 Ok(targets::CommandOutput {
                     status: 0,
@@ -1532,6 +1569,29 @@ mod tests {
         }
         #[cfg(unix)]
         impl CommandExecutor for RemoteGit {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
                 ensure!(
                     command.program == "ssh",
@@ -2002,6 +2062,29 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         struct Executor(std::sync::atomic::AtomicBool);
         impl CommandExecutor for Executor {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
                 if command.purpose == "transfer Move workspace with resumable files"
                     && self.0.swap(false, std::sync::atomic::Ordering::SeqCst)

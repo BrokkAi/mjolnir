@@ -2,6 +2,7 @@
 use super::*;
 use crate::controller::worker_binary::{WorkerInstall, prepare_managed_harness_for_upgrade};
 use crate::controller::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
+use mj_core::targets::SshTrafficClass;
 use sha2::Digest;
 
 /// Installation is a completed action under the lifecycle owner, not another
@@ -205,9 +206,9 @@ impl Controller {
             "The recovery copy does not contain this parent's native session. Current files and children were kept; supply a recovery copy for the current conversation and retry Resume."
         );
         let (backend, root) = self.worker_placement(session_id)?;
-        let output = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let output = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
             "Cannot recover parent files while its worker may be live; everything was kept. Retry Resume."
@@ -240,6 +241,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &backend,
                 session_id,
                 vec!["mkdir".into(), "-p".into(), root.clone()],
@@ -314,6 +316,7 @@ impl Controller {
         // Build the argv before SSH/container wrapping. Old workers reject
         // this explicit mode rather than treating it as a whole restore.
         let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
             &backend,
             session_id,
             vec![
@@ -379,6 +382,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec![
@@ -465,6 +469,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec!["cat".into(), format!("{root}/{filename}")],
@@ -503,6 +508,7 @@ impl Controller {
                 execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         backend,
                         session_id,
                         vec![
@@ -522,6 +528,7 @@ impl Controller {
                     execute_checked(
                         executor,
                         super::super::worktree::managed_git_command(
+                            SshTrafficClass::Control,
                             &worktree.target,
                             &worktree.source_repository,
                             ["worktree", "prune"],
@@ -533,6 +540,7 @@ impl Controller {
             execute_checked(
                 executor,
                 targets::command_on_locator(
+                    SshTrafficClass::Control,
                     backend,
                     session_id,
                     vec!["rm".into(), "--".into(), format!("{root}/{filename}")],
@@ -636,6 +644,7 @@ impl Controller {
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
+                        SshTrafficClass::Control,
                         &backend,
                         session_id,
                         vec!["cat".into(), remote_spec.clone()],
@@ -801,6 +810,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Control,
                 &backend,
                 session_id,
                 vec!["mkdir".into(), "-p".into(), root.clone()],
@@ -891,6 +901,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Bulk,
                 &backend,
                 session_id,
                 vec![
@@ -905,9 +916,9 @@ impl Controller {
             )?,
         )?;
         executor.end_resumable_work("resume recovered checkout")?;
-        let liveness = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let liveness = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             liveness.status == 0,
             "cannot establish parent worker state after checkout recovery; everything was kept, retry Resume"
@@ -946,9 +957,9 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
         let (backend, root) = self.worker_placement(session_id)?;
-        let dead = executor.execute(&super::super::worker_binary::worker_liveness_command(
-            &backend, &root,
-        ))?;
+        let dead = super::super::worker_binary::probe_worker_liveness(
+            executor, &backend, session_id, &root,
+        )?;
         ensure!(
             dead.status == 0 && String::from_utf8_lossy(&dead.stdout).trim() == "dead",
             "Parent runtime cannot be reconstructed while its worker may be live; everything was kept. Retry Resume."
@@ -1028,6 +1039,7 @@ impl Controller {
         execute_checked(
             executor,
             targets::command_on_locator(
+                SshTrafficClass::Bulk,
                 &backend,
                 session_id,
                 vec![

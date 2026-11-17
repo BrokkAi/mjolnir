@@ -1,0 +1,774 @@
+{
+  "task": "Bounded final corpus integration spread check; not reviewer/judge/census run",
+  "scope": "First30 integrated eligible records after parent acceptance of corrected34 and parent spread-only exclusion of122; ends127. Earlier two-variant/end124 inputs superseded by parent final decision.",
+  "input_file": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/integrated-eligible.jsonl",
+  "input_sha256": "53e6031e06a09b31a7cd5818cece2bcfb3d0d93b738c7bb85f59b7ea704d43c8",
+  "eligible_rows": 34,
+  "selected_count": 30,
+  "first_selection_position": 1,
+  "last_selection_position": 127,
+  "positions": [
+    1,
+    3,
+    5,
+    9,
+    17,
+    22,
+    26,
+    34,
+    44,
+    49,
+    51,
+    52,
+    55,
+    62,
+    63,
+    64,
+    68,
+    74,
+    77,
+    83,
+    89,
+    99,
+    106,
+    111,
+    117,
+    119,
+    120,
+    123,
+    124,
+    127
+  ],
+  "acceptance_policy": "Integrated parent acceptance/provenance used as given; no candidate verdicts or model inputs changed.",
+  "mechanical_uniqueness": {
+    "group_key_duplicates": [],
+    "base_intro_pair_duplicates": [],
+    "intro_duplicates": [],
+    "fix_duplicates": []
+  },
+  "confirmed_actual_duplicate_defects": [],
+  "duplicate_comparisons": [
+    {
+      "pair": [
+        1,
+        124
+      ],
+      "duplicate": false,
+      "reason": "Universal CodeUnitType::FileScope/enclosing-owner minimum versus synthetic JS/TS module/import-signature summary span. Different synthetic owner types/consumers; conservatively share one2-case family."
+    },
+    {
+      "pair": [
+        22,
+        34
+      ],
+      "duplicate": false,
+      "reason": "Unknown competitor removed from model overload set versus receiverless package-contract potential applicability matching an unrelated receiver. Different owners, proof fields, completion errors and fixing commits; conservatively share model-call applicability family."
+    },
+    {
+      "pair": [
+        44,
+        62
+      ],
+      "duplicate": false,
+      "reason": "Temporal module binding representative order versus repeated class/module mutation scans spending query budget. Shared Python binding-lookup surface, distinct causal algorithms."
+    },
+    {
+      "pair": [
+        51,
+        123
+      ],
+      "duplicate": false,
+      "reason": "Access-obligation denial and concrete override-family discharge are separate consumers of hierarchy evidence. Even a broader closed-hierarchy-consumer family would have only2."
+    },
+    {
+      "pair": [
+        77,
+        117
+      ],
+      "duplicate": false,
+      "reason": "Same selected inverse-usage routing family, distinct workset errors. Third confirmed case122 was excluded by parent for spread, not deduplicated."
+    },
+    {
+      "pair": [
+        119,
+        127
+      ],
+      "duplicate": false,
+      "reason": "Both are Rust location-definition target inference, but119 removes an associated-owner namespace exclusion while127 strips Option payload from an ordinary-call return type. Different changed branches, fixes and triggers."
+    }
+  ],
+  "feature_families": [
+    {
+      "feature_family": "synthetic-file-owner-projections",
+      "positions": [
+        1,
+        124
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "python-filescope-enclosing-tie",
+        "js-synthetic-owner-leaks-file-summary"
+      ],
+      "scope": "Synthetic file/module owner units retained in ParsedFile and projected into public enclosing-owner or summary outputs.",
+      "ownership_and_surface_anchors": "Position1: CodeUnit::file_scope/ParsedFile::add_file_scope -> enclosing_code_unit. Position124: JS/TS module_code_unit -> add_code_unit(root) -> signature summary renderer.",
+      "reasoning": "Conservative shared feature, not a duplicate: FileScope hash-order owner selection versus JS module signature span coverage. Different owner kinds and consumers.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "cpp-inherited-member-navigation",
+      "positions": [
+        3
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "cpp-template-inherited-base-signature"
+      ],
+      "scope": "Definition navigation through inherited C++ member ownership.",
+      "ownership_and_surface_anchors": "cpp_inherited_member_candidates -> cpp_direct_base_types and structured C++ base graph.",
+      "reasoning": "Do not group merely with all hierarchy or navigation bugs.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "dependency-semantic-pack-acquisition-activation",
+      "positions": [
+        5,
+        63
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "incompatible-semantic-bundle-late-gate",
+        "dependency-failure-drops-independent-model-evidence"
+      ],
+      "scope": "Obtaining usable dependency API model state during workspace/request activation.",
+      "ownership_and_surface_anchors": "release_bundle::verify_release_bundle/verify_generated_production + download::acquire_with_transport; WorkspaceAnalyzer::activate_dependency_packs -> catalog runtime activation/evidence.",
+      "reasoning": "Conservative pipeline-level grouping: incompatible bundle gating and early dependency failure dropping independent evidence are different defects/stages, but both serve usable model-pack activation.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "retained-fill-request-state-ownership",
+      "positions": [
+        9
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "retained-fill-java-memo-loses-gap"
+      ],
+      "scope": "State owned/replayed by retained analyzer fills across request-cache domains.",
+      "ownership_and_surface_anchors": "AnalyzerQueryContext.retained_fill_domain/for_retained_fill and JavaFileClassIndexMemo build completeness.",
+      "reasoning": "The model-pin cross-analyzer ownership case at128 belongs in this same broader family if it enters a later selection, but128 is not in the final first30.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "source-constructor-comment-attribution",
+      "positions": [
+        17
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "kotlin-source-constructor-steals-class-header-comment"
+      ],
+      "scope": "Class/constructor ownership of source comment-density intervals.",
+      "ownership_and_surface_anchors": "Kotlin primary constructor synthetic classification -> Kotlin comment-density constructor exclusion/shared comment-density counting.",
+      "reasoning": "Separate public metric from value semantics and symbol lookup.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "semantic-model-call-applicability",
+      "positions": [
+        22,
+        34
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "model-overload-unknown-competitor-discarded",
+        "go-receiver-poisons-package-result-contract-discovery"
+      ],
+      "scope": "Deciding whether an authored external model signature/contract applies to a call.",
+      "ownership_and_surface_anchors": "CallConversionCache::select_model_signature -> RQL call_binding model overload choice; EffectTraversalCache::may_name_result_contract/result_contract_call_expansions -> result_contract_calls inventory.",
+      "reasoning": "Position22 silently discards an unknown competing overload; corrected34 loses receiver/package application evidence and raises false incompleteness. Related applicability feature but not one actual defect.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "mcp-policy-result-label-projection",
+      "positions": [
+        26
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "mcp-default-advisory-reported-clean"
+      ],
+      "scope": "Mapping a policy run verdict/default advisory gate to the MCP result label.",
+      "ownership_and_surface_anchors": "PolicyOnInconclusive/PolicyRunGate -> MCP run_policy response status label.",
+      "reasoning": "Distinct from progress-notification delivery lifetime.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "python-module-binding-definition-lookup",
+      "positions": [
+        44,
+        62
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "python-module-binding-representative-after-event",
+        "python-module-mutation-repeated-scan-budget"
+      ],
+      "scope": "Resolving module-level Python binding/class-object candidates for definition lookup.",
+      "ownership_and_surface_anchors": "python_visible_module_binding_candidates/python_same_file_candidates and python_class_object_base_candidate/python_runtime_module_class_candidate_bounded.",
+      "reasoning": "Temporal binding representative choice versus repeated module mutation scans/budget exhaustion. Same binding-resolution feature, separate failure causes.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "structural-pattern-binding-activation",
+      "positions": [
+        49
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "rust-while-let-binder-body-field"
+      ],
+      "scope": "Publishing lexical activation ranges for structured pattern binders.",
+      "ownership_and_surface_anchors": "Rust structural.rs::binding_activation -> shared lexical_environment binding-fact consumer.",
+      "reasoning": "Not interchangeable with Rust CodeUnit declaration inventory or resolver namespace classification.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "contextual-protected-access-proof",
+      "positions": [
+        51
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "jvm-protected-unindexed-hierarchy-denied"
+      ],
+      "scope": "Applying source declaration visibility obligations from hierarchy evidence.",
+      "ownership_and_surface_anchors": "apply_contextual_declaration_access -> jvm_subclass_access_decision; Scala Protected obligation producer.",
+      "reasoning": "Separate from dispatch materialization: it decides selected declaration access, not concrete-callee gap discharge. Coarsening51+123 would still total only2.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "object-literal-callable-symbol-inventory",
+      "positions": [
+        52
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "javascript-object-method-indexed-as-field"
+      ],
+      "scope": "Classifying callable object-literal members for searchable symbol inventory.",
+      "ownership_and_surface_anchors": "JavaScript visit_js_object_literal_properties -> CodeUnit kind -> search_symbols functions.",
+      "reasoning": "Independent of module owner summaries and inverse usage workset planning.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "persistent-analyzer-epoch-admission",
+      "positions": [
+        55
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "matching-analyzer-epoch-needs-writer-slot"
+      ],
+      "scope": "Reconciling analyzer epoch generations while admitting SQLite transactions.",
+      "ownership_and_surface_anchors": "AnalyzerStore::ensure_language_epochs_tx -> Immediate writer transaction / unchanged-epoch read branch.",
+      "reasoning": "No shared retained-fill request-domain state or semantic-model matching.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "maintainability-report-file-retention",
+      "positions": [
+        64
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "maintainability-file-cap-missing-truncated"
+      ],
+      "scope": "Retaining/counting selected files and truthful truncation in maintainability reports.",
+      "ownership_and_surface_anchors": "code_quality.rs maintainability selected_files/file_cap loop -> report truncated field.",
+      "reasoning": "Separate from source constructor comment-density attribution.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "rust-source-declaration-inventory",
+      "positions": [
+        68
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "rust-enum-variant-named-fields-omitted"
+      ],
+      "scope": "Indexing Rust source declarations and named enum-variant fields.",
+      "ownership_and_surface_anchors": "visit_rust_class_like enum_variant dispatch -> visit_rust_field -> public CodeUnit inventory.",
+      "reasoning": "Producer inventory boundary, distinct from structural lexical activation and query-time definition target inference.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "php-indexed-receiver-type-inference",
+      "positions": [
+        74
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "php-indexed-write-reenters-current-rhs"
+      ],
+      "scope": "Inferring receiver types from indexed writes/reads to navigate/analyze PHP methods.",
+      "ownership_and_surface_anchors": "instance_receiver_type_fq_name_inner -> collection_element_type_fq_name -> indexed_assignment_receiver_type_fq_name.",
+      "reasoning": "A receiver inference recursion/liveness problem, not candidate-file routing.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "inverse-usage-candidate-file-routing",
+      "positions": [
+        77,
+        117
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "rust-importer-planning-widens-to-code-mentions",
+        "csharp-single-file-namespace-prunes-usages"
+      ],
+      "scope": "Choosing and cheaply admitting source files for inverse reference/usage scans.",
+      "ownership_and_surface_anchors": "Rust usage_candidate_files_while/RustUsageWalks::importers_of_seeds_while and importer_candidates_for; C# ImportAnalysisProvider::referencing_files_of -> CSharpUsageGraphStrategy candidate_files; JS/TS scan_files_for_seeds reference_needle pre-parse gate.",
+      "reasoning": "Parent grouped77/117/122 coherently as this feature and excluded third122 for spread only. Selected77/117 remain2; JS case122 stays a confirmed eligible trace outside the selected30. No language/ownership split was used to evade the cap.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "rust-lexical-drop-cleanup-proof",
+      "positions": [
+        83
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "rust-item-macro-evades-plain-struct-drop-proof"
+      ],
+      "scope": "Determining whether a local binding requires lexical destructor cleanup uncertainty.",
+      "ownership_and_surface_anchors": "rust_file_facts plain_structs -> expression_is_definitely_non_dropping -> let_declaration_may_require_drop/block cleanup consumer.",
+      "reasoning": "Semantic cleanup admission, distinct from all other selected Rust surfaces.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "kotlin-value-class-carrier-projection",
+      "positions": [
+        89
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "kotlin-value-class-this-loses-underlying-projection"
+      ],
+      "scope": "Projecting a value-class this carrier to its underlying representation in semantic flow.",
+      "ownership_and_surface_anchors": "semantic/values.rs::expression_carrier/underlying_projection -> semantic/control.rs::property_load.",
+      "reasoning": "Different source artifact/consumer from constructor comment density.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "nilness-modeled-call-control-flow",
+      "positions": [
+        99
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "go-nilness-ignores-modeled-nonreturn"
+      ],
+      "scope": "Projecting modeled nonreturn control into the user-facing nilness relation.",
+      "ownership_and_surface_anchors": "nilness_operation_expansions -> scalar call effects/edge exclusion; testing.T.Fatal normal_continuation_absent.",
+      "reasoning": "Consumes exact model control after applicability, not overload selection or result-contract discovery.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "jvm-static-import-alias-bridge",
+      "positions": [
+        106
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "java-static-getter-drops-incomplete-route"
+      ],
+      "scope": "Bridging published JVM static aliases into source import namespaces/completion.",
+      "ownership_and_surface_anchors": "jvm_alias_import_bridges kind/static filter -> found_alias/open_imports bookkeeping.",
+      "reasoning": "Source-name route conversion, not external model overload applicability or virtual hierarchy discharge.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "mcp-progress-delivery-lifetime",
+      "positions": [
+        111
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "mcp-timed-out-progress-survives-response"
+      ],
+      "scope": "Ordering request progress notification delivery before final MCP response.",
+      "ownership_and_surface_anchors": "ProgressReporter::send notify_progress timeout -> rmcp peer queue/response delivery lifetime.",
+      "reasoning": "Different protocol feature from policy verdict label projection.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "rust-definition-target-inference",
+      "positions": [
+        119,
+        127
+      ],
+      "count": 2,
+      "candidate_ids": [
+        "rust-bare-value-admits-associated-constant",
+        "rust-option-return-implicitly-unwrapped"
+      ],
+      "scope": "Selecting Rust declaration targets for location definition lookup.",
+      "ownership_and_surface_anchors": "rust_current_module_candidates/rust_role_accepts_current_module -> rust_value_namespace_candidate ownership; ordinary-call receiver return-type reader/Option payload stripping -> field definition target inference.",
+      "reasoning": "After the spread-only exclusion of122, Option return inference127 joins119 in this2-case Rust definition-target family. Lexical namespace admission and receiver return-type inference have different causes/fixes; parser inventory, import planning, Drop cleanup and structural binding facts are separate surfaces.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "ruby-focused-constant-navigation",
+      "positions": [
+        120
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "ruby-constant-navigation-climbs-to-terminal"
+      ],
+      "scope": "Mapping a focused qualified constant-path segment to the selected prefix for definition navigation.",
+      "ownership_and_surface_anchors": "ruby_reference_node ancestor climb -> ruby_constant_outcome.",
+      "reasoning": "Not the same owner-selection defect as synthetic FileScope or Rust bare-value admission.",
+      "over_limit": false
+    },
+    {
+      "feature_family": "concrete-callee-dispatch-completeness",
+      "positions": [
+        123
+      ],
+      "count": 1,
+      "candidate_ids": [
+        "unproven-override-family-certifies-empty"
+      ],
+      "scope": "Discharging a concrete source callee dynamic-dispatch gap only with proven absence of overrides.",
+      "ownership_and_surface_anchors": "WorkspaceOracle dispatch.rs concrete override branch/concrete_overrides_proven_absent_discharges_gap -> virtual_dispatch_implementor_targets member-family proof.",
+      "reasoning": "Operates on source declaration override families and works without an authored model. Do not merge into semantic-model-call-applicability merely because both manipulate uncertainty;51 is declaration access and this is call materialization.",
+      "over_limit": false
+    }
+  ],
+  "candidate_families": [
+    {
+      "selection_position": 1,
+      "id": "python-filescope-enclosing-tie",
+      "group_key": "issue:432",
+      "feature_family": "synthetic-file-owner-projections",
+      "intro_commit": "8ea28a492d39d520bc5e8c41d676460147910400",
+      "base_commit": "96f5f3a9b099cfe72e83994dbc99dcad3db6b516",
+      "fix_commit": "3a7a2ab38bb269df353748045be4cded97360959",
+      "location": "src/analyzer/tree_sitter_analyzer.rs at intro: ParsedFile::add_file_scope (new whole-file range and declaration insertion), parse_file (adds it for every language), and IAnalyzer::enclosing_code_unit (new direct declaration-set iteration with span-only minimum)."
+    },
+    {
+      "selection_position": 3,
+      "id": "cpp-template-inherited-base-signature",
+      "group_key": "issue:1833",
+      "feature_family": "cpp-inherited-member-navigation",
+      "intro_commit": "9c367d3f2eb0eabcbc97c36596d09052e1c3395d",
+      "base_commit": "cf916ccd7dc0afc240f9bf3ad382039dbef6e2c5",
+      "fix_commit": "e295a57e934129a6a1dd1b64ad70f855cf0951fd",
+      "location": "src/analyzer/usages/get_definition.rs at intro: cpp_member_candidates and newly added cpp_inherited_member_candidates (calls cpp_direct_base_types); existing cpp_direct_base_types reads unit.signature(). src/analyzer/cpp/declarations.rs passes template_signature into the class CodeUnit."
+    },
+    {
+      "selection_position": 5,
+      "id": "incompatible-semantic-bundle-late-gate",
+      "group_key": "issue:3364",
+      "feature_family": "dependency-semantic-pack-acquisition-activation",
+      "intro_commit": "3e51cfde577a31b83a72b8686694f3a2c0ea70ed",
+      "base_commit": "5d35b1cee7daf81b46ed9cda1d14aca4275a7716",
+      "fix_commit": "bd95c2354c20a24d433fcf419df23f9036857b59",
+      "location": "crates/bifrost-semantic-packs/src/release_bundle.rs at intro: verify_release_bundle (verify_checksums and curated pack decode precede generated loop around lines1707-1793); verify_generated_production starts around2042 and checks schema/cache integers. download.rs acquire_with_transport synchronously invokes verification."
+    },
+    {
+      "selection_position": 9,
+      "id": "retained-fill-java-memo-loses-gap",
+      "group_key": "issue:8618",
+      "feature_family": "retained-fill-request-state-ownership",
+      "intro_commit": "38ac5b5b2b51de7742b7995669f6e335fd78afe2",
+      "base_commit": "b0b914fcc274025118adee8cc655b6b707676a29",
+      "fix_commit": "9df5c262c96932e64bcabe712e465fb453e159da",
+      "location": "crates/bifrost-analysis/src/analyzer/i_analyzer.rs at intro: AnalyzerQueryContext.retained_fill_domain and AnalyzerQueryScope::for_retained_fill now get_or_init one RequestCacheDomain. Existing crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs JavaFileClassIndexMemo/unique_class_by_fqn_in_file stores only Arc<JavaFileClassIndex> and replays no incompleteness on hits."
+    },
+    {
+      "selection_position": 17,
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "group_key": "issue:3357",
+      "feature_family": "source-constructor-comment-attribution",
+      "intro_commit": "48c156c965b70729c1aa2bac2f148d530166fda0",
+      "base_commit": "afba7e70c9da9f081212d1846854589227f04a40",
+      "fix_commit": "d28e53242a4eaba5aa67b98ab276505d6f17287c",
+      "location": "crates/bifrost-jvm/src/kotlin/declarations.rs:399-410 removes with_synthetic(true); consumers: crates/bifrost-analysis/src/analyzer/kotlin/mod.rs:620-627,675-680 and analyzer/comment_density.rs:248-270 at intro"
+    },
+    {
+      "selection_position": 22,
+      "id": "model-overload-unknown-competitor-discarded",
+      "group_key": "issue:3811",
+      "feature_family": "semantic-model-call-applicability",
+      "intro_commit": "2dc7a9b231a028ebd9412c5241b90beea841c589",
+      "base_commit": "fcee1114ea49e78a3289b2015fd2ec7c0e1996ce",
+      "fix_commit": "367c1889e6c48adcb5ce58d2495dfe09486fd068",
+      "location": "crates/bifrost-analysis/src/analyzer/usages/call_conversion.rs:806-843 CallConversionCache::select_model_signature, especially the unconditional singleton success at 838; RQL structural/search/call_binding.rs:490 invokes it at intro"
+    },
+    {
+      "selection_position": 26,
+      "id": "mcp-default-advisory-reported-clean",
+      "group_key": "issue:13215",
+      "feature_family": "mcp-policy-result-label-projection",
+      "intro_commit": "a830471d19390c947b93e047483ab4e41f49ebe5",
+      "base_commit": "91d814e88dba028fc8f32e30986ca444093755a5",
+      "fix_commit": "31ab693e61c04b04a1e20a4c2db5b300ea819ca7",
+      "location": "crates/bifrost-policy/src/coordinator.rs: PolicyOnInconclusive default, PolicyRunGate::of and report_unreliable; crates/bifrost-mcp/src/searchtools_service.rs run_policy exit_status -> status match, at intro"
+    },
+    {
+      "selection_position": 34,
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "group_key": "commit:aa501216592e29e7f6c3ad62c0a61dac82dac368",
+      "feature_family": "semantic-model-call-applicability",
+      "intro_commit": "69e3afb5d2c4a2799c14e9d5e092b8619c9f8e1f",
+      "base_commit": "82151e1e5636bfc3215ccce8ed64b079b68f1dc4",
+      "fix_commit": "aa501216592e29e7f6c3ad62c0a61dac82dac368",
+      "location": "crates/bifrost-rql/src/structural/search/effects.rs:485-501, result_contract_call_expansions (new Open match arm), using EffectTraversalCache::may_name_result_contract at244-291; existing analyzer/usages/effects.rs:435-526 projects the unresolved typed receiver to Open."
+    },
+    {
+      "selection_position": 44,
+      "id": "python-module-binding-representative-after-event",
+      "group_key": "issue:2157",
+      "feature_family": "python-module-binding-definition-lookup",
+      "intro_commit": "776315a465bc83ad98650b4f283762ab981659ca",
+      "base_commit": "be40e535ab21de550581f7b39fc5f700c7e63820",
+      "fix_commit": "e9e10f60ad8234085132d8db65534e4f768fe723",
+      "location": "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1740-1749 and1759-1779, python_visible_module_binding_candidates / python_same_file_candidates_for_binding_event"
+    },
+    {
+      "selection_position": 49,
+      "id": "rust-while-let-binder-body-field",
+      "group_key": "commit:eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "feature_family": "structural-pattern-binding-activation",
+      "intro_commit": "eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "base_commit": "ead7aa834e2ab6718e6e7dea058cda2986db2ecf",
+      "fix_commit": "8d85c2acd91717da68599d253674b8cd9b9fca0d",
+      "location": "crates/bifrost-rust/src/structural.rs:421-432 binding_activation, especially owner field lookup at427; production structural lexical environment skips None at lexical_environment.rs:628-648."
+    },
+    {
+      "selection_position": 51,
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "group_key": "issue:7620",
+      "feature_family": "contextual-protected-access-proof",
+      "intro_commit": "41f159d3e2b88a6b8444444e59ad590ca6cadba5",
+      "base_commit": "5a8370cfadcec547065ee1704af3142989baf840",
+      "fix_commit": "5c3a37983df3fd7e49eb4ba8e77476a7be3c50ed",
+      "location": "crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:34456-34473 jvm_subclass_access_decision (subtype call34466, exhausted negative34472), and new apply_contextual_declaration_access subclass_access branch; Scala Protected obligation producer at intro."
+    },
+    {
+      "selection_position": 52,
+      "id": "javascript-object-method-indexed-as-field",
+      "group_key": "commit:ec9ed17871426aa7827936269de4ca3c801d4433",
+      "feature_family": "object-literal-callable-symbol-inventory",
+      "intro_commit": "fe862359a21a9f7ce9b72ecf2e8dc1481d191f6f",
+      "base_commit": "3af94431f3690b83afed677b57402173f0f727bc",
+      "fix_commit": "ec9ed17871426aa7827936269de4ca3c801d4433",
+      "location": "src/analyzer/javascript/mod.rs:929-958 at intro, visit_js_object_literal_properties, especially CodeUnit::new(..., CodeUnitType::Field, ...); js_object_literal_property_name explicitly accepts method_definition."
+    },
+    {
+      "selection_position": 55,
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "group_key": "commit:8c91d98583fb55ec581933aed249431c80f77423",
+      "feature_family": "persistent-analyzer-epoch-admission",
+      "intro_commit": "e21778d1d9516d5180308a4fd5dd503bbe5296c8",
+      "base_commit": "28fde2ac5cea47e9bb8457670c6bf571ed925831",
+      "fix_commit": "8c91d98583fb55ec581933aed249431c80f77423",
+      "location": "src/analyzer/store/mod.rs:4549-4570 at intro, ensure_language_epochs_tx, immediate transaction before SELECT epoch and unchanged-epoch continue."
+    },
+    {
+      "selection_position": 62,
+      "id": "python-module-mutation-repeated-scan-budget",
+      "group_key": "issue:5745",
+      "feature_family": "python-module-binding-definition-lookup",
+      "intro_commit": "6ac4593deee3adba092ab6e72cada15f431e731e",
+      "base_commit": "530ffcf825709529232c4e602cd7cdf1f43dfe7a",
+      "fix_commit": "c17373598357048afde4fa050f1297e079c7fcdc",
+      "location": "crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs: python_class_object_base_candidate and python_runtime_module_class_candidate_bounded; crates/bifrost-python/src/source_facts.rs bounded mutation collectors"
+    },
+    {
+      "selection_position": 63,
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "group_key": "commit:685c099dc03e0a7bb223f735034b94458a1b408c",
+      "feature_family": "dependency-semantic-pack-acquisition-activation",
+      "intro_commit": "dc0ba96f220bf0066892f98a6757a4c96d38335f",
+      "base_commit": "8f11273e451dd41ba0b3fff1e73fbf41e57d3158",
+      "fix_commit": "bfd526d2dd7db17e997f20644087ba093cdf89b3",
+      "location": "crates/bifrost-analysis/src/analyzer/workspace.rs: activate_dependency_packs, lines266-414, early runtime=None returns at356-380"
+    },
+    {
+      "selection_position": 64,
+      "id": "maintainability-file-cap-missing-truncated",
+      "group_key": "commit:f5ff17edf1709fcde9f753c2cf92b143cbf5d448",
+      "feature_family": "maintainability-report-file-retention",
+      "intro_commit": "f5ff17edf1709fcde9f753c2cf92b143cbf5d448",
+      "base_commit": "e9101909b801dd5ce4facd447d154707f710efaf",
+      "fix_commit": "088c5a7ec0329b7a7519a0d6ecdc7ba3d5155675",
+      "location": "src/code_quality.rs: maintainability report file selection loop (selected_files.push followed by len >= file_cap break)"
+    },
+    {
+      "selection_position": 68,
+      "id": "rust-enum-variant-named-fields-omitted",
+      "group_key": "issue:2033",
+      "feature_family": "rust-source-declaration-inventory",
+      "intro_commit": "33fba95a5b77052176035d9c7c282258a3fd0c05",
+      "base_commit": "f17ed0beb870ebae6c8c9b7fc5d7fc23dca1038a",
+      "fix_commit": "c4268c4fdfca81d9f99cf69e0030f2b5c1cc3fa6",
+      "location": "src/analyzer/rust_analyzer.rs:449-507 visit_rust_class_like, especially enum_variant dispatch at 490-496; 611-653 visit_rust_field, which records but does not descend into the variant body; public declaration inventory at 300-301."
+    },
+    {
+      "selection_position": 74,
+      "id": "php-indexed-write-reenters-current-rhs",
+      "group_key": "issue:3070",
+      "feature_family": "php-indexed-receiver-type-inference",
+      "intro_commit": "e55ed6f4a8aa392bd5186df034d9e4eede8eb250",
+      "base_commit": "b8750280dd21c94110c4e0dfdf39700cfbf66305",
+      "fix_commit": "de5d01b9c45c088421e953600652bab703a65211",
+      "location": "crates/bifrost-php/src/graph/syntax.rs:1854-1868 instance_receiver_type_fq_name_inner subscript arm; :1538-1563 collection_element_type_fq_name and :1382-1434 infer_indexed_local_element_type at intro."
+    },
+    {
+      "selection_position": 77,
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "group_key": "commit:6074c794e6bd5c4eae8f160e4c938c42f645963e",
+      "feature_family": "inverse-usage-candidate-file-routing",
+      "intro_commit": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6",
+      "base_commit": "b86e575a81a55cecbe08f225fd1275e5f7c05540",
+      "fix_commit": "6074c794e6bd5c4eae8f160e4c938c42f645963e",
+      "location": "crates/bifrost-analysis/src/analyzer/rust/usage_walks.rs:911-924 importer_candidates_for, :929-955 extend_module_importer_candidates, :977-996 importers_of_module at intro; production wiring in usage_index.rs:2325-2345."
+    },
+    {
+      "selection_position": 83,
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "group_key": "issue:10863",
+      "feature_family": "rust-lexical-drop-cleanup-proof",
+      "intro_commit": "d5c9845b7488e63b08987de579d381e76f751b5e",
+      "base_commit": "5bbe305e567f7c0856bb0a358644f8887a956afd",
+      "fix_commit": "431089afa325101c263a20a75a8eb83ef331e180",
+      "location": "crates/bifrost-analysis/src/analyzer/rust/semantic.rs:4030-4162 rust_file_facts written-impl/plain_structs prescan;1176-1190 expression_is_definitely_non_dropping;771-779 inserts local into definitely_non_dropping;1270-1281 local Drop classification;1604-1617 block cleanup consumer."
+    },
+    {
+      "selection_position": 89,
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "group_key": "commit:874e8edbc950bd6ac4bc93913a632ce9697c7c5a",
+      "feature_family": "kotlin-value-class-carrier-projection",
+      "intro_commit": "ba47ae3f428ea3e1d51d999176397a21ea71bff5",
+      "base_commit": "3f2ebbee4f13dcd764c7b767c4370c5f5dfe1f97",
+      "fix_commit": "874e8edbc950bd6ac4bc93913a632ce9697c7c5a",
+      "location": "crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:518-526 expression_carrier and :685-695 underlying_projection; control.rs:1946-1994 property_load at intro; receiver setup control.rs:48-78 lacks carrier binding"
+    },
+    {
+      "selection_position": 99,
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "group_key": "commit:1c12dfc6a0341ab4911e08d97abde920bac48bed",
+      "feature_family": "nilness-modeled-call-control-flow",
+      "intro_commit": "09b006454e308fe885b4b6b10b35aaa7e86dcb7f",
+      "base_commit": "58f59aa767dc1ed86efc9a4ff2e5647644f50de2",
+      "fix_commit": "1c12dfc6a0341ab4911e08d97abde920bac48bed",
+      "location": "crates/bifrost-rql/src/structural/search/effects.rs:2633-2737 nilness_operation_expansions, especially2731-2736; scalar_state.rs is the receiving scalar engine, not the earlier helper introduction to blame."
+    },
+    {
+      "selection_position": 106,
+      "id": "java-static-getter-drops-incomplete-route",
+      "group_key": "issue:5331",
+      "feature_family": "jvm-static-import-alias-bridge",
+      "intro_commit": "02a3329d1d54ec101e636f31a3427178edd97f58",
+      "base_commit": "c6e05f1044055726082a50f194221451db3fef8f",
+      "fix_commit": "13420737a6a4451643ce738119a6913808a9a9df",
+      "location": "crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs jvm_alias_import_bridges, intro lines 2336\u20132352 and subsequent found_alias/open_imports handling"
+    },
+    {
+      "selection_position": 111,
+      "id": "mcp-timed-out-progress-survives-response",
+      "group_key": "issue:12761",
+      "feature_family": "mcp-progress-delivery-lifetime",
+      "intro_commit": "25bbd98914912722170d90ca34c72d3b4a8eed85",
+      "base_commit": "3db1a9254c99537ef2d42942dd9b5c1b88c9c3fb",
+      "fix_commit": "397bcf8d6b5d22ad33a71353a62b91d47bb2b221",
+      "location": "crates/bifrost-mcp/src/rmcp_host.rs:739-750, ProgressReporter::send; request execution select loop and synchronous response return"
+    },
+    {
+      "selection_position": 117,
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "group_key": "commit:093b17cd76edaf2c67b3189fd0045262d0b4608b",
+      "feature_family": "inverse-usage-candidate-file-routing",
+      "intro_commit": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5",
+      "base_commit": "e2d09485b3d4657fa5870ee020bb2cc7fe04fab2",
+      "fix_commit": "093b17cd76edaf2c67b3189fd0045262d0b4608b",
+      "location": "src/analyzer/csharp_analyzer.rs:150-159 (namespace_of_file), 284-308 (referencing_files_of); src/usages/csharp_graph.rs:66-85 consumes candidate_files"
+    },
+    {
+      "selection_position": 119,
+      "id": "rust-bare-value-admits-associated-constant",
+      "group_key": "commit:12f759b2964cdae96832e59b7fe5dafc87a92832",
+      "feature_family": "rust-definition-target-inference",
+      "intro_commit": "db238908013acbe1691445f9470ce5f2f78fde4a",
+      "base_commit": "5332c0c72a8c84e77db1ad9b3bd73419485ff5f5",
+      "fix_commit": "12f759b2964cdae96832e59b7fe5dafc87a92832",
+      "location": "src/analyzer/usages/get_definition/rust.rs:871-895 (rust_role_accepts_current_module and rust_value_namespace_candidate), 938-941 (rust_declaration_is_value_item), 825-843 (current-module candidate filtering)"
+    },
+    {
+      "selection_position": 120,
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "group_key": "commit:e83f35411767aaffedbf1da5092d49e2d4a64b1d",
+      "feature_family": "ruby-focused-constant-navigation",
+      "intro_commit": "cc45d8f092e525615117108fbecf9453aed29bc4",
+      "base_commit": "b203b4e4b11864fb2b9570a5c76e5b7b133f9ed7",
+      "fix_commit": "e83f35411767aaffedbf1da5092d49e2d4a64b1d",
+      "location": "src/analyzer/usages/get_definition/ruby.rs:104-116, ruby_reference_node; resolve_ruby invokes it for the focused syntax node"
+    },
+    {
+      "selection_position": 123,
+      "id": "unproven-override-family-certifies-empty",
+      "group_key": "issue:7183",
+      "feature_family": "concrete-callee-dispatch-completeness",
+      "intro_commit": "f5cf77da184060e453f69b0c4f04e27d1ba2ae8b",
+      "base_commit": "c07ddd4c89ec3333fbeec270d510b35320cdcc37",
+      "fix_commit": "a6456555ee85efcabd7d38479e40462f8bbdde59",
+      "location": "crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:534-603 concrete override check and concrete_overrides_proven_absent_discharges_gap; virtual_dispatch_implementor_targets unproven branch"
+    },
+    {
+      "selection_position": 124,
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "group_key": "commit:e3a7cdf04a43b8401f419a39ad6fab4a3743e868",
+      "feature_family": "synthetic-file-owner-projections",
+      "intro_commit": "b73a383797683a2128fe176f85d9457a5f073ad0",
+      "base_commit": "d64255dfec7971fa22bc48a85960fedfa149ef56",
+      "fix_commit": "e3a7cdf04a43b8401f419a39ad6fab4a3743e868",
+      "location": "src/analyzer/javascript/mod.rs:122-124 and src/analyzer/typescript/mod.rs:130-132, module_has_imports registration"
+    },
+    {
+      "selection_position": 127,
+      "id": "rust-option-return-implicitly-unwrapped",
+      "group_key": "commit:36fa96bd75ca0de467734e93e780bcc177f2a461",
+      "feature_family": "rust-definition-target-inference",
+      "intro_commit": "309939da522fa0c3cf51ec922c15c1f5f81ff31a",
+      "base_commit": "77128367087b647353e3c68bb64edd49efa04d61",
+      "fix_commit": "36fa96bd75ca0de467734e93e780bcc177f2a461",
+      "location": "src/analyzer/usages/get_definition.rs:1045-1063 return-type parsing, especially Option stripping1054/1062-1063; ordinary call inference1012-1016."
+    }
+  ],
+  "over_limit_families": [],
+  "spread_exclusions": [
+    {
+      "selection_position": 122,
+      "id": "js-export-alias-prefilter-drops-importer",
+      "reason": "Parent decision: third case in inverse-usage-candidate-file-routing after77/117; SPEC8 cap. Confirmed trace remains eligible, unselected for spread only.",
+      "eligibility_failure": false
+    }
+  ],
+  "parent_spread_decision": "Keep first2 inverse-usage routing cases77/117; exclude third122; take next remaining qualified127. Do not split by language or ownership to fit cap.",
+  "summary": {
+    "proposed_families": 24,
+    "families_above_two": 0,
+    "largest_family_count": 2,
+    "unique_diff_pairs": true,
+    "actual_duplicate_found": false,
+    "conclusion": "Final selected30 pass the proposed practical feature-family cap after parent exclusion122. No repeated diff endpoints, fix SHA, canonical group or identified duplicate actual defect. Largest selected family count2; parent retains final acceptance."
+  },
+  "evidence_file": "/home/jonathan/Projects/mjolnir/.mj/clones/d2fa840b25852a07c2e024357afec69d/.mj/agents/4986f1be933dd07fa4abb1088914d33a/spread-final/bounded-anchors.txt",
+  "limits": "Bounded integration comparison of accepted descriptions/overlays and selected helper excerpts; no full retrace, builds, tests, new history investigations, model inputs, census or session/config/source changes.",
+  "actual_model": "gpt-6.1-sol",
+  "actual_effort": "medium"
+}

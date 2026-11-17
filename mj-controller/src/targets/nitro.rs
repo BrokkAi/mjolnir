@@ -14,6 +14,7 @@
 //!   (with a notice), and this module refuses any that arrive.
 
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// The oldest host kernel the sandbox boot path was proven on (Amazon Linux
 /// 2023 `6.18.51-120.162`).
@@ -73,9 +74,14 @@ pub(super) fn nitro_pool_memory(info: &str) -> Result<(u64, u64)> {
 }
 
 pub fn nitro_info_command(ssh: &SshTarget) -> CommandSpec {
-    ssh_engine_command(ssh, MICROVM_ENGINE, ["info", "--format", "json"])
-        .purpose("read the Nitro sandbox engine's host report")
-        .stage(ProvisionStage::Provisioning)
+    ssh_engine_command(
+        SshTrafficClass::Control,
+        ssh,
+        MICROVM_ENGINE,
+        ["info", "--format", "json"],
+    )
+    .purpose("read the Nitro sandbox engine's host report")
+    .stage(ProvisionStage::Provisioning)
 }
 
 /// Parse the engine's report, and say what is wrong with a host that cannot
@@ -264,11 +270,12 @@ pub(super) fn nitro_container_run(
     let inherited = inherited_environment_names(&arguments);
     let mut command = engine_argv_with_env(MICROVM_ENGINE, &inherited);
     command.append(&mut arguments);
-    let run = ssh_command_owned(ssh, command)
+    let run = ssh_command_owned(SshTrafficClass::Control, ssh, command)
         .purpose("start remote Nitro sandbox")
         .stage(ProvisionStage::Provisioning)
         .creates_target();
     let tmp = ssh_engine_command(
+        SshTrafficClass::Control,
         ssh,
         MICROVM_ENGINE,
         [
@@ -314,7 +321,7 @@ fn nitro_script_command(
         "mj-nitro".to_owned(),
     ];
     words.extend(arguments);
-    ssh_command_owned(ssh, words)
+    ssh_command_owned(SshTrafficClass::Control, ssh, words)
 }
 
 // `--time 0` matches the Podman scripts' shape, but the engine does not kill
@@ -424,6 +431,11 @@ pub(super) fn nitro_absence_command(ssh: &SshTarget, container: &str) -> Command
 /// The sandbox's mounts, from the engine's full `container inspect` JSON (a
 /// one-element array), so the controller needs no `--format` template.
 pub(super) fn nitro_inspect_command(ssh: &SshTarget, container: &str) -> CommandSpec {
-    ssh_engine_command(ssh, MICROVM_ENGINE, ["container", "inspect", container])
-        .purpose("inspect session container storage")
+    ssh_engine_command(
+        SshTrafficClass::Control,
+        ssh,
+        MICROVM_ENGINE,
+        ["container", "inspect", container],
+    )
+    .purpose("inspect session container storage")
 }

@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -124,6 +125,12 @@ pub trait ExportRuntime: Send + Sync {
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
+
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`. Backends without a daemon have none.
+    fn session_is_yolo_target(&self, _session_id: &str) -> bool {
+        false
+    }
 
     /// Whether a close the daemon admitted is still running for this session.
     ///
@@ -345,6 +352,11 @@ impl ExportRuntime for RuntimeState {
 
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn session_is_yolo_target(&self, session_id: &str) -> bool {
+        self.session_record(session_id)
+            .is_some_and(|record| record.is_yolo_target(&self.with_config(Clone::clone)))
     }
 
     fn close_is_requested(&self, session_id: &str) -> bool {
@@ -1087,12 +1099,14 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
+                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
+                        yolo,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -3442,9 +3456,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -3513,7 +3532,13 @@ fn worker_command_spec(
     let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
-    targets::command_on_locator(&layout.backend, session, argv, purpose)
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
@@ -3585,6 +3610,10 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
+    }
+
+    fn session_is_yolo_target(&self, session_id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.exports.session_is_yolo_target(&session_id)) })
     }
 
     fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {

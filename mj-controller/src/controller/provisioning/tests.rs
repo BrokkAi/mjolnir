@@ -39,6 +39,29 @@ impl ProbeExecutor {
 }
 
 impl CommandExecutor for ProbeExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(
             command.purpose, "probe mount source filesystem",
@@ -140,6 +163,29 @@ fn ssh_docker_registration_config() -> Config {
 struct DockerDesktopExecutor;
 
 impl CommandExecutor for DockerDesktopExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.program.as_str() {
             "docker" => "Docker Desktop 4.40.0 (187762)\n",
@@ -580,10 +626,13 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &executor,
-        || false,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -639,8 +688,8 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
     );
     assert_eq!(
         stop.commands().len(),
-        1,
-        "failed stop must not reinstall or relaunch anything"
+        2,
+        "failed stop (after the control-worker check) must not reinstall or relaunch anything"
     );
     let mut recovered = Controller::load().unwrap();
     let child = &recovered.state.sessions[&child_id];
@@ -692,6 +741,29 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
 
 struct CancelledLaunch;
 impl CommandExecutor for CancelledLaunch {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         bail!("operation cancelled")
     }
@@ -722,11 +794,33 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
     record.state = SessionState::Provisioning;
     crate::database::save_lifecycle_session(record).unwrap();
-    // Daemon shutdown is what cancels a launch nobody else stops (#1321).
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    // A launch the daemon's shutdown stopped is not a failure: the record and
+    // the worker stay as they are for the next daemon (create intent).
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &CancelledLaunch,
-        || true,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| true,
+    ))
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("the Mjolnir daemon stopped during this launch"),
+        "{error:#}"
+    );
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[&child_id].state,
+        SessionState::Provisioning
+    );
+    // A launch cancelled by anything else fails, and its cleanup still runs.
+    let error = futures::executor::block_on(controller.run_create(
+        &child_id,
+        &CancelledLaunch,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -741,14 +835,9 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         "cleanup used a fresh executor despite launch cancellation: {record:?}"
     );
     assert!(record.archived);
-    // The parent reads this cause; "operation cancelled" alone looked like a
-    // fault on the target.
     let cause = record.last_error.as_deref().unwrap();
     assert!(
-        cause.starts_with(
-            "sub-agent startup failed: the Mjolnir daemon stopped during this launch; \
-             spawn the sub-agent again: operation cancelled"
-        ),
+        cause.starts_with("sub-agent startup failed: operation cancelled"),
         "{cause}"
     );
     controller
@@ -1000,6 +1089,29 @@ struct DurableStateAtCleanup {
 }
 
 impl CommandExecutor for DurableStateAtCleanup {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
         let stored = crate::database::load_state()?
             .sessions
@@ -1140,6 +1252,29 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
 
     struct RefuseStop(Mutex<usize>);
     impl CommandExecutor for RefuseStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             *self.0.lock().unwrap() += 1;
             bail!("target stop failed");
@@ -1551,6 +1686,29 @@ impl RecordingExecutor {
 }
 
 impl CommandExecutor for RecordingExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let mut argv = vec![command.program.clone()];
         argv.extend(command.args.clone());
@@ -1766,6 +1924,29 @@ fn only_a_worker_that_never_started_is_retried() {
 
 struct RawRegistrationExecutor;
 impl CommandExecutor for RawRegistrationExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let stdout = match command.purpose.as_str() {
             "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
@@ -1791,6 +1972,29 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
     }
 
     impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             unreachable!("waiting for a start slot runs no commands: {command:?}");
         }
@@ -1846,6 +2050,29 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
     }
 
     impl CommandExecutor for StageRecorder {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             unreachable!("waiting for an image runs no commands: {command:?}");
         }
@@ -1941,6 +2168,29 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
 struct CgroupExecutor(serde_json::Value);
 
 impl CommandExecutor for CgroupExecutor {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        mj_core::targets::DeadlinePause::none()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.cancellation_requested()
+    }
+
+    fn execute_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &mj_core::targets::CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+        self.execute_with_stdin(command, input)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         assert_eq!(command.purpose, "check Podman cgroup controllers");
         Ok(CommandOutput {
@@ -2069,6 +2319,29 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: PathBuf,
     }
     impl CommandExecutor for OverlapExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let bound = std::time::Duration::from_secs(20);
             match command.purpose.as_str() {
@@ -2127,11 +2400,15 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: root.join(".mj/clones").join(&record.id),
     };
     let error = controller
-        .provision_session_controlled_with_commit(
+        .run_create(
             &record.id,
             &executor,
-            || panic!("failed setup cannot commit"),
+            CreateKind::TopLevel {
+                remember_launch_choices: false,
+            },
             false,
+            || panic!("failed setup cannot commit"),
+            &|| false,
         )
         .await
         .unwrap_err();

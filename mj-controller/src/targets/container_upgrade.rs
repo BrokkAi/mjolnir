@@ -1,6 +1,7 @@
 //! Container replacement has no storage-destruction capability. In particular,
 //! none of these commands use provisioning traps, close plans, or `rm -v`.
 use super::*;
+use mj_core::targets::SshTrafficClass;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +368,7 @@ pub(crate) fn inspect_retained_container(
     if control_state.is_some() {
         let probe = executor.execute(
             &locator_command(
+                SshTrafficClass::Control,
                 locator,
                 vec!["sh".into(), "-c".into(), "tar --help 2>&1".into()],
             )
@@ -493,7 +495,7 @@ impl RetainedContainer {
             ".".into(),
         ]);
         let output = executor.execute(
-            &locator_command(&self.locator, args)
+            &locator_command(SshTrafficClass::Bulk, &self.locator, args)
                 .purpose("capture stopped worker journal and harness state"),
         )?;
         ensure!(
@@ -503,6 +505,7 @@ impl RetainedContainer {
         );
         let output = executor.execute(
             &locator_command(
+                SshTrafficClass::Bulk,
                 &self.locator,
                 vec![
                     "mv".into(),
@@ -533,6 +536,7 @@ impl RetainedContainer {
         let script = "set -eu; state=$1; root=$2; exec flock -x \"$state/restore.lock\" sh -c 'set -eu; [ ! -f \"$1/restore-complete\" ] || exit 0; mkdir -p -- \"$2\"; tar --unlink-first --strip-components=1 -C \"$2\" -xf \"$1/state.tar\"; tar --no-recursion --occurrence=1 -C \"$2\" -xf \"$1/state.tar\" .; touch \"$1/restore-complete\"' mj-control-restore \"$state\" \"$root\"";
         let output = executor.execute(
             &locator_command(
+                SshTrafficClass::Bulk,
                 &self.locator,
                 vec![
                     "sh".into(),
@@ -941,7 +945,7 @@ impl RetainedContainer {
             )?;
         }
         if let Some(state) = &self.control_state {
-            let output = executor.execute(&locator_command(&self.locator, vec!["sh".into(), "-c".into(), "set -eu; [ -f \"$1/restore-complete\" ] || exit 0; rm -f -- \"$1/state.tar\" \"$1\"/state.tar.capture-*".into(), "mj-control-transfer-cleanup".into(), state.staging_directory.clone()]).purpose("retire completed private control-state transfer"))?;
+            let output = executor.execute(&locator_command(SshTrafficClass::Control, &self.locator, vec!["sh".into(), "-c".into(), "set -eu; [ -f \"$1/restore-complete\" ] || exit 0; rm -f -- \"$1/state.tar\" \"$1\"/state.tar.capture-*".into(), "mj-control-transfer-cleanup".into(), state.staging_directory.clone()]).purpose("retire completed private control-state transfer"))?;
             ensure!(
                 output.status == 0,
                 "cannot retire completed private control-state transfer"
@@ -1425,6 +1429,29 @@ mod tests {
 
     struct FailReplacementRun;
     impl CommandExecutor for FailReplacementRun {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             if command.purpose == "start replacement on retained storage" {
                 bail!("injected engine failure after retaining the stopped source");
@@ -1438,6 +1465,29 @@ mod tests {
     }
 
     impl CommandExecutor for RetainedInspectionExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             match command.purpose.as_str() {
                 "inspect retained session container" => Ok(CommandOutput {
@@ -1937,6 +1987,29 @@ mod tests {
     }
 
     impl CommandExecutor for FakeNitroEngine {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let ok = |stdout: &str| {
                 Ok(CommandOutput {

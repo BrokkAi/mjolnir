@@ -1,0 +1,638 @@
+{
+  "interval": "[2026-11-01T00:00:00Z,2026-11-01T06:00:00Z)",
+  "count": 70,
+  "matches": [],
+  "unresolved": [],
+  "records": [
+    {
+      "corpus": "corpus",
+      "id": "held-prompt-ignores-interrupt",
+      "intro_commit": "a583fa1036f534039bae407b3b22750b259111e8",
+      "committer_datetime": "2026-09-23T19:07:44-05:00",
+      "committer_utc": "2026-09-24T00:07:44+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "stale-model-launch-spec",
+      "intro_commit": "c0ca1fe93c6c0a1ce9f75d42153fb08bed11660d",
+      "committer_datetime": "2026-09-16T16:24:51Z",
+      "committer_utc": "2026-09-16T16:24:51+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "terminal-id-reused",
+      "intro_commit": "bdb55db1b7bc30bdf113c2f6e85287ca6db41baa",
+      "committer_datetime": "2026-08-18T10:27:25-05:00",
+      "committer_utc": "2026-08-18T15:27:25+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "osc-payload-in-transcript",
+      "intro_commit": "efd50a4f0eb5b124bd1e86a2e5801cb76015149e",
+      "committer_datetime": "2026-08-11T13:32:15-05:00",
+      "committer_utc": "2026-08-11T18:32:15+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "container-env-lost-during-worker-bootstrap",
+      "intro_commit": "66bf1421ed813dcd64be9fce94a0fcc44d257c74",
+      "committer_datetime": "2026-09-12T14:11:55-05:00",
+      "committer_utc": "2026-09-12T19:11:55+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "archive-resume-hint-without-prompt",
+      "intro_commit": "6f26caa20f1e2277a240719da2276318649f3464",
+      "committer_datetime": "2026-09-18T11:58:28-05:00",
+      "committer_utc": "2026-09-18T16:58:28+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "pinned-worker-disappears",
+      "intro_commit": "29310d2d795305389d96a50b60e1c2705d03c4cf",
+      "committer_datetime": "2026-09-08T16:52:22-05:00",
+      "committer_utc": "2026-09-08T21:52:22+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "pending-assessment-hidden-when-idle",
+      "intro_commit": "b72adcc6f7c8697e329bdf880780bbd3cc70a1b7",
+      "committer_datetime": "2026-10-13T06:46:55-05:00",
+      "committer_utc": "2026-10-13T11:46:55+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "stop-awk-multiline-variable",
+      "intro_commit": "2f859c8fb591e3fcd01e83674ba391a4fed5a6ce",
+      "committer_datetime": "2026-09-29T10:13:15-05:00",
+      "committer_utc": "2026-09-29T15:13:15+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "web-feed-self-deadlock",
+      "intro_commit": "7b6948038500a5883dc6edb0e96b11176fb49d31",
+      "committer_datetime": "2026-09-14T19:03:52-05:00",
+      "committer_utc": "2026-09-15T00:03:52+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "handback-reminder-stops-work",
+      "intro_commit": "a6674529c3117ef9b8ace7c02cd95487a1b6e372",
+      "committer_datetime": "2026-09-24T12:18:48-05:00",
+      "committer_utc": "2026-09-24T17:18:48+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "codex-effort-alias-lost",
+      "intro_commit": "a78a57a9054529423ed459e7ddd28b3d487e1e0a",
+      "committer_datetime": "2026-09-23T14:23:52-05:00",
+      "committer_utc": "2026-09-23T19:23:52+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "dropdown-click-hits-covered-field",
+      "intro_commit": "8a203905e89e13cb91d60de8a7200a259d2d413c",
+      "committer_datetime": "2026-09-09T08:47:46-05:00",
+      "committer_utc": "2026-09-09T13:47:46+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "stop-grep-matches-itself",
+      "intro_commit": "2bf19f4a294c68239f2cfb271b494a929de06430",
+      "committer_datetime": "2026-08-20T08:22:43-05:00",
+      "committer_utc": "2026-08-20T13:22:43+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "symbol-change-keeps-cached-transcript",
+      "intro_commit": "a02c94fed9337f212ebc400da9ceb50556e70c3d",
+      "committer_datetime": "2026-09-18T17:18:29+02:00",
+      "committer_utc": "2026-09-18T15:18:29+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "github-token-in-container-argv",
+      "intro_commit": "3348d75b51c3328bee6bdf12515223f38e22ce1e",
+      "committer_datetime": "2026-08-13T22:14:01-05:00",
+      "committer_utc": "2026-08-14T03:14:01+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "palette-scattered-match-beats-literal",
+      "intro_commit": "33b58e3c7deeec595d7d61c42af7589bf0069d7c",
+      "committer_datetime": "2026-09-18T16:02:26+02:00",
+      "committer_utc": "2026-09-18T14:02:26+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "reserved-workspace-internal-error",
+      "intro_commit": "3bea50170905667a07c42fc420386d1d6a0c08d7",
+      "committer_datetime": "2026-09-23T21:18:13-05:00",
+      "committer_utc": "2026-09-24T02:18:13+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "activity-recorder-kills-api",
+      "intro_commit": "efbd4bc08e28931aedd2a7f708d00ce8c1d9c4ac",
+      "committer_datetime": "2026-09-12T14:07:43-05:00",
+      "committer_utc": "2026-09-12T19:07:43+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "metadata-checkpoint-overwrites-checkout",
+      "intro_commit": "86494146fd9e2c0fc03b1a2422bc2f952a2e4a3a",
+      "committer_datetime": "2026-10-23T11:40:06-05:00",
+      "committer_utc": "2026-10-23T16:40:06+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "shortcut-escape-opens-unvisited-manager",
+      "intro_commit": "981532a239c40960a673b7f10a369082d666c57b",
+      "committer_datetime": "2026-09-19T17:40:04-05:00",
+      "committer_utc": "2026-09-19T22:40:04+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "child-model-wrong-efforts",
+      "intro_commit": "435b4ed941720b8dfa04fdb454ffa3ae3645f625",
+      "committer_datetime": "2026-09-24T15:39:14-05:00",
+      "committer_utc": "2026-09-24T20:39:14+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "ssh-user-hostkey-policy-overridden",
+      "intro_commit": "ee78904517fada56c3c080a50055adbded64619c",
+      "committer_datetime": "2026-08-10T08:27:54-05:00",
+      "committer_utc": "2026-08-10T13:27:54+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "unused-thread-above-archive-floor",
+      "intro_commit": "0cfac73ccb7d40bab2d4bce620cc24a8047a5688",
+      "committer_datetime": "2026-09-15T20:50:07-05:00",
+      "committer_utc": "2026-09-16T01:50:07+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "path-completion-lost-on-step-redraw",
+      "intro_commit": "1e5014fb21199fd3a06c61564cc3c5319d704194",
+      "committer_datetime": "2026-09-18T10:28:07-05:00",
+      "committer_utc": "2026-09-18T15:28:07+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "restore-through-profile-symlink",
+      "intro_commit": "23af4f3fff989c2b006c978a71f03d01dc35453b",
+      "committer_datetime": "2026-09-25T10:17:51-05:00",
+      "committer_utc": "2026-09-25T15:17:51+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "catalog-cache-key-collision",
+      "intro_commit": "fab5471bc81b5cc405ad911d9e8e2b4a13924fe7",
+      "committer_datetime": "2026-09-15T10:32:33-05:00",
+      "committer_utc": "2026-09-15T15:32:33+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "journal-valid-json-corruption",
+      "intro_commit": "e0f4c8db0868f6e3545455d7b36fc1acd0083db8",
+      "committer_datetime": "2026-08-30T01:01:20-05:00",
+      "committer_utc": "2026-08-30T06:01:20+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "export-relative-read-root",
+      "intro_commit": "e9929f997ccdafcc07a99b1a82d3af1247c5efc0",
+      "committer_datetime": "2026-09-11T20:15:04-05:00",
+      "committer_utc": "2026-09-12T01:15:04+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "corpus",
+      "id": "projection-mixed-sqlite-snapshots",
+      "intro_commit": "4bec091887a2a7e43a98e0652aa69a83fb50a5fe",
+      "committer_datetime": "2026-09-01T12:36:13-05:00",
+      "committer_utc": "2026-09-01T17:36:13+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-e46ec2f9b6",
+      "intro_commit": "e46ec2f9b68e020deea9f6e83a691e4378f09694",
+      "committer_datetime": "2026-05-19T17:35:50+02:00",
+      "committer_utc": "2026-05-19T15:35:50+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-63aa88db7c",
+      "intro_commit": "63aa88db7c5a7fad8bd6726c83b8f1fba7f5e799",
+      "committer_datetime": "2026-06-15T13:12:10+02:00",
+      "committer_utc": "2026-06-15T11:12:10+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-05bc8c1e68",
+      "intro_commit": "05bc8c1e681d5964f9f07d94783e3303255b8e39",
+      "committer_datetime": "2026-07-08T19:06:32+02:00",
+      "committer_utc": "2026-07-08T17:06:32+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-dd238f4aa2",
+      "intro_commit": "dd238f4aa2bfae87ff3f69f638cde692673fc30e",
+      "committer_datetime": "2026-07-15T18:54:06-05:00",
+      "committer_utc": "2026-07-15T23:54:06+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-9af690d4c0",
+      "intro_commit": "9af690d4c0f41e570718d80535c6ea7498d911fa",
+      "committer_datetime": "2026-07-28T16:18:06-05:00",
+      "committer_utc": "2026-07-28T21:18:06+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-6f384de792",
+      "intro_commit": "6f384de792c9e6e417b8648a4ab8c9d6d91c3c72",
+      "committer_datetime": "2026-08-05T11:06:54+02:00",
+      "committer_utc": "2026-08-05T09:06:54+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-bd8043d50e",
+      "intro_commit": "bd8043d50ebd814702f119f4ae9861358972aa9c",
+      "committer_datetime": "2026-08-10T06:20:03-05:00",
+      "committer_utc": "2026-08-10T11:20:03+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-e0ccec80d9",
+      "intro_commit": "e0ccec80d90ab7b0ad3b33f4b54b6618912ddfe0",
+      "committer_datetime": "2026-08-10T18:40:23+02:00",
+      "committer_utc": "2026-08-10T16:40:23+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-7393e1b766",
+      "intro_commit": "7393e1b766ff925b55d94915ccdf953cfd54f808",
+      "committer_datetime": "2026-08-14T01:37:29-05:00",
+      "committer_utc": "2026-08-14T06:37:29+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-9e6d561405",
+      "intro_commit": "9e6d5614059b08d2a3c92f622937eef275d4d5af",
+      "committer_datetime": "2026-08-16T09:34:05-05:00",
+      "committer_utc": "2026-08-16T14:34:05+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-0fc100bb45",
+      "intro_commit": "0fc100bb45663072f549c47e82b9bb77e6fd80ba",
+      "committer_datetime": "2026-08-20T09:16:05-05:00",
+      "committer_utc": "2026-08-20T14:16:05+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-100276360f",
+      "intro_commit": "100276360f441c272bb6fd3d58d1d8cb05db6bc2",
+      "committer_datetime": "2026-08-24T17:23:02-05:00",
+      "committer_utc": "2026-08-24T22:23:02+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-c6429e612e",
+      "intro_commit": "c6429e612eb12a9d1db9952589b099bce5c14864",
+      "committer_datetime": "2026-08-25T17:02:24+02:00",
+      "committer_utc": "2026-08-25T15:02:24+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-ce7d4bd532",
+      "intro_commit": "ce7d4bd532ba5aea308409ca2bb324a364f227d2",
+      "committer_datetime": "2026-08-27T20:14:36-05:00",
+      "committer_utc": "2026-08-28T01:14:36+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-d8dd17faa5",
+      "intro_commit": "d8dd17faa5e011a756c96637650296f5f55f8376",
+      "committer_datetime": "2026-08-31T16:06:41-05:00",
+      "committer_utc": "2026-08-31T21:06:41+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-d75bf85066",
+      "intro_commit": "d75bf85066834d6eed47915f657e3f48f239f067",
+      "committer_datetime": "2026-09-01T00:22:29-05:00",
+      "committer_utc": "2026-09-01T05:22:29+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-87ce619c40",
+      "intro_commit": "87ce619c4076cbdb82b493521467ca203f629f20",
+      "committer_datetime": "2026-09-01T21:28:44-05:00",
+      "committer_utc": "2026-09-02T02:28:44+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-da4e90bb79",
+      "intro_commit": "da4e90bb790f956b6299563f6dd4c8cc7ec410ed",
+      "committer_datetime": "2026-09-07T11:44:11+02:00",
+      "committer_utc": "2026-09-07T09:44:11+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-613a906918",
+      "intro_commit": "613a90691811ad47df7fb374c7e59f9053b7bc4d",
+      "committer_datetime": "2026-09-12T15:12:18-05:00",
+      "committer_utc": "2026-09-12T20:12:18+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-9581faf69b",
+      "intro_commit": "9581faf69b4687874cd623c32b861dd575f92384",
+      "committer_datetime": "2026-09-15T13:01:34Z",
+      "committer_utc": "2026-09-15T13:01:34+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-ceb1f1b077",
+      "intro_commit": "ceb1f1b077d430f805a5f9b2e15a4bd12443cc1a",
+      "committer_datetime": "2026-09-16T18:44:40-05:00",
+      "committer_utc": "2026-09-16T23:44:40+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-9651f8c78a",
+      "intro_commit": "9651f8c78a3b0b45a80cdc71657adb6c5fc96133",
+      "committer_datetime": "2026-09-17T13:32:25-05:00",
+      "committer_utc": "2026-09-17T18:32:25+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-796d055cd5",
+      "intro_commit": "796d055cd5ee6b18876f0bdaecc9506f50ce48fa",
+      "committer_datetime": "2026-09-17T20:21:12-05:00",
+      "committer_utc": "2026-09-18T01:21:12+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-88d26a63ff",
+      "intro_commit": "88d26a63ff9812dc3ae1e7f800201774a0ca6673",
+      "committer_datetime": "2026-09-18T11:48:09-05:00",
+      "committer_utc": "2026-09-18T16:48:09+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-ba9c307500",
+      "intro_commit": "ba9c3075005ae6421c6dfea53b1b630155ecf83d",
+      "committer_datetime": "2026-09-21T12:41:59+02:00",
+      "committer_utc": "2026-09-21T10:41:59+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-e0e9dd83aa",
+      "intro_commit": "e0e9dd83aa36cabd50be3ae9c55da6ac91798eec",
+      "committer_datetime": "2026-09-23T10:59:24-05:00",
+      "committer_utc": "2026-09-23T15:59:24+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-180c47334c",
+      "intro_commit": "180c47334cd188e3fc4dc1f2b192625c86ae002a",
+      "committer_datetime": "2026-09-23T19:58:51-05:00",
+      "committer_utc": "2026-09-24T00:58:51+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-028b832763",
+      "intro_commit": "028b8327637597df04ac844b102fad7be62a07c6",
+      "committer_datetime": "2026-09-25T00:30:07-05:00",
+      "committer_utc": "2026-09-25T05:30:07+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-a05e5f5fc7",
+      "intro_commit": "a05e5f5fc74f7b8865458ee897bbab0713d16d12",
+      "committer_datetime": "2026-09-26T10:38:22+02:00",
+      "committer_utc": "2026-09-26T08:38:22+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-660c78e96c",
+      "intro_commit": "660c78e96c378c0dbd4a81e923d31239419e63c6",
+      "committer_datetime": "2026-09-28T09:21:33-05:00",
+      "committer_utc": "2026-09-28T14:21:33+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-664b62605e",
+      "intro_commit": "664b62605e0fbc4ae9a7ed01a97c4471b8c0c129",
+      "committer_datetime": "2026-09-29T23:43:48-05:00",
+      "committer_utc": "2026-09-30T04:43:48+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-b5b30d250e",
+      "intro_commit": "b5b30d250ed7f0934e25ddb96dc78ec4776597d6",
+      "committer_datetime": "2026-10-01T07:49:15-05:00",
+      "committer_utc": "2026-10-01T12:49:15+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-0cb5bc6665",
+      "intro_commit": "0cb5bc6665e6ccadb1a7c5e02968c9bf246f2402",
+      "committer_datetime": "2026-10-04T09:36:19-05:00",
+      "committer_utc": "2026-10-04T14:36:19+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-7efd15da56",
+      "intro_commit": "7efd15da563c6f737b853ef2870e9a5896ec37ca",
+      "committer_datetime": "2026-10-05T01:42:12-05:00",
+      "committer_utc": "2026-10-05T06:42:12+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-7012287b74",
+      "intro_commit": "7012287b74e22f68c63eb7b84cb63f3bcdefb816",
+      "committer_datetime": "2026-10-07T13:16:24-05:00",
+      "committer_utc": "2026-10-07T18:16:24+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-c80d1f8047",
+      "intro_commit": "c80d1f8047c8f58ac0878827084639bda775dc36",
+      "committer_datetime": "2026-10-14T13:16:22+02:00",
+      "committer_utc": "2026-10-14T11:16:22+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-1035ca69e7",
+      "intro_commit": "1035ca69e717f6cfa4c55a7317a15d0b913af3ce",
+      "committer_datetime": "2026-10-21T14:23:28+02:00",
+      "committer_utc": "2026-10-21T12:23:28+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-7feabd81cd",
+      "intro_commit": "7feabd81cda95f1718a765eb5e56eb533195c4b3",
+      "committer_datetime": "2026-10-23T11:44:40-05:00",
+      "committer_utc": "2026-10-23T16:44:40+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-2c7ae2c2dd",
+      "intro_commit": "2c7ae2c2dd5b0d64d9524e2648bba45edfc6bb1d",
+      "committer_datetime": "2026-10-25T13:45:17-05:00",
+      "committer_utc": "2026-10-25T18:45:17+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    },
+    {
+      "corpus": "diffs",
+      "id": "diff-f41710c8ca",
+      "intro_commit": "f41710c8caf59e7eb0c29c058c840bf7199a8a85",
+      "committer_datetime": "2026-10-30T13:07:02Z",
+      "committer_utc": "2026-10-30T13:07:02+00:00",
+      "in_utc_to_0600_window": false,
+      "error": null
+    }
+  ]
+}

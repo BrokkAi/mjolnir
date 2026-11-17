@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -558,7 +559,7 @@ pub(super) fn verify_docker(
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
     let command = match ssh {
-        Some(ssh) => command_over_ssh(command, ssh),
+        Some(ssh) => command_over_ssh(SshTrafficClass::Control, command, ssh),
         None => command,
     };
     let output = match executor.execute(&command) {
