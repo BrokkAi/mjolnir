@@ -42,6 +42,10 @@ import driver
 from driver import ROOT, SCRIPTS, save
 
 PLAN = (SCRIPTS / "brief/PLAN.md").read_text()
+TASK_CENSUS = None
+TASK_JOBS = None
+TASK_NAME = None
+TASK_SCOPE = None
 
 
 def sha(text):
@@ -90,6 +94,198 @@ def sets():
     return s
 
 
+def task_work():
+    return ROOT / "briefs" / (f"{TASK_NAME}-work" if TASK_NAME else "oracle-work")
+
+
+def task_scope():
+    return {"census": str(pathlib.Path(TASK_CENSUS).resolve()),
+            "census_sha256": hashlib.sha256(pathlib.Path(TASK_CENSUS).read_bytes()).hexdigest(),
+            "jobs": str(pathlib.Path(TASK_JOBS).resolve()),
+            "jobs_sha256": hashlib.sha256(pathlib.Path(TASK_JOBS).read_bytes()).hexdigest(), "name": TASK_NAME}
+
+
+def load_task_inputs():
+    with open(TASK_CENSUS) as f:
+        census_rows = [json.loads(line) for line in f if line.strip()]
+    census = {row["id"]: row for row in census_rows}
+    if len(census) != len(census_rows):
+        raise SystemExit("census contains duplicate IDs")
+    jobs = json.loads(pathlib.Path(TASK_JOBS).read_text())
+    ids = [j["bug"] for j in jobs]
+    if not ids or len(ids) != len(set(ids)) or any(j.get("arm") != "OT" for j in jobs):
+        raise SystemExit("OT jobs must contain unique bug IDs and arm OT")
+    return census, jobs
+
+
+def remove_item_line(text, item, bug):
+    """Remove the item, optionally its added blank separator; retain existing separators too."""
+    lines = text.splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == item]
+    if len(matches) != 1:
+        raise SystemExit(f"{bug}: declared item must match exactly one complete brief line")
+    index = matches[0]
+    del lines[index]
+    variants = {"".join(lines)}
+    for neighbor in (index - 1, index):
+        if 0 <= neighbor < len(lines) and lines[neighbor] in ("\n", "\r\n"):
+            variants.add("".join(lines[:neighbor] + lines[neighbor + 1:]))
+    return variants
+
+
+def edit_build():
+    census_rows, jobs = load_task_inputs()
+    corpus = driver.CORPUS
+    W = task_work()
+    scope_path = W / "edit" / "settings.json"
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
+    scope = task_scope()
+    if scope_path.exists() and json.loads(scope_path.read_text()) != scope:
+        raise SystemExit(f"{scope_path}: edit scope differs from saved settings")
+    if not scope_path.exists():
+        save(scope_path, scope)
+    (W / "ORACLE.md").write_text((SCRIPTS / "brief/ORACLE.md").read_text())
+    (W / "WRITER.md").write_text((SCRIPTS / "brief/WRITER.md").read_text())
+    made = []
+    for job in jobs:
+        bug = job["bug"]
+        if bug not in corpus or bug not in census_rows:
+            raise SystemExit(f"unknown OT bug/census ID: {bug}")
+        unit = W / "edit" / bug
+        blind = ROOT / "briefs" / "blind" / bug / "brief.md"
+        census = census_rows[bug]
+        if not blind.is_file():
+            raise SystemExit(f"missing final published BT brief: {blind}")
+        item = {"id": bug, "group": "P", "intro": corpus[bug]["intro_commit"],
+                "base": corpus[bug]["base_commit"], "blind_brief": blind.read_text(),
+                "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")}}
+        if unit.exists():
+            raise SystemExit(f"{unit} exists; refusing to overwrite an editor unit")
+        unit.mkdir()
+        save(unit / "item.json", item)
+        (unit / "ORACLE.md").write_text((SCRIPTS / "brief/ORACLE.md").read_text())
+        (unit / "WRITER.md").write_text((SCRIPTS / "brief/WRITER.md").read_text())
+        (unit / "INSTRUCTIONS.md").write_text(
+            "Read ORACLE.md and WRITER.md and follow them exactly. Your item is item.json. "
+            "Read code only through git show or git diff at the item's intro and base commits; "
+            "do not read code from the current checkout or other history. Do not read any other "
+            "experiment data or history, use the network, build, test, or edit tracked files. "
+            "Replace StructuredOutput delivery with writing the specified JSON object to edit.json in "
+            "the repository working directory, not the uploaded-input folder. "
+            "Do not edit any other file; preserve every unaffected item and make only the one registered edit.")
+        made.append({"id": bug, "blind_sha256": sha(item["blind_brief"])})
+    print(json.dumps({"dir": str(W / "edit"), "diffs": made}))
+
+
+def edit_collect():
+    W = task_work()
+    census_rows, jobs = load_task_inputs()
+    ids = [j["bug"] for j in jobs]
+    scope = task_scope()
+    scope_path = W / "edit" / "settings.json"
+    if not scope_path.is_file() or json.loads(scope_path.read_text()) != scope:
+        raise SystemExit("editor scope does not match the saved jobs/census/name")
+    candidates = W / "candidates"
+    candidates.mkdir(parents=True, exist_ok=True)
+    recs = []
+    for bug in ids:
+        unit = W / "edit" / bug
+        item = json.loads((unit / "item.json").read_text())
+        raw = json.loads((unit / "edit.json").read_text())
+        required = {"id", "contains", "matching_item", "inserted_item", "replaced_item", "oracle_brief", "rationale"}
+        if not isinstance(raw, dict) or set(raw) != required or raw["id"] != bug or raw["contains"] not in ("yes", "partial", "no"):
+            raise SystemExit(f"{bug}: editor output schema/id invalid")
+        if not isinstance(raw["oracle_brief"], str) or not isinstance(raw["rationale"], str) or \
+                any(raw[k] is not None and not isinstance(raw[k], str)
+                    for k in ("matching_item", "inserted_item", "replaced_item")):
+            raise SystemExit(f"{bug}: editor output fields have invalid types")
+        original = item["blind_brief"]
+        result = raw["oracle_brief"].rstrip() + "\n"
+        if raw["contains"] == "yes":
+            if raw["oracle_brief"] != original or not raw["matching_item"] or raw["matching_item"] not in original or \
+                    raw["inserted_item"] is not None or raw["replaced_item"] is not None:
+                raise SystemExit(f"{bug}: yes must preserve the original brief exactly")
+            carrier = raw["matching_item"]
+        else:
+            carrier = raw["inserted_item"]
+            if not carrier or carrier not in result:
+                raise SystemExit(f"{bug}: inserted carrying item is absent literally from candidate")
+            # Remove exactly the declared replacement/insertion and require the remainder to be identical.
+            if raw["contains"] == "partial":
+                old = raw["replaced_item"]
+                if not raw["matching_item"] or old != raw["matching_item"] or not old or old not in original:
+                    raise SystemExit(f"{bug}: partial edit must name an original item")
+                expected = remove_item_line(original, old, bug)
+            else:
+                if raw["matching_item"] is not None:
+                    raise SystemExit(f"{bug}: no edit cannot name a matching item")
+                if raw["replaced_item"]:
+                    items = [line.strip()[2:] for line in original.splitlines() if line.strip().startswith("- ")]
+                    if sum(item.lower() != "none" for item in items) != brief_driver.MAX_ITEMS:
+                        raise SystemExit(f"{bug}: no edit may replace an item only when the brief already has 25 items")
+                expected = remove_item_line(original, raw["replaced_item"], bug) if raw["replaced_item"] else {original}
+            remainder = remove_item_line(result, carrier, bug)
+            if not remainder.intersection(expected):
+                raise SystemExit(f"{bug}: edit changed text beyond its single carrying item")
+        problems = brief_driver.lint(result, driver.CORPUS[bug])
+        if problems:
+            raise SystemExit(f"{bug}: editor candidate fails lint: {problems}")
+        candidate = candidates / bug
+        candidate.mkdir(exist_ok=False)
+        (candidate / "candidate.md").write_text(result)
+        save(candidate / "edit.json", raw)
+        save(candidate / "item.json", item)
+        recs.append({"id": bug, "contains": raw["contains"], "carrier_item": carrier,
+                     "candidate_sha256": hashlib.sha256(result.encode()).hexdigest()})
+    save(W / "edit-results.json", {"scope": scope, "results": recs})
+    print(json.dumps({"candidates": recs}))
+
+
+def task_sync():
+    W = task_work()
+    result = json.loads((W / "edit-results.json").read_text())
+    if result["scope"] != task_scope():
+        raise SystemExit("editor result scope mismatch")
+    leak_root = ROOT / "briefs" / f"{TASK_NAME or 'oracle'}-leak-records"
+    records = {}
+    for bug in (r["id"] for r in result["results"]):
+        record = leak_root / bug / "blind-leak.json"
+        if record.exists():
+            records[bug] = json.loads(record.read_text())
+    by_id = {r["id"]: r for r in result["results"]}
+    results = []
+    for bug, edit in by_id.items():
+        record = records.get(bug)
+        if not record or len(record.get("rounds", [])) != (2 if record["rounds"][0]["label"] != "missed" else 1):
+            raise SystemExit(f"{bug}: paired leak round(s) are incomplete")
+        candidate = (W / "candidates" / bug / "candidate.md").read_text()
+        rounds = record["rounds"]
+        original_sha = rounds[0]["brief_sha256"]
+        final_sha = rounds[-1]["brief_sha256"]
+        final_path = W / "candidates" / bug / ("final.md" if len(rounds) == 2 else "candidate.md")
+        if len(rounds) == 2:
+            final = final_path.read_text()
+        else:
+            final = candidate
+        if hashlib.sha256(candidate.encode()).hexdigest() != original_sha:
+            raise SystemExit(f"{bug}: first leak verdict does not bind the candidate bytes")
+        if hashlib.sha256(final.encode()).hexdigest() != final_sha:
+            raise SystemExit(f"{bug}: final leak verdict does not bind final bytes")
+        leak = [{"label": rounds[0]["label"], "brief_sha256": original_sha,
+                 "verdicts": rounds[0]["verdicts"]}]
+        if len(rounds) == 2:
+            leak.append({"label": rounds[1]["label"], "brief_sha256": final_sha,
+                         "verdicts": rounds[1]["verdicts"]})
+        results.append({"id": bug, "group": "P", "edit": json.loads((W / "candidates" / bug / "edit.json").read_text()),
+                        "leak": leak, "final_brief": final})
+    synced = {"results": results, "missing": []}
+    out_path = W / "workflow-out.json"
+    if out_path.exists() and json.loads(out_path.read_text()) != synced:
+        raise SystemExit(f"{out_path} already contains different synchronized results")
+    save(out_path, synced)
+    print(json.dumps({"synced": len(results)}))
+
+
 def build():
     s = sets()
     first = {json.loads(l)["id"]: json.loads(l) for l in open(SCRIPTS / "results/missing-facts.jsonl")}
@@ -127,22 +323,31 @@ def carrier_item(r):
 
 
 def collect():
-    W = ROOT / "briefs/oracle-work"
+    task_mode = TASK_JOBS is not None
+    W = task_work() if task_mode else ROOT / "briefs/oracle-work"
     out = json.loads((W / "workflow-out.json").read_text())
     assert not out["missing"], out["missing"]
     decisions_path = W / "factcheck-decisions.json"
     decisions = json.loads(decisions_path.read_text()) if decisions_path.exists() else {}
     rows, rejected, factcheck, undecided = [], [], [], []
     # The group decides whether a diff needs the fact check; take it from PLAN.md, not the run.
-    group_of = {bug: g for g, bugs in sets().items() for bug in bugs}
+    if task_mode:
+        _, jobs = load_task_inputs()
+        group_of = {j["bug"]: "P" for j in jobs}
+        if json.loads((W / "edit" / "settings.json").read_text()) != task_scope():
+            raise SystemExit("task scope differs from saved editor settings")
+    else:
+        group_of = {bug: g for g, bugs in sets().items() for bug in bugs}
     mislabeled = [r["id"] for r in out["results"] if group_of.get(r["id"]) != r["group"]]
     assert not mislabeled, f"results whose group differs from brief/PLAN.md: {mislabeled}"
-    assert sorted(r["id"] for r in out["results"]) == sorted(group_of), "results must cover the 30 frozen diffs"
+    assert sorted(r["id"] for r in out["results"]) == sorted(group_of), "results must exactly cover the scoped diffs"
     for r in out["results"]:
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
+        if task_mode and (d / "brief.md").exists():
+            raise SystemExit(f"{bug}: refusing to overwrite an existing published oracle brief")
         d.mkdir(parents=True, exist_ok=True)
-        blind = ROOT / "briefs/blind" / bug / "brief.md"
+        blind = (ROOT / "briefs/blind" / bug / "brief.md")
         if r["group"] == "C" and not judged_matches(r, blind.parent):
             # Its leak verdict was produced for other text than the blind brief: unpublish.
             (d / "brief.md").unlink(missing_ok=True)
@@ -157,7 +362,7 @@ def collect():
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         if r["group"] in "PS":
             norm = lambda t: " ".join((t or "").removeprefix("- ").split())
-            item_file = json.loads((W / f"item-{bug}.json").read_text())
+            item_file = json.loads((W / "candidates" / bug / "item.json").read_text()) if task_mode else json.loads((W / f"item-{bug}.json").read_text())
             digest = hashlib.sha256(final.encode()).hexdigest()
             decision = decisions.get(bug)
             factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
@@ -171,7 +376,7 @@ def collect():
                 # The checker quotes the final brief's carrying item (a leak rewrite rewords the
                 # editor's item); without a quote, the editor's item must still be there verbatim.
                 item = decision.get("item") or carrier_item(r)
-                if not item or norm(item) not in norm(final):
+                if not item or (item not in final if task_mode else norm(item) not in norm(final)):
                     problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
@@ -185,7 +390,7 @@ def collect():
                 rejected.append(bug)
             continue
         (d / "brief-pending.md").unlink(missing_ok=True)
-        if r["group"] == "C" and r["final_brief"]:
+        if not task_mode and r["group"] == "C" and r["final_brief"]:
             # A control's oracle brief is its blind brief. A leak rewrite therefore replaces the
             # blind brief too (the writer's text is kept as brief-original.md), so both stay equal.
             original = blind.with_name("brief-original.md")
@@ -285,10 +490,23 @@ def annotate(path, run_started):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate"])
+    p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate",
+                                    "edit-build", "edit-collect", "task-sync"])
     p.add_argument("path", nargs="?")
     p.add_argument("--run-started", help="annotate: ISO time the workflow run started")
+    p.add_argument("--census", help="task editor census JSONL")
+    p.add_argument("--bugs-from", help="task editor OT jobs JSON")
+    p.add_argument("--name", help="task-specific work name")
     a = p.parse_args()
+    if a.census or a.bugs_from or a.name:
+        if a.step not in ("edit-build", "edit-collect", "task-sync", "collect"):
+            p.error("--census/--bugs-from/--name apply only to task construction and collect steps")
+        if not a.census or not a.bugs_from:
+            p.error("task construction needs both --census and --bugs-from")
+        if a.name is not None and (pathlib.Path(a.name).name != a.name or a.name in (".", "..")):
+            p.error("--name must be a single path component")
+        TASK_CENSUS, TASK_JOBS, TASK_NAME = a.census, a.bugs_from, a.name
+        load_task_inputs()
     if a.step == "merge":
         merge(a.path)
     elif a.step == "blind-collect":
@@ -296,4 +514,5 @@ if __name__ == "__main__":
     elif a.step == "annotate":
         annotate(a.path, a.run_started)
     else:
-        {"build": build, "collect": collect}[a.step]()
+        {"build": build, "collect": collect, "edit-build": edit_build,
+         "edit-collect": edit_collect, "task-sync": task_sync}[a.step]()

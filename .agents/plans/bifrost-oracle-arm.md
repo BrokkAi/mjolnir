@@ -13,14 +13,16 @@ The deliverable is a locally committed readout with mixed-round labels for all t
 - [x] Read original registration 1c67abb55 and its pre-brief correction c0057b53b. No oracle model role has started.
 - [x] Record the 17 fixed relation IDs in existing order, final BT hashes, census hash and OT job file under the data root's oracle-arm directory. Current ordinary cached codex4 quota is 76%, valid/no error; retain the 25% per-launch floor.
 - [x] Map existing builder/collector, oracle instructions, task/judge runner, paired leak/rewrite helper and scorer. Workflow tool is unavailable here; reuse the existing task runner without a copied runner.
-- [ ] Generalize oracle construction and scoped candidate leak handling; implement explicit round-L reading and same-session reference comparison. Preserve existing defaults.
-- [ ] Run focused offline serialized-format/hash/isolation regressions after both implementers finish; parent review and local commit before any editor.
+- [x] Generalize oracle construction and scoped candidate leak handling; implement explicit round-L reading and same-session reference comparison. Preserve existing defaults.
+- [x] Run focused offline serialized-format/hash/isolation regressions after both implementers finish; parent review and local commit before any editor.
 - [ ] Run 17 Sol/high editors, validate minimal edits/lint and exact fact projection, paired leak checks and at most one wording rewrite/recheck; parent fact-check every final brief with its exact hash and verbatim carrying item before OT admission.
 - [ ] Freeze final 17 oracle briefs and run 17 OT jobs with three Terra/high reviewers each; freeze 51 original outputs and suspend own carriers.
 - [ ] Round L: mixed stored A/BT and new OT, 153 opaque outputs and 306 paired verdicts. Hand-check all positives/partials/disagreements before arm attribution, then score all arms on round-L labels.
 - [ ] Report the registered four-outcome reading, OT–BT, per-diff rates, stored-label consistency, retained neutral flags and cost; commit locally, validate frozen/index bytes and finish cleanup.
 
 ## Surprises & Discoveries
+
+Integrated source review caught the new scorer reading referring to its report before initialization. The parent moved the explicit reading after the existing shared rate/effect/accounting report, so it reuses that calculation and only bypasses the old two-model stage-A decision. A serialized 17-diff build/collect/score/reference regression is required before admission; syntax parsing alone did not protect this path.
 
 The original JavaScript workflow runs its own Opus agents and there is no Workflow tool in this harness. The existing verify_driver task mode already creates checked high-effort sessions, uploads only a unit's files, fetches structured output and suspends it. Adapt the oracle file contract to that runner, preserving the original editor instructions and output schema.
 
@@ -57,6 +59,8 @@ The editor may see only its item, ORACLE.md and WRITER.md plus historical source
 ## Plan of Work
 
 The parent owns this plan, registration, integration, fact decisions, rewrite acceptance, stage admission, handchecks, commits and readout. Implementers own disjoint files. One owns brief_oracle.py, brief_writer_terra.py and focused oracle task/serialized-format tests; one owns brief_score.py and test_scoring_interfaces.py. They may syntax-check their own files during edits. Neither runs importing tests while the other writes shared modules. After both report source completion, one designated child runs the combined focused tests; fix and rerun failures only.
+
+After the scorer handback, the parent took ownership of brief_score.py to correct the integrated report path. Its implementer now owns only the additional serialized scoring-interface regression. The construction owner keeps its original files. Neither child changes the parent's scorer while preparing tests.
 
 For construction, generalize brief_oracle.py with explicit census, bugs-from and work-name options while retaining old paths/default behavior. Scope must persist and reject mismatched reuse. Add task-unit build/collect/sync steps rather than another runtime. Build standard immediate task directories under the work directory's edit subdirectory. Each contains only INSTRUCTIONS.md, item.json, ORACLE.md and WRITER.md. Instructions change only output delivery: write the original editor schema to edit.json instead of the unavailable StructuredOutput tool, with only that untracked output write allowed. The original editing rules still apply, and repository reads are limited to intro/base; no other history, network, tests, builds, tracked edits, memory or experiment data.
 
@@ -103,3 +107,5 @@ The original corrected registration is available read-only in the lead clone at 
 Revision note: initial plan records the corrected reading, existing-runner adaptation, isolated candidates and explicit mixed-round scoring before any editor or reviewer. The reason is to test supplied facts without leaking the census query or changing stored comparison arms.
 
 Revision, 2026-11-17: the lead confirmed listed outcome priority before any brief. Record Partly for a proven positive small lift even when the interval is wholly below +10; use unrounded boundaries.
+
+Revision, 2026-11-17: focused offline checks pass after recorded construction and scoring-fixture corrections. Parent reviewed integrated source and preserved all 6,862 baseline artifact hashes. Candidate/rewrite newlines are canonicalized before leak checking, so final-byte hash bindings agree. No experimental role has started.

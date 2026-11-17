@@ -1,0 +1,8 @@
+{
+  "stage": "validated oracle harness before editors",
+  "files": {
+    "cost-estimate.json": "b453dd11f5a1ccb8952501d9028bbe04f6678580c2dfec1e8e3d2f593e0b8a5c",
+    "runtime-hashes.json": "e33e64de6ba3eafdf216accc102aeb61e18086542ab08a44f3f32f5755943ea7",
+    "validation.json": "e4c45bfb2e87151f6152f6fdde80660bd09dd54cf9c2a85c803b9b3f920fab95"
+  }
+}

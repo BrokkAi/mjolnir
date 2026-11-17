@@ -1,0 +1,18 @@
+{
+  "basis": "Prior primary17 role-root estimates, actual API-equivalent prices; editor vs writer and mixed153 vs102 judging are projections, not quota conversions.",
+  "construction_proxy_17_writers": 3.5996475999999995,
+  "paired_leak_17": 0.35638000000000003,
+  "one_rewrite_4_plus_recheck_proxy": 0.4495456,
+  "reviews_51_half_of_prior102": 2.3025776000000002,
+  "mixed_round153_judging_proxy": 1.0059210000000003,
+  "handcheck_proxy": 0.21537,
+  "carrier17_supported_recorded_proxy_incomplete": 0.897916624,
+  "estimate_range_api_equivalent_usd": [
+    7,
+    13
+  ],
+  "full_cost_unknown_if_carrier_reports_incomplete": true,
+  "quota_floor_unchanged": 25,
+  "quota_initial_remaining_percent": 76,
+  "quota_capacity_not_inferred_from_dollars": true
+}

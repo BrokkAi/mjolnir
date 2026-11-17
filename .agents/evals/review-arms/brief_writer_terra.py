@@ -56,6 +56,9 @@ KIND = "blind-terra"
 OUT = ROOT / "briefs" / KIND
 BUGS = None
 ROUND_NAME = None
+BRIEF_ROOT = None
+BUGS_FILE = None
+LEAK_ROUND = 0
 CORPUS_FIELDS = ("defect", "location", "trigger", "match_rule", "near_misses", "why_findable",
                  "intro_commit", "fix_commit")
 
@@ -65,6 +68,12 @@ def sha(text):
 
 
 def diffs():
+    if KIND == "oracle":
+        jobs = json.loads(pathlib.Path(BUGS_FILE).read_text())
+        ids = [j["bug"] for j in jobs]
+        if not ids or len(ids) != len(set(ids)) or any(j.get("arm") != "OT" for j in jobs):
+            raise SystemExit("oracle leak scope needs unique OT jobs")
+        return {b: "P" for b in ids}
     s = brief_oracle.sets()
     known = {b: g for g in ("P", "S") for b in s[g]}
     if BUGS is not None and (not BUGS or BUGS - known.keys()):
@@ -77,7 +86,14 @@ def leak_dir(n):
 
 
 def round_scope():
-    return {"kind": KIND, "name": ROUND_NAME or KIND, "diffs": diffs()}
+    return {"kind": KIND, "name": ROUND_NAME or KIND, "diffs": diffs(),
+            **({"brief_root": str(BRIEF_ROOT.resolve())} if BRIEF_ROOT else {})}
+
+
+def brief_path(bug):
+    if KIND == "oracle":
+        return BRIEF_ROOT / bug / ("final.md" if LEAK_ROUND == 1 and (BRIEF_ROOT / bug / "final.md").exists() else "candidate.md")
+    return OUT / bug / "brief.md"
 
 
 def check_scope(directory, create=False):
@@ -98,12 +114,22 @@ def rewrite_dir():
 
 
 def leak_build(n):
+    global LEAK_ROUND
+    LEAK_ROUND = n
     corpus = driver.CORPUS
     if n == 0:
         bugs = list(diffs())
+    elif KIND == "oracle":
+        bugs = []
+        for b in diffs():
+            rec = ROOT / "briefs" / f"{ROUND_NAME or KIND}-leak-records" / b / "blind-leak.json"
+            if rec.exists() and json.loads(rec.read_text())["rounds"][0]["label"] != "missed":
+                if not (BRIEF_ROOT / b / "final.md").is_file():
+                    raise SystemExit(f"{b}: wording rewrite is missing")
+                bugs.append(b)
     else:
         bugs = [b for b in diffs() if (OUT / b / "brief-writer.md").exists()]
-    missing = [b for b in bugs if not (OUT / b / "done.json").exists()]
+    missing = [b for b in bugs if not (OUT / b / "done.json").exists()] if KIND != "oracle" else []
     if missing:
         raise SystemExit(f"briefs not written yet: {missing}")
     d = leak_dir(n)
@@ -112,7 +138,7 @@ def leak_build(n):
     check_scope(d, create=True)
     batch, key = [], {}
     for b in bugs:
-        brief = (OUT / b / "brief.md").read_text()
+        brief = brief_path(b).read_text()
         oid = secrets.token_hex(8)
         key[oid] = {"bug": b, "brief_sha256": sha(brief)}
         batch.append({"bug": b, **{k: corpus[b][k] for k in CORPUS_FIELDS},
@@ -124,6 +150,8 @@ def leak_build(n):
 
 
 def leak_collect(n):
+    global LEAK_ROUND
+    LEAK_ROUND = n
     d = leak_dir(n)
     check_scope(d)
     key = json.loads((d / "key.json").read_text())
@@ -139,18 +167,18 @@ def leak_collect(n):
         vs = judged[oid]
         assert sorted(v["judge"] for v in vs) == ["A", "B"], (k["bug"], vs)
         assert all(v["bug"] == k["bug"] and v["label"] in ("caught", "partial", "missed") for v in vs), "wrong bug or invalid leak label"
-        assert sha((OUT / k["bug"] / "brief.md").read_text()) == k["brief_sha256"], \
+        assert sha(brief_path(k["bug"]).read_text()) == k["brief_sha256"], \
             f"{k['bug']}: brief.md changed since leak round {n} was built"
     rows = []
     for oid, k in key.items():
         b, vs = k["bug"], judged.get(oid, [])
         assert sorted(v["judge"] for v in vs) == ["A", "B"], (b, vs)
-        brief = (OUT / b / "brief.md").read_text()
+        brief = brief_path(b).read_text()
         # A verdict counts only for the text it was given.
-        assert sha(brief) == k["brief_sha256"], f"{b}: brief.md changed since leak round {n} was built"
+        assert sha(brief) == k["brief_sha256"], f"{b}: brief changed since leak round {n} was built"
         label = "missed" if all(v["label"] == "missed" for v in vs) else \
             "caught" if any(v["label"] == "caught" for v in vs) else "partial"
-        path = OUT / b / "blind-leak.json"
+        path = (ROOT / "briefs" / f"{ROUND_NAME or KIND}-leak-records" / b / "blind-leak.json") if KIND == "oracle" else OUT / b / "blind-leak.json"
         record = json.loads(path.read_text()) if path.exists() else {"id": b, "group": diffs()[b], "rounds": []}
         record["rounds"] = [r for r in record["rounds"] if r["round"] != n] + [
             {"round": n, "label": label, "brief_sha256": k["brief_sha256"], "judge_dir": str(d),
@@ -179,12 +207,13 @@ def rewrite_build():
     check_scope(base, create=True)
     made = 0
     for b in diffs():
-        record = json.loads((OUT / b / "blind-leak.json").read_text())
+        record_path = (ROOT / "briefs" / f"{ROUND_NAME or KIND}-leak-records" / b / "blind-leak.json") if KIND == "oracle" else OUT / b / "blind-leak.json"
+        record = json.loads(record_path.read_text())
         first = next(r for r in record["rounds"] if r["round"] == 0)
         if first["label"] == "missed" or (base / b).exists():
             continue
         u = base / b
-        brief = (OUT / b / "brief.md").read_text()
+        brief = brief_path(b).read_text()
         assert sha(brief) == first["brief_sha256"], f"{b}: brief.md is not the text judged in round 0"
         (u / "brief-in.md").parent.mkdir(parents=True, exist_ok=True)
         (u / "brief-in.md").write_text(brief)
@@ -205,15 +234,25 @@ def rewrite_collect():
             print(json.dumps({"bug": b, "state": "no rewrite fetched"}))
             continue
         text = out.read_text()
+        if KIND == "oracle":
+            text = text.rstrip() + "\n"
         original = (u / "brief-in.md").read_text()
-        record = json.loads((d / "blind-leak.json").read_text())
+        record_path = (ROOT / "briefs" / f"{ROUND_NAME or KIND}-leak-records" / b / "blind-leak.json") if KIND == "oracle" else d / "blind-leak.json"
+        record = json.loads(record_path.read_text())
         first = next(r for r in record["rounds"] if r["round"] == 0)
         assert sha(original) == first["brief_sha256"], f"{b}: rewrite input is not the round0 judged text"
-        current = (d / "brief.md").read_text()
+        current = brief_path(b).read_text()
         assert current in (original, text), f"{b}: brief changed since rewrite was prepared"
         problems = brief_driver.lint(text, driver.CORPUS[b])
         if problems:
             print(json.dumps({"bug": b, "state": "rewrite fails lint", "problems": problems}))
+            continue
+        if KIND == "oracle":
+            final_path = BRIEF_ROOT / b / "final.md"
+            if final_path.exists() and final_path.read_text() != text:
+                raise SystemExit(f"{b}: refusing to replace a different accepted rewrite")
+            final_path.write_text(text)
+            print(json.dumps({"bug": b, "state": "candidate rewritten", "brief_sha256": sha(text)}))
             continue
         if not (d / "brief-writer.md").exists():
             (d / "brief-writer.md").write_text((u / "brief-in.md").read_text())
@@ -303,6 +342,68 @@ def judged_round(round_name):
     if any(label not in valid for label in final.values()):
         raise SystemExit("invalid final label: expected caught, partial or missed")
     return key, final
+
+
+def compare_same_sessions(round_name, reference_round, bugs, arms=("A", "BT"), model=REVIEW_MODEL):
+    """Compare final labels for identical (bug, condition, session) observations across rounds."""
+    if not bugs or not arms or set(arms) - {"A", "BT"}:
+        raise SystemExit("same-session comparison needs bugs and A/BT arms")
+    rounds = (round_name, reference_round)
+    selected, finals = {}, {}
+    conditions = {"A": "no-brief", "BT": "blind"}
+    for name in rounds:
+        key, finals[name] = judged_round(name)
+        cells = {}
+        for oid, k in key.items():
+            if k["model"] != model or k["bug"] not in bugs or k["arm"] not in arms:
+                continue
+            arm = k["arm"]
+            if k["condition"] != conditions[arm]:
+                raise SystemExit(f"{name}: wrong condition for {arm}: {oid}")
+            identity = (k["bug"], arm, k["session"])
+            if identity in cells:
+                raise SystemExit(f"{name}: duplicate same-session cell: {identity}")
+            cells[identity] = oid
+        selected[name] = cells
+        for bug in bugs:
+            for arm in arms:
+                count = sum(identity[:2] == (bug, arm) for identity in cells)
+                if count != 3:
+                    raise SystemExit(f"{name}: expected exactly 3 {arm} sessions for {bug}, found {count}")
+    current, reference = (selected[name] for name in rounds)
+    if current.keys() != reference.keys():
+        raise SystemExit("same-session comparison needs identical keys; "
+                         f"only {round_name}: {sorted(current.keys() - reference.keys())}; "
+                         f"only {reference_round}: {sorted(reference.keys() - current.keys())}")
+    per_diff = []
+    for bug in bugs:
+        row = {"bug": bug, "arms": {}}
+        for arm in arms:
+            ids = sorted(i for i in current if i[:2] == (bug, arm))
+            if not ids:
+                raise SystemExit(f"{bug}: no same-session rows for {arm}")
+            labels = [{"session": i[2], "round": finals[round_name][current[i]],
+                       "reference": finals[reference_round][reference[i]]} for i in ids]
+            row["arms"][arm] = {"sessions": len(ids), "labels": labels,
+                                "catch_rate": {name: statistics.fmean(
+                                    (r["round"] if name == round_name else r["reference"]) == "caught"
+                                    for r in labels) for name in rounds}}
+        per_diff.append(row)
+    summary, caveats = {}, []
+    for arm in arms:
+        n = sum(r["arms"][arm]["sessions"] for r in per_diff)
+        # Exact rational comparison keeps the registered strict >10-point boundary exact.
+        delta = sum((Fraction(sum(x["round"] == "caught" for x in r["arms"][arm]["labels"]),
+                               r["arms"][arm]["sessions"])
+                     - Fraction(sum(x["reference"] == "caught" for x in r["arms"][arm]["labels"]),
+                                r["arms"][arm]["sessions"])) for r in per_diff) / len(bugs)
+        changed = sum(x["round"] != x["reference"] for r in per_diff for x in r["arms"][arm]["labels"])
+        summary[arm] = {"sessions": n, "difference_points": float(100 * delta),
+                        "changed_labels": changed, "differs_over_10_points": abs(delta) > Fraction(1, 10)}
+        if summary[arm]["differs_over_10_points"]:
+            caveats.append(f"{arm}: {round_name} vs {reference_round} differs by {float(100 * delta):.1f} points")
+    return {"reference_round": reference_round, "reviewer_model": model, "diffs": len(bugs),
+            "arms": summary, "caveats": caveats, "per_diff": per_diff}
 
 
 def readout_data(round_name, groups):
@@ -476,20 +577,25 @@ def main():
                                     "contains-build", "usage", "readout"])
     p.add_argument("--round", type=int, choices=[0, 1], default=0)
     p.add_argument("--name", help="readout round (default brief-judge-j), or distinct leak/rewrite path prefix")
-    p.add_argument("--kind", choices=("blind-terra", "blind"), help="leak/rewrite brief kind; default blind-terra")
+    p.add_argument("--kind", choices=("blind-terra", "blind", "oracle"), help="leak/rewrite brief kind; default blind-terra")
     p.add_argument("--bugs-from", help="leak/rewrite: jobs file whose diffs are the explicit subset")
+    p.add_argument("--brief-root", help="leak/rewrite: explicit root containing <bug>/candidate.md")
     a = p.parse_args()
-    global KIND, OUT, BUGS, ROUND_NAME
+    global KIND, OUT, BUGS, ROUND_NAME, BRIEF_ROOT, BUGS_FILE
     scoped = a.step in ("leak-build", "leak-collect", "rewrite-build", "rewrite-collect")
-    if (a.kind or a.bugs_from) and not scoped:
-        p.error("--kind and --bugs-from apply only to leak/rewrite steps")
+    if (a.kind or a.bugs_from or a.brief_root) and not scoped:
+        p.error("--kind, --bugs-from and --brief-root apply only to leak/rewrite steps")
     if scoped:
         KIND = a.kind or "blind-terra"
         OUT = ROOT / "briefs" / KIND
+        BRIEF_ROOT = pathlib.Path(a.brief_root).resolve() if a.brief_root else None
+        if KIND == "oracle" and BRIEF_ROOT is None:
+            p.error("--kind oracle requires --brief-root")
+        if KIND == "oracle" and not a.bugs_from:
+            p.error("--kind oracle requires --bugs-from")
         ROUND_NAME = a.name
-        if ROUND_NAME is not None and (pathlib.Path(ROUND_NAME).name != ROUND_NAME or ROUND_NAME in (".", "..")):
-            p.error("--name must be a single round path component")
         if a.bugs_from:
+            BUGS_FILE = a.bugs_from
             BUGS = {j["bug"] for j in json.loads(pathlib.Path(a.bugs_from).read_text())}
         diffs()  # Validate selection before creating round files.
     {"leak-build": lambda: leak_build(a.round), "leak-collect": lambda: leak_collect(a.round),
