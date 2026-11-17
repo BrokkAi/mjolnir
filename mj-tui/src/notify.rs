@@ -241,7 +241,42 @@ impl DashboardState {
             }
             _ => None,
         };
-        message_id.map_or(NotificationPosition::End, NotificationPosition::Message)
+        message_id.map_or_else(
+            || {
+                if level == AttentionLevel::Waiting
+                    && detail.is_none_or(|detail| detail.pending_elicitations.is_empty())
+                {
+                    NotificationPosition::Question(crate::NotificationCard {
+                        session_id: session_id.to_owned(),
+                        target: self.notification_dismissal_target(session_id),
+                    })
+                } else {
+                    NotificationPosition::End
+                }
+            },
+            NotificationPosition::Message,
+        )
+    }
+
+    /// Keep pending navigation tied to the request that was actually opened.
+    pub fn resolve_notification_position(
+        &self,
+        session_id: &str,
+        target: &crate::NotificationPosition,
+    ) -> crate::NotificationPosition {
+        use crate::NotificationPosition;
+        match target {
+            NotificationPosition::LatestAgentMessage => {
+                self.notification_position(session_id, AttentionLevel::Important)
+            }
+            NotificationPosition::Question(card)
+                if self.notification_dismissal_target(&card.session_id) == card.target =>
+            {
+                self.notification_position(&card.session_id, AttentionLevel::Waiting)
+            }
+            NotificationPosition::Question(_) => NotificationPosition::End,
+            other => other.clone(),
+        }
     }
 
     pub(crate) fn notification_card_text(&self, session_id: &str, level: AttentionLevel) -> String {
@@ -272,6 +307,12 @@ impl DashboardState {
         let holder = self.notification_content_session(session_id, level);
         let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
+        let located_read = self.notifications.message_read.as_ref().filter(|read| {
+            read.session_id == holder
+                && detail.is_some_and(|detail| {
+                    detail.question_message.as_deref() == Some(read.stable_id.as_str())
+                })
+        });
         let text = match level {
             AttentionLevel::Waiting => detail
                 .and_then(|detail| detail.pending_elicitations.last())
@@ -288,6 +329,22 @@ impl DashboardState {
                         detail.projection.transcript.iter().map(AsRef::as_ref),
                         target,
                     )
+                    .or_else(|| {
+                        located_read.map(|read| {
+                            if read.status == crate::ingest::TranscriptHydration::Loading {
+                                return "loading…".to_owned();
+                            }
+                            read.item
+                                .as_deref()
+                                .and_then(|item| {
+                                    mj_core::transcript::materialized_agent_message_text(
+                                        std::iter::once(item),
+                                        target,
+                                    )
+                                })
+                                .unwrap_or_else(|| "message not available".to_owned())
+                        })
+                    })
                 })
                 .or_else(|| {
                     let detail = detail?;

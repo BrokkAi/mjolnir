@@ -45,16 +45,14 @@ pub(super) fn apply_notification_position(
     use mj_tui::NotificationPosition;
     let chat = chats.get_mut(session_id)?;
     let target = positions.get(session_id)?;
-    let target = if *target == NotificationPosition::LatestAgentMessage {
-        dashboard.notification_position(session_id, mj_tui::AttentionLevel::Important)
-    } else {
-        target.clone()
-    };
+    let target = dashboard.resolve_notification_position(session_id, target);
     let located = target != NotificationPosition::End;
     let position = match target {
         NotificationPosition::Message(id) => mj_chat::chat::TranscriptPosition::at_stable_id(id),
         NotificationPosition::End => mj_chat::chat::TranscriptPosition::bottom(),
-        NotificationPosition::LatestAgentMessage => return None,
+        NotificationPosition::LatestAgentMessage | NotificationPosition::Question(_) => {
+            return None;
+        }
     };
     positions.remove(session_id);
     chat.restore_transcript_position(position);
@@ -151,11 +149,18 @@ impl DashboardContext {
         ) == Some(false)
         {
             self.dashboard.set_notice("The notification message could not be located; showing the end of the conversation.");
-        } else if self.notification_positions.get(session_id)
-            == Some(&mj_tui::NotificationPosition::LatestAgentMessage)
-        {
-            self.dashboard.set_notice("Loading notification message…");
-        } else if self.dashboard.notice().as_deref() == Some("Loading notification message…") {
+        } else if let Some(target) = self.notification_positions.get(session_id) {
+            self.dashboard.set_notice(
+                if matches!(target, mj_tui::NotificationPosition::Question(_)) {
+                    "Waiting for the notification message locator…"
+                } else {
+                    "Loading notification message…"
+                },
+            );
+        } else if matches!(
+            self.dashboard.notice().as_deref(),
+            Some("Loading notification message…" | "Waiting for the notification message locator…")
+        ) {
             self.dashboard.clear_notice();
         }
     }

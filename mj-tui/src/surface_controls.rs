@@ -16,6 +16,7 @@ use crate::{DashboardAction, DashboardState, Focus, SupportPane};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceControl {
     Command(CommandId),
+    Notification(CommandId),
     Footer(CommandId),
     Session(usize),
     /// The close chip on one conversation pane's title row.
@@ -136,6 +137,27 @@ impl DashboardState {
                 .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
         let result = self.surface_form.get_mut().handle(&Event::Mouse(mouse));
         self.last_event_consumed.set(result.consumed);
+        if mouse.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        {
+            self.notifications.gesture = [
+                CommandId::NotificationClear,
+                CommandId::NotificationLater,
+                CommandId::NotificationOpen,
+            ]
+            .into_iter()
+            .find(|id| {
+                self.surface_form
+                    .borrow()
+                    .is_armed(SurfaceControl::Notification(*id))
+            })
+            .and_then(|id| {
+                self.notifications
+                    .controls
+                    .iter()
+                    .find(|gesture| gesture.command == id)
+                    .cloned()
+            });
+        }
         if workspace_menu_hit
             && self
                 .surface_form
@@ -149,6 +171,14 @@ impl DashboardState {
         if let Some(Interaction::Activate(control)) = result.action {
             self.last_row_click = None;
             return Some(match control {
+                SurfaceControl::Notification(id) => self
+                    .notifications
+                    .gesture
+                    .take()
+                    .filter(|gesture| gesture.command == id)
+                    .map_or(DashboardAction::None, |gesture| {
+                        self.activate_notification(gesture)
+                    }),
                 SurfaceControl::Command(id) | SurfaceControl::Footer(id) => {
                     self.run_available_command(id)
                 }

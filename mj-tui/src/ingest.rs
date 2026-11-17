@@ -1352,14 +1352,21 @@ impl DashboardState {
         session_id: &str,
     ) -> Option<mj_core::attention::NotificationDismissal> {
         let target = self.notification_dismissal_target(session_id)?;
+        self.submit_notification_target(session_id, target.clone());
+        Some(target)
+    }
+
+    pub(crate) fn submit_notification_target(
+        &mut self,
+        session_id: &str,
+        target: mj_core::attention::NotificationDismissal,
+    ) {
         let detail = self
             .session_details
             .entry(session_id.to_owned())
             .or_default();
-        detail.notification_dismissal =
-            Some(NotificationDismissalState::Submitting(target.clone()));
+        detail.notification_dismissal = Some(NotificationDismissalState::Submitting(target));
         self.notifications.errors.remove(session_id);
-        Some(target)
     }
 
     pub fn notification_dismissal_finished(

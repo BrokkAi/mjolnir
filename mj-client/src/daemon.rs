@@ -22,6 +22,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+/// A single-message read has a terminal unsupported result on older daemons.
+#[derive(Debug)]
+pub enum StoredTranscriptItem {
+    Found(Box<TranscriptItem>),
+    Missing,
+    Unsupported,
+}
+
 /// Durable terminal results for caller-owned startup prompt identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -1032,6 +1040,11 @@ pub enum DaemonAction {
         session_id: String,
         items: usize,
     },
+    /// One stored transcript item, addressed by its stable identity.
+    StoredTranscriptItem {
+        session_id: String,
+        stable_id: String,
+    },
     /// The stored projection summary of one session.
     StoredSessionSummary {
         session_id: String,
@@ -1383,6 +1396,7 @@ pub enum DaemonReply {
         Option<Box<MaterializedSession>>,
     ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
+    StoredTranscriptItem(Option<Box<TranscriptItem>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
     ResumeRepositoryPreflight(Box<ResumeRepositorySourcePreflight>),
@@ -2943,6 +2957,28 @@ impl DaemonClient {
         }
     }
 
+    pub async fn stored_transcript_item(
+        &mut self,
+        session_id: String,
+        stable_id: String,
+    ) -> Result<StoredTranscriptItem> {
+        // Never send an unknown action to an older daemon or retry its refusal.
+        if self.metadata.protocol_version < STORED_TRANSCRIPT_ITEM_PROTOCOL {
+            return Ok(StoredTranscriptItem::Unsupported);
+        }
+        match self
+            .request(DaemonAction::StoredTranscriptItem {
+                session_id,
+                stable_id,
+            })
+            .await?
+        {
+            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
+            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
+            reply => bail!("unexpected stored transcript item reply {reply:?}"),
+        }
+    }
+
     pub async fn stored_session_summary(
         &mut self,
         session_id: String,
@@ -3626,7 +3662,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // schedule; the daemon answers one all-workspaces draft listing.
 // Version 101: the daemon answers the capacity service's per-host readings.
 // Version 102: review views carry the writing_brief phase and brief-writer role.
-pub const PROTOCOL_VERSION: u32 = 102;
+// Version 103: indexed single-item transcript reads for notification cards.
+pub const PROTOCOL_VERSION: u32 = 103;
+/// The first protocol whose daemon answers single stored transcript item reads.
+pub const STORED_TRANSCRIPT_ITEM_PROTOCOL: u32 = 103;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

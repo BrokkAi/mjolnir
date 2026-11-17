@@ -105,7 +105,11 @@ impl DashboardContext {
 
     pub(crate) fn reconcile_stored_session_summaries(&mut self) {
         let wanted = self.wanted_summary_sessions();
-        for removed in self.summary_reads.reconcile(wanted, &self.dashboard_io_tx) {
+        let item = self.dashboard.wanted_notification_message();
+        for removed in self
+            .summary_reads
+            .reconcile(wanted, item.clone(), &self.dashboard_io_tx)
+        {
             self.finish_startup_summary(&removed);
         }
         let pending = self
@@ -115,6 +119,20 @@ impl DashboardContext {
             .cloned()
             .collect();
         self.dashboard.sync_transcript_hydration(&pending);
+        let loading = item.as_ref().is_some_and(|(session_id, stable_id)| {
+            self.summary_reads.item_loading(session_id, stable_id)
+        });
+        self.dashboard.sync_notification_message_read(item, loading);
+        // Operational locator updates can arrive without a newer transcript.
+        let pending = self
+            .notification_positions
+            .keys()
+            .filter(|id| self.chats.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in pending {
+            self.apply_notification_position(&session_id);
+        }
     }
 
     /// Records that one live session's stored summary has arrived, however it

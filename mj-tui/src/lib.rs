@@ -268,6 +268,15 @@ pub enum NotificationPosition {
     End,
     /// Resolve through the message owner after the full projection arrives.
     LatestAgentMessage,
+    /// Wait for the question locator rather than consuming an end anchor.
+    Question(NotificationCard),
+}
+
+/// The daemon-published identity of the card on which an action began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationCard {
+    pub session_id: String,
+    pub target: Option<mj_core::attention::NotificationDismissal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,7 +303,11 @@ pub enum DashboardAction {
     Open {
         session_id: String,
     },
+    NotificationLater {
+        card: NotificationCard,
+    },
     OpenAtMessage {
+        card: NotificationCard,
         session_id: String,
         position: NotificationPosition,
     },

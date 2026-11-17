@@ -1380,7 +1380,9 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
+        DashboardAction::NotificationLater { .. } => {}
         DashboardAction::OpenAtMessage {
+            card: _,
             session_id,
             position,
         } => {

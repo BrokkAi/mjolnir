@@ -1833,6 +1833,7 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
         dashboard.handle_key(plain_key(KeyCode::Tab));
     }
     let DashboardAction::OpenAtMessage {
+        card: _,
         session_id,
         position,
     } = dashboard.handle_key(plain_key(KeyCode::Enter))
@@ -1870,6 +1871,53 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
             .pointer("/Entry/start_seq"),
         Some(&serde_json::json!(3))
     );
+    // The ? locator can arrive after attach, without a newer transcript.
+    // Do not consume its pending target as an End anchor in the meantime.
+    dashboard.set_question_message("session-1", None, true);
+    positions.insert(
+        "session-1".into(),
+        dashboard.notification_position("session-1", mj_tui::AttentionLevel::Waiting),
+    );
+    let before_question = chats["session-1"].transcript_position();
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        None
+    );
+    assert_eq!(chats["session-1"].transcript_position(), before_question);
+    assert!(positions.contains_key("session-1"));
+    dashboard.set_question_message("session-1", Some("reply-1".into()), true);
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        Some(true)
+    );
+    assert!(!positions.contains_key("session-1"));
+    assert_ne!(chats["session-1"].transcript_position(), before_question);
+    assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
+    // A different request must not satisfy the pending locator of the one
+    // the user opened. Report its lost target through the same End path as !.
+    dashboard.set_question_message("session-1", None, true);
+    positions.insert(
+        "session-1".into(),
+        dashboard.notification_position("session-1", mj_tui::AttentionLevel::Waiting),
+    );
+    dashboard.set_notification_dismissals(
+        [(
+            "session-1".into(),
+            mj_core::attention::NotificationDismissal::Question(
+                mj_core::assessment::InferredQuestion {
+                    turn_id: "replacement".into(),
+                    completed_ordinal: 4,
+                },
+            ),
+        )]
+        .into(),
+    );
+    dashboard.set_question_message("session-1", Some("reply-3".into()), true);
+    assert_eq!(
+        drafts::apply_notification_position(&mut positions, &mut chats, &dashboard, "session-1"),
+        Some(false)
+    );
+    assert!(!positions.contains_key("session-1"));
     materialized.applied_event_ordinal = 4;
     materialized.pending_elicitations.push(
         mj_core::elicitation::ElicitationRequest::from_acp_params(

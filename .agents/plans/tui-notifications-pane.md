@@ -18,6 +18,12 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Progress
 
+- [x] Review follow-up on f7b8ed60b: traced the projection path before editing; confirmed live SessionControl snapshots return the bounded managed-session view rather than the unbounded database projection.
+- [x] Parent authorized an indexed one-item read; the existing `(session_id, stable_id)` primary key covers it, with no migration.
+- [x] Captured card identity at pointer-down and carried it through Clear/Later/Go To actions; keys capture at the key press. Pending question navigation waits for its locator.
+- [x] Added the bounded read operation on the daemon database read path and client Unsupported result; integrated it into the existing generation/cancellation owner and shared message text builder.
+- [x] Extended state/navigation and daemon/client integration regressions pass: 3 notification tests, 2 unchanged goldens, 1 CLI navigation test, 1 read-owner cancellation test and 1 daemon/client integration test. Dev/all-targets clippy passes for brokk-mj-tui, brokk-mjolnir, brokk-mj-controller and brokk-mj-client.
+
 - [x] Recency follow-up: preserve positive millisecond activity timestamps for sorting; unknown/zero sorts after known activity. Existing state regression extended for sub-second values, None and zero.
 - [x] Requested attention-navigation golden, session-action-menu golden, notification tests and TUI clippy passed. Attention golden refreshed only for seven previously incorrect age labels; card identities/order/layout expectations remain unchanged.
 
@@ -40,6 +46,16 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 
 ## Surprises & Discoveries
+
+Later must retain the full card identity too: a session-only deferral would still defer a new question published between press and release. Its local ordering now matches both session and dismissal target. Pending question navigation also retains that identity; replacement requests terminate through the existing missing-message notice instead of satisfying the old request's locator. The wire has no terminal "locator failed" fact, so an unresolved current question stays pending with an explicit waiting-for-locator notice rather than silently consuming an End anchor.
+
+
+The transcript table already has `PRIMARY KEY(session_id, stable_id)` (baseline.sql). The exact-key read returns an old item independently of the 512-item tail; its daemon operation uses the existing blocking database read path. Protocol 103 introduces the operation; the client returns Unsupported without sending an action when endpoint metadata is older. No schema/persisted-format change is needed.
+
+
+The path called a full projection in the TUI is not necessarily whole history. `request_materialized_projection` accepts the worker/runtime snapshot and only prepares it in the background. The live `ClientSessionControl::snapshot` path in `mj-controller/src/session_manager/client_backend.rs:152-163` returns `handle.view().snapshot.materialized`; `SessionControlBackend::snapshot` has the same default in `mj-client/src/session.rs:432-444`. That live view can already omit history before the daemon/runtime tail. Only the no-live-handle fallback at client_backend.rs:164-170 invokes the unbounded database reader. Under the parent's explicit instruction to stop if this path does not supply messages beyond the 512-item tail, the worker stopped before source edits.
+
+An unbounded daemon-owned read exists: `database::load_materialized_session` -> `load_materialized_session_with` -> `load_materialized_session_bounded(..., None)` -> `read_materialized_transcript` without LIMIT (`mj-controller/src/database/materialized.rs:12,1416-1430,1599-1620`). A narrow indexed read could instead select a TranscriptItem by `(session_id, stable_id)` from `materialized_transcript_items`; the exact-key lookup pattern already exists in `hydrate_terminal_outputs` at materialized.rs:657 and `materialized_transcript_item_exists` at 439. There is no current client method exposing a body read by that key. `StoredProjectionTail` accepts a transcript count, but remains a bounded-count API; it is not a documented unbounded or stable-ID message read.
 
 The seconds-precision filter added for age handling discarded the attention fixture's valid 10/20/30 ms activity timestamps before sorting. Those entries fell back to their identical inherited `updated_at` value (the fixture varies `created_at`, not `updated_at`) and tied by session ID, selecting asks instead of remote. Sorting now retains positive millisecond precision, while formatting alone renders an age rounded to epoch zero as unknown. Unknown timestamps remain zero after fallback and sort after positive known recency. The existing state regression independently checks sub-second recency and unknown/zero ordering.
 
@@ -70,6 +86,19 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: bind pointer actions to an immutable snapshot of the rendered card, captured when the Form arms the control, and carry the session/dismissal identity in the resulting dashboard action. Keys capture when pressed. Keep missing question locators pending through the existing notification-position map and retry when operational updates arrive.
+  Rationale: parent approved issues 1 and 3 independently of content acquisition; the existing Form pointer cancellation still owns cancellation on session-order/modal changes, without a second freshness check.
+  Date/Author: 2026-11-17, parent ruling and implementation worker.
+
+- Decision: expose one stored transcript item by exact `(session_id, stable_id)` through daemon/client, as another read kind in the existing generation/cancellation owner. Read only for the displayed located question absent from the loaded tail; Missing and Unsupported are terminal card states.
+  Rationale: parent authorized this operation instead of reading thousands of coordinator messages. The existing primary key covers it, so no migration is required. Protocol 103 permits a definitive older-daemon Unsupported result without probing unknown actions.
+  Date/Author: 2026-11-17, parent ruling and implementation worker.
+
+
+- Decision: stop and return the bounded-snapshot finding before implementing the f7b8ed60b review fixes.
+  Rationale: the parent explicitly requires stopping if the purported full projection cannot supply a located question outside the runtime tail. The live snapshot path returns the already bounded view; choosing a daemon-owned unbounded or stable-ID read changes the agreed data acquisition design.
+  Date/Author: 2026-11-17, review follow-up worker.
 
 - Decision: preserve every nonzero stored activity timestamp at millisecond precision for ordering, independently of the one-second precision used to render its age.
   Rationale: presentation rounding must not erase newer/older distinctions or replace real activity with fallback ties. Unknown/zero recency sorts last, and an age rounded to epoch zero remains `age unknown`.
@@ -120,6 +149,9 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Outcomes & Retrospective
+
+The three accepted f7b8ed60b review issues are fixed without committing. Pointer actions capture the rendered card at press and retain its identity through the dashboard action; Later matches the full identity, and Clear lets the daemon refuse a stale target. Existing Form/begin_surface_frame cancellation remains the sole gesture cancellation owner; no second freshness check was added beside it. Question navigation waits for a locator, retries after operational updates even without a new projection, and uses the existing unavailable-message notice if its original request changes. A primary-key single-item read fetches located questions outside the runtime tail through SummaryReads' existing generations, semaphore and cancellation. Found, missing and unsupported results terminate; loading is shown only for a pending read, and missing/unsupported show message not available. Protocol 103 adds this operation, with an explicit client Unsupported result for older endpoints and no database migration. All eight focused tests and four-crate dev/all-targets clippy pass; neither golden changed. The initial CLI fixture compile error was fixed by converting an array into SnapshotMap. No further live harness run was requested for this round; API behavior is tested against the real isolated daemon/client transport.
+
 
 The recency regression is fixed: nonzero sub-second activity timestamps retain their ordering, and remote is again the selected card in the failing attention-navigation cases. All requested focused tests and TUI clippy pass. The attention golden changed only in seven age-label cells whose sub-second epoch timestamps must display `age unknown`; no ordering expectation was refreshed. No commit.
 
@@ -214,3 +246,7 @@ Revision note (2026-11-17): the three accepted review fixes after 41eb625c2 are 
 Revision note (2026-11-17): fixed the parent-reported palette age/loading regressions at their sources, strengthened existing notification transition coverage, and passed the requested focused tests plus affected-crate clippy. The palette golden has no remaining diff and was not refreshed.
 
 Revision note (2026-11-17): corrected the recency filter to preserve millisecond precision and confined epoch-zero handling to age formatting. Verified both requested goldens, notification state tests and TUI clippy; refreshed only seven demonstrably incorrect age-label cells, preserving every card identity/order/layout expectation.
+
+Revision note (2026-11-17): recorded the f7b8ed60b review stop condition and decisive live-snapshot/database-reader evidence. No source edits, tests, builds or commits were performed in this round.
+
+Revision note (2026-11-17): completed the parent-approved indexed read and captured-card/deferred-question follow-ups. Eight focused tests and four-crate clippy pass; no golden refresh, migration or commit.

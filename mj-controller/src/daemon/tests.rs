@@ -14647,3 +14647,95 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .contains_key(&failed.id)
     );
 }
+
+#[tokio::test]
+async fn notification_item_read_crosses_the_daemon_client_boundary() {
+    const NAME: &str = "notification_item_read_crosses_the_daemon_client_boundary";
+    const CHILD: &str = "MJ_TEST_NOTIFICATION_ITEM_READ";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&runtime_test_session(
+        "notification-history",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    ))
+    .unwrap();
+    let mut history = mj_core::state::MaterializedSession::empty("notification-history");
+    history.applied_event_ordinal = 600;
+    history.applied_event_digest = format!("{:064x}", 600);
+    for position in 1..=600 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Question {position}")}})], streaming: false },
+        }));
+    }
+    crate::database::save_materialized_session(&history).unwrap();
+    let (tail, _) = crate::database::load_materialized_projection_tail("notification-history", 512)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !tail
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "reply-1")
+    );
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata.clone(),
+                Arc::clone(&state),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let StoredTranscriptItem::Found(item) = client
+        .stored_transcript_item("notification-history".into(), "reply-1".into())
+        .await
+        .unwrap()
+    else {
+        panic!("old question must be found outside the tail");
+    };
+    assert_eq!(*item, *history.transcript[0]);
+    assert!(matches!(
+        client
+            .stored_transcript_item("notification-history".into(), "missing".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Missing
+    ));
+    drop(client);
+    let mut old_metadata = metadata;
+    old_metadata.protocol_version = 102;
+    let mut older = DaemonClient::connect(old_metadata).await.unwrap();
+    assert!(matches!(
+        older
+            .stored_transcript_item("notification-history".into(), "reply-1".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Unsupported
+    ));
+    // No unknown action was sent and no error/reconnect loop was entered.
+    // The frozen management operation still works on the same connection.
+    older.status().await.unwrap();
+    drop(older);
+    server.await.unwrap();
+}
