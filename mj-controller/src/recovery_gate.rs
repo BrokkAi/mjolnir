@@ -848,7 +848,8 @@ impl Drop for RelayLeaseAdmission {
     }
 }
 impl RecoveryGate {
-    #[cfg(test)]
+    // Its one caller is a Unix-only test.
+    #[cfg(all(test, unix))]
     pub(crate) fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
         self.state
             .lock()
