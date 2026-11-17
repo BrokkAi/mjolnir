@@ -841,9 +841,12 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             let transcript_line = format!("{transcript_header} {}", short_first_line(text, 96));
             (header, Some(text.clone()), None, transcript_line)
         }
-        // Review progress uses the existing text wire shape so workers can
-        // receive it without replacing their relay during an active turn.
-        MailboxEventBody::PlainText { text } if event.source == "review" => {
+        // Review progress and project-tool installation notices use the
+        // existing text wire shape so workers can receive them without
+        // replacing their relay during an active turn.
+        MailboxEventBody::PlainText { text }
+            if matches!(event.source.as_str(), "review" | "project-tools") =>
+        {
             (text.clone(), None, None, short_first_line(text, 120))
         }
         MailboxEventBody::PlainText { text } => {

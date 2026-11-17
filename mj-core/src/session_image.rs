@@ -28,6 +28,11 @@ pub const RECIPE_FILES: &[&str] = &[
     ".go-version",
 ];
 
+/// Where a built image keeps the recipe files it was built from. The worker
+/// compares a checkout's recipe with this copy to know the image ran the
+/// recipe's postinstall hook.
+pub const IMAGE_RECIPE_DIR: &str = "/opt/mj-image/recipe";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiseArtifact {
     pub version: String,
@@ -105,7 +110,7 @@ pub fn containerfile(
     );
     let recipe = recipe_hash(files)?;
     let mut text = format!(
-        "FROM {}\nUSER root\nADD --checksum=sha256:{} {} /usr/local/bin/mise\nRUN chmod 0755 /usr/local/bin/mise\nENV MISE_DATA_DIR=/opt/mise \\\n    RUSTUP_HOME=/opt/rustup \\\n    CARGO_HOME=/opt/cargo \\\n    MISE_TRUSTED_CONFIG_PATHS=/opt/mj-image/recipe \\\n    MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=rust,node,python,ruby,go \\\n    PATH=/opt/mise/shims:$PATH\nWORKDIR /opt/mj-image/recipe\n",
+        "FROM {}\nUSER root\nADD --checksum=sha256:{} {} /usr/local/bin/mise\nRUN chmod 0755 /usr/local/bin/mise\nENV MISE_DATA_DIR=/opt/mise \\\n    RUSTUP_HOME=/opt/rustup \\\n    CARGO_HOME=/opt/cargo \\\n    MISE_TRUSTED_CONFIG_PATHS={IMAGE_RECIPE_DIR} \\\n    MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=rust,node,python,ruby,go \\\n    PATH=/opt/mise/shims:$PATH\nWORKDIR {IMAGE_RECIPE_DIR}\n",
         base.reference, mise.sha256, mise.url
     );
     for (path, contents) in files {
