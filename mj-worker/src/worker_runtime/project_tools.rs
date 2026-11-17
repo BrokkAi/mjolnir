@@ -58,11 +58,24 @@ pub(super) fn apply_environment(
     );
     let shims = data.join("shims");
     let old = environment.get("PATH").cloned().unwrap_or_default();
+    // The build-cache launchers (tool_cache::prepare) wrap tools such as cmake
+    // and must stay ahead of the project's tools; they find the real tool,
+    // here a mise shim, after their own directory.
+    let wrappers = environment
+        .get("MJ_BUILD_TOOL_BIN")
+        .map(PathBuf::from)
+        .filter(|bin| std::env::split_paths(&old).any(|entry| &entry == bin));
+    let mise_dir = mise.and_then(Path::parent);
     let path = std::env::join_paths(
-        std::iter::once(shims.clone())
-            .chain(mise.and_then(Path::parent).map(Path::to_owned))
+        wrappers
+            .clone()
+            .into_iter()
+            .chain(std::iter::once(shims.clone()))
+            .chain(mise_dir.map(Path::to_owned))
             .chain(std::env::split_paths(&old).filter(|entry| {
-                entry != &shims && mise.and_then(Path::parent) != Some(entry.as_path())
+                entry != &shims
+                    && mise_dir != Some(entry.as_path())
+                    && wrappers.as_ref() != Some(entry)
             })),
     )?;
     environment.insert(
@@ -135,4 +148,27 @@ pub(super) async fn install(
         }
     }
     Ok(notices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: review of b0f32d6: restoring the mise shims put them ahead of the build-cache launchers, bypassing mbx for mise-installed cmake.
+    #[test]
+    fn build_cache_launchers_stay_ahead_of_project_shims() {
+        let mut environment = BTreeMap::from([
+            (
+                "PATH".to_owned(),
+                "/managed-node/bin:/wrap:/usr/bin".to_owned(),
+            ),
+            ("MJ_BUILD_TOOL_BIN".to_owned(), "/wrap".to_owned()),
+            ("MISE_DATA_DIR".to_owned(), "/data".to_owned()),
+        ]);
+        apply_environment(&mut environment, &[PathBuf::from("/workspace/repo")], None).unwrap();
+        assert_eq!(
+            environment["PATH"],
+            "/wrap:/data/shims:/managed-node/bin:/usr/bin"
+        );
+    }
 }

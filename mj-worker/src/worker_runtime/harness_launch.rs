@@ -187,7 +187,6 @@ pub(super) async fn freeze_node_entrypoints(
     }
     let root = root.join("node-entrypoints");
     let providers = tokio::task::spawn_blocking(move || -> Result<_> {
-        use std::os::unix::fs::PermissionsExt;
         let mut launchers = Vec::new();
         if !providers.is_empty() {
             std::fs::create_dir_all(&root)?;
@@ -200,8 +199,10 @@ pub(super) async fn freeze_node_entrypoints(
                 quote(&node.to_string_lossy()),
                 quote(&entrypoint.to_string_lossy())
             );
-            mj_core::config::atomic_write_existing(&launcher, script.as_bytes())?;
-            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+            // The shared writer never holds a writable descriptor in this
+            // multithreaded process, so a concurrent fork cannot make the
+            // published launcher fail with ETXTBSY.
+            super::shell_environment::write_executable(&launcher, &script)?;
             launchers.push((name, launcher));
         }
         Ok(launchers)

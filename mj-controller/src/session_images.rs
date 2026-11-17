@@ -60,6 +60,8 @@ impl ImageBuilds {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(operation_id.clone(), operation.clone());
+        let operations = self.operations.clone();
+        let id = operation_id.clone();
         self.tasks.spawn(async move {
             let result = std::panic::AssertUnwindSafe(run(request, status, operation.clone()))
                 .catch_unwind()
@@ -74,6 +76,14 @@ impl ImageBuilds {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .result = Some(result);
             operation.changed.notify_waiters();
+            // A cancelled operation's client has gone (Ctrl-C) or is being
+            // replaced with the daemon; nobody will read the rest of its log.
+            if operation.cancel.is_cancelled() {
+                operations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id);
+            }
         });
         Ok(ImageStarted { operation_id })
     }
@@ -114,11 +124,24 @@ impl ImageBuilds {
                     end += chunk.invalid().len();
                 }
                 if end > offset || state.result.is_some() {
-                    return Ok(Some(ImageFollow {
+                    let follow = ImageFollow {
                         log: String::from_utf8_lossy(&state.log[offset..end]).into_owned(),
                         next_offset: end,
                         result: state.result.clone(),
-                    }));
+                    };
+                    // The follower now holds the whole log and the result, so
+                    // the daemon releases them. A response lost in transit
+                    // leaves the client with an unknown operation, which it
+                    // resubmits; the build is content-addressed.
+                    let consumed = state.result.is_some() && end == state.log.len();
+                    drop(state);
+                    if consumed {
+                        self.operations
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(id);
+                    }
+                    return Ok(Some(follow));
                 }
             }
             changed.await;
@@ -861,5 +884,14 @@ mod tests {
             std::str::from_utf8(message).unwrap()
         );
         assert_eq!(rest.next_offset, message.len());
+        operation.state.lock().unwrap().result = Some(Err("done".into()));
+        let last = builds
+            .follow("unicode", rest.next_offset)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(last.result.is_some());
+        // Hard-won: review of b0f32d6: a finished operation kept its whole engine log until the daemon exited.
+        assert!(builds.follow("unicode", 0).await.unwrap().is_none());
     }
 }

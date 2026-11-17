@@ -136,7 +136,28 @@ pub fn containerfile(
             ));
         }
     }
-    text.push_str("RUN mise bootstrap packages apply --yes && mise install\n");
+    // Sessions on a non-root base run as that user and install recipe changes
+    // into these directories. Chown in the install layer: a later layer would
+    // copy every installed file up again.
+    let user = base.user.split(':').next().unwrap_or_default();
+    let chown = if user.is_empty() || user == "root" || user == "0" {
+        String::new()
+    } else {
+        ensure!(
+            base.user
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)),
+            "unsupported base image user {:?}",
+            base.user
+        );
+        format!(
+            " && mkdir -p /opt/mise /opt/rustup /opt/cargo && chown -R {} /opt/mise /opt/rustup /opt/cargo",
+            base.user
+        )
+    };
+    text.push_str(&format!(
+        "RUN mise bootstrap packages apply --yes && mise install{chown}\n"
+    ));
     text.push_str(&format!("LABEL dev.mj.image.recipe=\"{recipe}\" \\\n    dev.mj.image.mise={} \\\n    dev.mj.image.platform={}\n", serde_json::to_string(&mise.version)?, serde_json::to_string(platform)?));
     text.push_str(&format!(
         "USER {}\nWORKDIR {}\n",
