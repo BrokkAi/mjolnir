@@ -682,6 +682,49 @@ impl TranscriptRenderCache {
     }
 }
 
+/// Canonical entry identity also distinguishes items at the same position.
+pub(super) fn transcript_entry_identity(entry: &ChatEntry) -> (u64, Option<&str>) {
+    (
+        entry.start_seq,
+        entry
+            .source
+            .0
+            .as_ref()
+            .map(|item| item.stable_id.as_str())
+            .or(entry.message_id.as_deref())
+            .or(entry.tool_call_id.as_deref()),
+    )
+}
+
+/// Both inputs are ordered by position/identity. A live projection may contain
+/// retained old turns and a recent tail with holes between them. Keep history
+/// in every hole, and replace only the identities actually present in live.
+pub(super) fn merge_transcript_history(
+    history: Vec<ChatEntry>,
+    live: Vec<ChatEntry>,
+) -> Vec<ChatEntry> {
+    if history.is_empty() {
+        return live;
+    }
+    let mut entries = Vec::with_capacity(history.len() + live.len());
+    let mut history = history.into_iter().peekable();
+    let mut live = live.into_iter().peekable();
+    while let (Some(old), Some(update)) = (history.peek(), live.peek()) {
+        match transcript_entry_identity(old).cmp(&transcript_entry_identity(update)) {
+            std::cmp::Ordering::Less => entries.push(history.next().unwrap()),
+            std::cmp::Ordering::Greater => entries.push(live.next().unwrap()),
+            std::cmp::Ordering::Equal => {
+                history.next();
+                entries.push(live.next().unwrap());
+            }
+        }
+    }
+    entries.extend(history);
+    entries.extend(live);
+    apply_entry_list_rules(&mut entries);
+    entries
+}
+
 impl ChatState {
     /// Where the reader is, independent of the tail-first loading window.
     pub fn transcript_position(&self) -> TranscriptPosition {
@@ -721,22 +764,18 @@ impl ChatState {
             .position(|entry| entry.message_id.as_deref() == Some(stable_id))
     }
 
-    /// Install history already converted off the event loop. Preserve newer live
-    /// rows, the composer and pending forms; same-frontier reads can widen a tail.
+    /// Install history already converted off the event loop. Live identities
+    /// win overlaps; keep loaded entries across gaps, without replacing forms
+    /// or the composer. Same-frontier reads can widen the loaded history.
     pub fn hydrate_transcript_history(&mut self, snapshot: TranscriptSnapshot) {
         let position = self.transcript_position();
-        let mut entries = Arc::unwrap_or_clone(snapshot.entries);
-        if snapshot.latest_seq < self.latest_seq
-            && let Some(first) = self.entries.first()
-        {
-            entries.truncate(entries.partition_point(|entry| entry.start_seq < first.start_seq));
-            entries.append(&mut self.entries);
-        }
-        self.entries = entries;
+        self.entries = merge_transcript_history(
+            Arc::unwrap_or_clone(snapshot.entries),
+            std::mem::take(&mut self.entries),
+        );
         self.retain_loaded_history = true;
         self.unconverted_prefix = 0;
         self.prefix_seam = None;
-        apply_entry_list_rules(&mut self.entries);
         self.invalidate_render_cache();
         self.restore_transcript_position(position);
     }

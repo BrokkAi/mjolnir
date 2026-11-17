@@ -66,19 +66,11 @@ pub(super) fn apply_notification_position(
     Some(located)
 }
 
-pub(super) fn notification_history_items(chat: &mj_chat::chat::ChatState, position: u64) -> u64 {
-    let latest = chat
-        .entries()
-        .last()
-        .map_or(position, |entry| entry.start_seq)
-        .max(position);
-    // Eight leading items put the question's immediate context above the
-    // jump. The count spans target to latest; it is what this jump needs,
-    // not a history cap.
-    latest
-        .saturating_sub(position)
-        .saturating_add(1)
-        .saturating_add(8)
+pub(super) fn notification_history_start(position: u64) -> u64 {
+    // Include eight preceding positions for the question's immediate context.
+    // The daemon reads from here to its own snapshot's end; no local tail
+    // estimate can race with newly stored output.
+    position.saturating_sub(8)
 }
 
 fn clear_notification_loading_notice(dashboard: &mut DashboardState) {
@@ -260,7 +252,7 @@ impl DashboardContext {
         self.notification_positions
             .iter()
             .filter_map(|(session_id, target)| {
-                let chat = self.chats.get(session_id)?;
+                self.chats.get(session_id)?;
                 match self
                     .dashboard
                     .resolve_notification_position(session_id, target)
@@ -272,8 +264,8 @@ impl DashboardContext {
                         message_id,
                         position,
                     } => {
-                        let items = notification_history_items(chat, position);
-                        Some((ReadKey::History(session_id.clone(), message_id), items))
+                        let start = notification_history_start(position);
+                        Some((ReadKey::History(session_id.clone(), message_id), start))
                     }
                     _ => None,
                 }

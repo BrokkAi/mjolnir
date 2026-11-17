@@ -493,8 +493,8 @@ pub struct ChatState {
     /// loop. Zero whenever the projection is complete.
     unconverted_prefix: usize,
     /// Explicitly loaded history stays available when the live tail slides.
-    /// An explicit history jump widened the view. Preserve that loaded prefix
-    /// when the live session next publishes its bounded tail.
+    /// An explicit history jump widened the view. Preserve loaded entries
+    /// omitted by later live windows, including holes between retained turns.
     retain_loaded_history: bool,
     /// The last unconverted transcript item: the projection item a pending
     /// prefix has to end at to be spliced in front of the tail. `None`
@@ -1074,25 +1074,22 @@ impl ChatState {
                 self.entries.clear();
                 self.invalidate_render_cache();
             }
-            let mut previous = std::mem::take(&mut self.entries);
-            let mut history = Vec::new();
-            if self.retain_loaded_history {
-                if let Some(first) = session.transcript.first() {
-                    let prefix = previous.partition_point(|entry| entry.start_seq < first.position);
-                    history.extend(previous.drain(..prefix));
-                } else {
-                    self.retain_loaded_history = false;
-                }
-            }
-            let tail =
-                materialized_chat_entries_reusing(session, self.unconverted_prefix, previous);
-            self.entries = if history.is_empty() {
-                tail
+            let previous = std::mem::take(&mut self.entries);
+            let (history, reusable) = if self.retain_loaded_history {
+                let live: BTreeSet<_> = session
+                    .transcript
+                    .iter()
+                    .map(|item| (item.position, Some(item.stable_id.as_str())))
+                    .collect();
+                previous.into_iter().partition(|entry| {
+                    !live.contains(&transcript::transcript_entry_identity(entry))
+                })
             } else {
-                history.extend(tail);
-                mj_client::transcript::apply_entry_list_rules(&mut history);
-                history
+                (Vec::new(), previous)
             };
+            let live =
+                materialized_chat_entries_reusing(session, self.unconverted_prefix, reusable);
+            self.entries = transcript::merge_transcript_history(history, live);
             if self.has_inline_submissions() {
                 self.sync_inline_submissions();
             }

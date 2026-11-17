@@ -18,6 +18,15 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 ## Progress
 
+- [x] Parent compatibility follow-up: retain unchunked StoredProjectionTail for legacy count requests; only protocol-103 start-position requests receive the new chunked StoredProjectionRange. The database range owner is unchanged.
+- [x] Extend the daemon/client integration with a pre-103 count action shape and a raw single-frame assertion, retaining the over-8-MiB test on the new range reply.
+- [x] Both requested tests passed (integration 1, CLI navigation 1). Dev/all-targets clippy passed for mj-client, mj-controller and mj-cli with warnings denied. No commit.
+
+- [x] 36aecf9ed review: replace the local count estimate with a start-position range, selected through the existing stored-tail read owner and a single daemon database snapshot; Unsupported is terminal for older daemons. Protocol remains 103.
+- [x] Enable existing chunked transport for protocol-103 StoredProjectionRange and stored item replies; legacy count-mode StoredProjectionTail remains unchunked. Extend the daemon/client integration test past 8 MiB, including store advancement and older-daemon compatibility.
+- [x] Merge loaded history and gapped live windows by stable identity and position, with live entries winning. Extend the existing chat-prefix regression using a gap produced by ProjectionWindow::trim.
+- [x] All requested validation passed: daemon/client range and over-8-MiB integration (1), existing chat-prefix filter including the new gap regression (10), CLI navigation (1), read-owner cancellation/generation (1). Dev/all-targets clippy passed for mj-controller, mj-client, mj-chat and mj-cli. No commit.
+
 - [x] 1d2150be0 review: confirmed StoredProjectionTail forwards an arbitrary requested item count into the SQL LIMIT; no new daemon API is needed.
 - [x] Keep notification navigation pending until the chat anchors the stable id. Add a stored-history request under the existing read owner, using latest position minus target position plus eight leading context items.
 - [x] Convert the returned history off the event loop; hydrate the live chat without replacing its drafts/forms, including same-frontier reads, and retain the loaded prefix across later live tails.
@@ -52,6 +61,12 @@ To see it working, start an isolated instance with a session that ends a turn by
 
 
 ## Surprises & Discoveries
+
+The first chunking fix classified the legacy StoredProjectionTail reply as chunkable. Older clients can reassemble fragments but then reject that reply kind in their own is_chunked check, so even small count-mode replies broke existing TUIs. Count mode must retain its original unchunked reply. A new StoredProjectionRange reply can safely be chunked because only protocol-103 clients send start_position. The integration now sends the old JSON action shape and decodes exactly one raw ResponseEnvelope, so a ReplyChunk cannot hide behind the modern client's decoder.
+
+
+A local count is not a stable range: after a chat through 600 estimates 579 items for target 30, a store through 610 starts that tail at 32. StoredProjectionTail now accepts an exclusive choice of count or start position; the start-position SQL query and all projection fields share one read transaction and use the existing `(session_id, position, stable_id)` index. The generic chunk decoder already verifies the reassembled reply against the same is_chunked classification used by the writer; adding the stored projection/item kinds enables both ends without a transport redesign. ProjectionWindow::trim can retain a streaming old turn and the latest tail while omitting completed middle turns. Both hydration and subsequent live projection updates must preserve every missing identity, not just entries before the first live row.
+
 
 The previous navigation helper treated a known stable id as a successful jump even when the chat had no corresponding entry. ChatState then fell back to Bottom during resolution. ChatState::apply_materialized also rebuilds only when its event ordinal changes, so a wider stored tail at the same frontier cannot be installed by that method alone. The stored-tail API already forwards the caller's count into load_materialized_projection_tail and its SQL LIMIT. Stored transcript conversion can reuse TranscriptSnapshot's background construction; chat hydration must preserve the loaded prefix when the next bounded live projection arrives.
 
@@ -95,6 +110,20 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Decision Log
+
+- Decision: preserve legacy count-mode StoredProjectionTail replies unchanged and unchunked. Wrap start-position results in the new StoredProjectionRange reply, classified for the existing chunk transport alongside StoredTranscriptItem. Keep the shared database range read and client request owner; only mode-specific reply wrapping/decoding differs. Protocol remains 103.
+  Rationale: parent identified that older clients reject chunked StoredProjectionTail after reassembly. Only 103 clients request start_position, so the new reply kind isolates the new large-response behavior without changing existing tail seeding.
+  Date/Author: 2026-11-17, parent session and implementation worker.
+
+
+- Decision: extend StoredProjectionTail with mutually exclusive optional items and start_position selectors and keep one database selection/parser owner for both. A notification jump sends the located position minus eight preceding positions; the daemon chooses its snapshot's end. Older endpoints return Unsupported without an unknown request, and no client retry adjusts counts. The operation and chunking remain in unshipped protocol 103.
+  Rationale: parent accepted the race and authorized this shape; a start-position query makes new stored output incapable of excluding the target.
+  Date/Author: 2026-11-17, parent session and implementation worker.
+
+- Decision (reply classification corrected by the compatibility follow-up above): classify new range and stored item replies for the existing chunk transport, and merge loaded/live entries by `(position, stable id)` in one helper with live identities replacing matching loaded identities.
+  Rationale: the existing reply decoder validates the same chunk classification; individual bodies and requested history can exceed a frame. A gapped live view is not evidence that a loaded middle item was deleted.
+  Date/Author: 2026-11-17, parent session and implementation worker.
+
 
 - Decision: a pending notification position is consumed only after ChatState confirms the target entry was anchored, or after an explicitly reported failure. Missing chat entries trigger the existing count-limited stored-tail operation through SummaryReads' generation/cancellation owner. The count spans target to latest position plus eight leading items to show the question's immediate context; it is not a cap. Prepared entries hydrate the live chat without replacing interactive state, and the widened history remains retained across live tail updates.
   Rationale: parent accepted all reviewers' 1d2150be0 finding and specified this design. A stable id alone does not prove that the visible chat can resolve it; loading and anchoring are distinct states. No new daemon API, protocol or persisted format is introduced.
@@ -163,6 +192,12 @@ Pane-size storage is not an extensible map of pane kinds. `mj-core/src/workspace
 
 
 ## Outcomes & Retrospective
+
+The parent compatibility finding is fixed without committing. Count-mode requests retain the exact legacy unchunked StoredProjectionTail reply, including requests using the old JSON action shape. Start-position requests now receive a separate StoredProjectionRange reply that is classified for chunk transport; StoredTranscriptItem remains chunked. The database range owner is unchanged, and the client request helper accepts the corresponding reply kind for each mode. The integration reads a single raw response frame for a legacy count request and asserts StoredProjectionTail before exercising the modern client. The over-8-MiB range test uses StoredProjectionRange and still validates exact reassembly; oversized item transport and older-endpoint Unsupported checks also pass. Both requested focused tests and three-crate dev/all-targets clippy pass. Protocol remains 103, with no schema or persisted-format change.
+
+
+All three accepted 36aecf9ed findings are fixed without committing. History navigation now sends only a start position through the existing stored-tail operation; one database transaction selects all rows from that position through its own snapshot's end. The old count mode remains supported, while older daemons return Unsupported for position mode and the existing navigation failure path reports it visibly. Protocol remains 103 and no migration was added. Start-position range and item replies use the existing chunk transport; the real daemon/client integration successfully returned both a range and an individual body larger than 8 MiB, with exact content retained. That same integration observes a store advancing from 600 to 610 and proves target 30 remains in the range starting at 22. One identity merge now preserves loaded entries in every gap of a live projection and lets live entries replace matching identities. The extended existing prefix regression constructs its gap using ProjectionWindow::trim, verifies immediate hydration and later updates preserve the middle message and anchor, and checks live content wins without duplicates. All 13 focused tests and four-crate dev/all-targets clippy passed. No golden refresh or live/default-instance operation was needed.
+
 
 The 1d2150be0 buried-question navigation defect is fixed in the working tree. A stable id alone no longer consumes the pending jump: ChatState confirms a concrete entry anchor. Missing entries retain the pending request and show `loading earlier history…`; the existing SummaryReads owner loads a count-limited stored tail covering the target through the latest loaded position plus eight preceding context items. TranscriptSnapshot conversion runs on a blocking background thread. Hydration widens the chat at the same event frontier without replacing its composer or forms, and the loaded prefix survives later bounded live updates. Failed reads and returned history still lacking the target consume the request only with an explicit `Could not load that message` notice and Bottom; successful jumps clear only their own loading notice. The existing CLI navigation regression covers both outcomes, actual anchor ordinal, draft/form preservation and a later live projection. Fifteen focused tests and final three-crate dev/all-targets clippy passed. No new daemon API, protocol/schema/persisted-format change, golden refresh, full suite or commit was made.
 

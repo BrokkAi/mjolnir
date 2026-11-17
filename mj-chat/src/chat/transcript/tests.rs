@@ -715,6 +715,61 @@ fn an_update_while_the_prefix_is_pending_keeps_the_tail_and_still_splices() {
             .windows(2)
             .all(|pair| pair[0].start_seq < pair[1].start_seq)
     );
+
+    // A live window can keep an unsettled old turn and the recent tail while
+    // omitting the completed turns in between. Loaded history fills that gap.
+    let mut complete = session.clone();
+    let unsettled = Arc::make_mut(&mut complete.transcript[1]);
+    if let TranscriptBody::Agent { streaming, .. } = &mut unsettled.body {
+        *streaming = true;
+    }
+    let mut gapped = complete.clone();
+    mj_core::state::ProjectionWindow::default().trim(&mut gapped, TAIL_SEED_ITEMS);
+    assert_eq!(gapped.transcript.first().unwrap().position, 1);
+    assert!(
+        !gapped
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "agent:200")
+    );
+    let mut gap_chat = ChatState::from_materialized(&gapped, &[], &[]);
+    // Simulate a live body update while the stored history is in flight.
+    let live_item = Arc::make_mut(&mut gapped.transcript[1]);
+    live_item.last_changed_at_ms += 1;
+    if let TranscriptBody::Agent { chunks, .. } = &mut live_item.body {
+        *chunks = vec![serde_json::json!({"content":{"type":"text", "text":"New live content"}})];
+    }
+    gapped.applied_event_ordinal += 1;
+    gap_chat.apply_materialized(&gapped, &[], &[]);
+    gap_chat.hydrate_transcript_history(TranscriptSnapshot::from_materialized(&complete));
+    assert!(gap_chat.restore_transcript_message("agent:200"));
+    let anchored = gap_chat.transcript_position();
+    assert!(
+        gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.text == "New live content")
+    );
+    gapped.applied_event_ordinal += 1;
+    gap_chat.apply_materialized(&gapped, &[], &[]);
+    assert_eq!(gap_chat.transcript_position(), anchored);
+    assert!(
+        gap_chat
+            .entries
+            .iter()
+            .any(|entry| entry.message_id.as_deref() == Some("agent:200"))
+    );
+    assert!(
+        gap_chat
+            .entries
+            .windows(2)
+            .all(|pair| transcript_entry_identity(&pair[0]) < transcript_entry_identity(&pair[1]))
+    );
+    assert_eq!(
+        gap_chat.entries.len(),
+        complete.transcript.len(),
+        "live identities replace history rather than duplicating it"
+    );
 }
 
 #[test]

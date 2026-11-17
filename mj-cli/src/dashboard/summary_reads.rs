@@ -76,7 +76,7 @@ impl SummaryReads {
                 ReadKey::History(session_id, stable_id) => io::spawn_notification_history(
                     session_id.clone(),
                     stable_id.clone(),
-                    usize::try_from(viewed).unwrap_or(usize::MAX),
+                    viewed,
                     self.generation,
                     Arc::clone(&self.permits),
                     updates.clone(),
@@ -169,10 +169,8 @@ mod tests {
         let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
         let wanted = (0..1200).map(|id| (format!("child-{id}"), 0)).collect();
         let item = Some(("notification".into(), "outside-tail".into()));
-        let navigation = BTreeMap::from([(
-            ReadKey::History("notification".into(), "buried".into()),
-            600,
-        )]);
+        let navigation =
+            BTreeMap::from([(ReadKey::History("notification".into(), "buried".into()), 22)]);
         reads.reconcile(wanted, item.clone(), navigation.clone(), &updates);
         let old_history =
             reads.reads[&ReadKey::History("notification".into(), "buried".into())].generation;

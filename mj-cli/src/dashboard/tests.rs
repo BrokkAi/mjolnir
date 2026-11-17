@@ -1962,7 +1962,7 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
     );
     assert_eq!(chats["session-1"].draft(), "Keep this unsent answer");
     // The locator can point before the entire live tail. Keep the jump
-    // pending until a count-limited stored tail installs the actual entry.
+    // pending until a stored start-position range installs the actual entry.
     let mut full = materialized.clone();
     for position in 4..=600 {
         full.transcript.push(Arc::new(TranscriptItem {
@@ -1994,10 +1994,17 @@ async fn notification_navigation_overrides_a_warm_position_and_waits_for_cold_ch
             position: 30,
         },
     );
-    let count = drafts::notification_history_items(&chats["session-1"], 30) as usize;
+    let start = drafts::notification_history_start(30);
+    // The store advances after the local chat's view. A position range still
+    // includes the target; a locally estimated tail count would lose it.
+    for position in 601..=610 {
+        full.transcript.push(Arc::new(TranscriptItem { stable_id: format!("reply-{position}"), position, latest_content_event_ordinal: Some(position), created_at_ms: 0, last_changed_at_ms: 0,
+            body: TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text":format!("Message {position}")}})], streaming: false } }));
+    }
+    full.applied_event_ordinal = 610;
     let mut stored_tail = full.clone();
-    stored_tail.transcript =
-        full.transcript[full.transcript.len().saturating_sub(count)..].to_vec();
+    stored_tail.transcript.retain(|item| item.position >= start);
+    assert_eq!(stored_tail.transcript.last().unwrap().position, 610);
     assert!(
         stored_tail.transcript.len() < full.transcript.len(),
         "the jump does not need the whole session"

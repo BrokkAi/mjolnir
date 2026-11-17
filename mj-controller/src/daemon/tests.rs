@@ -14694,7 +14694,7 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     let metadata = test_metadata(listener.local_addr().unwrap());
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (stream, _) = listener.accept().await.unwrap();
             serve_client(
                 stream,
@@ -14706,6 +14706,31 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             .unwrap();
         }
     });
+    // Send the legacy action shape without new optional fields, in the
+    // daemon's advertised dialect (as DaemonClient::request does). Reading a
+    // single raw frame proves the reply never entered chunk transport.
+    let mut legacy = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut legacy,
+        &serde_json::json!({
+            "protocol_version": metadata.protocol_version,
+            "request_id": 41,
+            "token": metadata.token.clone(),
+            "action": {"action": "stored_projection_tail", "arguments": {
+                "session_id": "notification-history", "items": 512
+            }}
+        }),
+    )
+    .await
+    .unwrap();
+    let response: ResponseEnvelope = read_frame(&mut legacy).await.unwrap();
+    assert_eq!(response.request_id, 41);
+    let Ok(DaemonReply::StoredProjectionTail(Some(legacy_tail))) = response.result else {
+        panic!("legacy count requests must return an unchunked StoredProjectionTail frame");
+    };
+    assert_eq!(legacy_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(legacy_tail.transcript.last().unwrap().position, 600);
+    drop(legacy);
     let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
     let StoredTranscriptItem::Found(item) = client
         .stored_transcript_item("notification-history".into(), "reply-1".into())
@@ -14722,6 +14747,68 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             .unwrap(),
         StoredTranscriptItem::Missing
     ));
+    let count_tail = client
+        .stored_projection_tail("notification-history".into(), 512)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count_tail.transcript.first().unwrap().position, 89);
+    assert_eq!(count_tail.transcript.last().unwrap().position, 600);
+    // Local navigation observed position 600 and located target 30. The store
+    // advances before its range query; the daemon, not the client, owns the end.
+    let large_text = "x".repeat(MAX_FRAME_BYTES + 128 * 1024);
+    for position in 601..=610 {
+        history.transcript.push(Arc::new(mj_core::state::TranscriptItem {
+            stable_id: format!("reply-{position}"), position,
+            latest_content_event_ordinal: Some(position), created_at_ms: position as i64, last_changed_at_ms: position as i64,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text": if position == 610 { large_text.clone() } else { format!("Question {position}") }}})], streaming: false },
+        }));
+    }
+    history.applied_event_ordinal = 610;
+    history.applied_event_digest = format!("{:064x}", 610);
+    crate::database::save_materialized_session(&history).unwrap();
+    // The actual reply, not just the fixture allocation, exceeds one frame.
+    assert!(
+        serde_json::to_vec(&DaemonReply::StoredProjectionRange(Some(Box::new(
+            history.clone()
+        ))))
+        .unwrap()
+        .len()
+            > MAX_FRAME_BYTES
+    );
+    let StoredProjectionHistory::Found(range) = client
+        .stored_projection_from_position("notification-history".into(), 22)
+        .await
+        .unwrap()
+    else {
+        panic!("position range must be available");
+    };
+    assert_eq!(range.transcript.first().unwrap().position, 22);
+    assert_eq!(range.transcript.last().unwrap().position, 610);
+    assert!(
+        range
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "reply-30"),
+        "new stored output cannot push the target outside a position range"
+    );
+    assert!(
+        range
+            .transcript
+            .iter()
+            .eq(history.transcript.iter().filter(|item| item.position >= 22)),
+        "chunk reassembly must preserve all history bodies and positions"
+    );
+    // Single-item bodies use the same chunked transport and can also exceed
+    // a frame. Consume another reply on this connection after the range.
+    let StoredTranscriptItem::Found(large) = client
+        .stored_transcript_item("notification-history".into(), "reply-610".into())
+        .await
+        .unwrap()
+    else {
+        panic!("large item must be returned");
+    };
+    assert!(large.body == history.transcript.last().unwrap().body);
     drop(client);
     let mut old_metadata = metadata;
     old_metadata.protocol_version = 102;
@@ -14732,6 +14819,13 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             .await
             .unwrap(),
         StoredTranscriptItem::Unsupported
+    ));
+    assert!(matches!(
+        older
+            .stored_projection_from_position("notification-history".into(), 22)
+            .await
+            .unwrap(),
+        StoredProjectionHistory::Unsupported
     ));
     // No unknown action was sent and no error/reconnect loop was entered.
     // The frozen management operation still works on the same connection.
