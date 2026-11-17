@@ -355,8 +355,8 @@ impl WaitDecision {
 ///
 /// The rules run in order, and the order is the point:
 ///
-/// 0. A resume running for this session ends nothing: it is a session coming
-///    up, and its durable record says stopped until the archive is verified.
+/// 0. A create or resume ends nothing while it owns the session. The wait
+///    follows the attempt until its owner reports how it ended.
 ///    A close running for it ends nothing either, for the same reason in
 ///    reverse: the wait follows it and reports how it ended. A close that
 ///    left the session alive failed, and this is the only place left to say
@@ -386,9 +386,8 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         observation.execution,
         MaterializedExecutionState::Closing | MaterializedExecutionState::Closed
     );
-    // A resume owns the session: nothing about it has settled yet, and its
-    // durable record still says stopped. The wait keeps waiting; its own
-    // deadline still bounds it.
+    // A create or resume owns the session. Keep waiting under the caller's
+    // deadline while that attempt is still running.
     if observation.resuming {
         return None;
     }

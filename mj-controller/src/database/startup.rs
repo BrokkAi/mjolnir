@@ -556,21 +556,49 @@ pub fn dismiss_startup_group(session_id: &str, group_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let group_id = group_id.to_owned();
     submit_database_write("dismiss completed API startup", move |connection| {
-        // A group that is still being rejected settles through the drain; a
-        // finished group has been read by its API client and can go.
-        connection.execute(
-            "UPDATE startup_steps SET phase='cancelling',error=NULL
-             WHERE session_id=?1 AND group_id=?2 AND phase='rejecting'",
-            params![session_id, group_id],
-        )?;
-        connection.execute(
-            "DELETE FROM startup_steps WHERE session_id=?1 AND group_id=?2
-               AND phase IN ('done','failed','dismissed')
-               AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
-            params![session_id, group_id],
-        )?;
-        Ok(())
+        dismiss_startup_group_with(connection, &session_id, &group_id)
     })
+}
+
+fn dismiss_startup_group_with(
+    connection: &Connection,
+    session_id: &str,
+    group_id: &str,
+) -> Result<()> {
+    // A group that is still being rejected settles through the drain; a
+    // finished group has been read by its API client and can go.
+    connection.execute(
+        "UPDATE startup_steps SET phase='cancelling',error=NULL
+         WHERE session_id=?1 AND group_id=?2 AND phase='rejecting'",
+        params![session_id, group_id],
+    )?;
+    connection.execute(
+        "DELETE FROM startup_steps WHERE session_id=?1 AND group_id=?2
+           AND phase IN ('done','failed','dismissed')
+           AND json_type(step_json, '$.Prompt.prompt') IS NOT 'array'",
+        params![session_id, group_id],
+    )?;
+    Ok(())
+}
+
+/// Retry acknowledges settled launch failures. A group with even one
+/// unfinished step may still need to reconcile with its original worker.
+pub(super) fn dismiss_failed_startup_groups_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<()> {
+    let groups = connection
+        .prepare(
+            "SELECT group_id FROM startup_steps WHERE session_id=?1 AND group_id IS NOT NULL
+             GROUP BY group_id HAVING sum(phase='failed') > 0
+                AND sum(phase NOT IN ('done','failed','dismissed')) = 0",
+        )?
+        .query_map([session_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for group in groups {
+        dismiss_startup_group_with(connection, session_id, &group)?;
+    }
+    Ok(())
 }
 
 /// Rows that nothing will read again: dismissed groups, settled legacy steps

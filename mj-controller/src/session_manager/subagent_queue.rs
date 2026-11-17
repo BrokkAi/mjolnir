@@ -77,46 +77,46 @@ impl SubagentQueueObserver {
                     let client = client.as_mut().expect("connected queue");
                     let waits =
                         client.protocol_version() >= mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL;
-                    let queue = if queue_due || !waits {
-                        Some(client.subagent_requests().await?)
-                    } else {
-                        None
-                    };
+                    if queue_due || !waits {
+                        let (requests, completions) = client.subagent_requests().await?;
+                        // Wake the actor now. The following change wait can
+                        // hold for its full bound while this request needs a reply.
+                        let published = tx.send_if_modified(|view| {
+                            let next = Observation {
+                                requests,
+                                completions,
+                                error: None,
+                            };
+                            if *view == next {
+                                false
+                            } else {
+                                *view = next;
+                                true
+                            }
+                        });
+                        // The actor reads the queue on its next sync, which
+                        // a quiet session no longer runs on a short timer.
+                        if published {
+                            relay_changed.send_modify(|count| *count = count.wrapping_add(1));
+                        }
+                    }
                     if !waits {
-                        return Ok::<_, anyhow::Error>((queue, None));
+                        return Ok(None);
                     }
                     queue_due = false;
                     waiting_tx.send_if_modified(|waiting| !std::mem::replace(waiting, true));
                     let (after_ordinal, state_digest) = observed
                         .clone()
                         .map_or((0, None), |(ordinal, digest)| (ordinal, Some(digest)));
-                    let change = client.wait_for_change(after_ordinal, state_digest).await?;
-                    Ok((queue, Some(change)))
+                    client
+                        .wait_for_change(after_ordinal, state_digest)
+                        .await
+                        .map(Some)
                 }
                 .await;
                 let pause = match result {
-                    Ok((queue, change)) => {
+                    Ok(change) => {
                         delay = RECONNECT_INTERVAL;
-                        if let Some((requests, completions)) = queue {
-                            let published = tx.send_if_modified(|view| {
-                                let next = Observation {
-                                    requests,
-                                    completions,
-                                    error: None,
-                                };
-                                if *view == next {
-                                    false
-                                } else {
-                                    *view = next;
-                                    true
-                                }
-                            });
-                            // The actor reads the queue on its next sync, which
-                            // a quiet session no longer runs on a short timer.
-                            if published {
-                                relay_changed.send_modify(|count| *count = count.wrapping_add(1));
-                            }
-                        }
                         match change {
                             // A worker that waits for changes answers as they
                             // happen; following a busy one no more often than
@@ -234,5 +234,65 @@ impl SubagentQueueObserver {
             observation.completions.clone(),
             error,
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::session_manager::tests::{RELAY_REQUEST_LOG, leased_relay_target};
+    use futures::FutureExt as _;
+    use mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
+    use mj_core::subagent::SubagentToolAction;
+
+    // Hard-won: #1580: a queue read waited for the next change wait before it was published
+    #[tokio::test]
+    async fn publishes_a_queue_read_before_the_next_change_wait() {
+        let root = tempfile::tempdir().unwrap();
+        let request = SubagentToolRequest {
+            originating_command_id: None,
+            request_id: "pending".into(),
+            created_at_ms: 1,
+            action: SubagentToolAction::ListAgents,
+        };
+        std::fs::write(
+            root.path().join("subagent-request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("block-change-wait"), b"").unwrap();
+        let mut observer = SubagentQueueObserver::spawn(&leased_relay_target(root.path()));
+
+        let log = root.path().join(RELAY_REQUEST_LOG);
+        tokio::time::timeout(RELAY_CHANGE_WAIT_BOUND / 2, async {
+            while !std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .any(|method| method == "wait_for_change")
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the relay reached its change wait");
+        // The subprocess has the wait and cannot answer it. The preceding
+        // queue exchange must already have woken the actor.
+        assert!(observer.relay_changed().now_or_never().is_some());
+        let (requests, _, error) = observer.observe(true);
+        assert_eq!(requests.as_slice(), std::slice::from_ref(&request));
+        assert!(error.is_none());
+
+        std::fs::write(root.path().join("worker-unreachable"), b"").unwrap();
+        let requests_after_failure = tokio::time::timeout(
+            RELAY_CHANGE_WAIT_BOUND / 2,
+            observer.view.wait_for(|view| view.error.is_some()),
+        )
+        .await
+        .expect("the change wait failure was reported")
+        .unwrap()
+        .requests
+        .clone();
+        assert_eq!(requests_after_failure.as_slice(), &[request]);
+        observer.stop().await;
     }
 }

@@ -77,6 +77,23 @@ Discard them
 Resume
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Mutating sessionlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profile\nalpha\nbeta","value":"alpha","disabled":false},{"id":null,"text":"Choose target\nlocal\nremote","value":"local","disabled":false},{"id":null,"text":"Choose 1 queued prompt\nRun them after resuming\nDiscard them","value":"start","disabled":false},{"id":null,"text":"Resume","value":"","disabled":false}]
 request: GET /api/v1/wiki/search [""]
+=== failed first launch uses saved settings (390x844) ===
+Back to sessions
+Mutating session
+
+Failed · local
+
+The previous operation reported an error. Review the available choices before trying again.
+
+Relaunch this session with its saved settings.
+
+Prompts that failed with the previous launch are not resent.
+
+Retry launch
+
+Worker bootstrap failed.
+controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Mutating sessionlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Retry launch","value":"","disabled":false}]
+request: GET /api/v1/wiki/search [""]
 === archived index entry and live search hit (390x844) ===
 Resume a session
 Find a session

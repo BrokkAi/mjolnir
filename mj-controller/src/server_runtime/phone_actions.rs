@@ -290,8 +290,7 @@ pub(super) fn apply_read_receipt(state: &mut State, session_id: &str, receipt: u
 pub(super) struct PhoneActionControl {
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) lifecycle: Option<LifecycleControl>,
-    /// The lifecycle kind the action starts, which decides how a server
-    /// shutdown stops it.
+    /// The requested lifecycle kind. A Resume can be admitted as a Create.
     pub(super) kind: Option<LifecycleKind>,
 }
 
@@ -300,6 +299,7 @@ impl PhoneActionControl {
         let kind = match action {
             ControllerAction::New { .. } => Some(LifecycleKind::Create),
             ControllerAction::Suspend { .. } => Some(LifecycleKind::Suspend),
+            ControllerAction::Resume { .. } => Some(LifecycleKind::Resume),
             ControllerAction::Restart { .. } => Some(LifecycleKind::Restart),
             ControllerAction::Move { .. } => Some(LifecycleKind::Move),
             _ => None,
@@ -316,11 +316,11 @@ impl PhoneActionControl {
         }
     }
 
-    /// The server is exiting: a create is stopped without rollback for the next
-    /// daemon to finish, everything else is cancelled.
+    /// Preserve a resumable create intent across shutdown, including when
+    /// the daemon chose Create to retry a failed phone Resume.
     pub(super) fn stop_for_server_shutdown(&self) {
         match (&self.lifecycle, self.kind) {
-            (Some(control), Some(LifecycleKind::Create)) => {
+            (Some(control), Some(LifecycleKind::Create | LifecycleKind::Resume)) => {
                 control.cancel_for_shutdown();
             }
             _ => {
