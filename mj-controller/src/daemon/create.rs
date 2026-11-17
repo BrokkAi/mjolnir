@@ -1,18 +1,8 @@
-use super::views::{CreateProgress, StalledCreate};
+use super::views::{LifecycleStallProgress, StalledLifecycle};
 use super::*;
 
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The existing ten-minute reviewer Create idle bound (#1438) also measures
-/// time since the last byte of an active transfer (#1583).
-///
-/// The longest single stage measured on 2026-11-06 under a load average of
-/// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
-/// three times that worst case. The bound exists because the Create's
-/// executor and `CommandSpec` have no per-command timeout, so a remote command
-/// that hangs on a live connection would otherwise wait for ever (#1438).
-pub(super) const CREATE_STALL_BOUND: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Bounds one reviewer readiness wait that runs with no Create to end it.
 ///
@@ -231,7 +221,7 @@ impl RuntimeState {
         // accepted Create mid-provision, which left the child without a worker
         // root (#1438). While the Create runs, each wait ends with its
         // outcome: the child is ready, its record says the Create failed or
-        // it was closed, or the Create stalled for `CREATE_STALL_BOUND` and
+        // it was closed, or the Create stalled for `LIFECYCLE_STALL_BOUND` and
         // was cancelled. Once no Create is running (it finished, or the
         // reviewer was restored without one) nothing else ends a wait, so
         // `PostCreateWait` bounds it.
@@ -296,14 +286,14 @@ impl RuntimeState {
     /// Fail unless the reviewer child's record is still one a Create can
     /// finish: missing, closed, failed or destroyed children never become
     /// ready, so waiting for them would never end. Also fail, and cancel, a
-    /// Create that has stalled (see [`CREATE_STALL_BOUND`]), and a readiness
+    /// Create that has stalled (see [`LIFECYCLE_STALL_BOUND`]), and a readiness
     /// wait that has gone on too long with no Create running.
     fn reviewer_child_can_still_start(
         &self,
         child: &str,
         waiting: &mut PostCreateWait,
     ) -> Result<()> {
-        self.check_create_progress(child, CREATE_STALL_BOUND, waiting)?;
+        self.check_create_progress(child, LIFECYCLE_STALL_BOUND, waiting)?;
         let Some(record) = self.session_record(child) else {
             anyhow::bail!("reviewer child {child} no longer exists");
         };
@@ -338,13 +328,13 @@ impl RuntimeState {
         bound: Duration,
         waiting: &mut PostCreateWait,
     ) -> Result<()> {
-        match self.cancel_stalled_create(child, bound) {
-            CreateProgress::NotRunning => waiting.check(child),
-            CreateProgress::Running => {
+        match self.cancel_stalled_lifecycle(child, LifecycleKind::Create, bound) {
+            LifecycleStallProgress::NotRunning => waiting.check(child),
+            LifecycleStallProgress::Running(_) => {
                 waiting.create_running();
                 Ok(())
             }
-            CreateProgress::Stalled {
+            LifecycleStallProgress::Stalled {
                 idle,
                 stages,
                 stream,
@@ -356,9 +346,9 @@ impl RuntimeState {
                     stages.join(" + ")
                 };
                 let outcome = match phase {
-                    StalledCreate::Cancelled => "its Create was cancelled",
-                    StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
-                    StalledCreate::Committed => "its Create had committed and was left running",
+                    StalledLifecycle::Cancelled => "its Create was cancelled",
+                    StalledLifecycle::AlreadyCancelling => "its Create was already being cancelled",
+                    StalledLifecycle::Committed => "its Create had committed and was left running",
                 };
                 tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?stream, ?phase, "reviewer child Create stalled");
                 let detail = match stream {

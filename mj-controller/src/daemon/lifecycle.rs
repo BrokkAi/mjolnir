@@ -484,12 +484,17 @@ impl RuntimeState {
             // Completion releases ownership under this same lock. Retained
             // results answer identical retries; they cannot block a fresh
             // request just because its original waiter disappeared.
+            // An Unpark has no replay key. A later wake of a parked child
+            // retries even when the previous caller dropped its result.
             let completed_other_request = lifecycle.get(&session_id).is_some_and(|active| {
                 !active.is_running()
                     && (mode == AdmissionMode::FreshRequest
                         || active.kind != kind
                         || active.request_key != request_key
-                        || kind == LifecycleKind::UpgradeContainer)
+                        || matches!(
+                            kind,
+                            LifecycleKind::Unpark | LifecycleKind::UpgradeContainer
+                        ))
             });
             if completed_other_request {
                 ensure!(
@@ -605,6 +610,8 @@ impl RuntimeState {
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
                 let acceptance =
                     acceptance.unwrap_or_else(|| tokio::sync::watch::channel(Some(Ok(()))).1);
+                let stream_started =
+                    (kind == LifecycleKind::Unpark).then(|| Arc::new(tokio::sync::Notify::new()));
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
@@ -618,7 +625,10 @@ impl RuntimeState {
                         kind,
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
-                        progress: LifecycleProgress::new(),
+                        progress: LifecycleProgress {
+                            stream_started: stream_started.clone(),
+                            ..LifecycleProgress::new()
+                        },
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,
@@ -699,62 +709,105 @@ impl RuntimeState {
                         Ok(admission) => {
                             foreground_hold = Some(admission.clone());
                             let session_admission = SessionAdmission::Foreground(admission);
-                            match mj_core::runtime::spawn_off_async_workers(async move {
-                        if let Some(intent_id) = superseded_restart_intent {
-                            if matches!(
-                                kind,
-                                LifecycleKind::ForceDestroy | LifecycleKind::DestroyStopped
-                            ) && let Some(plan) = crate::database::load_session_restarts()?
-                                .into_iter()
-                                .find(|intent| {
-                                    intent.session_id == operation_id
-                                        && intent.operation_id == intent_id
-                                })
-                                .and_then(|intent| intent.container_upgrade)
-                                && let Err(error) = plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)
-                            {
-                                if kind != LifecycleKind::ForceDestroy {
-                                    return Err(error);
-                                }
-                                tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
-                                cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
-                            }
-                            cleanup_state
-                                .release_restart_intent(&operation_id, &intent_id)
-                                .await?;
-                        }
-                        // Move was already published under the lifecycle owner.
-                        // Any earlier startup submit must settle before source
-                        // sealing; later startup submits see that same owner.
-                        let _startup_delivery = if kind == LifecycleKind::Move {
-                            let admission = operation_state
-                                .startup_delivery_gate(&operation_id)
-                                .lock_owned();
-                            tokio::pin!(admission);
-                            loop {
-                                if cancelled.load(Ordering::Acquire) {
-                                    return Ok(DaemonLifecycleResult::Done);
-                                }
+                            let mut executing = mj_core::runtime::spawn_off_async_workers(
+                                async move {
+                                    if let Some(intent_id) = superseded_restart_intent {
+                                        if matches!(
+                                            kind,
+                                            LifecycleKind::ForceDestroy
+                                                | LifecycleKind::DestroyStopped
+                                        ) && let Some(plan) =
+                                            crate::database::load_session_restarts()?
+                                                .into_iter()
+                                                .find(|intent| {
+                                                    intent.session_id == operation_id
+                                                        && intent.operation_id == intent_id
+                                                })
+                                                .and_then(|intent| intent.container_upgrade)
+                                            && let Err(error) = plan.retire_backup_for_destroy(
+                                                &operation_id,
+                                                &ProcessExecutor,
+                                            )
+                                        {
+                                            if kind != LifecycleKind::ForceDestroy {
+                                                return Err(error);
+                                            }
+                                            tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
+                                            cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
+                                        }
+                                        cleanup_state
+                                            .release_restart_intent(&operation_id, &intent_id)
+                                            .await?;
+                                    }
+                                    // Move was already published under the lifecycle owner.
+                                    // Any earlier startup submit must settle before source
+                                    // sealing; later startup submits see that same owner.
+                                    let _startup_delivery = if kind == LifecycleKind::Move {
+                                        let admission = operation_state
+                                            .startup_delivery_gate(&operation_id)
+                                            .lock_owned();
+                                        tokio::pin!(admission);
+                                        loop {
+                                            if cancelled.load(Ordering::Acquire) {
+                                                return Ok(DaemonLifecycleResult::Done);
+                                            }
+                                            tokio::select! {
+                                                guard = &mut admission => break Some(guard),
+                                                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let worker_owner =
+                                        crate::worker_lifecycle::WorkerPermit::acquire(
+                                            &operation_id,
+                                            &session_admission,
+                                        )?;
+                                    worker_owner
+                                        .scope(operation(
+                                            operation_state,
+                                            operation_id,
+                                            cancelled,
+                                            session_admission,
+                                        ))
+                                        .await
+                                },
+                            );
+                            let (completed, stall) = if let Some(started) = stream_started {
+                                // The same task supervises the command and its
+                                // stall check. The caller may drop its waiter.
                                 tokio::select! {
-                                    guard = &mut admission => break Some(guard),
-                                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                                    biased;
+                                    completed = &mut executing => (completed, None),
+                                    stall = state.cancel_unpark_when_stream_stalls(&operation_session_id, &started) => {
+                                        // Cancellation owns process teardown;
+                                        // retain admission until the work unwinds.
+                                        (executing.await, stall)
+                                    }
                                 }
-                            }
-                        } else {
-                            None
-                        };
-                        let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(&operation_id, &session_admission)?;
-                        worker_owner.scope(operation(operation_state, operation_id, cancelled, session_admission)).await
-                    })
-                    .await
-                    {
-                        Ok(Ok(result)) => result.map_err(|error| LifecycleFailure::of(&error)),
-                        Ok(Err(shutdown)) => Err(LifecycleFailure::internal(format!(
-                            "daemon lifecycle stopped: {shutdown:#}"
-                        ))),
-                        Err(error) => Err(LifecycleFailure::internal(format!(
-                            "daemon lifecycle task failed: {error}"
-                        ))),
+                            } else {
+                                (executing.await, None)
+                            };
+                            let result = match completed {
+                                Ok(Ok(result)) => {
+                                    result.map_err(|error| LifecycleFailure::of(&error))
+                                }
+                                Ok(Err(shutdown)) => Err(LifecycleFailure::internal(format!(
+                                    "daemon lifecycle stopped: {shutdown:#}"
+                                ))),
+                                Err(error) => Err(LifecycleFailure::internal(format!(
+                                    "daemon lifecycle task failed: {error}"
+                                ))),
+                            };
+                            if let Some(stall) = stall {
+                                let detail = match result {
+                                    Ok(_) => stall,
+                                    Err(failure) => format!("{stall}: {}", failure.detail),
+                                };
+                                Err(LifecycleFailure::internal(detail))
+                            } else {
+                                result
                             }
                         }
                     };
@@ -963,10 +1016,10 @@ impl RuntimeState {
                         );
                         // Waiters and state readers cross the same completion
                         // boundary; the channel is notification, not ownership.
+                        drop(foreground_hold);
                         result_tx.send_replace(Some(result));
                     }
                     drop(_startup_enqueue);
-                    drop(foreground_hold);
                     // Hand off under daemon ownership even if the requesting
                     // client disconnects. The completed close remains visible
                     // until the cleanup replaces it in the lifecycle map.
