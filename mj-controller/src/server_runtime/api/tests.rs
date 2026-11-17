@@ -896,6 +896,8 @@ fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionVie
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
         open_request: None,
+        notification_stack: Default::default(),
+        notifications_read_through: 0,
         person_input_through: 0,
         work_liveness: None,
         undelivered_mailbox_event_keys: Vec::new(),

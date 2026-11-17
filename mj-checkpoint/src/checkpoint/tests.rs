@@ -1657,6 +1657,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
             canonical_session: CanonicalSessionSnapshot {
                 command_ledger: None,
                 assessment_state: None,
+                notification_stack: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {
@@ -4303,7 +4304,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
     for schema_version in [
         1,
         crate::archive::ARCHIVE_SCHEMA_VERSION + 1,
-        crate::archive::ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES + 1,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK + 1,
     ] {
         let incompatible = temp
             .path()

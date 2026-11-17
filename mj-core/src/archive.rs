@@ -44,6 +44,8 @@ pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 /// older build would drop them silently, so an archive that carries any
 /// declares this schema whatever else it carries.
 pub const ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES: u32 = 11;
+/// Older readers reject the new canonical notification record.
+pub const ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK: u32 = 12;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
@@ -306,6 +308,9 @@ pub struct CanonicalSessionSnapshot {
     /// Versioned worker assessment state, validated by assessment::Checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_state: Option<serde_json::Value>,
+    /// Worker-owned state outside the bounded assessment record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_stack: Option<crate::attention::NotificationStack>,
     /// Highest relay event ordinal incorporated into this projection.
     pub event_frontier: u64,
     /// Relay-authored rolling digest of the exact event prefix at the frontier.
@@ -337,6 +342,7 @@ impl CanonicalSessionSnapshot {
     pub fn content_matches(&self, other: &Self) -> bool {
         self.command_ledger == other.command_ledger
             && self.assessment_state == other.assessment_state
+            && self.notification_stack == other.notification_stack
             && self.transcript == other.transcript
             && self.queued_prompts == other.queued_prompts
             && self.session.without_activity_watermark()
@@ -652,6 +658,9 @@ impl NativeArtifact {
 }
 
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {
+    if let Some(stack) = &snapshot.notification_stack {
+        stack.validate_at(snapshot.event_frontier)?;
+    }
     if let Some(value) = &snapshot.assessment_state {
         crate::assessment::Checkpoint::decode(value)?;
     }

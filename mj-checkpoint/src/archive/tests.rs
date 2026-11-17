@@ -280,6 +280,7 @@ pub(super) fn input() -> ArchiveInput {
         canonical_session: CanonicalSessionSnapshot {
             command_ledger: None,
             assessment_state: None,
+            notification_stack: None,
             event_frontier: 4,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {

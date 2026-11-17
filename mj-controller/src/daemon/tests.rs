@@ -4103,6 +4103,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
         open_request: None,
+        notification_stack: Default::default(),
+        notifications_read_through: 0,
         person_input_through: 0,
         work_liveness: None,
         undelivered_mailbox_event_keys: Vec::new(),
@@ -5378,6 +5380,7 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
     mj_core::archive::CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use tracing::instrument::WithSubscriber;
 
 /// Only the coordinator accepts readiness or expiry. A ready bridge removes
@@ -135,6 +136,7 @@ fn run_relay_coordinator(
             .flatten();
         let mut verdict_tasks = tokio::task::JoinSet::new();
         let mut locator_tasks = tokio::task::JoinSet::new();
+        let mut locator_completions = BTreeMap::new();
         let mut verdict_generation = None;
         let mut verdict_poll = tokio::time::interval(std::time::Duration::from_secs(1));
         verdict_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -512,21 +514,29 @@ fn run_relay_coordinator(
                                     let reason = relay.apply_glide_assessment(generation, answer)?;
                                     attempt.finish("applied", reason);
                                     if reason == "user_input_required"
-                                        && let Some(request) = relay.question_locator_request(generation)
+                                        && let Some(completed) = relay.question_locator_completion(generation)
                                     {
-                                        if request.message_ids.len() == 1 {
-                                            if let Some(id) = mj_core::activity::question_locator::transcript_stable_id(&request.message_ids[0]) {
-                                                relay.store_question_target(generation, &id)?;
-                                                if let Some(client) = &verdict {
-                                                    client.log_single_question(&relay.turn_context().session_id(), &request, &id);
+                                        let request = relay.question_locator_request(generation);
+                                        match request {
+                                            Some(request) if request.message_ids.len() == 1 => {
+                                                let id = mj_core::activity::question_locator::transcript_stable_id(&request.message_ids[0]);
+                                                if let (Some(id), Some(client)) = (&id, &verdict) {
+                                                    client.log_single_question(&relay.turn_context().session_id(), &request, id);
                                                 }
+                                                relay.finish_question_locator(completed, id)?;
                                             }
-                                        } else if let Some(client) = verdict.clone() {
-                                            let session = relay.turn_context().session_id();
-                                            locator_tasks.spawn(async move {
-                                                let result = client.locate_question(&session, &request).await;
-                                                (generation, request.message_ids, result)
-                                            }.with_current_subscriber());
+                                            Some(request) if verdict.is_some() => {
+                                                let client = verdict.clone().expect("verified classifier client");
+                                                let session = relay.turn_context().session_id();
+                                                let task = locator_tasks.spawn(async move {
+                                                    let result = client.locate_question(&session, &request).await;
+                                                    (request.message_ids, result)
+                                                }.with_current_subscriber());
+                                                locator_completions.insert(task.id(), completed);
+                                            }
+                                            _ => {
+                                                relay.finish_question_locator(completed, None)?;
+                                            }
                                         }
                                     }
                                 }
@@ -547,24 +557,27 @@ fn run_relay_coordinator(
                     }
                     recover_authentication(&relay)?;
                 }
-                result = locator_tasks.join_next(), if !locator_tasks.is_empty() && !held => {
-                    match result {
-                        Some(Ok((revision, ids, Ok(Some(index))))) => {
-                            if let Some(id) = ids.get(index).and_then(|id| mj_core::activity::question_locator::transcript_stable_id(id)) {
-                                let stored = relay.lock().expect("relay state lock poisoned")
-                                    .store_question_target(revision, &id)?;
-                                tracing::info!(target: "mj_jev", revision, stable_id = %id,
-                                    outcome = if stored { "stored" } else { "stale" },
-                                    "question locator target resolved");
+                result = locator_tasks.join_next_with_id(), if !locator_tasks.is_empty() && !held => {
+                    if let Some(result) = result {
+                        let (task_id, target) = match result {
+                            Ok((task_id, (ids, Ok(index)))) => (
+                                task_id,
+                                index.and_then(|index| ids.get(index))
+                                    .and_then(|id| mj_core::activity::question_locator::transcript_stable_id(id)),
+                            ),
+                            Ok((task_id, (_, Err(error)))) => {
+                                tracing::warn!(target: "mj_jev", %error, "question locator failed");
+                                (task_id, None)
                             }
+                            Err(error) => {
+                                tracing::warn!(target: "mj_jev", %error, "question locator task failed");
+                                (error.id(), None)
+                            }
+                        };
+                        if let Some(completed) = locator_completions.remove(&task_id) {
+                            relay.lock().expect("relay state lock poisoned")
+                                .finish_question_locator(completed, target)?;
                         }
-                        Some(Ok((_, _, Err(error)))) => {
-                            tracing::warn!(target: "mj_jev", %error, "question locator failed");
-                        }
-                        Some(Err(error)) if !error.is_cancelled() => {
-                            tracing::warn!(target: "mj_jev", %error, "question locator task failed");
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -1582,6 +1595,8 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::SetSubagentWait { .. }
         | RelayCommand::SeedAssessmentContext { .. }
         | RelayCommand::DismissQuestion { .. }
+        | RelayCommand::ClearNotifications { .. }
+        | RelayCommand::NotificationsRead { .. }
         | RelayCommand::SetQuotaRecovery { .. }
         | RelayCommand::ResolveSteering { .. }
         | RelayCommand::DeliverMailboxEvent { .. } => None,

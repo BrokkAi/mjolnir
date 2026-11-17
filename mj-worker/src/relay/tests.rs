@@ -8529,6 +8529,10 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
             upgraded.snapshot.person_input_through,
             if later_prompt { 11 } else { 0 }
         );
+        assert_eq!(
+            !upgraded.snapshot.notification_stack.entries.is_empty(),
+            upgraded.snapshot.open_request().is_some(),
+        );
         // Both modern exact-empty and exact-open checkpoint envelopes survive restoration.
         let state = Checkpoint {
             version: 1,
@@ -8639,6 +8643,7 @@ fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_o
     let seed = mj_core::relay::RestoredRelaySeed {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: 7,
         event_frontier_digest: "a".repeat(64),
         queued_prompts: vec![mj_core::archive::CanonicalQueuedPrompt {

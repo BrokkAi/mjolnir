@@ -162,6 +162,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::Closing
             | RelayObservation::HandbackCheckStarted { .. }
             | RelayObservation::QuestionTargetUpdated { .. }
+            | RelayObservation::QuestionLocatorFinished { .. }
             | RelayObservation::TurnAssessmentUpdated { .. }
             | RelayObservation::Closed => {}
         }

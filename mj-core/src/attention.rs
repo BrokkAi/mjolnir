@@ -55,6 +55,23 @@ pub struct NotificationStack {
     pub entries: Vec<NotificationStackEntry>,
 }
 
+impl NotificationStack {
+    pub(crate) fn validate_at(&self, frontier: u64) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.revision <= frontier
+                && self.entries.iter().all(|entry| {
+                    entry.completed_ordinal > 0 && entry.completed_ordinal <= self.revision
+                })
+                && self
+                    .entries
+                    .windows(2)
+                    .all(|pair| { pair[0].completed_ordinal < pair[1].completed_ordinal }),
+            "notification stack is out of order or beyond its relay frontier",
+        );
+        Ok(())
+    }
+}
+
 /// Exact notification identity served by the daemon and echoed by clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

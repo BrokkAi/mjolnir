@@ -1115,7 +1115,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_linked_worktrees(&repositories) {
+        schema_version: if input.canonical_session.notification_stack.is_some() {
+            ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
+        } else if carries_linked_worktrees(&repositories) {
             ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
         } else if carries_review_refs(&repositories) {
             ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
@@ -1766,6 +1768,12 @@ fn read_verified_zip_cancellable(
                 ARCHIVE_SCHEMA_VERSION_MESSAGES
             );
             ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
+                    || snapshot.notification_stack.is_none(),
+                "notification stack requires archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
+            );
+            ensure!(
                 canonical_session.replace(snapshot).is_none(),
                 "archive contains duplicate canonical session payloads"
             );
@@ -1945,7 +1953,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -2025,6 +2034,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_NOTIFICATION_STACK
             || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES
             || (manifest.schema_version == ARCHIVE_SCHEMA_VERSION_REVIEW_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_LINKED_WORKTREES)

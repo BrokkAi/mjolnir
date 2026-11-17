@@ -22,6 +22,9 @@ pub fn relay_seed_for_restore(
         assessment_state: native_continuity
             .then(|| canonical.assessment_state.clone())
             .flatten(),
+        notification_stack: native_continuity
+            .then(|| canonical.notification_stack.clone())
+            .flatten(),
         event_frontier: canonical.event_frontier,
         event_frontier_digest: canonical.event_frontier_digest.clone(),
         queued_prompts: if queue_policy == QueueRestorePolicy::Restore {

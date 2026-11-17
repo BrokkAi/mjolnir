@@ -601,7 +601,12 @@ impl DurableRelay {
                 None,
             )));
         }
-        if let Err(message) = self.validate_turn_control(&command) {
+        if let Err(message) = self
+            .snapshot
+            .validate_notification_command(&command)
+            .map_err(str::to_owned)
+            .and_then(|()| self.validate_turn_control(&command))
+        {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
                 message,
@@ -1001,6 +1006,8 @@ impl DurableRelay {
             | RelayCommand::SetQuotaRecovery { .. }
             | RelayCommand::SeedAssessmentContext { .. }
             | RelayCommand::DismissQuestion { .. }
+            | RelayCommand::ClearNotifications { .. }
+            | RelayCommand::NotificationsRead { .. }
             | RelayCommand::InstallPromptContext { .. }
             | RelayCommand::DeliverMailboxEvent { .. }
             | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,

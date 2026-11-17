@@ -930,6 +930,7 @@ pub(super) fn project_observation(
         | RelayObservation::RetryAssessmentStarted { .. }
         | RelayObservation::HandbackCheckStarted { .. }
         | RelayObservation::QuestionTargetUpdated { .. }
+        | RelayObservation::QuestionLocatorFinished { .. }
         | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
