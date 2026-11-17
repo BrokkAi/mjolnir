@@ -6,6 +6,7 @@ use mj_client::session::ViewError;
 const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
 const MIN_SESSION_ID_PREFIX_LENGTH: usize = mj_core::state::SHORT_ID_LEN;
+pub(crate) const QUEUED_UNTIL_STARTUP_NOTE: &str = "Queued until startup ends.";
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
@@ -73,7 +74,7 @@ impl ApiBackend {
     ) -> Result<crate::server::api::SessionMessageResponse> {
         let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (target_session_id, own_child, managed_child, sender_title) =
+        let (target_session_id, own_child, managed_child, sender_title, target_state) =
             blocking("authorize session message", move || {
             let state = Controller::load()?.state;
             let sender = state.sessions.get(&sender_for_auth).ok_or_else(|| {
@@ -138,7 +139,13 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((target_id, own_child, managed_child, sender.message_name()))
+            Ok((
+                target_id,
+                own_child,
+                managed_child,
+                sender.message_name(),
+                target.state,
+            ))
         })
         .await?;
 
@@ -203,6 +210,22 @@ impl ApiBackend {
                 turn_id: Some(ordinal),
                 managed_child: false,
             });
+        }
+
+        // A peer message sent while startup is still running joins that queue.
+        // Mailing it immediately would land before the first prompt, and
+        // refusing it makes the sender retry until the message is lost (#1553).
+        if let Some(queued) = self
+            .queue_session_message_until_startup(
+                &target_session_id,
+                target_state,
+                &request_id,
+                &command_id,
+                &event,
+            )
+            .await?
+        {
+            return Ok(queued);
         }
 
         let protocol = {
@@ -326,6 +349,127 @@ impl ApiBackend {
             "session {recipient} no longer exists, so the message was not delivered"
         );
         Ok(())
+    }
+
+    /// Queue `event` when `target` cannot take it yet. `None` means deliver now.
+    /// An existing step for `command_id` is the retry: the first sender, text,
+    /// and timestamp win, and a failed step stays failed.
+    async fn queue_session_message_until_startup(
+        &self,
+        target: &str,
+        target_state: SessionState,
+        request_id: &str,
+        command_id: &str,
+        event: &mj_core::mailbox::MailboxEvent,
+    ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
+        let (sender_id, message_text) = session_message_identity(event)?;
+        if let Some(response) = self
+            .session_message_startup_receipt(target, command_id, sender_id, message_text)
+            .await?
+        {
+            return Ok(Some(response));
+        }
+        let eligible = matches!(
+            target_state,
+            SessionState::Provisioning
+                | SessionState::Running
+                | SessionState::Disconnected
+                | SessionState::Checkpointing
+        );
+        if !eligible {
+            return Ok(None);
+        }
+        let (group_id, status) = self.exports.startup_context(target.to_owned()).await?;
+        let target_id = target.to_owned();
+        let in_progress = blocking("read startup queue", move || {
+            Ok(
+                crate::database::next_startup_delivery(&target_id)?.is_some_and(|step| {
+                    matches!(step.phase.as_str(), "pending" | "delivering" | "accepted")
+                }),
+            )
+        })
+        .await?;
+        let pending = matches!(status, Some(crate::server::api::StartStatus::Pending));
+        let provisioning = target_state == SessionState::Provisioning;
+        let actor_missing = !(provisioning || pending || in_progress)
+            && self.sessions.session(target.to_owned()).await.is_err();
+        if !(provisioning || pending || in_progress || actor_missing) {
+            return Ok(None);
+        }
+        // A sticky failed startup must not block a later message once the
+        // session can take work. Only a message queued behind a still-pending
+        // group remembers that group, and only that group can retire it.
+        let waited_on_group = pending.then_some(group_id).flatten();
+        let message = crate::daemon::startup_followup::QueuedSessionMessage {
+            request_id: request_id.to_owned(),
+            sender_id: sender_id.to_owned(),
+            sender_title: session_message_title(event)?,
+            text: message_text.to_owned(),
+            created_at_ms: event.created_at_ms,
+            waited_on_group,
+        };
+        let queued = queued_session_message_response(target.to_owned());
+        match Arc::clone(&self.exports)
+            .queue_startup_session_message(target.to_owned(), message)
+            .await
+        {
+            Ok(()) => Ok(Some(queued)),
+            Err(error) if error.is::<mj_client::daemon::StartupPromptIdentityConflict>() => self
+                .session_message_startup_receipt(target, command_id, sender_id, message_text)
+                .await?
+                .context("startup command ID was reused with a different payload")
+                .map(Some),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// What a retry of `command_id` should answer. `None` when no step exists.
+    async fn session_message_startup_receipt(
+        &self,
+        target: &str,
+        command_id: &str,
+        sender_id: &str,
+        message_text: &str,
+    ) -> Result<Option<crate::server::api::SessionMessageResponse>> {
+        let command_id = command_id.to_owned();
+        let existing = blocking("read session-message startup step", move || {
+            crate::database::load_startup_delivery(&command_id)
+        })
+        .await?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if existing.session_id != target {
+            return Err(session_message_identity_conflict());
+        }
+        let stored: crate::daemon::StartupStep = serde_json::from_str(&existing.step_json)
+            .context("stored session message could not be read")?;
+        let crate::daemon::StartupStep::SessionMessage {
+            sender_id: stored_sender,
+            text,
+            ..
+        } = &stored
+        else {
+            return Err(session_message_identity_conflict());
+        };
+        if stored_sender != sender_id || text != message_text {
+            return Err(session_message_identity_conflict());
+        }
+        match existing.phase.as_str() {
+            "failed" | "rejecting" => bail!(
+                "{}",
+                existing
+                    .error
+                    .unwrap_or_else(|| "the message was not delivered".to_owned())
+            ),
+            "pending" | "delivering" | "accepted" | "cancelling" => {
+                Ok(Some(queued_session_message_response(target.to_owned())))
+            }
+            "done" | "dismissed" => {
+                bail!("the message was already settled but its delivery receipt is missing")
+            }
+            other => bail!("session message is in an unknown startup phase {other}"),
+        }
     }
 
     /// The parent's messages to its children and what became of them. The
@@ -712,6 +856,43 @@ pub(super) fn resolve_session_target(
             ))
             .into())
         }
+    }
+}
+
+fn queued_session_message_response(
+    session_id: String,
+) -> crate::server::api::SessionMessageResponse {
+    crate::server::api::SessionMessageResponse {
+        session_id,
+        via: "queued".into(),
+        note: Some(QUEUED_UNTIL_STARTUP_NOTE.into()),
+        mailbox_delivery: None,
+        turn_id: None,
+        managed_child: false,
+    }
+}
+
+fn session_message_identity_conflict() -> anyhow::Error {
+    anyhow::Error::new(mj_client::daemon::StartupPromptIdentityConflict)
+}
+
+fn session_message_identity(event: &mj_core::mailbox::MailboxEvent) -> Result<(&str, &str)> {
+    match &event.body {
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { id, .. },
+            text,
+        } => Ok((id.as_str(), text.as_str())),
+        _ => bail!("session message is missing its sender"),
+    }
+}
+
+fn session_message_title(event: &mj_core::mailbox::MailboxEvent) -> Result<String> {
+    match &event.body {
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session { title, .. },
+            ..
+        } => Ok(title.clone()),
+        _ => bail!("session message is missing its sender"),
     }
 }
 

@@ -2572,6 +2572,34 @@ impl ExportRuntime for ParkingExports {
         Box::pin(load_startup_status(session_id))
     }
 
+    fn startup_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<(Option<String>, Option<StartStatus>)>> {
+        Box::pin(load_startup_context(session_id))
+    }
+
+    fn queue_startup_session_message(
+        self: Arc<Self>,
+        session_id: String,
+        message: crate::daemon::startup_followup::QueuedSessionMessage,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let (command_id, step) =
+                crate::daemon::startup_followup::session_message_startup_step(&message);
+            crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+                session_id,
+                command_id,
+                step_json: serde_json::to_string(&step)?,
+                phase: "pending".into(),
+                group_id: None,
+                accepted_ordinal: None,
+                error: None,
+            }])?;
+            Ok(())
+        })
+    }
+
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         self.records.lock().unwrap().get(session_id).cloned()
     }
@@ -3215,6 +3243,184 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
     assert!(rendered.contains("session_id parent-1"));
     assert!(rendered.contains("Please check the retry path."));
+}
+
+/// A message to a session that is still starting is accepted once and held
+/// with the startup work. It is not mailed or submitted until that work ends,
+/// and a retry keeps the first copy (#1553).
+#[tokio::test]
+async fn send_message_while_starting_is_queued_once() {
+    if !isolated_parked_test("send_message_while_starting_is_queued_once") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let mut pending_peer = parent_record("peer-1", "peer");
+    pending_peer.no_github_events = true;
+    crate::database::save_session(&pending_peer).unwrap();
+    let mut provisioning_peer = parent_record("peer-2", "peer");
+    provisioning_peer.state = SessionState::Provisioning;
+    provisioning_peer.no_github_events = true;
+    crate::database::save_session(&provisioning_peer).unwrap();
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "peer-1".into(),
+        command_id: "api-startup-peer-1-prompt".into(),
+        step_json: serde_json::to_string(&crate::daemon::StartupStep::ApiPrompt {
+            text: "boot".into(),
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: Some("api-startup-peer-1".into()),
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    let exports = ParkingExports::with_modern_worker(SessionState::Running, None, true);
+    let (backend, mut delivered) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+
+    let send = |request_id: &'static str, target: &'static str, text: &'static str, at: i64| {
+        let backend = backend.clone();
+        async move {
+            backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
+                        request_id: request_id.into(),
+                        created_at_ms: at,
+                        action: mj_core::subagent::SubagentToolAction::SendMessage {
+                            child_session_id: target.into(),
+                            message: text.into(),
+                        },
+                    },
+                )
+                .await
+        }
+    };
+
+    let first = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        10,
+    )
+    .await;
+    assert!(!first.is_error, "{}", first.message);
+    let result: serde_json::Value = serde_json::from_str(&first.message).unwrap();
+    assert_eq!(result["via"], "queued");
+    assert_eq!(result["status"], "queued");
+    assert_eq!(
+        result["note"],
+        super::subagent_input::QUEUED_UNTIL_STARTUP_NOTE
+    );
+    assert!(result["turn_id"].is_null(), "{result}");
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "a starting session must not be mailed before its startup prompt"
+    );
+    assert!(delivered_prompts(&mut delivered).is_empty());
+
+    let retry = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        99,
+    )
+    .await;
+    assert!(!retry.is_error, "{}", retry.message);
+    let retry: serde_json::Value = serde_json::from_str(&retry.message).unwrap();
+    assert_eq!(retry["via"], "queued");
+    let held = startup_session_messages("peer-1");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].1, "context for the first turn");
+    assert_eq!(held[0].2, 10, "the first request's timestamp wins");
+    assert_eq!(held[0].3.as_deref(), Some("api-startup-peer-1"));
+
+    let conflict = send("while-starting-1", "peer-1", "a different message", 100).await;
+    assert!(conflict.is_error, "{}", conflict.message);
+    let conflict: serde_json::Value = serde_json::from_str(&conflict.message).unwrap();
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("different payload"),
+        "{conflict}"
+    );
+    assert_eq!(startup_session_messages("peer-1").len(), 1);
+
+    let failed_at = crate::database::load_startup_delivery(&held[0].0)
+        .unwrap()
+        .unwrap();
+    crate::database::fail_retained_startup_step(
+        &failed_at.command_id,
+        "the message was not delivered: the session is Error",
+    )
+    .unwrap();
+    let refused = send(
+        "while-starting-1",
+        "peer-1",
+        "context for the first turn",
+        101,
+    )
+    .await;
+    assert!(refused.is_error, "{}", refused.message);
+    let refused: serde_json::Value = serde_json::from_str(&refused.message).unwrap();
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("was not delivered"),
+        "{refused}"
+    );
+
+    let provisioning = send(
+        "while-provisioning-1",
+        "peer-2",
+        "before the actor exists",
+        11,
+    )
+    .await;
+    assert!(!provisioning.is_error, "{}", provisioning.message);
+    let provisioning: serde_json::Value = serde_json::from_str(&provisioning.message).unwrap();
+    assert_eq!(provisioning["via"], "queued");
+    assert_eq!(provisioning["session_id"], "peer-2");
+    let provisioning_held = startup_session_messages("peer-2");
+    assert_eq!(provisioning_held.len(), 1);
+    assert_eq!(provisioning_held[0].1, "before the actor exists");
+    assert!(provisioning_held[0].3.is_none());
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn startup_session_messages(session_id: &str) -> Vec<(String, String, u64, Option<String>)> {
+    crate::database::load_startup_deliveries()
+        .unwrap()
+        .into_iter()
+        .filter(|step| step.session_id == session_id)
+        .filter_map(|step| {
+            let crate::daemon::StartupStep::SessionMessage {
+                text,
+                created_at_ms,
+                waited_on_group,
+                ..
+            } = serde_json::from_str(&step.step_json).unwrap()
+            else {
+                return None;
+            };
+            Some((step.command_id, text, created_at_ms, waited_on_group))
+        })
+        .collect()
 }
 
 /// The sender of a peer message is named as the session list names it: a name

@@ -347,6 +347,20 @@ creation order. `priority` drops the headings and lists sessions by attention
 level, so a question is always at the top; the numbered fold keys do nothing
 in this order.
 
+## Going AFK
+
+When you step away, choose **Go AFK** from the command palette (`prefix+:`).
+While you are away, an agent that asks a question or needs permission is told
+you are away and asked to do other useful work first. If it asks the same
+thing again, the request waits for you, and the AFK screen lists the sessions
+that are waiting. Use the AFK return action to come back. The state ends when the window closes.
+
+To go AFK automatically, set **Settings → Advanced → Auto-AFK after
+(minutes)**: the terminal or web UI goes AFK after that many minutes without
+input, and `0` (the default) disables it. Spotting "the same thing again"
+uses the Jev classifier ([Sessions](/sessions/)); with Jev off, requests
+simply wait for you.
+
 ## Command palette
 
 Click **Commands** or press `prefix+:` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands. Click a command and **Run** to execute it, or **Close** to dismiss the palette. A session row's **⋯** button opens a palette limited to that session's actions.

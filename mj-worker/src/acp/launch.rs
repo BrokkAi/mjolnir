@@ -292,7 +292,15 @@ pub(super) fn session_request_meta(
         );
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
-        let mut allowed = vec!["Bash(gh:*)".to_owned()];
+        // A harness whose approval destination is this request supplies the
+        // rule here, so the grant is scoped to the session even when the home
+        // is not one Mjolnir staged (see `HarnessKind::gh_approval`).
+        let mut allowed = match spec.harness.gh_approval() {
+            mj_core::config::GhApproval::SessionOptions => {
+                vec![mj_core::config::HarnessKind::CLAUDE_GH_RULE.to_owned()]
+            }
+            _ => Vec::new(),
+        };
         if include_history_tools {
             for server in project_history_mcp(spec) {
                 if let McpServer::Stdio(server) = server {
@@ -320,7 +328,9 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::REVIEW_MCP_SERVER)),
             );
         }
-        options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
+        if !allowed.is_empty() {
+            options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
+        }
     }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
@@ -466,6 +476,12 @@ const OWNED_MCP_SERVERS: [&str; 3] = [
     mj_core::subagent::REVIEW_MCP_SERVER,
 ];
 
+/// agy's rule for commands whose first word is `gh`. Its Auto mode sends a
+/// `gh` call that leaves the sandbox to its reviewer, and the worker grants
+/// the command so an agent's GitHub work does not interrupt a person. agy
+/// keeps a person's own `deny` rules above this one.
+const ANTIGRAVITY_GH_GRANT: &str = "command(gh)";
+
 /// Trust the Mjolnir-owned MCP servers this launch registered over ACP, for
 /// agy in its guardian (Auto) mode, which asks a person before every MCP tool
 /// call. agy names a call `mcp_<server>_<tool>` and the request says nothing
@@ -481,7 +497,10 @@ const OWNED_MCP_SERVERS: [&str; 3] = [
 /// Also grant reads below the home directory agy sees in its launch environment.
 /// A trailing directory separator allows nested files and keeps sibling paths
 /// outside the grant (checked against agy 1.5.8). This grants no writes or
-/// commands; agy keeps applying its Auto-mode policy to those tools.
+/// commands; agy keeps applying its Auto-mode policy to those tools. One
+/// command grant is staged: `command(gh)`, Mjolnir's GitHub CLI approval, so
+/// an agent's issue and pull-request work reaches no person. A person's own
+/// `deny` rules stay above it.
 ///
 /// Unconstrained targets run agy with `--dangerously-skip-permissions`, which
 /// already approves every call.
@@ -609,6 +628,7 @@ fn with_antigravity_grants(
     allow.retain(|entry| {
         !entry.as_str().is_some_and(|rule| {
             rule == read_rule
+                || rule == ANTIGRAVITY_GH_GRANT
                 || staged_reads.iter().any(|staged| staged == rule)
                 || owned.iter().any(|owned| owned == rule)
         })
@@ -619,6 +639,7 @@ fn with_antigravity_grants(
             .map(|server| serde_json::Value::String(rule(server))),
     );
     allow.push(serde_json::Value::String(read_rule.to_owned()));
+    allow.push(serde_json::Value::String(ANTIGRAVITY_GH_GRANT.to_owned()));
     serde_json::to_vec_pretty(&project).context("serialize the project file")
 }
 

@@ -117,7 +117,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         !unsupported.contains("Pending application"),
         "{unsupported}"
     );
-    assert!(!unsupported.contains("Mj-managed mbx"), "{unsupported}");
+    assert!(!unsupported.contains("Mj-managed build cache (mbx)"), "{unsupported}");
 
     // The status line belongs to this page: leaving it takes the line along.
     let shown = setup_dialog_mut(&mut dashboard.mode)

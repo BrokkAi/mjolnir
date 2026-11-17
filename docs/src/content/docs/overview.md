@@ -38,7 +38,8 @@ A Mjolnir installation has four main parts:
    of the daemon. Detaching a client does not stop the session.
 
 A profile selects a harness account, and a target selects the execution
-boundary. Managed container sessions use a bundle describing the
+boundary. Managed container sessions use a bundle (a named set of
+repositories) describing the
 repositories in their workspace; bare sessions instead select an existing
 project directory, which may be a plain local folder. See [Profiles and harnesses](/profiles/), [Workspaces and
 bundles](/workspaces-bundles/), and [Targets](/targets/).

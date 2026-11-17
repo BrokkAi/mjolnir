@@ -35,7 +35,7 @@ use crate::relay::{
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
-use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::config::HarnessKind;
 use mj_core::subprocess::terminate_process_group;
 use mj_core::worker_protocol::{DecodedRelayRequest, decode_relay_request};
 
@@ -1786,12 +1786,8 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    if (config.execution_policy == ExecutionPolicy::ConfiguredApprovals
-        && matches!(
-            config.harness,
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Muse
-        ))
-        || super::json_gh_rules::configures_native_rules_always(config.harness)
+    // Every launch records its `gh` approval where the selected harness reads
+    // it, and OpenCode's denials apply in every execution policy.
     {
         let budget = preparation_step(
             root,
@@ -1801,18 +1797,11 @@ async fn prepare_and_start_harness(
             cancel,
         )
         .await?;
-        // Only the TOML-configured harnesses edit a file in their home.
-        let home = if matches!(config.harness, HarnessKind::Kimi | HarnessKind::Grok) {
-            Some(
-                credentials
-                    .as_ref()
-                    .map_err(|message| anyhow::anyhow!("{message}"))?
-                    .home
-                    .clone(),
-            )
-        } else {
-            None
-        };
+        let home = credentials
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?
+            .home
+            .clone();
         let root = root.to_owned();
         let session_id = config.session_id.clone();
         let harness = config.harness;
@@ -1831,16 +1820,10 @@ async fn prepare_and_start_harness(
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring command permissions");
                 }
-                if let Some(home) = &home {
-                    super::gh_rules::configure_toml_gh_rules(
-                        &root,
-                        &session_id,
-                        home,
-                        harness,
-                        policy,
-                    )?;
-                }
-                super::json_gh_rules::configure_json_gh_rules(
+                super::gh_rules::configure_native_rules(
+                    &root,
+                    &session_id,
+                    &home,
                     harness,
                     policy,
                     denials,

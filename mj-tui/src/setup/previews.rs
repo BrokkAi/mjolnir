@@ -334,7 +334,7 @@ impl SetupDialog {
         let owner = if preview.user_managed {
             "User-managed mbx; mj budgets are inactive"
         } else {
-            "Mj-managed mbx"
+            "Mj-managed build cache (mbx)"
         };
         let status = match &preview.application {
             BuildCacheApplication::Pending => "Pending application".into(),
