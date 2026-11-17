@@ -5,7 +5,6 @@ ones), so nothing here reads live experiment data or writes into the repository'
 """
 import contextlib
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -16,15 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-REAL = Path(__file__).resolve().parent
-_BOOT = tempfile.TemporaryDirectory(prefix='writer-studies-boot-')
-os.environ['REVIEW_ARMS_DIR'] = _BOOT.name
-os.environ['REVIEW_ARMS_REPO'] = str(REAL.parents[2])
-sys.path.insert(0, str(REAL))
-w = importlib.import_module('brief_writer_terra')
-SETS = w.brief_oracle.sets()
-P, S = SETS['P'], SETS['S']
-ALL = P + S
+from writer_test_fixture import SCRIPTS as REAL, WriterTestCase
 
 
 def sha(path):
@@ -36,7 +27,7 @@ def labels_for(catches):
     return ['caught' if n < catches else 'partial' if n == catches else 'missed' for n in range(3)]
 
 
-class Study(unittest.TestCase):
+class Study(WriterTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='writer-studies-')
         self.addCleanup(self.tmp.cleanup)
@@ -45,10 +36,10 @@ class Study(unittest.TestCase):
         self.scripts.mkdir()
         for name in ('corpus', 'judge'):
             (self.scripts / name).symlink_to(REAL / name)
-        for patch in (mock.patch.object(w, 'ROOT', self.root), mock.patch.object(w.brief_ablation, 'ROOT', self.root),
-                      mock.patch.object(w, 'SCRIPTS', self.scripts)):
-            patch.start()
-            self.addCleanup(patch.stop)
+        self.writer = self.load_writer(self.root)
+        self.writer.SCRIPTS = self.scripts
+        sets = self.writer.brief_oracle.sets()
+        self.bugs = sets['P'] + sets['S']
         self.terra_before = {p: sha(p) for p in (REAL / 'results/brief-writer-terra').glob('*') if p.is_file()}
 
     def tearDown(self):
@@ -58,7 +49,7 @@ class Study(unittest.TestCase):
     def cli(self, *args):
         out = io.StringIO()
         with mock.patch.object(sys, 'argv', ['brief_writer_terra.py', *args]), contextlib.redirect_stdout(out):
-            w.main()
+            self.writer.main()
         return out.getvalue()
 
     def write_round(self, name, rows):
@@ -78,9 +69,9 @@ class Study(unittest.TestCase):
 
     def rows(self, ts, bt, nb, tt=None, solnb=True):
         """Per-arm caught counts of 3 sessions. Baseline and BT session IDs are shared by both rounds."""
-        t = w.REVIEW_MODEL
+        t = self.writer.REVIEW_MODEL
         out = []
-        for bug in ALL:
+        for bug in self.bugs:
             cells = [('BT', 'blind', t, bt), ('A', 'no-brief', t, nb)]
             if ts is not None:
                 cells.append(('TS', 'blind-sonnet', t, ts))
@@ -95,11 +86,11 @@ class Study(unittest.TestCase):
 
     def briefs(self):
         for kind in ('blind', 'blind-sonnet'):
-            for bug in ALL:
+            for bug in self.bugs:
                 d = self.root / 'briefs' / kind / bug
                 d.mkdir(parents=True, exist_ok=True)
                 (d / 'brief.md').write_text(f'{kind} {bug}\n')
-        (self.root / 'briefs/blind-sonnet' / ALL[0] / 'launch-intent.json').write_text(
+        (self.root / 'briefs/blind-sonnet' / self.bugs[0] / 'launch-intent.json').write_text(
             json.dumps({'model': 'sonnet', 'effort': 'high', 'profile': 'claude6'}))
 
     def standard(self, k_ts=2, k_bt=2, k_nb=0, j_bt=1, j_nb=0, j_tt=3):
@@ -146,8 +137,8 @@ class SonnetReadout(Study):
         prov = report['provenance']
         self.assertEqual(prov['source_rounds'], ['brief-judge-k', 'brief-judge-j'])
         self.assertEqual(prov['raw_artifacts']['brief-judge-k']['key'], sha(self.root / 'private/key-brief-judge-k.json'))
-        self.assertEqual(prov['writer']['launches'][ALL[0]]['profile'], 'claude6')
-        self.assertIsNone(prov['writer']['launches'][ALL[1]])
+        self.assertEqual(prov['writer']['launches'][self.bugs[0]]['profile'], 'claude6')
+        self.assertIsNone(prov['writer']['launches'][self.bugs[1]])
         # Per-diff output keeps J's TT sessions apart from K's arms.
         per = json.loads((self.sonnet_results() / 'per-diff.json').read_text())
         self.assertNotIn('TT', per['sets']['P'][0])
@@ -164,7 +155,7 @@ class SonnetReadout(Study):
 
     def test_incomplete_or_mismatched_inputs_refuse_before_writing(self):
         def drop(rows, arm):
-            return [r for r in rows if not (r[0] == ALL[0] and r[1] == arm)]
+            return [r for r in rows if not (r[0] == self.bugs[0] and r[1] == arm)]
 
         def retag(rows, which, **changes):
             names = ('bug', 'arm', 'condition', 'model', 'session', 'label')
@@ -174,7 +165,7 @@ class SonnetReadout(Study):
             'missing TS cell': (lambda: self.write_round('brief-judge-k', drop(self.rows(2, 2, 0), 'TS')),
                                 'incomplete sample'),
             'TS reviewer count': (lambda: self.write_round('brief-judge-k', [r for r in self.rows(2, 2, 0)
-                                                                              if r[4] != f'{ALL[0]}/TS/2']),
+                                                                              if r[4] != f'{self.bugs[0]}/TS/2']),
                                   'incomplete sample'),
             'TS recorded as the Terra writer arm': (
                 lambda: self.write_round('brief-judge-k', retag(self.rows(2, 2, 0), 'TS', arm='TT')),
@@ -184,10 +175,10 @@ class SonnetReadout(Study):
                 'wrong arm/condition'),
             'reference missing a BT session': (
                 lambda: self.write_round('brief-judge-j', [r for r in self.rows(None, 1, 0, tt=3)
-                                                           if r[4] != f'{ALL[0]}/BT/0']),
+                                                           if r[4] != f'{self.bugs[0]}/BT/0']),
                 'brief-judge-j'),
             'reference sessions differ': (
-                lambda: self.write_round('brief-judge-j', [r[:4] + (r[4] + '-again' if r[4].endswith(f'{ALL[0]}/BT/0') else r[4],
+                lambda: self.write_round('brief-judge-j', [r[:4] + (r[4] + '-again' if r[4].endswith(f'{self.bugs[0]}/BT/0') else r[4],
                                                                     r[5]) for r in self.rows(None, 1, 0, tt=3)]),
                 'identical sessions'),
             'reference lacks the historical TT': (
@@ -247,10 +238,10 @@ class SonnetArtifacts(Study):
                   'totals': {'total_tokens': {'tokens': 1234}}}
         # A Claude-style record: no cost, no coverage block and no token totals.
         bare = {'turns': turns}
-        writer('blind', ALL[0], priced, 'gpt-6.1-sol')
-        writer('blind-terra', ALL[0], priced, 'gpt-6.1-terra')
-        writer('blind-sonnet', ALL[0], bare, 'sonnet')
-        writer('blind-sonnet', ALL[1], bare, 'sonnet')
+        writer('blind', self.bugs[0], priced, 'gpt-6.1-sol')
+        writer('blind-terra', self.bugs[0], priced, 'gpt-6.1-terra')
+        writer('blind-sonnet', self.bugs[0], bare, 'sonnet')
+        writer('blind-sonnet', self.bugs[1], bare, 'sonnet')
         out = [json.loads(line) for line in self.cli('usage', '--writer', 'sonnet').splitlines()]
         summary = {r['kind']: r for r in out}
         self.assertEqual(sorted(summary), ['blind', 'blind-sonnet', 'blind-terra'])
@@ -260,7 +251,7 @@ class SonnetArtifacts(Study):
         self.assertEqual(summary['blind']['median']['cost_usd'], 5.0)
         self.assertEqual(summary['blind']['median']['total_tokens'], 1234)
         rows = [json.loads(line) for line in (self.sonnet_results() / 'usage.jsonl').read_text().splitlines()]
-        got = next(r for r in rows if r['kind'] == 'blind-sonnet' and r['bug'] == ALL[0])
+        got = next(r for r in rows if r['kind'] == 'blind-sonnet' and r['bug'] == self.bugs[0])
         self.assertIsNone(got['cost_usd'])
         self.assertIsNone(got['total_tokens'])
         self.assertIsNone(got['cost_turns_missing'])
@@ -268,22 +259,22 @@ class SonnetArtifacts(Study):
         self.assertTrue(any(r.get('state') == 'not written' for r in rows))
 
         # A known subtotal cannot stand in for a complete price across writers or turns.
-        first = self.root / 'briefs/blind-sonnet' / ALL[0] / 'reviewers/abc/usage.json'
+        first = self.root / 'briefs/blind-sonnet' / self.bugs[0] / 'reviewers/abc/usage.json'
         first.write_text(json.dumps(priced))
         partial = {**priced, 'coverage': {'estimated_cost_turns': 1, 'missing_cost_turns': 1}}
-        second = self.root / 'briefs/blind-sonnet' / ALL[1] / 'reviewers/abc/usage.json'
+        second = self.root / 'briefs/blind-sonnet' / self.bugs[1] / 'reviewers/abc/usage.json'
         second.write_text(json.dumps(partial))
         summary = {r['kind']: r for r in map(json.loads, self.cli('usage', '--writer', 'sonnet').splitlines())}
         self.assertIsNone(summary['blind-sonnet']['total_cost_usd'])
         self.assertEqual(summary['blind-sonnet']['unknown_cost'], 1)
         self.assertEqual(summary['blind-sonnet']['known_cost_usd'], 10.0)
         rows = [json.loads(line) for line in (self.sonnet_results() / 'usage.jsonl').read_text().splitlines()]
-        unknown = next(r for r in rows if r['kind'] == 'blind-sonnet' and r['bug'] == ALL[1])
+        unknown = next(r for r in rows if r['kind'] == 'blind-sonnet' and r['bug'] == self.bugs[1])
         self.assertIsNone(unknown['cost_usd'])
         self.assertEqual(unknown['known_cost_subtotal_usd'], 5.0)
 
     def test_default_writer_is_terra_and_its_usage_leaves_out_sonnet(self):
-        d = self.root / 'briefs/blind-sonnet' / ALL[0]
+        d = self.root / 'briefs/blind-sonnet' / self.bugs[0]
         (d / 'reviewers/abc').mkdir(parents=True)
         (d / 'done.json').write_text(json.dumps({'fix_rounds': 0}))
         self.assertEqual(self.cli('usage'), '')  # nothing written for Sol or Terra: no summary, no crash
@@ -296,11 +287,11 @@ class SonnetArtifacts(Study):
         shared.mkdir(parents=True)
         (shared / 'CONTAINS.md').write_text('rule\n')
         for kind in ('blind', 'blind-sonnet'):
-            for bug in ALL:
+            for bug in self.bugs:
                 d = self.root / 'briefs' / kind / bug
                 d.mkdir(parents=True, exist_ok=True)
                 (d / 'brief.md').write_text(f'relations of {bug} written by {kind[-3:]}\n')
-        for bug in ALL:
+        for bug in self.bugs:
             (shared / f'item-{bug}.json').write_text(json.dumps({'census': []}))
         self.cli('contains-build', '--writer', 'sonnet')
         base = self.root / 'briefs/writer-contains-sonnet'
@@ -309,7 +300,7 @@ class SonnetArtifacts(Study):
         self.assertEqual(len(items), 44)
         key = json.loads((base / 'key.json').read_text())
         self.assertEqual({v['kind'] for v in key.values()}, {'blind', 'blind-sonnet'})
-        self.assertEqual({v['bug'] for v in key.values()}, set(ALL))
+        self.assertEqual({v['bug'] for v in key.values()}, set(self.bugs))
         uploaded = ' '.join(p.read_text() for p in unit.iterdir())
         self.assertNotIn('blind-sonnet', uploaded)
         self.assertFalse((unit / 'key.json').exists())
@@ -320,7 +311,7 @@ class SonnetArtifacts(Study):
 
     def test_sonnet_leak_round_is_bound_to_its_own_brief_hashes_and_dirs(self):
         self.briefs()
-        for bug in ALL:
+        for bug in self.bugs:
             (self.root / 'briefs/blind-sonnet' / bug / 'done.json').write_text('{"fix_rounds": 0}')
         self.cli('leak-build', '--writer', 'sonnet')
         d = self.root / 'briefs/blind-sonnet-leak-0'
@@ -331,13 +322,13 @@ class SonnetArtifacts(Study):
                     for oid, record in key.items() for j in 'AB']
         (d / 'workflow-out.json').write_text(json.dumps({'verdicts': verdicts}))
         # A brief edited after its leak judgment cannot reuse the verdict.
-        (self.root / 'briefs/blind-sonnet' / ALL[0] / 'brief.md').write_text('changed after judging\n')
+        (self.root / 'briefs/blind-sonnet' / self.bugs[0] / 'brief.md').write_text('changed after judging\n')
         with self.assertRaisesRegex(AssertionError, 'changed since leak round 0'):
             self.cli('leak-collect', '--writer', 'sonnet')
-        (self.root / 'briefs/blind-sonnet' / ALL[0] / 'brief.md').write_text(f'{"blind-sonnet"} {ALL[0]}\n')
+        (self.root / 'briefs/blind-sonnet' / self.bugs[0] / 'brief.md').write_text(f'{"blind-sonnet"} {self.bugs[0]}\n')
         out = self.cli('leak-collect', '--writer', 'sonnet')
         self.assertIn('"missed": 22', out)
-        record = json.loads((self.root / 'briefs/blind-sonnet' / ALL[0] / 'blind-leak.json').read_text())
+        record = json.loads((self.root / 'briefs/blind-sonnet' / self.bugs[0] / 'blind-leak.json').read_text())
         self.assertEqual(record['rounds'][0]['label'], 'missed')
 
 
