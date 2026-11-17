@@ -1,0 +1,28 @@
+{
+  "id": "maintainability-file-cap-missing-truncated",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "276030a90d12253407794e4642bb62b69b203bb4c114801f843e1bfb52aeb425",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes report caps and serialization, but never identifies the max_files early break returning truncated=false when further distinct files remain. Its observations about rendered line numbers concern a different behavior and do not state a defect finding.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes cap parameters and the truncated result field, but does not identify the max_files early break or unreported omission of additional distinct files. Its observation about displayed line endpoints concerns a different behavior.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

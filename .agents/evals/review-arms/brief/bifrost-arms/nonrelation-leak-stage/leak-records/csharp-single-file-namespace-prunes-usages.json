@@ -1,0 +1,28 @@
+{
+  "id": "csharp-single-file-namespace-prunes-usages",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "143c9d4f03821fb7581062cdb4d28dc8cc5045dd26d9206388b85eb806b3238a",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes namespace_of_file and candidate routing, but never identifies multiple namespace blocks in one file or omitted usages in a later namespace. These contextual observations do not identify the required defect.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions namespace_of_file and candidate routing, but never identifies multiple namespace blocks or later-namespace references being pruned from candidate files and usage results.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

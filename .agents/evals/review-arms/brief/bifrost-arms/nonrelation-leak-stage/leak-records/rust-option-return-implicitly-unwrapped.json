@@ -1,0 +1,28 @@
+{
+  "id": "rust-option-return-implicitly-unwrapped",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "41a446fb937c7175aa35f1b290020c86c03cedcffcd2065744638a61a7e45429",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload unwrapping for ordinary calls or invalid field navigation on the resulting receiver.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output mentions container return-type extraction and explicit unwrap inference, but never identifies unconditional Option payload inference for an ordinary call or invalid payload-field navigation.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

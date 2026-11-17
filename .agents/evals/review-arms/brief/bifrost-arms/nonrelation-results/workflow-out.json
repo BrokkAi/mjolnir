@@ -1,0 +1,1565 @@
+{
+  "verdicts": [
+    {
+      "output_id": "0aeab229971f8e57",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration-site imports and custom unwrap/expect return signatures. Neither identifies payload inference for an ordinary, unwrapped Option-returning call.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e2620ee18a49f974",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address import context, custom unwrap methods, and macro method/field distinctions. They do not identify unconditional Option stripping on direct calls.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "aa6109a37425d8c9",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern imports, custom unwrap return types, and macro call classification. None identifies an Option payload being inferred without any unwrap syntax.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "270d26c32aa546f7",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "caught",
+      "matching_finding": "Preserve Option as the receiver type until it is unwrapped",
+      "rationale": "The third finding explicitly identifies unconditional Option<Foo>-to-Foo inference on a direct call and consequent lookup on the wrong receiver. Its method-navigation example has the same cause as the known field-navigation defect and calls for syntax-directed unwrapping.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f8fc990942271c2d",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The custom unwrap finding concerns an explicit call to a user-defined method, while the other finding concerns import context. Neither diagnoses implicit payload unwrapping of ordinary Option-returning calls.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "96af10d69d04352d",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address field declaration imports and user-defined unwrap signatures. They do not identify automatic removal of Option from an ordinary call result.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "82e8aca33a2cde08",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings cover callable constants, generic visibility, and inherited macros. They do not identify associated constants being admitted into bare current-module lookup.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ef089d420b8454ac",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern callable constants being excluded and qualified types being mistaken for generic parameters. Neither describes associated constants competing with module constants in bare lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "67f6f41248d41119",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern callable constants and inline-module import context. Neither identifies the missing ownership exclusion for bare value candidates.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d860f9ad82add079",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address callable constants being rejected and inherited macros being missed. They do not identify associated constants incorrectly admitted as bare module values.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b1ea3a4ad802474d",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern generic parameter detection and calls through constants. Neither identifies impl/trait-associated constants participating in bare-name lookup.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "df96e7433e2136ac",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern callable constants and nested free functions. Neither diagnoses associated constants competing with module constants because ownership filtering was removed.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "e4d929beb05ea0fd",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark reports truncated when the file cap excludes inputs",
+      "rationale": "The first finding explicitly describes excess valid files being omitted at max_files without setting input_truncated. Its condition is more files than the cap, rather than incorrectly treating an exact fit as truncated.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "837f84dcab8b35fb",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark files omitted by max_files as truncated",
+      "rationale": "The first finding identifies the file-cap early exit and false completeness flag when additional valid inputs remain. It does not require marking exact-fit requests truncated.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b575f25f3fa5d9f5",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark file-cap truncation and count skipped inputs correctly",
+      "rationale": "The first finding gives the precise two-existing-files/max_files=1 trigger and identifies the missing input_truncated flag. This matches the known mechanism and distinguishes excess input from an exact fit.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "89256679c057960a",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark file-cap omissions as truncation",
+      "rationale": "The second finding identifies the file-cap exit leaving input_truncated false when more valid files were requested than the cap. This matches the omission and does not claim every exact-cap report is incomplete.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3c9e87973358a73b",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark reports truncated when the file cap excludes inputs",
+      "rationale": "The second finding explicitly connects excess valid files, the early break at max_files, and an incorrectly false truncated flag. The condition excludes an exact-fit request.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5bc50a8004638643",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "Mark file-cap omissions as truncated",
+      "rationale": "The second finding identifies unexamined valid files beyond max_files and the missing input_truncated flag. It limits the complaint to excess inputs rather than an exact fit.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7eb15c0e1059668b",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern TypeScript traversal, shape inference, and receiver shadowing. None identifies callable JavaScript object members being emitted as Field rather than Function.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ae6a653f6bfe9325",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern recursive traversal, Zod and function shape inference, and receiver shadowing. They do not identify object-literal method symbol-kind misclassification.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7aa65f7a1fe78df5",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address cross-file member candidates, shape inference, and recursive walks. None ties missing function results or wrong symbol kinds to callable object properties being indexed as fields.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "fb7d2b089ff35e3f",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern receiver file identity, shape inference, and traversal safety. They do not diagnose callable object-literal members being classified as fields.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "16987b7dfa83a198",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern traversal safety/cost and TypeScript return-shape inference. None identifies the JavaScript walker unconditionally emitting Field for callable members.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "4fea82f1cdc1bb88",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern traversal, shape inference, and shadowing. None identifies the callable-as-field classification that removes methods from function search results.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c11f6641984196ad",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding addresses recursive export-chain traversal and stack overflow. It does not identify terminal module-name code mentions widening candidates and causing expensive forward-edge verification.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "316fa20d469b0ffc",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern project-snapshot cache sharing and recursive traversal. Neither identifies non-import code occurrences widening importer candidates and exhausting search budgets.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "89d0f4a087e0e9f5",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The importer-candidate finding describes missing alias imports, the opposite candidate-selection problem. It does not identify arbitrary code mentions causing excessive forward-edge verification.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a27128d11922e990",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding addresses recursive import/export traversal and stack safety. It does not diagnose terminal-name widening through arbitrary code occurrences.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3af8a63eead9ce39",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address snapshot caches, alias imports being omitted, and recursive traversal. None identifies non-import code mentions being admitted and repeatedly semantically verified.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1ab3fe4d394ebb66",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding diagnoses alias-based glob imports missing from the candidate set. Sharing the candidate-selection location does not identify the known excessive-candidate and verification-cost defect.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "76cb0b03725fa98f",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "Resolve namespaces at the reference location",
+      "rationale": "The fifth finding explicitly connects multiple namespace blocks, use of the first namespace for all references, missed references in the second block, and affected candidate selection. This identifies the known file-level routing assumption.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "9758bf302b2162c5",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "Resolve namespaces at the reference location",
+      "rationale": "The sixth finding identifies first-namespace selection in a file with multiple namespace blocks and explicitly says it prevents same-namespace candidate discovery for other blocks. That matches the known pruning mechanism.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b869ee0fd9b01dd3",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address qualified static receivers, optional/params arguments, and overload selection. None identifies multiple namespace blocks being reduced to one namespace during candidate routing.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "2ec9c41a1e14be31",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "Resolve namespaces at the reference location",
+      "rationale": "The fourth finding identifies several namespaces in one file being reduced to a single declaration namespace, omitted references elsewhere in the file, and the same defect in candidate routing. This matches the known mechanism.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ac3f2c234532a0a2",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "Keep namespace visibility specific to the reference",
+      "rationale": "The fourth finding explicitly says multiple namespaces are reduced to one and same-namespace candidate selection can exclude the file entirely. This directly identifies the known missing-usage routing defect.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f4f4a69e5fa40505",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address qualified static consumers, overloads, optional/params arguments, and file filters. None identifies the single-namespace assumption for files containing multiple namespace blocks.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6c6b2d8328eec7fa",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding concerns inaccurate file reuse counts for duplicate blobs. It does not discuss timed-out sends remaining queued or progress arriving after the response.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d6ebfcb3df55decb",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "5462d96b100a11da",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding concerns a refresh/bind observation race that suppresses new-workspace progress. It does not identify a timed-out notification surviving the response boundary.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a896c420bbcca384",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "123d687012c08d91",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d6c4caca0708b888",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "124f82856a716c6d",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, import handling, module naming, and default trait methods. None identifies missing descent into named fields inside enum variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "ea9961fad65e1e75",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, glob/public imports, default trait methods, and test detection. They do not identify enum struct-variant fields being omitted from declaration inventory.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "672da2abb62b5a0b",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, and test detection. None describes recording an enum variant without traversing its named fields.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "40e9c1d50295ab07",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern mixed-language updates, inline modules, imports, default trait methods, and test detection. None identifies missing field declarations within enum struct variants.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "310bd1a25f4da716",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern mixed-language updates, modules/imports, test detection, and trait methods. They do not identify omitted named enum-variant fields or their variant ownership.",
+      "finding_count": 7,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a0a2cf7fac6a3f4c",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, and test detection. None identifies missing traversal and indexing of named fields inside enum variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "0aeab229971f8e57",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration import context and custom unwrap/expect methods, not stripping Option from an ordinary call result before any unwrap syntax.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e2620ee18a49f974",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration import context and custom unwrap/expect methods, not stripping Option from an ordinary call result before any unwrap syntax.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "aa6109a37425d8c9",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration import context and custom unwrap/expect methods, not stripping Option from an ordinary call result before any unwrap syntax.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "270d26c32aa546f7",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "caught",
+      "matching_finding": "this unconditionally infers `Foo` as the receiver",
+      "rationale": "The finding explicitly identifies unconditional Option payload inference for an ordinary call and incorrect member resolution on that payload. Its method-call example and syntax-dependent unwrapping remedy match the same mechanism as the invalid field-navigation trigger.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f8fc990942271c2d",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration import context and custom unwrap/expect methods, not stripping Option from an ordinary call result before any unwrap syntax.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "96af10d69d04352d",
+      "bug": "rust-option-return-implicitly-unwrapped",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern declaration import context and custom unwrap/expect methods, not stripping Option from an ordinary call result before any unwrap syntax.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "82e8aca33a2cde08",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ef089d420b8454ac",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "67f6f41248d41119",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d860f9ad82add079",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b1ea3a4ad802474d",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "df96e7433e2136ac",
+      "bug": "rust-bare-value-admits-associated-constant",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Rejecting callable constants is a different namespace-filter defect. No finding identifies associated constants being admitted into bare current-module value lookup without an ownership check.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "e4d929beb05ea0fd",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "When more valid files are supplied than `max_files`, the loop stops without setting `input_truncated`.",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "837f84dcab8b35fb",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "When more valid files are supplied than `max_files`, the loop stops at the cap without setting `input_truncated`",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b575f25f3fa5d9f5",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "two existing files with `max_files: 1` produce `truncated: false`",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "89256679c057960a",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "When more valid files are supplied than `max_files`, this exits without setting `input_truncated`.",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3c9e87973358a73b",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "When more valid files are supplied than `max_files`, the loop stops without setting `input_truncated`",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5bc50a8004638643",
+      "bug": "maintainability-file-cap-missing-truncated",
+      "label": "caught",
+      "matching_finding": "When more valid files are supplied than `max_files`, this exits without setting `input_truncated`.",
+      "rationale": "The finding identifies the file-selection early exit leaving truncated false despite omitted valid inputs. It explicitly conditions the problem on more valid files than the cap, so it does not incorrectly demand truncation for an exact fit.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7eb15c0e1059668b",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ae6a653f6bfe9325",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7aa65f7a1fe78df5",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "fb7d2b089ff35e3f",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "16987b7dfa83a198",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "4fea82f1cdc1bb88",
+      "bug": "javascript-object-method-indexed-as-field",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shape inference, traversal, or receiver resolution. None identifies callable object-literal members being emitted as fields instead of functions.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c11f6641984196ad",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "316fa20d469b0ffc",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "89d0f4a087e0e9f5",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a27128d11922e990",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3af8a63eead9ce39",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1ab3fe4d394ebb66",
+      "bug": "rust-importer-planning-widens-to-code-mentions",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings address recursive walks, snapshot caches, or missing alias candidates. None identifies broadening importer candidates to arbitrary code mentions of the terminal module name and the resulting expensive forward-edge verification.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "76cb0b03725fa98f",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "a `Target` reference inside the second namespace resolves against the first namespace, causing missed references or references attributed to the wrong type; the same file-level assumption also affects candidate selection.",
+      "rationale": "The namespace finding identifies the one-namespace-per-file assumption despite multiple namespace blocks and explicitly connects it to candidate selection or routing and omitted references. This matches the known pruning defect even though the finding also discusses incorrect namespace resolution.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "9758bf302b2162c5",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "also prevents same-namespace candidate discovery for those blocks.",
+      "rationale": "The namespace finding identifies the one-namespace-per-file assumption despite multiple namespace blocks and explicitly connects it to candidate selection or routing and omitted references. This matches the known pruning defect even though the finding also discusses incorrect namespace resolution.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b869ee0fd9b01dd3",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern qualified static accesses, overloads, argument arity, or file filters. None connects multiple namespace blocks in one file to omitted candidate files.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "2ec9c41a1e14be31",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "References in another namespace in the same file can therefore resolve to the wrong same-named type or be omitted, and the same approximation also affects candidate routing.",
+      "rationale": "The namespace finding identifies the one-namespace-per-file assumption despite multiple namespace blocks and explicitly connects it to candidate selection or routing and omitted references. This matches the known pruning defect even though the finding also discusses incorrect namespace resolution.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ac3f2c234532a0a2",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "caught",
+      "matching_finding": "same-namespace candidate selection can also exclude the file entirely.",
+      "rationale": "The namespace finding identifies the one-namespace-per-file assumption despite multiple namespace blocks and explicitly connects it to candidate selection or routing and omitted references. This matches the known pruning defect even though the finding also discusses incorrect namespace resolution.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f4f4a69e5fa40505",
+      "bug": "csharp-single-file-namespace-prunes-usages",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern qualified static accesses, overloads, argument arity, or file filters. None connects multiple namespace blocks in one file to omitted candidate files.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6c6b2d8328eec7fa",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The sole finding concerns inaccurate reused-file counters for identical blobs. It does not address timed-out progress notifications remaining queued beyond the request response.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d6ebfcb3df55decb",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings and does not identify the known defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "5462d96b100a11da",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The sole finding concerns a concurrent refresh replacing a new workspace observation and suppressing progress. This is a different lifetime race from a timed-out notification remaining queued after the response.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a896c420bbcca384",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings and does not identify the known defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "123d687012c08d91",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings and does not identify the known defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d6c4caca0708b888",
+      "bug": "mcp-timed-out-progress-survives-response",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The output contains no findings and does not identify the known defect.",
+      "finding_count": 0,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "124f82856a716c6d",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "ea9961fad65e1e75",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "672da2abb62b5a0b",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "40e9c1d50295ab07",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 6,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "310bd1a25f4da716",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 7,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a0a2cf7fac6a3f4c",
+      "bug": "rust-enum-variant-named-fields-omitted",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern inline modules, imports, trait methods, test detection, or mixed-language updates. None identifies missing traversal and indexing of named fields within enum struct variants.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "01e7eab53851371e",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve uncertainty from other overload candidates",
+      "rationale": "The finding explicitly distinguishes failed conversion proof from proven inapplicability and explains that an unresolved competing overload is discarded to fabricate a unique selection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "dd8b616edebc9dfd",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve uncertainty when another overload cannot be classified",
+      "rationale": "The finding explicitly distinguishes failed conversion proof from proven inapplicability and explains that an unresolved competing overload is discarded to fabricate a unique selection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "bf6ce081829124ee",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The sole finding concerns invalid scalar conversions between array element types. It does not identify ignored unknown competitors or unjustified singleton overload selection.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "7b91bb0c78dbb616",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve uncertainty from other overload candidates",
+      "rationale": "The finding explicitly distinguishes failed conversion proof from proven inapplicability and explains that an unresolved competing overload is discarded to fabricate a unique selection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "69ecf142bfb7d2ee",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve uncertainty from other overload candidates",
+      "rationale": "The finding explicitly distinguishes failed conversion proof from proven inapplicability and explains that an unresolved competing overload is discarded to fabricate a unique selection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "b6d1e3ecd0b383cb",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "[P1] Keep unresolved overloads from proving a unique selection",
+      "rationale": "The finding explicitly distinguishes failed conversion proof from proven inapplicability and explains that an unresolved competing overload is discarded to fabricate a unique selection.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d94f239f956aaca0",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Preserve the selected component of a qualified constant",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "f1f712fa4b5b7176",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Resolve the selected segment of a qualified constant",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a3b2cb7d0ccf1e08",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Resolve each component of a qualified constant independently",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "20c952e71f6ecaed",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Preserve the selected component of a qualified constant",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "1519da597540dc64",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Resolve the selected component of a qualified constant",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "c7da8e99ca03b977",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "[P2] Preserve the selected component of a qualified constant",
+      "rationale": "The finding identifies promotion of the selected qualifier to the full scope-resolution expression, causing navigation to the terminal constant instead of the focused segment.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "3876427a338219bc",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern assignment evaluation order, overloaded operator return types, and shadowed callees. None connects an unexpanded item macro generating Drop to the plain-struct proof and omitted local cleanup uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "77fe20858b2ce2d5",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding attributes omitted cleanup to an implementation in another module, an explicitly excluded near miss. It does not identify same-file macro-generated Drop evading the plain-struct prescan.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "cc58330aec1a3081",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding describes cross-file implementations, which the match rule explicitly excludes. The output never identifies the same-file unexpanded macro mechanism.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8791d40f3ef4c174",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern shadowed callees, unqualified field-owner identity, and equivalent indices. None identifies macro-generated Drop bypassing plain-struct classification for a local binding.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "cab07eff5e2e1ada",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The cleanup findings concern overloaded operator outputs and cross-file Drop implementations; the latter is an explicit near miss. Neither identifies a same-file item macro hiding Drop from the new struct-expression proof.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "0ad6bb88c87fcf65",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding explicitly requires accounting for implementations outside the prepared file, rather than unexpanded item macros in that file. This is an excluded near miss despite the shared cleanup symptom.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "a8d34d5aa073af0f",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P2] Use the loop body for while-let bindings",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8faddbde7a79aeb3",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve bindings in while-let loops",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8c978fbc8eeecc67",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P2] Preserve while-let binding activation",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "878e20ba89942028",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P2] Preserve while-let binding activation crates/bifrost-rust/src/structural.rs:427-427",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "78a861a7d8bb829d",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P1] Preserve bindings in while-let bodies",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "08dba19cbc43c879",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "[P2] Use the loop body for while-let binding activation",
+      "rationale": "The finding identifies the body-versus-consequence grammar-field mismatch for while-let and connects the failed lookup to dropped bindings and incomplete lexical analysis.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6aabea546b6d9066",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding concerns permanently cached empty Scala indexes after store errors. It does not identify matching epoch checks unnecessarily acquiring SQLite writer access.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "d000ba7662cc3c3d",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern reclamation scans holding a write transaction and loss of dirty Scala facts after generation changes. Neither identifies writer reservation before checking an unchanged epoch.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "da7366b2e36d710e",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding describes repeated reclamation scans and writer blocking during persistence maintenance. That is a different path and cause from a read-only matching-epoch check taking an Immediate transaction.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "8b29f23783cf5eb2",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern reclamation scans blocking writers and caching empty Scala indexes after errors. Neither identifies an already-current epoch lookup blocking behind an unrelated writer.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6af767404b83cb68",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern stale-generation fallback indexes and repeated scans of active blobs. Neither identifies unnecessary writer access in the matching-epoch path.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "6b2ee0d6a7a3427c",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Both findings concern silently empty analyzer file sets or Scala indexes after generation cutover. Neither identifies the Immediate transaction acquired before checking an unchanged epoch.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "A"
+    },
+    {
+      "output_id": "01e7eab53851371e",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "A failed proof is not evidence that the candidate is inapplicable.",
+      "rationale": "The finding explicitly distinguishes an unknown conversion from proven inapplicability and explains that ignoring an unresolved competitor falsely makes the successful overload exact.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "dd8b616edebc9dfd",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "this selects the first overload as exact even though the second may also apply or be the actual Java overload.",
+      "rationale": "The finding explicitly distinguishes an unknown conversion from proven inapplicability and explains that ignoring an unresolved competitor falsely makes the successful overload exact.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "bf6ce081829124ee",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The only finding concerns invalid scalar conversions between array element types. It does not identify selection of a sole proven overload despite unresolved competitors.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "7b91bb0c78dbb616",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "the latter is discarded and the first is selected as unique.",
+      "rationale": "The finding explicitly distinguishes an unknown conversion from proven inapplicability and explains that ignoring an unresolved competitor falsely makes the successful overload exact.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "69ecf142bfb7d2ee",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "this selects the first overload as exact even though the other may also apply or be more specific.",
+      "rationale": "The finding explicitly distinguishes an unknown conversion from proven inapplicability and explains that ignoring an unresolved competitor falsely makes the successful overload exact.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "b6d1e3ecd0b383cb",
+      "bug": "model-overload-unknown-competitor-discarded",
+      "label": "caught",
+      "matching_finding": "unknown applicability must remain inconclusive rather than count as rejection.",
+      "rationale": "The finding explicitly distinguishes an unknown conversion from proven inapplicability and explains that ignoring an unresolved competitor falsely makes the successful overload exact.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d94f239f956aaca0",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "this climbs to the entire `A::B` expression and returns the definition of `B` instead of `A`.",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "f1f712fa4b5b7176",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "this loop promotes the node to the whole `A::B` expression, so lookup returns `B` instead of `A`",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a3b2cb7d0ccf1e08",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "this climbs to the entire scope resolution and returns the definition of `A::B` instead of `A`.",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "20c952e71f6ecaed",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "this unconditionally promotes it to the entire scope resolution and returns the definition of `Foo::Bar` instead of `Foo`.",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "1519da597540dc64",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "Selecting `A` in `A::B` climbs to the whole scope resolution and returns the definition of `A::B` instead of `A`",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "c7da8e99ca03b977",
+      "bug": "ruby-constant-navigation-climbs-to-terminal",
+      "label": "caught",
+      "matching_finding": "this climbs to the entire scope resolution and resolves `A::B`, so go-to-definition navigates to `B` instead of `A`.",
+      "rationale": "The finding identifies promotion of the focused constant to the enclosing qualified path, causing navigation to the terminal declaration rather than the selected prefix.",
+      "finding_count": 5,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "3876427a338219bc",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern assignment ordering, overloaded operator return types, and callee shadowing. None identifies an item macro hiding an impl Drop from the plain-struct prescan and thereby suppressing local cleanup uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "77fe20858b2ce2d5",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding attributes the unsound plain-struct proof to implementations in other module files, an explicit near miss. It never identifies an unexpanded same-file item macro generating impl Drop; the other findings concern assignment order and field identity.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "cc58330aec1a3081",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding describes implementations in another module rather than unexpanded same-file macros. The match rule explicitly excludes this general file-local absence complaint; assignment ordering and constant indices are separate defects.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8791d40f3ef4c174",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "Callee shadowing, unqualified field owner identity, and equivalent constant indices are different mechanisms. None connects a macro-generated impl Drop to the plain-struct expression proof and omitted local cleanup uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "cab07eff5e2e1ada",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The plain-struct finding cites impl Drop in another file, which the specification explicitly excludes. The operator-output and field-identity findings also do not identify same-file item macro uncertainty.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "0ad6bb88c87fcf65",
+      "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The Drop finding challenges implementations outside the prepared file, an explicit near miss, without identifying a same-file macro-generated impl Drop. The remaining findings concern assignment order, index identity, and field owner resolution.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "a8d34d5aa073af0f",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "A `while let` owner has a `body` field rather than `consequence`, so this returns `None` for every such binder.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8faddbde7a79aeb3",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "the Rust grammar names the loop block `body`, not `consequence`, so this returns `None` and drops the pattern binding.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8c978fbc8eeecc67",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "the owner is a `while_expression`, whose loop block is in the `body` field rather than `consequence`.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "878e20ba89942028",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "the loop's block is the `body` field, not `consequence`, so this returns `None` and the lexical environment drops the binding with `BindingActivationUnknown`.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 3,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "78a861a7d8bb829d",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "the Rust grammar names the loop body `body`, not `consequence`, so this lookup returns `None` and drops every pattern binding in the loop.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "08dba19cbc43c879",
+      "bug": "rust-while-let-binder-body-field",
+      "label": "caught",
+      "matching_finding": "the `while_expression` uses the `body` field rather than `consequence`, so this returns `None`, drops the binding and marks the lexical environment incomplete.",
+      "rationale": "The finding identifies the body/consequence grammar-field mismatch for while-let and connects the failed lookup to omitted pattern bindings.",
+      "finding_count": 4,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6aabea546b6d9066",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The finding concerns permanently caching empty Scala indexes after a read error. It does not discuss matching epoch checks unnecessarily acquiring SQLite writer access.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "d000ba7662cc3c3d",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern synchronous reclamation scans and loss of dirty Scala facts. Writer contention from reclamation is a different path; neither identifies the immediate transaction before checking an already-matching epoch.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "da7366b2e36d710e",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The sole finding identifies full-registry scans during persistence maintenance. It does not identify a read-only matching-epoch lookup blocked by an unnecessary writer reservation.",
+      "finding_count": 1,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "8b29f23783cf5eb2",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings describe reclamation scan costs and caching empty Scala indexes after errors. Neither connects matching epoch checks to acquiring an immediate transaction before reading the current epoch.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6af767404b83cb68",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern stale-generation index fallback and repeated scans of active blobs. They do not identify unchanged epoch lookups unnecessarily waiting for unrelated SQLite writers.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    },
+    {
+      "output_id": "6b2ee0d6a7a3427c",
+      "bug": "matching-analyzer-epoch-needs-writer-slot",
+      "label": "missed",
+      "matching_finding": null,
+      "rationale": "The findings concern losing analyzed file sets and caching empty Scala indexes after generation cutover. Neither identifies writer reservation on the already-current epoch path.",
+      "finding_count": 2,
+      "confidence": "high",
+      "judge": "B"
+    }
+  ],
+  "missing": []
+}

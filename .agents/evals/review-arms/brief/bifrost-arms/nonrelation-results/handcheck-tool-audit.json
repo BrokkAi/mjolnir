@@ -1,0 +1,79 @@
+{
+  "represented_requests": 12,
+  "all_sources_manually_reviewed": true,
+  "records": [
+    {
+      "seq": 89,
+      "kind": "required initialization checkout",
+      "accepted": true,
+      "source_sha256": "c4692cc36a2a2457ba5a94f5ab43960a7912292d72a1792109ef3603606c71c2"
+    },
+    {
+      "seq": 91,
+      "kind": "uploaded instructions read",
+      "accepted": true,
+      "source_sha256": "b21dfc3dd1eb69370cdb46bd8fa98175e071c52507326e379dfdd04c28a83326"
+    },
+    {
+      "seq": 94,
+      "kind": "uploaded handcheck rules and unit inventory",
+      "accepted": true,
+      "source_sha256": "3affb7c9a5c0019025e540e88fb0f1f62cf737916109620e406ffaaf74570261"
+    },
+    {
+      "seq": 97,
+      "kind": "uploaded decision rules and public batches",
+      "accepted": true,
+      "source_sha256": "26347b2ac6afdb2d6ea6c1b1eae7be7fb8ef250d510887a9801056c2f87eafef"
+    },
+    {
+      "seq": 99,
+      "kind": "uploaded handcheck rows",
+      "accepted": true,
+      "source_sha256": "ad0322a91c5e3e074fea16b64585836660bac12e8af773a04a320565b89e3999"
+    },
+    {
+      "seq": 102,
+      "kind": "initial Python uploaded-row read attempt; identical payload rerun with Python3",
+      "accepted": true,
+      "source_sha256": "0fb76501e11a6a0b7a74ab293496541befdfc038a0b74982e84750eac48a55c4"
+    },
+    {
+      "seq": 105,
+      "kind": "same read-only uploaded rows/batches via Python3",
+      "accepted": true,
+      "source_sha256": "455cda38f149fc22b16ca1deeb40f3b6d735146f27606b14fd3c5cc1127bfa77"
+    },
+    {
+      "seq": 110,
+      "kind": "read full uploaded outputs",
+      "accepted": true,
+      "source_sha256": "45aa06f5c2caf015410ad0ef3c7d2c4720f3f072ed6a5c5f6a99b3a8ecf90a29"
+    },
+    {
+      "seq": 158,
+      "kind": "reread uploaded Ruby outputs",
+      "accepted": true,
+      "source_sha256": "e5cb5d57449a311a83930ed66a570ccfed776b09de63300e8d5935db58e868e9"
+    },
+    {
+      "seq": 160,
+      "kind": "permitted historical intro source",
+      "accepted": true,
+      "source_sha256": "303c5b726873bd5bfcee44d65e8a3c2ac1a9d6698e6ff4e5785721e0016783ab"
+    },
+    {
+      "seq": 166,
+      "kind": "permitted historical intro/fix source",
+      "accepted": true,
+      "source_sha256": "5eafa7dcd87469a0246d923ca154a4592695a1b0a6b2000dbc8e577274c47cd6"
+    },
+    {
+      "seq": 238,
+      "kind": "literal group reasons, uploaded rows, proposal JSON write/self-checks only",
+      "accepted": true,
+      "source_sha256": "a3b0750a0771221f41cf3122014255a2d38290a2c7f081060b6cb59002389b3e"
+    }
+  ],
+  "limits": "Recorded request sources only; some bridge payload fields are absent, but full represented sources remain in titles/presentation. Not OS isolation. No private attribution, outside results, network, tests, builds or other roles observed."
+}

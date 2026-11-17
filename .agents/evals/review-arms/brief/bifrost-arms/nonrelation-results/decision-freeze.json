@@ -1,0 +1,7 @@
+{
+  "frozen_at": "2026-11-17T07:40:57.104659+00:00",
+  "decisions_sha256": "767e0be78326a0d17e6293560973a52e8dae83efd08e384457531e119d95282e",
+  "parent_acceptance_sha256": "83966c1670f7ceb455d65519fa1d2497d74bab6672378d97ee40b9aca74ba8c9",
+  "raw_proposal_sha256": "0864b528e28a32986f85030cd7d2d507445e060bdcc7b2027c818999715cbe85",
+  "private_arm_key_not_read": true
+}

@@ -1,0 +1,1894 @@
+{
+  "recorded_at": "2026-11-17T06:30:55.422013+00:00",
+  "status": "complete13/13writers; all13API-confirmedsuspended; fulltranscriptauditclassified",
+  "expected": 13,
+  "completed": 13,
+  "unstarted": [],
+  "driver_exit": {
+    "exit_code": 0,
+    "finished_at": "2026-11-17T06:29:45.332860+00:00"
+  },
+  "launch_HEAD": "e0300768448bfa07cf2ae6c7b4d51b97874fcc85",
+  "final_HEAD": "e721a01ac033178d1323b084b1294be8fe1208ef",
+  "runtime_commit": "be74a5cb9",
+  "runtime_inputs_and_prior17_preserved": true,
+  "original_writer_prompt_unchanged": true,
+  "lint_repairs_total": 1,
+  "usage_source": "existing driver once-per-SID root mj usage snapshots; no summing paginated turns",
+  "priced_sessions": 13,
+  "missing_price_sids": [],
+  "known_cost_usd_api_equivalent": 3.237596,
+  "total_cost_usd_api_equivalent": 3.237596,
+  "aggregate_usage_coverage": {
+    "recorded_turns": 14,
+    "full_turn_reports": 14,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 0,
+    "unfinished_turns": 0,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 14,
+    "missing_cost_turns": 0
+  },
+  "background_operator_remaining": false,
+  "writers": [
+    {
+      "id": "model-overload-unknown-competitor-discarded",
+      "sid": "ed965eebe3d29d1abaed211da6d57d02",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "bfae2ecd1788",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/ed965eebe3d29d1abaed211da6d57d02/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-ed965eebe3d2-633db4-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-ed965eebe3d2-633db4-workspace/_data",
+            "destination": "/workspace/ed965eebe3d29d1abaed211da6d57d02",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/ed965eebe3d29d1abaed211da6d57d02",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          }
+        ]
+      },
+      "intro_commit": "2dc7a9b231a028ebd9412c5241b90beea841c589",
+      "base_commit": "fcee1114ea49e78a3289b2015fd2ec7c0e1996ce",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/model-overload-unknown-competitor-discarded/brief.md",
+      "brief_sha256": "095d969883c542bed9410af52914b2bfb949d4def86d2dd7f75233490b58de5d",
+      "brief_bytes": 4726,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/model-overload-unknown-competitor-discarded/reviewers/ed965eebe3d2/transcript.json",
+      "transcript_sha256": "7a4bccf1fec5ba100e40966ecfcb62b86bebf3c7a89805e10be986228248155c",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/model-overload-unknown-competitor-discarded/reviewers/ed965eebe3d2/usage.json",
+      "usage_sha256": "536bfa004f9c0702e3cd3618f5351200392fcbd18b04e4720cab6ee390970a49",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 501504,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 95844,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 4201,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 722,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 601549,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 501504,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 95844,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 4201,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 722,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 601549,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2838484000,
+      "cost_usd_api_equivalent": 0.2838484,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896272918740324
+    },
+    {
+      "id": "rust-while-let-binder-body-field",
+      "sid": "90878775d6a298486f47617381db79a9",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "f5e5aaee8354",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/90878775d6a298486f47617381db79a9/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-90878775d6a2-6ae9dd-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-90878775d6a2-6ae9dd-workspace/_data",
+            "destination": "/workspace/90878775d6a298486f47617381db79a9",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/90878775d6a298486f47617381db79a9",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "eea67f99599410a874c7c37dea4fb40b0f9c187c",
+      "base_commit": "ead7aa834e2ab6718e6e7dea058cda2986db2ecf",
+      "fix_rounds": 1,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-while-let-binder-body-field/brief.md",
+      "brief_sha256": "2fc693cd9b11e6e155c8d3f2c0ffebe0ae78d1fe0052f51f64a63a5de1121490",
+      "brief_bytes": 6327,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-while-let-binder-body-field/reviewers/90878775d6a2/transcript.json",
+      "transcript_sha256": "0b9478548562a78184f409b4340d5b26f7d501a316ea5c20f5e85a8b99a4a332",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-while-let-binder-body-field/reviewers/90878775d6a2/usage.json",
+      "usage_sha256": "9be9840ba2074f05fb3fd66961908167b4f1d8e3e76234ca290b4b8794fed896",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 684800,
+          "reported_turns": 2
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 82461,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 3944,
+          "reported_turns": 2
+        },
+        "thought_tokens": {
+          "tokens": 506,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 771205,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 684800,
+              "reported_turns": 2
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 82461,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 3944,
+              "reported_turns": 2
+            },
+            "thought_tokens": {
+              "tokens": 506,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 771205,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2728420000,
+      "cost_usd_api_equivalent": 0.272842,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896296107496423
+    },
+    {
+      "id": "javascript-object-method-indexed-as-field",
+      "sid": "669ced85cbe642ab57b3fb55f0e9b1f3",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "d3e130967fe3",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/669ced85cbe642ab57b3fb55f0e9b1f3/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-669ced85cbe6-4513ab-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-669ced85cbe6-4513ab-workspace/_data",
+            "destination": "/workspace/669ced85cbe642ab57b3fb55f0e9b1f3",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/669ced85cbe642ab57b3fb55f0e9b1f3",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "fe862359a21a9f7ce9b72ecf2e8dc1481d191f6f",
+      "base_commit": "3af94431f3690b83afed677b57402173f0f727bc",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/javascript-object-method-indexed-as-field/brief.md",
+      "brief_sha256": "5ed703879717faed99c5b8cf3228d2e1611b67d6aec00bc92cc2f935ac04c5e2",
+      "brief_bytes": 5740,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/javascript-object-method-indexed-as-field/reviewers/669ced85cbe6/transcript.json",
+      "transcript_sha256": "dc79bc03794b1ec979bebf96c19f80025fd0be376b042d19992ea5841ba3f35f",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/javascript-object-method-indexed-as-field/reviewers/669ced85cbe6/usage.json",
+      "usage_sha256": "0685797d5de6122d33258dc38c09cfd2d08cd9dd5ffa6df60dac09c18cfa96d5",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 285312,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 50166,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2711,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 272,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 338189,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 285312,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 50166,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2711,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 272,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 338189,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1559732000,
+      "cost_usd_api_equivalent": 0.1559732,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896248900767569
+    },
+    {
+      "id": "matching-analyzer-epoch-needs-writer-slot",
+      "sid": "85b3ccf8e8593227d6c7b4bafac37e73",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "dea28e174cc6",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/85b3ccf8e8593227d6c7b4bafac37e73/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-85b3ccf8e859-ceca89-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-85b3ccf8e859-ceca89-workspace/_data",
+            "destination": "/workspace/85b3ccf8e8593227d6c7b4bafac37e73",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/85b3ccf8e8593227d6c7b4bafac37e73",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "e21778d1d9516d5180308a4fd5dd503bbe5296c8",
+      "base_commit": "28fde2ac5cea47e9bb8457670c6bf571ed925831",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/matching-analyzer-epoch-needs-writer-slot/brief.md",
+      "brief_sha256": "7b158e915a5c0924b3390ab08ca6c6a7d5a009d6c516da24a6658d4bb8d874ea",
+      "brief_bytes": 4886,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/matching-analyzer-epoch-needs-writer-slot/reviewers/85b3ccf8e859/transcript.json",
+      "transcript_sha256": "6e3260c949a5f3c438046c5fad428f90c971a27d0541ccef445b52bfa500a5c3",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/matching-analyzer-epoch-needs-writer-slot/reviewers/85b3ccf8e859/usage.json",
+      "usage_sha256": "a3c04e1af507fdbdab24a691cc753d584dcd0d8ea7b6a8dd00ec389b71baef6c",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 706560,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 93077,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 4050,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 865,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 803687,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 706560,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 93077,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 4050,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 865,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 803687,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2973100000,
+      "cost_usd_api_equivalent": 0.29731,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896465001712762
+    },
+    {
+      "id": "maintainability-file-cap-missing-truncated",
+      "sid": "526babaf9257ad36ee12b0164533f0ee",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "140527e9bb75",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/526babaf9257ad36ee12b0164533f0ee/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-526babaf9257-04d5f2-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-526babaf9257-04d5f2-workspace/_data",
+            "destination": "/workspace/526babaf9257ad36ee12b0164533f0ee",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/526babaf9257ad36ee12b0164533f0ee",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "f5ff17edf1709fcde9f753c2cf92b143cbf5d448",
+      "base_commit": "e9101909b801dd5ce4facd447d154707f710efaf",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/maintainability-file-cap-missing-truncated/brief.md",
+      "brief_sha256": "276030a90d12253407794e4642bb62b69b203bb4c114801f843e1bfb52aeb425",
+      "brief_bytes": 6245,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/maintainability-file-cap-missing-truncated/reviewers/526babaf9257/transcript.json",
+      "transcript_sha256": "6968284d934d75f1b4d65377b76980f281b41ca37cfb5cbb79587dc970e14558",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/maintainability-file-cap-missing-truncated/reviewers/526babaf9257/usage.json",
+      "usage_sha256": "d2dad9bc20acd7c800b3e2c5f6c04be801f141e4af8f3caba8cbe89e53ecb9b2",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 589568,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 48665,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3514,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 427,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 641747,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 589568,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 48665,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3514,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 427,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 641747,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1914268000,
+      "cost_usd_api_equivalent": 0.1914268,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896467573286333
+    },
+    {
+      "id": "rust-enum-variant-named-fields-omitted",
+      "sid": "be1fea635a78e844eb820a7d82d514d1",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "ade000604a3e",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/be1fea635a78e844eb820a7d82d514d1/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-be1fea635a78-72b071-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-be1fea635a78-72b071-workspace/_data",
+            "destination": "/workspace/be1fea635a78e844eb820a7d82d514d1",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/be1fea635a78e844eb820a7d82d514d1",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "33fba95a5b77052176035d9c7c282258a3fd0c05",
+      "base_commit": "f17ed0beb870ebae6c8c9b7fc5d7fc23dca1038a",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-enum-variant-named-fields-omitted/brief.md",
+      "brief_sha256": "08f91672bc0d6e8e710e0b86e91130800a27cc844d86676a0fd708e10ff0c8df",
+      "brief_bytes": 4826,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-enum-variant-named-fields-omitted/reviewers/be1fea635a78/transcript.json",
+      "transcript_sha256": "5c082df23cb33bb7ebde0a4f7c5a3d34fd59ba0b361562197722870a455566d0",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-enum-variant-named-fields-omitted/reviewers/be1fea635a78/usage.json",
+      "usage_sha256": "d8a5c62e422fbb3f178820e7d6969670b20be0b4e73ea1a35f2058f8ac9c839c",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 458368,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 57226,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2931,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 463,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 518525,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 458368,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 57226,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2931,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 463,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 518525,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1895988000,
+      "cost_usd_api_equivalent": 0.1895988,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896513245709599
+    },
+    {
+      "id": "rust-importer-planning-widens-to-code-mentions",
+      "sid": "bb7f122893e6d596d0152fa0eb0f41e5",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "2d4753390d62",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/bb7f122893e6d596d0152fa0eb0f41e5/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-bb7f122893e6-790aec-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-bb7f122893e6-790aec-workspace/_data",
+            "destination": "/workspace/bb7f122893e6d596d0152fa0eb0f41e5",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/bb7f122893e6d596d0152fa0eb0f41e5",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "8f0d2a75baddda42ce1cb9a7252b71ff3ae8a7b6",
+      "base_commit": "b86e575a81a55cecbe08f225fd1275e5f7c05540",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-importer-planning-widens-to-code-mentions/brief.md",
+      "brief_sha256": "fee35958a9e49ce133873216fbb38f194adddf808b986fc127e0d4865f3a79f9",
+      "brief_bytes": 5953,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-importer-planning-widens-to-code-mentions/reviewers/bb7f122893e6/transcript.json",
+      "transcript_sha256": "2088557914acc7362300b1da88d1e0cf6b22febd4248b4bb18cd121bfe93dde5",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-importer-planning-widens-to-code-mentions/reviewers/bb7f122893e6/usage.json",
+      "usage_sha256": "ffbbba0e19e3b2e85632a51f43ca2004b99f3fb029ec41ad957d0326144c6789",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 753664,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 97715,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 4354,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 793,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 855733,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 753664,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 97715,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 4354,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 793,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 855733,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 3143364000,
+      "cost_usd_api_equivalent": 0.3143364,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896663614275898
+    },
+    {
+      "id": "rust-item-macro-evades-plain-struct-drop-proof",
+      "sid": "7c9f8f68b353d82a0cf900ba0fad1e9f",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "515a3c872ed0",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/7c9f8f68b353d82a0cf900ba0fad1e9f/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-7c9f8f68b353-7f5bd4-workspace/_data",
+            "destination": "/workspace/7c9f8f68b353d82a0cf900ba0fad1e9f",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-7c9f8f68b353-7f5bd4-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/7c9f8f68b353d82a0cf900ba0fad1e9f",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          }
+        ]
+      },
+      "intro_commit": "d5c9845b7488e63b08987de579d381e76f751b5e",
+      "base_commit": "5bbe305e567f7c0856bb0a358644f8887a956afd",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-item-macro-evades-plain-struct-drop-proof/brief.md",
+      "brief_sha256": "311f928ee162819f457e54d5c3ac362cd69fdeefba4920ecbf5b69fa9da66623",
+      "brief_bytes": 5837,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-item-macro-evades-plain-struct-drop-proof/reviewers/7c9f8f68b353/transcript.json",
+      "transcript_sha256": "94a5d9934e5c7235d7f743691fdf571a9833ec5c7d212b1126e63a2378367b9d",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-item-macro-evades-plain-struct-drop-proof/reviewers/7c9f8f68b353/usage.json",
+      "usage_sha256": "0a750c461ea7b266236959bab740a86764758002f9952d49678d5d788ff0a5d3",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 762624,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 88432,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3729,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 536,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 854785,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 762624,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 88432,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3729,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 536,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 854785,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2904164000,
+      "cost_usd_api_equivalent": 0.2904164,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896664438939783
+    },
+    {
+      "id": "mcp-timed-out-progress-survives-response",
+      "sid": "8ffdf0d78d0f3a7a302b9a6de713f68b",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "2c73e2f66c25",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/8ffdf0d78d0f3a7a302b9a6de713f68b/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-8ffdf0d78d0f-32619c-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-8ffdf0d78d0f-32619c-workspace/_data",
+            "destination": "/workspace/8ffdf0d78d0f3a7a302b9a6de713f68b",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/8ffdf0d78d0f3a7a302b9a6de713f68b",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          }
+        ]
+      },
+      "intro_commit": "25bbd98914912722170d90ca34c72d3b4a8eed85",
+      "base_commit": "3db1a9254c99537ef2d42942dd9b5c1b88c9c3fb",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-timed-out-progress-survives-response/brief.md",
+      "brief_sha256": "f174b8fb3a7e320a2874d21350336c249de05b7c15347c951dcbc83399c78aa1",
+      "brief_bytes": 5576,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-timed-out-progress-survives-response/reviewers/8ffdf0d78d0f/transcript.json",
+      "transcript_sha256": "0576399dad08d5c44dad20ad597565de94c5258158ee94233fe0c677923a83d4",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/mcp-timed-out-progress-survives-response/reviewers/8ffdf0d78d0f/usage.json",
+      "usage_sha256": "af0cded99c5afbb34387e702c7e416d08a5eae07ed05e873dbf334a7d682ee31",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 445568,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 132702,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3576,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 522,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 581846,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 445568,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 132702,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3576,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 522,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 581846,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 3457208000,
+      "cost_usd_api_equivalent": 0.3457208,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896718879323803
+    },
+    {
+      "id": "csharp-single-file-namespace-prunes-usages",
+      "sid": "6b340e577d561d88c2f4847fdfd93637",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "4e5bf90e7ed6",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/6b340e577d561d88c2f4847fdfd93637/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-6b340e577d56-f057ea-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-6b340e577d56-f057ea-workspace/_data",
+            "destination": "/workspace/6b340e577d561d88c2f4847fdfd93637",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/6b340e577d561d88c2f4847fdfd93637",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "88fa9bb729af44cc316e5b18c68ca7443cfb25c5",
+      "base_commit": "e2d09485b3d4657fa5870ee020bb2cc7fe04fab2",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/csharp-single-file-namespace-prunes-usages/brief.md",
+      "brief_sha256": "143c9d4f03821fb7581062cdb4d28dc8cc5045dd26d9206388b85eb806b3238a",
+      "brief_bytes": 5608,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/csharp-single-file-namespace-prunes-usages/reviewers/6b340e577d56/transcript.json",
+      "transcript_sha256": "75ae04707fad0e57e652d97f91eb49388e04608e6a42b3978fa2a4b8672e1daa",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/csharp-single-file-namespace-prunes-usages/reviewers/6b340e577d56/usage.json",
+      "usage_sha256": "076b4b073071e2888d943f2af81ca3e0f71df5ae719c12a3cb6b89d10513e8ea",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 496256,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 89490,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3502,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 506,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 589248,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 496256,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 89490,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3502,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 506,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 589248,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2636256000,
+      "cost_usd_api_equivalent": 0.2636256,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896848026022947
+    },
+    {
+      "id": "rust-bare-value-admits-associated-constant",
+      "sid": "a0d1c870e1c1041364d7b71d206b47cd",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "83ee4938ad00",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/a0d1c870e1c1041364d7b71d206b47cd/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-a0d1c870e1c1-5a846c-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-a0d1c870e1c1-5a846c-workspace/_data",
+            "destination": "/workspace/a0d1c870e1c1041364d7b71d206b47cd",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/a0d1c870e1c1041364d7b71d206b47cd",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "db238908013acbe1691445f9470ce5f2f78fde4a",
+      "base_commit": "5332c0c72a8c84e77db1ad9b3bd73419485ff5f5",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-bare-value-admits-associated-constant/brief.md",
+      "brief_sha256": "8b87487a3f46e445fd94f0a8e2561506bbc5b873d29dd221370cec22164eb7f1",
+      "brief_bytes": 5308,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-bare-value-admits-associated-constant/reviewers/a0d1c870e1c1/transcript.json",
+      "transcript_sha256": "bc8fcfc63d3ac96f16b8acdc1db24556d87b0b04d277d0522394e9530891658b",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-bare-value-admits-associated-constant/reviewers/a0d1c870e1c1/usage.json",
+      "usage_sha256": "9e20f9ee412d36a1a2a41b0560b0fc6ab3c5c12eca756899b0c5544c3492078f",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 529536,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 68878,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3644,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 563,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 602058,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 529536,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 68878,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3644,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 563,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 602058,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2271496000,
+      "cost_usd_api_equivalent": 0.2271496,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896866468764115
+    },
+    {
+      "id": "ruby-constant-navigation-climbs-to-terminal",
+      "sid": "f674f2614a8932f05d4f3029ecde1d2f",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "7a266854b532",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/f674f2614a8932f05d4f3029ecde1d2f/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-f674f2614a89-0d2b41-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-f674f2614a89-0d2b41-workspace/_data",
+            "destination": "/workspace/f674f2614a8932f05d4f3029ecde1d2f",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/f674f2614a8932f05d4f3029ecde1d2f",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "cc45d8f092e525615117108fbecf9453aed29bc4",
+      "base_commit": "b203b4e4b11864fb2b9570a5c76e5b7b133f9ed7",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/ruby-constant-navigation-climbs-to-terminal/brief.md",
+      "brief_sha256": "b57220583525a5690702f6d15a84431cf173f0db8bcc5acd18df423328a914c5",
+      "brief_bytes": 5374,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/ruby-constant-navigation-climbs-to-terminal/reviewers/f674f2614a89/transcript.json",
+      "transcript_sha256": "7c100d218c96a131d4c71d7660f40b514f8013f6529154c3630e1ddcbabdcf26",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/ruby-constant-navigation-climbs-to-terminal/reviewers/f674f2614a89/usage.json",
+      "usage_sha256": "2414cde49197e663ee08a3f5e1cfb74f98434f7a60766ccef23e96e9bb066731",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 763520,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 70868,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 3255,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 353,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 837643,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 763520,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 70868,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 3255,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 353,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 837643,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 2506380000,
+      "cost_usd_api_equivalent": 0.250638,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896968467174662
+    },
+    {
+      "id": "rust-option-return-implicitly-unwrapped",
+      "sid": "f8126ef4bb4587d420202a5d2cbf7adb",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "settings": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "placement": {
+        "container": "1ac79990e625",
+        "image": "cd7e9788bbc9871e2b72b9f36dcf01d1340268670578e57ef64a1ce671aff10b",
+        "cwd": "/workspace/f8126ef4bb4587d420202a5d2cbf7adb/bifrost-dev",
+        "mounts": [
+          {
+            "source": "/mnt/optane/containers/volumes/mj-f8126ef4bb45-359a4e-tmp/_data",
+            "destination": "/tmp",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/containers/volumes/mj-f8126ef4bb45-359a4e-workspace/_data",
+            "destination": "/workspace/f8126ef4bb4587d420202a5d2cbf7adb",
+            "rw": true
+          },
+          {
+            "source": "/mnt/optane/mbx-targets",
+            "destination": "/mnt/optane/mbx-targets",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/build",
+            "destination": "/home/jonathan/.cache/mjolnir/build",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.nx",
+            "destination": "/home/hel/.nx",
+            "rw": true
+          },
+          {
+            "source": "/home/jonathan/.cache/mjolnir/git/sessions/f8126ef4bb4587d420202a5d2cbf7adb",
+            "destination": "/run/hel/git-cache",
+            "rw": false
+          },
+          {
+            "source": "/mnt/optane/mbx-cache",
+            "destination": "/mnt/optane/mbx-cache",
+            "rw": true
+          }
+        ]
+      },
+      "intro_commit": "309939da522fa0c3cf51ec922c15c1f5f81ff31a",
+      "base_commit": "77128367087b647353e3c68bb64edd49efa04d61",
+      "fix_rounds": 0,
+      "lint_final": [],
+      "inventory_problems": [],
+      "brief_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-option-return-implicitly-unwrapped/brief.md",
+      "brief_sha256": "41a446fb937c7175aa35f1b290020c86c03cedcffcd2065744638a61a7e45429",
+      "brief_bytes": 5958,
+      "transcript_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-option-return-implicitly-unwrapped/reviewers/f8126ef4bb45/transcript.json",
+      "transcript_sha256": "d418db6a2a7c04a1a04628eb53e1904e766fd6683013b7d36ffe5827fbb4cf99",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/briefs/blind/rust-option-return-implicitly-unwrapped/reviewers/f8126ef4bb45/usage.json",
+      "usage_sha256": "f605e4301976b43a8dbd5bd166a9aeae5ca5267205bdf78b25047bec6d457b6a",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 288000,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 50285,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2534,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 184,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 340819,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 288000,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 50285,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2534,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 184,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 340819,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1547100000,
+      "cost_usd_api_equivalent": 0.15471,
+      "cost_status": "estimated API-equivalent",
+      "done_finished_ns": 1794896985226368119
+    }
+  ],
+  "finalized_at": "2026-11-17T06:33:19.770834+00:00",
+  "session_summary_path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/session-summary.json",
+  "live_own_writers": [],
+  "tool_audit": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/writer-tool-audit.json",
+    "coverage": {
+      "expected": 13,
+      "audited": 13,
+      "tool_items": 215,
+      "raw_hits": 1,
+      "missing_transcripts": []
+    },
+    "raw_hits": 1,
+    "false_positives": 1,
+    "actual_forbidden_operations": [],
+    "classification": "historical repository plan path in git diff output; actual command and cwd ownworkspace"
+  },
+  "post_quota": {
+    "path": "/mnt/optane/review-arms-bifrost-20261116/arms/nonrelation-writer-driver/quota-after.json",
+    "refreshed_at_epoch_seconds": 1794896572,
+    "observed_age_seconds": 627,
+    "last_writer_done_epoch_seconds": 1794896985,
+    "refresh_minus_last_done_seconds": -413,
+    "fresh_after_last_done": false,
+    "windows": [
+      {
+        "label": "Week",
+        "remaining_percent": 83,
+        "duration_seconds": 604800,
+        "used": null,
+        "limit": null,
+        "resets": "22:42 Nov 23",
+        "resets_at_epoch_seconds": 1795495361
+      }
+    ],
+    "interpretation": "normal cached shared-account availability, timestamp/age recorded; not an extra admission gate or isolated stage delta"
+  },
+  "prior17_final_md_and_leak_record_hashes_unchanged": true
+}
