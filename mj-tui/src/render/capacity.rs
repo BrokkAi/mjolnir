@@ -46,8 +46,10 @@ impl CapacityTableRow {
         u16::try_from(self.disks.width()).unwrap_or(u16::MAX)
     }
 
-    /// The lines this target occupies: its readings, plus one for the notice
-    /// when the reading cannot be trusted.
+    /// The lines this target wants: its readings, plus one for the notice
+    /// when the reading cannot be trusted. The pane's content height bounds
+    /// it, so a short pane keeps the readings and waits for room for the
+    /// notice.
     fn height(&self) -> usize {
         1 + usize::from(self.staleness.is_some())
     }
@@ -336,9 +338,15 @@ pub(crate) fn render_capacity(
             dashboard.pane_maximize_enabled(SupportPane::Targets),
         ))
     });
+    // A row never asks for more lines than the pane has room for. The table
+    // scrolls a selected row into view by dropping whole rows from the top of
+    // the page, and a row taller than the content area makes it drop the
+    // selected row itself, so a notice that does not fit waits for room
+    // instead of costing the readings their line.
+    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
     let row_heights = rows
         .iter()
-        .map(CapacityTableRow::height)
+        .map(|row| row.height().min(viewport.max(1)))
         .collect::<Vec<_>>();
     let disks_buttons = rows
         .iter()
@@ -346,11 +354,16 @@ pub(crate) fn render_capacity(
         .collect::<Vec<_>>();
     let notices = rows
         .iter()
-        .map(|row| row.staleness.clone().unwrap_or_default())
+        .zip(&row_heights)
+        .map(|(row, height)| {
+            (*height > 1)
+                .then(|| row.staleness.clone())
+                .flatten()
+                .unwrap_or_default()
+        })
         .collect::<Vec<_>>();
     let table = Table::new(
-        rows.into_iter().map(|row| {
-            let height = row.height();
+        rows.into_iter().zip(&row_heights).map(|(row, height)| {
             Row::new(vec![
                 Cell::from(row.host).style(Style::default().add_modifier(Modifier::BOLD)),
                 Cell::from(row.targets).style(theme::muted()),
@@ -358,7 +371,7 @@ pub(crate) fn render_capacity(
                 Cell::from(row.memory),
                 Cell::from(row.disks),
             ])
-            .height(u16::try_from(height).unwrap_or(u16::MAX))
+            .height(u16::try_from(*height).unwrap_or(u16::MAX))
         }),
         column_widths.iter().copied().map(Constraint::Length),
     )
@@ -376,7 +389,6 @@ pub(crate) fn render_capacity(
     })
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
-    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.targets_scroll.get(),
         &row_heights,

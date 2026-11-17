@@ -2023,6 +2023,99 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
     assert!(!rendered.contains("stale"), "{rendered}");
 }
 
+/// A notice never costs the readings their place. A table row taller than the
+/// pane makes the table scroll past the selected row, so in a pane with room
+/// for one content line the reading keeps that line and the notice waits for
+/// the room it needs.
+#[test]
+fn a_one_line_targets_viewport_keeps_a_stale_reading_on_screen() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(host_capacity_usage())),
+        now_epoch_seconds(),
+    );
+    dashboard.apply_deployment_capacity(
+        "local",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
+
+    let drawn = |dashboard: &mut DashboardState, height: u16| {
+        let mut terminal = Terminal::new(TestBackend::new(40, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                dashboard.begin_surface_frame();
+                render_capacity(frame, Rect::new(0, 0, 40, height), dashboard, None);
+                dashboard.end_surface_frame();
+            })
+            .expect("draw the Targets pane");
+        buffer_lines(terminal.backend().buffer())
+    };
+
+    // Border, heading, and a single content line.
+    let lines = drawn(&mut dashboard, 4);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("local") && line.contains("37%")),
+        "the selected target keeps its reading: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("stale")),
+        "a notice with no line to itself is not drawn over a reading: {lines:#?}"
+    );
+
+    // One more row of room and the notice is back on its own line.
+    let lines = drawn(&mut dashboard, 5);
+    assert!(lines.iter().any(|line| line.contains("37%")), "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("stale: probe timed out")),
+        "{lines:#?}"
+    );
+
+    // The same holds with a target after the stale one: the selected target
+    // keeps its line rather than the pane settling on the next one.
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(
+        ["host-0", "host-1"]
+            .into_iter()
+            .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                id: host.into(),
+                host: host.into(),
+                target_ids: vec!["podman".into()],
+                kind: mj_core::targets::DeploymentCapacityKind::Host,
+                local: false,
+                probes: Vec::new(),
+                local_storage_paths: Vec::new(),
+                probe_error: None,
+            })
+            .collect(),
+    );
+    dashboard.apply_deployment_capacity("host-0", Ok(Some(host_usage(11))), now_epoch_seconds());
+    dashboard.apply_deployment_capacity("host-1", Ok(Some(host_usage(12))), now_epoch_seconds());
+    dashboard.apply_deployment_capacity(
+        "host-1",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
+    dashboard.capacity_index = 1;
+    let lines = drawn(&mut dashboard, 4);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("host-1") && line.contains("12%")),
+        "the selected target keeps its reading: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("host-0")),
+        "the pane does not settle on the target before it: {lines:#?}"
+    );
+}
+
 /// Each notice line belongs to its own row, wherever the table scrolled to:
 /// it is drawn from the layout the table settled on, not from the row's index.
 #[test]
