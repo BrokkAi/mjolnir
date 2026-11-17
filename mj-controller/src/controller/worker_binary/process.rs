@@ -58,6 +58,8 @@ fn run_owned_worker_stop(
 /// swap admission; the root is its one owner. A root with no `hel` never ran a
 /// worker and needs none. When this build's worker cannot be installed for the
 /// target this fails and names it; there is no second way to stop a worker.
+/// Replacing the staged file is safe during daemon handoff: a running command
+/// keeps its inode, and an older daemon reinstalls its file before using it.
 ///
 /// Deadlines: the state check (absent, present or missing) runs on the caller's
 /// executor, deadline included. The install, meaning publication of the build
@@ -99,7 +101,19 @@ pub(crate) fn ensure_control_worker(
         .context("the control worker has a file name")?
         .to_owned();
     install_worker_binary(untimed, locator, session_id, &worker, &name)
-        .with_context(|| format!("install the current worker for {root}"))
+        .with_context(|| format!("install the current worker for {root}"))?;
+    let current = targets::control_worker_path(&root);
+    let cleanup = format!(
+        "for path in {}'/hel-control-'*; do [ \"$path\" = {} ] || rm -f -- \"$path\"; done",
+        targets::posix_quote(&root),
+        targets::posix_quote(&current),
+    );
+    execute_checked(
+        untimed,
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), cleanup])
+            .purpose("remove superseded control workers"),
+    )?;
+    Ok(())
 }
 
 /// Probe worker liveness through the staged current worker.

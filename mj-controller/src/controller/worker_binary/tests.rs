@@ -218,6 +218,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
 #[cfg(unix)]
 #[test]
 fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = "MJ_FRESH_BARE_CLOSE_CHILD";
     const SESSION: &str = "18181818181818181818181818181818";
@@ -246,21 +247,22 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("workers").join(SESSION);
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let hel = root.join("hel");
+    std::fs::write(&hel, "#!/bin/sh\nexit 2\n").unwrap();
+    let hel_inode = std::fs::metadata(&hel).unwrap().ino();
     let root_text = root.to_string_lossy().into_owned();
     let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
     assert!(!control.exists(), "nothing is staged yet");
-    // Another build's control worker in the same root: installing this build's
-    // must never touch it.
+    // Simulate another build's control file as a link to this worker store
+    // entry. Installing this build must release the old link.
     let other = std::path::PathBuf::from(targets::control_worker_path_for_build(
         &root_text,
         "another-build",
     ));
     assert_ne!(other, control, "builds get separate files");
     assert_eq!(other.parent(), control.parent());
-    std::fs::write(&other, "another build's worker").unwrap();
     let locator = targets::TargetLocator::LocalBare {
-        worker_root: root_text,
+        worker_root: root_text.clone(),
     };
     let plan = targets::close_plan(&locator, SESSION).unwrap();
     assert!(plan.stages_control_worker());
@@ -271,13 +273,26 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     assert!(!control.exists(), "the check ignored the caller's deadline");
     assert!(root.exists(), "the timed-out close removed nothing");
+    // Install this build's control worker once so its store entry exists, then
+    // add a stand-in for an older build's control file linked to that entry.
+    ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let entry = directory
+        .path()
+        .join("workers/worker-binaries")
+        .join(digest)
+        .join("hel");
+    std::fs::hard_link(&entry, &other).unwrap();
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 3);
+    std::fs::remove_file(&control).unwrap();
     ensure_control_worker(&ProcessExecutor, &locator, SESSION).unwrap();
     assert!(control.exists());
-    assert_eq!(
-        std::fs::read_to_string(&other).unwrap(),
-        "another build's worker",
-        "installing this build's control worker touched another build's"
-    );
+    assert!(!other.exists(), "the superseded control file is removed");
+    assert_eq!(std::fs::metadata(&entry).unwrap().nlink(), 2);
+    assert_eq!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
     plan.execute(&ProcessExecutor).unwrap();
     assert!(!root.exists());
 }
