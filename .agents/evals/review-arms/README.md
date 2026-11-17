@@ -961,3 +961,49 @@ python3 compare.py verify5 Terra/xhigh+Terra/xhigh Terra/xhigh+Terra/xhigh+Gemin
 python3 knownbug.py verify5 results/known-bug.jsonl --groups-from verify2 --exclude DSF/low
 uv run --with matplotlib python3 plot_pareto.py <out-dir> [--no-greptile-combos]  # latency vs. findings, both frontiers + Greptile
 ```
+
+
+## Bifrost bug corpus and registered arms
+
+`corpus-bifrost/README.md` records Milestone1, including the UTC correction,
+30 confirmed bugs,40 ordinary controls and quota-amended census. The stage
+registration is `brief/PLAN-bifrost-bugs.md`; execution and cleanup follow
+`.agents/plans/bifrost-brief-arms.md`. Relation-stage membership comes from the
+frozen Sol census, not from reviewer outcomes. The17 relation diffs run first
+in A (no brief) and BT (blind Sol brief), each with3 Terra/high reviewers.
+Later13 non-relation diffs and40 controls wait for the primary reading and
+remaining-budget decision.
+
+Use the production default instance through `mjx`; do not start the private
+review-arms daemon or edit the main config. Shared source settings preserve
+mjolnir defaults and can select the frozen Bifrost inputs:
+
+```sh
+export REVIEW_ARMS_DIR=/mnt/optane/review-arms-bifrost-20261116
+export REVIEW_ARMS_INSTANCE=default
+export REVIEW_ARMS_REPO=/mnt/optane/tmp/d2fa-bifrost/bifrost-dev
+export REVIEW_ARMS_CORPUS="$REVIEW_ARMS_DIR/corpus/corpus.jsonl"
+export REVIEW_ARMS_DIFFS="$REVIEW_ARMS_DIR/corpus/diffs.jsonl"
+export REVIEW_ARMS_BUNDLE=bifrost-dev
+export REVIEW_ARMS_REPO_DIR=bifrost-dev
+export REVIEW_ARMS_SETS="$REVIEW_ARMS_DIR/arms/sets.json"
+export REVIEW_ARMS_QUOTA_FLOOR=codex4=25
+```
+
+The existing quota parser takes `profile=percent`; `codex4=25` expresses this
+study's25percent floor. A missing report holds launches. A quota stop is
+reported without switching model/profile. The manifest has P=17 relation
+IDs,S=13 other known-bug IDs,C=[]; ordinary controls stay in their own jobs
+file. `REVIEW_ARMS_REPO` selects host Git reads, while bundle and repository
+directory select the actual container source. Set all three consistently.
+Workspace records are `default-instance/workspace.json` and the separate
+`default-instance/verify/workspace.json` under the data root.
+
+Writers, paired leak checks and both catch judges are Sol/high on codex4.
+Writer prompts/tools and historical blinding are stageB's. Reviewer selection
+uses the explicit3Terra/high roster through normal review. New reviewers are
+destroyed at role end (#1554/#1559): stored handbacks and usage support catch
+judging and control2, while tool-call audits and latency are unavailable.
+No transcript capture is added, and a missing audit is never called clean.
+Existing repository-inventory checks still apply; their coverage and the
+prompt-based access restrictions retain the blinding limits described above.

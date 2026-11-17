@@ -1,0 +1,104 @@
+{
+  "recorded_at": "2026-11-17T06:11:01.518456+00:00",
+  "stage": "primary relation17 complete; remaining13+40 not yet launched",
+  "diffs": 17,
+  "sessions_per_arm": 51,
+  "reviewer": "gpt-6.1-terra/high",
+  "writer": "gpt-6.1-sol/high,codex4,blind standardtools",
+  "caught": {
+    "A": 9,
+    "BT": 4
+  },
+  "partial": {
+    "A": 2,
+    "BT": 0
+  },
+  "catch_rate": {
+    "A": 0.17647058823529413,
+    "BT": 0.0784313725490196
+  },
+  "effect_points": -9.8,
+  "paired_ci95_points": [
+    -19.6,
+    -2.0
+  ],
+  "primary_reading": "does not generalize on the primary relation set",
+  "registered_bar": ">=17point lift with95%intervalabove0; not met",
+  "full_study_complete": false,
+  "raw_paired_judge_agreement": {
+    "agree": 102,
+    "n": 102
+  },
+  "handcheck": {
+    "required": 15,
+    "parent_reviewed": 15,
+    "final_caught": 13,
+    "final_partial": 2,
+    "changes_from_paired": 2,
+    "parent_overrides_to_proposal": 0,
+    "decisions_fixed_before_arm_attribution": true
+  },
+  "neutral_leak_flags": {
+    "missed": 13,
+    "partial": 3,
+    "caught": 1,
+    "rule": "retainedafteronewordingrewrite/recheck perStageB"
+  },
+  "by_source": {
+    "hard-won": {
+      "diffs": 17,
+      "A_caught": 9,
+      "BT_caught": 4
+    }
+  },
+  "by_found_by": {
+    "known-empty": {
+      "diffs": 11,
+      "A_caught": 9,
+      "BT_caught": 4,
+      "sessions_per_arm": 33
+    },
+    "unknown": {
+      "diffs": 5,
+      "A_caught": 0,
+      "BT_caught": 0,
+      "sessions_per_arm": 15
+    },
+    "found-by:policy-oracle": {
+      "diffs": 1,
+      "A_caught": 0,
+      "BT_caught": 0,
+      "sessions_per_arm": 3
+    }
+  },
+  "attribution": "all17confirmedsource/historyattributions;no runtimebugreproduction",
+  "template_applicability": {
+    "assigned": 15,
+    "n": 17,
+    "share": 0.8823529411764706,
+    "candidate_confidence": {
+      "medium": 14,
+      "low": 1
+    },
+    "reach_measured": false
+  },
+  "cost": {
+    "known_recorded_api_equivalent_subtotal": 11.692545648,
+    "complete_stage_total": null,
+    "reviewers_complete": 4.6051552,
+    "carrier_recorded_priced_turn_subtotal": 1.795833248,
+    "carrier_missing_usage_reports": 5,
+    "carrier_unfinished_usage_records": 22,
+    "not_live_carriers": true,
+    "aux_applicability_separate": 0.087068,
+    "excludes": "parent/helper orchestration and unpriced/missing carrier usage; estimates notsubscriptioncharges"
+  },
+  "cleanup": "34carrierssuspended;102reviewerrolesended;17writers+2leak0+4editors+2leak1+6catchjudges+1handcheck normallysuspended; no stageoperatorbackgroundwork",
+  "tool_audit_latency": "Reviewer toolaudits/latencyunavailable due role destruction; no capture",
+  "remaining_estimate": {
+    "initial_model_only_central_usd": 24.762561910909092,
+    "historical_sample_envelope_usd": 38.1030326,
+    "limit": "ordinary grouping/verification overhead and carrier/orchestration incomplete; no quota conversion"
+  },
+  "raw_score_limit": "Legacy expected_catches_of_30 field sums this17diffsubset rather than normalizingto30; excluded from thisreading. Rates,effect,pairedCI usecorrect17diffs."
+}

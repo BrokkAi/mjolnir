@@ -1,0 +1,40 @@
+{
+  "metric": "template applicability (reach unmeasured)",
+  "facts": 17,
+  "assigned_existing_template": 15,
+  "assigned_none": 2,
+  "applicability_share": 0.8823529411764706,
+  "reach_measured": false,
+  "engine_reach_share": null,
+  "template_counts": {
+    "T8a": 13,
+    "none": 2,
+    "T2": 1,
+    "T3": 1
+  },
+  "confidence_all": {
+    "medium": 15,
+    "high": 1,
+    "low": 1
+  },
+  "confidence_assigned": {
+    "medium": 14,
+    "low": 1
+  },
+  "assessors": 1,
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "profile": "codex4",
+  "session_id": "1d0c72a0ee4c1144529fd8ac8db62b26",
+  "lifecycle": "suspended",
+  "input_scope": "only frozen fact/kind/query descriptions plus literal template definitions,opaque IDs",
+  "limitations": [
+    "Descriptions-only classification, not verified diff-seed legality, implemented engine support or executed query reach.",
+    "All15 candidate assignments are medium(14) orlow(1)confidence; none ishigh.",
+    "T8a accounts for13 assignments; template semantics describe broader flow shapes, not evidence current engine retrieves them.",
+    "Recorded request audit is complete;fourbridge records omit rawInput/content. Full represented commands/titles/payloads were inspected; not OS-level isolation."
+  ],
+  "api_equivalent_estimated_usd": 0.087068,
+  "usage_coverage": "onefull-turnreport,priced,no missing",
+  "parent_validation": "exact17schema/IDs,rawbyteidentity,deterministicprivateIDjoin. Audited all5represented requests; bothPythonpayloads identical, importjson only, soleopen applicability.json inwrite mode. No extra classification votes."
+}

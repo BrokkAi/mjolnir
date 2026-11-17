@@ -117,6 +117,17 @@ corpus. No briefs or reviews preceded this correction.
   `PLAN-writer-terra.md` (Terra/high if it passes, otherwise Sol/high), with
   stage B's writer prompt, tools, blinding and leak check.
 
+Before launch, 2026-11-17: the selected writer is Sol/high on codex4,
+using stage B's unchanged prompt, tools and historical blinding. Run the17
+primary relation diffs first in both arms, then judge them and report before
+continuing with13 non-relation diffs and40 ordinary controls. The full-plan
+quota fit cannot be certified from the historical usage estimates; it does
+not authorize launching the later stages. Use the production default
+instance on this host with local Podman and the bifrost-dev bundle. The
+existing paired leak helper supplies two Sol/high checks per brief, one
+rewrite/recheck if needed, with exact brief-hash binding. Tool-call audits
+and latency for new destroyed reviewer sessions are unavailable (#1554/#1559).
+
 ## Judging
 
 As in `PLAN-writer-terra.md`: one judge model for both arms, two judges, a
@@ -138,3 +149,20 @@ Also reported: the non-relation diffs, the decisive-fact contains rate, and
 the share of relation diffs whose decisive fact a diff-seeded query
 template (H6's census) reaches. That share tests the templates on a second
 codebase.
+
+Amendment, 2026-11-17, before any brief: the leak check and both judges are GPT-6.1 Sol/high on codex4, one model for every arm; Carbon's week is spent.
+
+Amendment, 2026-11-17, before the template-applicability assessment. H6's
+original query census measured reach by executing engine queries; repeating
+that on bifrost-dev belongs to milestone5. Here the report-only metric is
+**template applicability (reach unmeasured)**. One GPT-6.1 Sol/high session
+on codex4 reads only the frozen primary relation labels' fact, kind and query
+description, plus the frozen T1–T8b template definitions from
+`/mnt/optane/tmp/bf13143-prompts/mvp/h6-results/h6/SYNTHESIS.md`. It assigns
+each of the17 relation facts one best matching existing template, or none,
+with a reason and confidence. Opaque fact IDs keep bug names, defect/fix
+records, source evidence, briefs, review outputs and catch verdicts out of
+this input. No engine queries or repository investigation run. Missing or
+invalid classifications remain unavailable, never implicit none. This
+assessment does not change the corpus, relation membership, briefs or
+catch-rate reading and is not supplied to writers, reviewers or judges.

@@ -1,0 +1,659 @@
+{
+  "recorded_epoch": 1794894740.8288646,
+  "status": "collected; awaiting parent-authorized blinded handcheck; not scored",
+  "owner_model": "gpt-6.1-sol",
+  "owner_effort": "medium",
+  "diffs": 17,
+  "arms": [
+    "A",
+    "BT"
+  ],
+  "reviewer_model": "gpt-6.1-terra",
+  "reviewer_effort": "high",
+  "reviewer_outputs": 102,
+  "unique_output_ids": 102,
+  "batches": 3,
+  "batch_output_counts": [
+    48,
+    48,
+    6
+  ],
+  "verdicts": 204,
+  "exact_A_B_per_output_and_bug_mapping": "pass",
+  "label_pair_counts": {
+    "missed/missed": 87,
+    "caught/caught": 15
+  },
+  "judge_agreement_outputs": 102,
+  "disagreement_outputs": 0,
+  "handcheck_required_outputs": 15,
+  "handcheck_coverage_rule": "every non-missed verdict from either judge and every disagreement; outputIDs exactly checked against merged",
+  "handcheck_path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/handcheck.jsonl",
+  "handcheck_sha256": "9b871796745d686049adce8227311633e80faa0bbbb0913af097f98f9f34569c",
+  "raw_combined_verdicts_path": "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/workflow-out.json",
+  "raw_combined_verdicts_sha256": "ac81acbd6efd732f2a885081159079063295389f045a967f6bba734bcb1404ee",
+  "raw_per_judge_hashes": {
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-0-A.json": "e756381172b5d67a09b147c8a24c5b1a29aeaa8b3725cdb77e9fb5ac45c74035",
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-2-A.json": "ecaf780b274542cb46503526800185211282ad5c436abf90467bde5ce3a03c22",
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-1-B.json": "861f2211dc482eb8930b17c6746dfecb5a4d3afc3303393ad3c2bc6f226e30f8",
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-2-B.json": "bac63d08149a82cb054513068460cc38a59ca43c9d502d39190f7d0f2276a7fc",
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-0-B.json": "697fc78de9ecb4ba60c5eee5f1ad3d8af588c236e032a69c37dabfd8d635a769",
+    "/mnt/optane/review-arms-bifrost-20261116/bifrost-judge-relation/out/verdicts-1-A.json": "d489cdd10ffeedda6098c1f74a97aa22aef2c2eb0a65346ce9bd8832bcf73e18"
+  },
+  "private_key_path": "/mnt/optane/review-arms-bifrost-20261116/private/key-bifrost-judge-relation.json",
+  "private_key_sha256": "591996406fd0e0a9ffd366da02feef7ff7c5968c5ecd18a56fa8cb186f84d7fb",
+  "key_public_inputs_code_registered_inputs_unchanged": true,
+  "final17_published_brief_hashes_unchanged": true,
+  "uploaded_inputs": "Only publicSPEC+batch through existing verify driver; no privatekey/arm/model metadata/H6 inputs. Verified public batch shape.",
+  "sessions": [
+    {
+      "slot": "0-A",
+      "sid": "04f95d269543bc0ca128d72e266daf53",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-0-A-04f95d269543",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 222,
+        "completed_at_ms": 1794894527726,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-04f95d269543bc0ca128d72e266daf53.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 240512,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 31878,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2594,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 84,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 274984,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 240512,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 31878,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2594,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 84,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 274984,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1137472000
+    },
+    {
+      "slot": "0-B",
+      "sid": "ab6142161fa45297d6dd9497984b6d71",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-0-B-ab6142161fa4",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 214,
+        "completed_at_ms": 1794894535893,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-ab6142161fa45297d6dd9497984b6d71.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 216064,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 60638,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2842,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 161,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 279544,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 216064,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 60638,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2842,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 161,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 279544,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1713024000
+    },
+    {
+      "slot": "1-A",
+      "sid": "e493ba8aad960afa310508767d84a72b",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-1-A-e493ba8aad96",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 184,
+        "completed_at_ms": 1794894528148,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-e493ba8aad960afa310508767d84a72b.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 215040,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 38482,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2355,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 140,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 255877,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 215040,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 38482,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2355,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 140,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 255877,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1220180000
+    },
+    {
+      "slot": "1-B",
+      "sid": "2ef0c2d507fc74d136f9ee8c7dd76734",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-1-B-2ef0c2d507fc",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 177,
+        "completed_at_ms": 1794894663078,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-2ef0c2d507fc74d136f9ee8c7dd76734.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 263168,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 44196,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 2868,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 228,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 310232,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 263168,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 44196,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 2868,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 228,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 310232,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 1433888000
+    },
+    {
+      "slot": "2-A",
+      "sid": "073d8faf24a4f3e124a414c35fe58514",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-2-A-073d8faf24a4",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 122,
+        "completed_at_ms": 1794894608773,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-073d8faf24a4f3e124a414c35fe58514.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 67712,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 24128,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 461,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 39,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 92301,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 67712,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 24128,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 461,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 39,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 92301,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 596372000
+    },
+    {
+      "slot": "2-B",
+      "sid": "4180429aa3bacf4f67be755949b056ac",
+      "profile": "codex4",
+      "actual_config": {
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "collaboration_mode": "default",
+        "fast-mode": "off"
+      },
+      "lifecycle": "suspended",
+      "last_turn_outcome": {
+        "command_id": "review-arms-bifrost-judge-relation-batch-2-B-4180429aa3ba",
+        "accepted_ordinal": 38,
+        "turn_start_position": 39,
+        "completed_ordinal": 176,
+        "completed_at_ms": 1794894594805,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      },
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/catch-judge-driver/usage-4180429aa3bacf4f67be755949b056ac.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 67584,
+          "reported_turns": 1
+        },
+        "cached_write_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 24246,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 527,
+          "reported_turns": 1
+        },
+        "thought_tokens": {
+          "tokens": 30,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 92357,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "gpt-6.1-sol",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 67584,
+              "reported_turns": 1
+            },
+            "cached_write_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 24246,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 527,
+              "reported_turns": 1
+            },
+            "thought_tokens": {
+              "tokens": 30,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 92357,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "root_cost_usd_ticks": 605204000
+    }
+  ],
+  "normal_suspensions": 6,
+  "cost_usd_estimated_api": 0.670614,
+  "usage_totals_sum": {
+    "cached_read_tokens": 1070080,
+    "cached_write_tokens": 0,
+    "input_tokens": 223568,
+    "output_tokens": 11647,
+    "thought_tokens": 682,
+    "total_tokens": 1305295
+  },
+  "usage_coverage_sum": {
+    "estimated_cost_turns": 6,
+    "full_turn_reports": 6,
+    "last_request_reports": 0,
+    "missing_cost_turns": 0,
+    "missing_reports": 0,
+    "provider_cost_turns": 0,
+    "recorded_turns": 6,
+    "unfinished_turns": 0,
+    "unspecified_reports": 0
+  },
+  "usage_accounting": "Global rootonceperSID;6completepages/full-turnreports; no missingcost/usage, no pagination root double-count; estimatedAPIcost not subscription charge",
+  "quota_before": {
+    "remaining_min_percent": 90,
+    "refreshed_epoch": 1794894172,
+    "age_seconds": 259.6497812271118
+  },
+  "quota_after": {
+    "remaining_percent": [
+      90
+    ],
+    "refreshed_epoch": 1794894172,
+    "age_seconds": 568.8300292491913,
+    "refresh_after_last_completion": false
+  },
+  "quota_note": "Cached snapshots/freshness only; shared delta cannot be attributed to judgework. Existing25floor gate unchanged.",
+  "verify_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794894674.8062596
+  },
+  "collect_exit": {
+    "exit_code": 0,
+    "finished_epoch": 1794894674.9578655
+  },
+  "stop_boundary": "No handcheck model, score or label adjudication performed; no extra roles/models/profile fallback/code/build/test/config/unrelated-session edits/commits."
+}
