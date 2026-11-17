@@ -1377,6 +1377,7 @@ impl Controller {
         }
         if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
+            self.remove_abandoned_move_stage(&operation, executor);
         }
         let retained_checkout = if self.state.subagents.contains_key(session_id) {
             super::environment::stop_borrower(session_id, &self.config, executor)?;
@@ -1537,6 +1538,7 @@ impl Controller {
                         cleanup,
                         executor,
                     )?;
+                    self.remove_abandoned_move_stage(&operation, executor);
                 }
                 outcome.cleanup(
                     if self.state.subagents.contains_key(session_id) {

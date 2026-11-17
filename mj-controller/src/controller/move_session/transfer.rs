@@ -176,44 +176,61 @@ struct ContainerStage {
     stage: PathBuf,
 }
 
+/// The destination host of a target template, addressed as a bare target.
+fn template_host(template: &mj_core::config::TargetTemplate) -> Option<targets::TargetLocator> {
+    use mj_core::config::TargetTemplate as T;
+    let ssh = |ssh: &mj_core::config::SshConnection| targets::TargetLocator::SshBare {
+        ssh: targets::SshTarget::from(ssh),
+        workspace: String::new(),
+        worker_id: None,
+    };
+    Some(match template {
+        T::SshBare { ssh: target, .. }
+        | T::SshPodman { ssh: target, .. }
+        | T::SshDocker { ssh: target, .. }
+        | T::SshAppleContainer { ssh: target, .. } => ssh(target),
+        T::LocalBare | T::LocalPodman { .. } | T::LocalDocker { .. } | T::AppleContainer { .. } => {
+            targets::TargetLocator::LocalBare {
+                worker_root: String::new(),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Where a host holds a Move's staging and marker: the state directory of
+/// the host's account, or the controller's data directory for a local host.
+fn host_stage_paths(host: &targets::TargetLocator, operation_id: &str) -> (PathBuf, PathBuf) {
+    let root = match host {
+        targets::TargetLocator::LocalBare { .. } => mj_core::config::data_dir().join("move-stage"),
+        _ => PathBuf::from(".local/share/hel/move-stage"),
+    };
+    (
+        root.join(operation_id),
+        root.join(format!("{operation_id}.marker")),
+    )
+}
+
 fn destination_stage(
     backend: &targets::TargetLocator,
     operation_id: &str,
 ) -> Result<DestinationStage> {
     use targets::TargetLocator as L;
-    let relative = |name: String| Path::new(".local/share/hel/move-stage").join(name);
-    let local = |name: String| mj_core::config::data_dir().join("move-stage").join(name);
-    let (host, stage, marker) = match backend {
-        L::LocalBare { .. } => (
-            backend.clone(),
-            local(operation_id.to_owned()),
-            local(format!("{operation_id}.marker")),
-        ),
-        L::AwsEc2 { .. } | L::SshBare { .. } => (
-            backend.clone(),
-            relative(operation_id.to_owned()),
-            relative(format!("{operation_id}.marker")),
-        ),
-        L::LocalPodman { .. } | L::LocalDocker { .. } | L::AppleContainer { .. } => (
-            L::LocalBare {
-                worker_root: String::new(),
-            },
-            local(operation_id.to_owned()),
-            local(format!("{operation_id}.marker")),
-        ),
+    let host = match backend {
+        L::LocalBare { .. } | L::AwsEc2 { .. } | L::SshBare { .. } => backend.clone(),
+        L::LocalPodman { .. } | L::LocalDocker { .. } | L::AppleContainer { .. } => L::LocalBare {
+            worker_root: String::new(),
+        },
         L::SshPodman { ssh, .. }
         | L::SshDocker { ssh, .. }
         | L::SshAppleContainer { ssh, .. }
-        | L::SshNitro { ssh, .. } => (
-            L::SshBare {
-                ssh: ssh.clone(),
-                workspace: String::new(),
-                worker_id: None,
-            },
-            relative(operation_id.to_owned()),
-            relative(format!("{operation_id}.marker")),
-        ),
+        | L::SshNitro { ssh, .. } => L::SshBare {
+            ssh: ssh.clone(),
+            workspace: String::new(),
+            worker_id: None,
+        },
     };
+    let (stage, marker) = host_stage_paths(&host, operation_id);
     let container = match (backend.container_engine(), backend) {
         (
             Some(engine),
@@ -1540,6 +1557,54 @@ impl Controller {
         }
     }
 
+    /// A Move that will never resume (destroyed, or replaced by another):
+    /// remove its host staging. The host is the one the Move's own target
+    /// names, so no record of where it copied is needed. The container copy
+    /// went with its container. Best effort: the host may be gone with the
+    /// environment, and a leftover must not block the destroy or the new Move.
+    pub(in crate::controller) fn remove_abandoned_move_stage(
+        &self,
+        operation: &MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) {
+        if operation.workspace_transfer.is_none() {
+            return;
+        }
+        let Some(template) = operation
+            .selection
+            .target_template_id
+            .as_deref()
+            .and_then(|target| self.config.targets.get(target))
+        else {
+            return;
+        };
+        let backend = match template_host(template) {
+            Some(backend) => backend,
+            None => return,
+        };
+        let (stage, marker) = host_stage_paths(&backend, &operation.operation_id);
+        let removed = super::super::execute_checked(
+            executor,
+            targets::locator_command(
+                SshTrafficClass::Control,
+                &backend,
+                vec![
+                    "rm".into(),
+                    "-rf".into(),
+                    "--".into(),
+                    stage.to_string_lossy().into_owned(),
+                    marker.to_string_lossy().into_owned(),
+                ],
+            )
+            .purpose("remove abandoned destination Move staging"),
+        );
+        if let Err(error) = removed {
+            tracing::warn!(session_id = %operation.selection.session_id,
+                operation_id = %operation.operation_id, error = %format!("{error:#}"),
+                "could not remove an abandoned Move's staging on its destination host");
+        }
+    }
+
     pub(in crate::controller) fn rollback_move_destination(
         &mut self,
         operation: &MoveOperation,
@@ -1694,6 +1759,61 @@ mod tests {
         assert!(!next_daemon.stage.join("data").exists());
         assert!(!next_daemon.stage.join(".move-partial").exists());
         assert!(next_daemon.stage.is_dir());
+    }
+
+    // Hard-won: #1579: a destroyed or replaced Move left its host staging, a full workspace copy,
+    // behind, because only a finished Move removed it.
+    // Needs a POSIX shell.
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_move_removes_the_staging_it_left_on_the_host() {
+        use crate::controller::test_support::{
+            IsolatedTest, checkpoint_test_session, resume_compatibility_config,
+        };
+        if std::env::var_os("MJ_MOVE_ABANDONED_STAGE_TEST").is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let name = crate::controller::test_support::test_name(
+                module_path!(),
+                "an_abandoned_move_removes_the_staging_it_left_on_the_host",
+            );
+            IsolatedTest::new(name)
+                .isolated_store(directory.path())
+                .env("MJ_MOVE_ABANDONED_STAGE_TEST", "1")
+                .run();
+            return;
+        }
+        let mut session = checkpoint_test_session("abandoned-move");
+        session.target_template_id = "local-bare".into();
+        let mut operation = super::super::tests::source_recovery_operation(&session);
+        operation.selection.target_template_id = Some("local-bare".into());
+        operation.workspace_transfer = Some(WorkspaceTransfer {
+            assessment: Default::default(),
+            source: Box::new(session),
+            source_stage: "unused".into(),
+            controller_stage: "unused".into(),
+            phase: WorkspaceTransferPhase::SourceStopped,
+        });
+        let host = targets::TargetLocator::LocalBare {
+            worker_root: String::new(),
+        };
+        let (stage, marker) = host_stage_paths(&host, &operation.operation_id);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("copied"), vec![1; 256 * 1024 + 1]).unwrap();
+        std::fs::write(&marker, "identity").unwrap();
+        let other = host_stage_paths(&host, "another-move").0;
+        std::fs::create_dir_all(&other).unwrap();
+
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: Default::default(),
+        };
+        controller.remove_abandoned_move_stage(&operation, &targets::ProcessExecutor);
+
+        assert!(!stage.exists() && !marker.exists());
+        assert!(
+            other.exists(),
+            "another Move's staging is not this Move's to remove"
+        );
     }
 
     // The stage's location is fixed by the Move's operation id, so a daemon that never saw the
