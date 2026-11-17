@@ -1,5 +1,5 @@
 {
-  "status": "second source amendment approved; normalizing Hard-won groups before draw",
+  "status": "canonical group draw fixed; source-order tracing in progress; corpus/census not frozen",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
@@ -39,13 +39,71 @@
     "qualified_defects": null,
     "attribute_inventory": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hard-won/attribute-inventory.json",
     "attribute_inventory_sha256": "7f927da7f193b33e44692857aa2453e8f7d92aa3d304983c0bae1fe82f989fa2",
-    "reason": "Bifrost AGENTS.md defines #[hardwon(...)] as canonical defect metadata; initial22 included literal comments only."
+    "reason": "Bifrost AGENTS.md defines #[hardwon(...)] as canonical defect metadata; initial22 included literal comments only.",
+    "groups": {
+      "pinned_commit": "35933693612806a7ab6446bdcf52cfc579eebf9d",
+      "markers": 12954,
+      "groups": 4168,
+      "group_kinds": {
+        "commit": 1479,
+        "issue": 2653,
+        "unresolved-sha": 36
+      },
+      "marker_kinds": {
+        "attribute": 12932,
+        "comment": 22
+      },
+      "grouping_basis": {
+        "first_named_sha": 3290,
+        "marker_added_commit_blame": 3,
+        "first_named_issue": 9661
+      },
+      "multiple_distinct_issue_markers": 168,
+      "multiple_distinct_sha_no_issue_markers": 8,
+      "no_explicit_reference_markers": 3,
+      "missing_primary_sha_markers": 60,
+      "named_sha_strings": 1557,
+      "resolved_sha_strings": 1518,
+      "missing_sha_strings": 39,
+      "collapsed_sha_alias_sets": 1,
+      "sha_aliases": {
+        "40457c5a89740d822a690a6b5ab08dd98df10ea2": [
+          "40457c5a89",
+          "40457c5a8974"
+        ]
+      },
+      "comments_joining_attribute_groups": 16,
+      "comment_only_groups": [
+        "commit:0dad4cdf5306d7bddd76d53da6fb6ab276534a81",
+        "commit:44c5cdebe29f71828a9a4fdcda5486201dc7f37f",
+        "commit:5b258841ad07af9a5ba47cddf02d977d0e992f5a",
+        "commit:97b137dbb54c142ec08428cdec101868d724f89d",
+        "issue:11595",
+        "issue:12198"
+      ],
+      "order": "Lexicographic group_key only; no draw or seed used.",
+      "qualification": "Canonical source groups only; not confirmed defects or eligible introductions.",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+      "normalized_markers_sha256": "99b86695b24e43bf2487f5441afb093e99726d8b283d533c5d3d1d5212185d31",
+      "validation": "All12954 raw markers retained exactly once;4168 sorted groups; numeric path/line member ordering; no draw performed."
+    }
   },
   "hardwon_group_seed": 20261118,
-  "hardwon_group_order": "not drawn yet",
+  "hardwon_group_order": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hardwon-groups-order.jsonl",
   "second_source_amendment": {
     "plan": "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md",
     "sha256": "82a56e2c8a7b3d8a0905d68400f20e6f2e12c7fcd8f57058e01cf85f81d4a0a2",
     "method": "Group canonical comment/attribute markers by primary issue, else named commit (full SHA where resolvable); unreferenced comments use marker-added fix commit. Shuffle stable sorted groups with seed20261118, trace in order until30confirmed under unchanged SPEC. Existing bugissue order is fallback only if groups exhaust."
+  },
+  "hardwon_group_draw": {
+    "seed": 20261118,
+    "groups": 4168,
+    "markers": 12954,
+    "pool_sha256": "edd448fd1d6cb5f97248ef09c1c3ebdcd8da5ff4270fcf8bc14283b384961631",
+    "order_sha256": "20123d27b1ade9e3a30a9014a7d4242065c29f77a17dbccea775eb202063f7cf",
+    "method": "random.Random(20261118).shuffle over lexical group_key order; 1-based positions assigned after draw",
+    "seed_commit": "a04256027"
   }
 }
