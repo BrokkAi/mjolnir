@@ -271,6 +271,25 @@ async fn selection_backend(
     selection_backend_refusing(offers, parent_view, Default::default()).await
 }
 
+/// The profiles [`selection_backend`] enables.
+fn selection_config() -> mj_core::config::Config {
+    test_config(&[
+        ("parent", HarnessKind::Codex),
+        ("codex-high", HarnessKind::Codex),
+        ("deepseek", HarnessKind::Codex),
+    ])
+}
+
+/// Give `parent` quota again, so load balancing may offer it once
+/// `codex-high` is unavailable.
+fn refill_parent(backend: &ApiBackend) {
+    let mut reports = backend.quota_reports.lock().unwrap();
+    let report = reports.get_mut("parent").unwrap().report.as_mut().unwrap();
+    for window in &mut report.windows {
+        window.remaining_percent = Some(50);
+    }
+}
+
 /// [`selection_backend`], with logins the credential sync found refused.
 async fn selection_backend_refusing(
     offers: &[(&str, &[&str])],
@@ -278,13 +297,7 @@ async fn selection_backend_refusing(
     rejected_logins: mj_core::credentials::RejectedLogins,
 ) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
     let catalog = ProfileCatalog::with_probe(models_probe(offers));
-    catalog
-        .sync_now(&test_config(&[
-            ("parent", HarnessKind::Codex),
-            ("codex-high", HarnessKind::Codex),
-            ("deepseek", HarnessKind::Codex),
-        ]))
-        .await;
+    catalog.sync_now(&selection_config()).await;
     // Spawns draw profiles weighted by quota left, so any quota at all would
     // let `parent` win some draws; with none it always ranks behind `codex-high`.
     let quotas: crate::quota::QuotaReportMap = BTreeMap::from([
@@ -468,6 +481,14 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
             .unwrap()
             .paid_credits = mj_client::quota::PaidCredits::limited(12.75);
     }
+    // Spending a subscription's paid credits is the profile's own opt-in.
+    let mut config = selection_config();
+    config
+        .profiles
+        .get_mut("codex-high")
+        .unwrap()
+        .load_balancing_may_consume_credits = true;
+    backend.profile_catalog.sync_now(&config).await;
     let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
@@ -571,6 +592,7 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(candidates.unavailable[0].0, "codex-high");
     assert_eq!(candidates.offered.len(), 2);
 
+    refill_parent(&backend);
     backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
@@ -2432,6 +2454,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             .contains("mj login --profile codex-high")
     );
 
+    refill_parent(&backend);
     backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
