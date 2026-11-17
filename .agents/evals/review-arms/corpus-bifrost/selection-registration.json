@@ -1,5 +1,5 @@
 {
-  "status": "tracing; corpus and census not frozen",
+  "status": "source inventory corrected; awaiting amended Hard-won sampling order before any corpus freeze",
   "repository": "BrokkAi/bifrost-dev",
   "snapshot": "35933693612806a7ab6446bdcf52cfc579eebf9d",
   "data_dir": "/mnt/optane/review-arms-bifrost-20261116",
@@ -29,5 +29,16 @@
     "/home/jonathan/Projects/mjolnir/.mj/clones/dbcece95f1cdc80785d2df3f995138f2/.agents/evals/review-arms/brief/PLAN-bifrost-bugs.md": "bd7e80aca9854a9c5e7b273624aca3134ed100dc0f8eb32d260079d6fa89e4c5",
     "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-pool.jsonl": "69ed25d6d7477fdaecf788c995796d3fd9f7b128cd5f07c04843eff03a6dd730",
     "/mnt/optane/review-arms-bifrost-20261116/corpus-build/bug-issues-order.jsonl": "b9fcee93f4c4f05feeee97bb7a39635185f15e5fd5b3d97fc7f28c26431b2c0b"
+  },
+  "source_inventory_correction": {
+    "original_literal_comments": 22,
+    "rust_attributes": 12932,
+    "attribute_files": 2244,
+    "distinct_attribute_reasons": 11969,
+    "distinct_attribute_issue_numbers": 2705,
+    "qualified_defects": null,
+    "attribute_inventory": "/mnt/optane/review-arms-bifrost-20261116/corpus-build/hard-won/attribute-inventory.json",
+    "attribute_inventory_sha256": "7f927da7f193b33e44692857aa2453e8f7d92aa3d304983c0bae1fe82f989fa2",
+    "reason": "Bifrost AGENTS.md defines #[hardwon(...)] as canonical defect metadata; initial22 included literal comments only."
   }
 }
