@@ -1265,7 +1265,6 @@ impl std::str::FromStr for HarnessKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
     /// Whether Mjolnir may select this profile for new work or probe it.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
