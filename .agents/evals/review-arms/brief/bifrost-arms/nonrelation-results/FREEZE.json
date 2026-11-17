@@ -1,0 +1,43 @@
+{
+  "frozen_at": "2026-11-17T07:43:33.842202+00:00",
+  "stage": "secondary13 non-relation known bugs",
+  "files": {
+    "READOUT.md": "4ad5fefcaa42c5ea7367bf7fbcccba9c1cb5d2f4d3f6ece8bbe5a72f0bbd030a",
+    "catch-judge-completion.json": "05af184db1af5f3fed9e34b0a297b75674f5c9089841ace0a2d0d8b081c06c97",
+    "decision-freeze.json": "5e2ee3d15485bbac9c6dab8bee85f56d03cf1184ff96bf163ba26ea79c0d0a8b",
+    "handcheck-completion.json": "c163e5a773e0dce0022c59af32094d03007390703ee1158688985bd277ad410b",
+    "handcheck-decisions.json": "767e0be78326a0d17e6293560973a52e8dae83efd08e384457531e119d95282e",
+    "handcheck-input.jsonl": "a60157ffe5239edc8ba6f947c40d3e4e4f18b66917ff321e3efe6de4dc395455",
+    "handcheck-proposal-raw.json": "0864b528e28a32986f85030cd7d2d507445e060bdcc7b2027c818999715cbe85",
+    "handcheck-tool-audit.json": "40bcfa10b9b534cebea0bdfda0971fe1740c684bf2c71a283ecefc666a38fc81",
+    "merged.jsonl": "12c34aa006663066275b48a3e738886ec8008b7702fe01cb109e414ec77805d2",
+    "parent-acceptance.json": "83966c1670f7ceb455d65519fa1d2497d74bab6672378d97ee40b9aca74ba8c9",
+    "parent-blind-review.json": "631a04dd1dce69acb6c2cfa262833fb01fb84d50107616432bb50d58c88f713a",
+    "per-diff.jsonl": "80f6d79da130322c3ae229ff1ad20fdb0c1dc0b3dd187faf4a1669f0a5406557",
+    "score-raw.json": "312c780ec0c35d6fa90e48c6604b546322ec7f545d71cae825874a358054b724",
+    "summary.json": "718b40d43589aa6990209afa422d424fa6112a7839534dbf16a6ced7b4c3df9b",
+    "workflow-out.json": "e535e711d33f14fbe73829f36497032c9b3acbc81d91eabb50e95755c3e0fe4b"
+  },
+  "source_hashes": {
+    "arms/nonrelation-writer-driver/completion-manifest.json": "06257a612c48799fcfac21a7c202c3ef13264fa140eb3bd95673504c99ed14c8",
+    "arms/nonrelation-leak-driver/completion-manifest.json": "e135b46bf449728df7666332dd33f29205de901944b46258c9126ded15d6f49d",
+    "arms/nonrelation-review-driver/completion-manifest.json": "98c8bfe2e0c0ecc746dc9ab04a76d4e1caeb80a66d7a9920dc117bf350855ed3",
+    "arms/nonrelation-catch-judge-driver/completion-manifest.json": "05af184db1af5f3fed9e34b0a297b75674f5c9089841ace0a2d0d8b081c06c97",
+    "arms/nonrelation-handcheck-driver/completion-manifest.json": "c163e5a773e0dce0022c59af32094d03007390703ee1158688985bd277ad410b",
+    "arms/nonrelation-review-stage/FREEZE.json": "4af7f5b24092de2347d6cc1ba47e21e86685dcb94b29107c940d606da5dce2aa",
+    "arms/nonrelation-writer-stage/FREEZE.json": "9e1a3a81a1868382a7b9e2e9fa03c4e73f0148cdc18672a9ce5810edb709e44e",
+    "arms/nonrelation-leak-stage/FREEZE.json": "0771aa36108c3dc549ba2dfdcb4d50ff2455d0d84cfb0eb81ce4336dc6a4cfc6",
+    "arms/nonrelation-handcheck-driver/input-freeze.json": "ceaa68e88f39252553afd2cb1990d22f87aea7abada01e8e6463531e55b8a56c",
+    "arms/nonrelation-handcheck-driver/transcript.json": "7b8acc646b5979ab5667759ef8f95df070b87a1c722a97c6b857ca982a807873",
+    "arms/nonrelation-handcheck-driver/tool-requests.json": "089a5d1ad0b0c7ff7d168331369718b308c1162808e332a3336362a74b3d2d3d",
+    "private/key-bifrost-judge-nonrelation.json": "cf7926dd496429422812b4903072a3d4551364282ab65e2bef19c23f263fcbe6",
+    "stageB-nonrelation-jobs.json": "8c046cdd9c41e42a0831931f1fb733ef00e7a66ee85b05c96da4867dc4434998",
+    "corpus/corpus.jsonl": "f6fda0200ac7fecbb7f03bc3a27fb193fd08620c82476118f33533972c8ea749",
+    "corpus/diffs.jsonl": "82cfc283d94ac463f891e6a5de29bf3a1d7febc5de427b825655db796e5c3bce",
+    "arms/relation-results/FREEZE.json": "002d37e8c3bb7eb62d1fc860f0f8f418c8eee5957d2398ba43605bfcf596c520"
+  },
+  "private_key_contents_not_published": true,
+  "primary_reading_unchanged": true,
+  "decision_freeze_before_private_key_attribution": true,
+  "control_roles_not_yet_launched": true
+}
