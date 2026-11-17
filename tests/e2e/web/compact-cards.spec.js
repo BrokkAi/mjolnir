@@ -1123,7 +1123,7 @@ test('the notifications screen clears and skips one card at a time and Clear all
   };
   i1.notification_dismissal = { read_through: 4 };
   i2.notification_card = {
-    badge: 'important', holder: null, form: null, dismissal: { stack: { revision: 8 } },
+    badge: 'important', holder: null, form: null, dismissal: { read_through: 5 },
     entries: [{ completed_ordinal: 5, kind: 'important', message: 'none' }],
   };
   broken.notification_card = null;
@@ -1156,7 +1156,7 @@ test('the notifications screen clears and skips one card at a time and Clear all
   const dismissed = Object.fromEntries(state.actions
     .filter(action => action.action === 'dismiss-notification' && action.session_id !== 'card-q')
     .map(action => [action.session_id, action.target]));
-  expect(dismissed).toEqual({ 'card-i1': { read_through: 4 }, 'card-i2': { stack: { revision: 8 } } });
+  expect(dismissed).toEqual({ 'card-i1': { read_through: 4 }, 'card-i2': { read_through: 5 } });
   await expect(page.locator('#notifications-badge')).toHaveCount(1);
   await expect(page.locator('.inbox-message')).toContainText('card-q');
 

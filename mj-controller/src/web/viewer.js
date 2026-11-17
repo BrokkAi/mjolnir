@@ -154,9 +154,7 @@ let snapshot,
 /// failure cannot leave a button dead.
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
-/// Session → the notification target its accepted dismissal named. The card
-/// hides that notification's glyph at once rather than waiting for the feed to
-/// lower the session's attention; a cleared or different target renders again.
+/// Session → the target of its pending or accepted dismissal.
 const dismissedNotifications = new Map();
 /// Stop failures are tied to a task identity, so a fresh snapshot can redraw
 /// the row without losing the inline error that tells the person what failed.
@@ -1161,12 +1159,55 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
+function publishedNotificationDismissal(session) {
+  if (!session) return null;
+  if (session.notification_card) return session.notification_card.dismissal;
+  if (Object.hasOwn(session, 'notification_card') && !inboxSessionFailed(session)) return null;
+  return session.notification_dismissal ?? null;
+}
+
+function matchesNotificationDismissal(session, dismissal) {
+  return Boolean(session?.notification_card) === dismissal.card
+    && JSON.stringify(publishedNotificationDismissal(session)) === dismissal.target;
+}
+
+function notificationDismissed(session) {
+  const dismissal = dismissedNotifications.get(session.id);
+  return dismissal?.accepted && matchesNotificationDismissal(session, dismissal);
+}
+
+function reconcileNotificationDismissals() {
+  for (const [id, dismissal] of dismissedNotifications) {
+    if (!matchesNotificationDismissal(sessionById(id), dismissal)) {
+      dismissedNotifications.delete(id);
+    }
+  }
+}
+
+async function sendNotificationDismissal(identity) {
+  const id = identity.session_id;
+  const session = sessionById(id);
+  const dismissal = { target: JSON.stringify(identity.target), card: Boolean(session?.notification_card), accepted: false };
+  if (identity.target && matchesNotificationDismissal(session, dismissal)) {
+    dismissedNotifications.set(id, dismissal);
+  }
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'dismiss-notification', ...identity }),
+    });
+    // Publication can retire the overlay before the request returns.
+    if (dismissedNotifications.get(id) === dismissal) dismissal.accepted = true;
+  } finally {
+    if (!dismissal.accepted && dismissedNotifications.get(id) === dismissal) dismissedNotifications.delete(id);
+  }
+}
+
 function hasNotification(session) {
   // An ignored session never interrupts: it neither lists nor counts here. A
   // notification whose dismissal the daemon accepted is already handled.
   return session.notifications_ignored !== true
-    && dismissedNotifications.get(session.id)
-      !== JSON.stringify(session.notification_dismissal ?? null)
+    && !notificationDismissed(session)
     && ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
 }
 
@@ -1262,7 +1303,7 @@ function inboxCard(entry) {
     key: inboxKey(entry),
     id: entry.id,
     destination: inboxDestination(entry),
-    dismissal: stack ? stack.dismissal : entry.notification_dismissal ?? null,
+    dismissal: publishedNotificationDismissal(entry),
     launchFailureId: entry.launchFailure?.id ?? null,
     canReply: Boolean(stack) || (!entry.launchFailure && !inboxSessionFailed(entry)),
     badge: inboxBadge(entry),
@@ -1274,7 +1315,7 @@ function inboxCard(entry) {
 function inboxEntries() {
   const rows = [...viewerState.rows.values()].filter(row => {
     const stack = row.notification_card;
-    if (stack) return dismissedNotifications.get(row.id) !== JSON.stringify(stack.dismissal);
+    if (stack) return !notificationDismissed(row);
     // Older daemons omit notification_card. New daemons publish null for
     // sessions with no card, while failures still come from attention.
     return (!Object.hasOwn(row, 'notification_card') || inboxSessionFailed(row))
@@ -1439,11 +1480,7 @@ async function inboxDismiss(identity) {
   const key = `dismiss-notification:${identity.session_id}`;
   pendingActions.add(key);
   try {
-    await request('/api/actions', {
-      method: 'POST',
-      body: JSON.stringify({ action: 'dismiss-notification', ...identity }),
-    });
-    dismissedNotifications.set(identity.session_id, JSON.stringify(identity.target));
+    await sendNotificationDismissal(identity);
   } finally {
     pendingActions.delete(key);
   }
@@ -2303,8 +2340,7 @@ function attentionParts(session) {
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   // An ignored session never interrupts, and a notification whose dismissal
   // the daemon already accepted is done: neither shows an attention glyph.
-  const dismissed = dismissedNotifications.get(session.id)
-    === JSON.stringify(session.notification_dismissal ?? null);
+  const dismissed = notificationDismissed(session);
   const attention = session.notifications_ignored === true || dismissed ? undefined : {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
@@ -2418,7 +2454,7 @@ function renderNotificationDismissal(container, session, errorNode) {
 /// what the person saw and not one that arrived after the last render.
 function markNotificationDismissal(control, session) {
   if (control.dataset.action !== 'dismiss-notification') return;
-  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
+  control.dataset.notificationDismissal = JSON.stringify(publishedNotificationDismissal(session));
 }
 
 function updateSessionMenu(card, session) {
@@ -6342,6 +6378,7 @@ function startEvents(since = viewerState.cursor) {
     try {
       const frame = JSON.parse(event.data);
       if (!viewerState.apply(frame)) return;
+      reconcileNotificationDismissals();
       if (!runtimeFrameApplied) {
         eventReconnectDelayMs = 250;
         runtimeFrameApplied = true;
@@ -6409,6 +6446,7 @@ function showLogin() {
   // Nothing from the previous viewer may survive a sign-out in this tab.
   pendingActions.clear();
   pendingLifecycleActions.clear();
+  dismissedNotifications.clear();
   backgroundTaskErrors.clear();
   resumeRows.clear();
   resumeCards.clear();
@@ -7026,6 +7064,7 @@ async function refresh() {
     clearTimeout(eventReconnectTimer);
     eventReconnectTimer = undefined;
     viewerState.install(value, value.cursor);
+    reconcileNotificationDismissals();
     await loadLaunchDefault();
     return presentSnapshot();
   } catch (e) {
@@ -9144,6 +9183,14 @@ function scheduleConversationRead() {
   });
 }
 
+function conversationReadThrough(session) {
+  let through = cursor;
+  for (const entry of session?.notification_card?.entries ?? []) {
+    if (entry.kind === 'important') through = Math.max(through, entry.completed_ordinal);
+  }
+  return through;
+}
+
 async function persistVisibleConversationRead() {
   const sessionId = currentSession;
   // A window on another monitor or behind the active one still reports
@@ -9165,10 +9212,10 @@ async function persistVisibleConversationRead() {
     receipt = { through: 0, inFlight: false };
     conversationReads.set(sessionId, receipt);
   }
-  // Acknowledge what this reader has loaded and seen. Bounding it by the
-  // row's served frontier would stall: the conversation cursor advances
-  // before the row republishes, and a row update schedules no receipt.
-  const through = cursor;
+  // The loaded cursor covers visible output. An Important completion can
+  // follow that output without a transcript item of its own.
+  if (!Number.isSafeInteger(cursor)) return;
+  const through = conversationReadThrough(session);
   if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
     || receipt.inFlight) return;
   receipt.inFlight = true;
@@ -9178,8 +9225,9 @@ async function persistVisibleConversationRead() {
     });
     receipt.through = Math.max(receipt.through, through);
     if (currentSession === sessionId) acknowledged = Math.max(acknowledged, through);
-    // A newer loaded cursor may have arrived while this request was pending.
-    if (currentSession === sessionId && cursor > through) scheduleConversationRead();
+    if (currentSession === sessionId && conversationReadThrough(sessionById(sessionId)) > through) {
+      scheduleConversationRead();
+    }
   } catch (err) {
     if (currentSession === sessionId) {
       if (err.message === 'unauthorized') showLogin();
@@ -10162,11 +10210,10 @@ async function runSessionAction(dataset, errorNode, extra) {
         method: 'POST', body: JSON.stringify(dataset.action === 'suspend'
           ? { acknowledge_active_subagents: true, acknowledge_unpublished_work: true } : { delete_branch: extra.delete_branch }),
       });
+    } else if (dataset.action === 'dismiss-notification') {
+      await sendNotificationDismissal({ session_id: body.session_id, target: body.target });
     } else {
       await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
-      if (dataset.action === 'dismiss-notification') {
-        dismissedNotifications.set(dataset.id, dataset.notificationDismissal);
-      }
     }
     errorNode.textContent = '';
     await refresh();
