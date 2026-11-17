@@ -465,6 +465,9 @@ fi
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$temporary");; *) actual=$(sha256sum -- "$temporary");; esac
 [ "${actual%% *}" = "$4" ] || { echo 'shared worker digest mismatch' >&2; exit 77; }
 promote_worker_binary "$temporary" "$destination"
+# This build serves every control subcommand, so a staged control worker has
+# nothing left to do; its link would only pin a store entry.
+case "$destination" in */hel) rm -f -- "${destination%/*}"/hel-control* ;; esac
 "#,
                 &[&cached, &temporary, destination, &digest, mode],
                 "link shared Mjolnir worker into session",

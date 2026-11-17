@@ -273,10 +273,16 @@ pub(in crate::controller) fn install_staged_worker_binary(
             vec![
                 "sh".into(),
                 "-c".into(),
-                format!("{PROMOTE_WORKER_BINARY}\npromote_worker_binary \"$1\" \"$2\""),
+                format!(
+                    "{PROMOTE_WORKER_BINARY}\npromote_worker_binary \"$1\" \"$2\" || exit $?\n\
+                     # The promoted build serves every control subcommand; a staged\n\
+                     # control worker would only pin a store entry.\n\
+                     rm -f -- \"$3\"/hel-control*"
+                ),
                 "mj-worker-promote".into(),
                 format!("{root}/{staging}"),
                 format!("{root}/hel"),
+                root,
             ],
         )
         .purpose("install the prepared Mjolnir worker"),

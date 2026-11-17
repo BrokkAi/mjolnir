@@ -4,13 +4,42 @@
 //! closes its descriptors, so "the lock cannot be taken" is the whole answer to
 //! "is a worker running for this root". It needs no process listing, and a
 //! recycled pid cannot confuse it. The controller asks
-//! `hel worker liveness|stop|holder` on the target, run from this build's
-//! control worker staged in the root, rather than testing the lock from a
-//! shell. Two measured reasons rule out a shell probe (#1550): minimal images
-//! such as ubi9-minimal have neither `flock(1)` nor Perl, and `/proc/locks`
-//! drops a lock's line once the process that took it has exited, even while a
-//! forked child still holds the descriptor (#1257), so it would report a live
-//! worker as free in any pid namespace other than the initial one.
+//! `hel worker liveness|stop|holder` on the target, from the root's own `hel`
+//! when that build has them and otherwise from a control worker it stages in
+//! the root. It does not test the lock from a shell. Two measured reasons rule
+//! that out (#1550): minimal images such as ubi9-minimal have neither
+//! `flock(1)` nor Perl, and `/proc/locks` drops a lock's line once the process
+//! that took it has exited, even while a forked child still holds the
+//! descriptor (#1257), so it would report a live worker as free in any pid
+//! namespace other than the initial one.
+//!
+//! # The control contract
+//!
+//! Any build may be asked to stop or probe a worker that a different build
+//! started, so these commands are a frozen interface, not an implementation
+//! detail. The controller decides on the target, per command, which binary in
+//! the root serves it: one that exits 0 for `worker <subcommand> --help`
+//! (`targets::worker_daemon`). That detection is the only version logic.
+//!
+//! - The names, arguments, stdout tokens and exit-status meanings of
+//!   `worker liveness`, `worker holder` and `worker stop [--kill]` (all with
+//!   `--root <dir>`) are frozen. `liveness` prints `dead`, `starting` or
+//!   `alive`; `holder` prints the holder's pid, or nothing when no worker holds
+//!   the lock; `stop` prints nothing; status 0 is success and any other status
+//!   is a failure.
+//! - Never change an existing control subcommand's arguments. New behavior is a
+//!   new subcommand, which the same `--help` probe detects.
+//! - `--help` exits 0 on each of these subcommands. That is how a build proves
+//!   it has them, and a build that predates them exits 2.
+//! - What the commands read in the root is frozen and may change only by
+//!   addition: the exclusive flock on `worker.lock`, held for the worker's
+//!   life, and the startup-record fields stop uses (`pid` and `process_birth`
+//!   in the startup record). This replaces any rule that an older build must
+//!   not judge a newer worker: every build that has the commands reads the
+//!   same things the same way, so any of them may stop any worker.
+//!
+//! The golden for the control scripts and the contract test in this
+//! package's `tests/` enforce this.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
