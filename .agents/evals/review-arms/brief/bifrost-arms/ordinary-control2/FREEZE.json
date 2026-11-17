@@ -55,9 +55,10 @@
     "summary.json": "2dd819a890b0dd1c0d42b2aa48bab8922d6dd8718ccb4d62e6c266c843476954",
     "verification-completion.json": "b6507ac63653998094282970c2188c4f7ebbbde1c63fa28283139f6eadde71fb",
     "verifier-tool-audit.json": "416297218a3c9c6a02fac3f242d19131f2d8bf12d5c9ccb554957378c21b7275",
-    "verifier-tool-audit.md": "8fae3ec4f047c5dbe5dd5809b81d63b1713fd5db88c6fb28f813e984f2f682f6"
+    "verifier-tool-audit.md": "8fae3ec4f047c5dbe5dd5809b81d63b1713fd5db88c6fb28f813e984f2f682f6",
+    ".gitattributes": "d3dc9bf0fa1000bb7cca6d1d21d8353c559e5884229d37159d502d745e6a72db"
   },
-  "sha256sums_sha256": "7bc484fa96d025451a744e96bee6621716993af0b3cf17e513262981379f87b1",
+  "sha256sums_sha256": "1685c64fad064752d5fe5b4894a5d319a7d8799bbec8a97e33a1d68158a586db",
   "source_hashes": {
     "arms/ordinary-review-stage/FREEZE.json": "c534848f39896ecf03211e2a20783c0b4b0e6af45561dbada152d9255b8f66ba",
     "arms/ordinary-writer-stage/FREEZE.json": "1bfe5457d770f22bd1450c8c909ec0aa98e9c0d2f23e72c136a67d1a14e9b2a2",
