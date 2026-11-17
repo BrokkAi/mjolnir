@@ -10,10 +10,7 @@
 │                 │    codex-2   Codex        refreshing                                             │                 │
 │                 │ !  kimi-1    Kimi Code    refreshing                                             │                 │
 │                 │                                                                                  │                 │
-│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
+│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
@@ -24,8 +21,11 @@
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
@@ -42,9 +42,6 @@
 │  │              │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -55,8 +52,11 @@
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │    Resets       │
-│                 │   Cancel     Next                                                                │  % now          │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+│                 │                                                                                  │  % now          │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
@@ -67,21 +67,21 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ─────  │                                                                                  │                 │
 │ Create   Open   │    PROFILE   HARNESS      WEEKLY      5H                                         │                 │
 │hel ───────────  │    claude-1  Claude Code  refreshing      (lossy: text-only transcript)          │                 │
-│› ■ ACP pretty   │    codex-1   Codex        refreshing                                             │                 │
-│  Stopped  podm  │    codex-2   Codex        refreshing                                             │                 │
+│› ■ ACP pretty   │    codex-1   Codex        refreshing                                             │  ───────────────╯
+│  Stopped  podm  │    codex-2   Codex        refreshing                                             │  ───────────────╮
 │  │ No messages  │ !  kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)          │                 │
-│  │              │                                                                                  │  ───────────────╯
-│                 │ Same agent: the conversation continues natively.                                 │  ───────────────╮
-│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│  │              │                                                                                  │                 │
+│                 │ Same agent: the conversation continues natively.                                 │  ───────────────╯
+│                 │ !  No guardian approval mode; do not run on a raw, unsandboxed target.           │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ──── ▁   ▄   □ ╮
 │                 │                                                                                  │                 ▐
 │                 │                                                                                  │                 ▐
-│                 │   Cancel     Next                                                                │                 ▐
+│                 │                                                                                  │                 ▐
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 ╰───────────────                                                                                        ───────────────╯
 Enter open · / s                                                                                        / ? palette
@@ -97,11 +97,8 @@ Enter open · / s                                                               
 │                 │   codex-2   Codex        refreshing                                              │                 │
 │                 │                                                                                  │                 │
 │                 │ kimi-1: Kimi Code is not installed here: /profiles/kimi does not exist and       │                 │
-│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │                 │
-│                 │ › Profiles.                                                                      │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │  ───────────────╯
-│                 │                                                                                  │  ───────────────╮
+│                 │ `kimi` is not on PATH. Install Kimi Code, or turn the profile off in Settings    │  ───────────────╯
+│                 │ › Profiles.                                                                      │  ───────────────╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
@@ -111,8 +108,11 @@ Enter open · / s                                                               
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │   Cancel     Next                                                                │                 │
-│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │  ───────────────╯
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ──────── ▁   ▄ ╮
 │                                                                                                                      │
 ╰───────────────                                                                                        ───────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette

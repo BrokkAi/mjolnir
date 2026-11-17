@@ -106,7 +106,7 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
     )
     .unwrap();
     let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(first, "test current worker promotion")
+        crate::controller::test_support::worker_test_permit(first, "test current worker promotion")
             .unwrap()
             .unwrap();
     staged.install(&owner).unwrap();

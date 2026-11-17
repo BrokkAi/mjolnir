@@ -456,8 +456,8 @@ impl LifecycleKind {
 /// A park needs the session actor: it takes the actor's connection to admit
 /// the park only while the worker is idle. Once the record says `Parked` the
 /// manager drops the session on its own. Once unpark commits an active record
-/// and boot intent, the actor can observe startup; WorkerPermit still prevents
-/// it from racing a process mutation by the wake owner.
+/// and boot intent, the actor can observe startup; the session owner defers
+/// readiness settlement while the wake lifecycle is mutating its worker.
 fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     match kind {
         LifecycleKind::Suspend => state == Some(SessionState::Destroying),

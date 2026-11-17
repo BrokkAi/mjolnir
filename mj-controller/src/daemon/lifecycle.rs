@@ -743,7 +743,8 @@ impl RuntimeState {
                         } else {
                             None
                         };
-                        operation(operation_state, operation_id, cancelled, session_admission).await
+                        let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(&operation_id, &session_admission)?;
+                        worker_owner.scope(operation(operation_state, operation_id, cancelled, session_admission)).await
                     })
                     .await
                     {

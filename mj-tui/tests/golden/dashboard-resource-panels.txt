@@ -9,12 +9,9 @@
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
 │                                                   ││                                            ✦  M J O L N I R                                             │
 │                                                   ││                                                                                                         │
 │                                                   ││                                   Create a session to start building.                                   │
-│                                                   ││                                                                                                         │
-│                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
 │                                                   ││                                                                                                         │
@@ -37,6 +34,9 @@
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││           Harness  Weekly Resets  5H Resets                                                             │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Notifications (0) ─────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                                   ││Nothing needs you                                                                                        │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 === grouped host load without sample clock (120x40) ===
@@ -48,12 +48,9 @@
 │No sessions yet                       ││                                                                              │
 │Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -78,19 +75,19 @@
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -107,19 +104,19 @@
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        unavailable                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === expired login quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -136,19 +133,19 @@
 │                                      ││  claude-1  Claude Code  login expired                                        │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === usage-priced API quota (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                      Create a session to start building.                     │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -165,19 +162,19 @@
 │                                      ││  bedrock-claude  Claude Code  ▕   API    ▏                                   │
 │                                      ││  codex-1         Codex        ▕   API    ▏                                   │
 │                                      ││  codex-2         Codex        refreshing…                                    │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === quota a harness never shares (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                      Create a session to start building.                     │
 │No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
+│Create new work or open a session.    ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -194,19 +191,19 @@
 │                                      ││  codex-1     Codex        refreshing…                                        │
 │                                      ││  codex-2     Codex        refreshing…                                        │
 │                                      ││  opencode-1  OpenCode     ▕   n/a    ▏                                       │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Claude Fable weekly quota (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                                                                            │
+╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
+│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
 │No sessions yet                             ││                                                                                            │
-│Create new work or open a session.          ││                             Create a session to start building.                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
+│Create new work or open a session.          ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -223,19 +220,19 @@
 │                                            ││  claude-2  Claude Code  ▕██▏       ▏21%       2d 0h   ▕████      ▏40% 1h 0m                │
 │                                            ││  codex-1   Codex                                                                           │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota columns (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
-╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
-│No sessions yet                             ││                                                                                            │
-│Create new work or open a session.          ││                             Create a session to start building.                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                      ✦  M J O L N I R                                      │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                             Create a session to start building.                            │
+│Create new work or open a session.          ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -252,19 +249,19 @@
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        ▕███████▎  ▏73% 2d 0h   ▕███████   ▏70% 1h 5m                      │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === weekly and five-hour quota at 80 columns (80x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
-╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
-│ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
-│No sessions yet                       ││                                      │
-│Create new work or open a session.    ││  Create a session to start building. │
-│                                      ││                                      │
-│                                      ││                                      │
-│                                      ││                                      │
+╭ Sessions ───────────────────── ▁   ▄ ╮│           ✦  M J O L N I R           │
+│ Create   Open   Filter: _____________││                                      │
+│No sessions yet                       ││  Create a session to start building. │
+│Create new work or open a session.    ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -282,18 +279,18 @@
 │  codex-1   Codex        ▕███████▎  ▏73% 2d 0h [1]  ▕███████   ▏70% 1h 5m     │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
 === Antigravity Gemini and Claude quota pools (140x28) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ≡ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                                                                            │
+╰────────────────────────────────────────────╯│                                      ✦  M J O L N I R                                      │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
-│ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
+│ Create   Open   Filter: ___________________││                             Create a session to start building.                            │
 │No sessions yet                             ││                                                                                            │
-│Create new work or open a session.          ││                             Create a session to start building.                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
+│Create new work or open a session.          ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -310,5 +307,8 @@
 │                                            ││› agy (Cl)  Antigravity  ▕          ▏0%                                                     ▐
 │                                            ││  claude-1  Claude Code  refreshing…                                                        ▐
 │                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette

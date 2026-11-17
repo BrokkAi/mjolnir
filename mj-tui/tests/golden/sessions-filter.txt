@@ -8,12 +8,9 @@
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│  Outside filter                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -37,6 +34,9 @@
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -50,12 +50,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│  Outside filter                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -79,6 +76,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 click=(6,3); action=None; filter retained=true
@@ -93,12 +93,9 @@ click=(6,3); action=None; filter retained=true
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│  Outside filter                      ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  Outside filter                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -122,6 +119,9 @@ click=(6,3); action=None; filter retained=true
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 click=(19,3); action=None; filter retained=true
@@ -136,12 +136,9 @@ click=(19,3); action=None; filter retained=true
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│  │                                   ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -165,6 +162,9 @@ click=(19,3); action=None; filter retained=true
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 chip=(21,3) glyph='×'; action=None; filter active=false
@@ -179,12 +179,9 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
 |  |                                   ||                                                                              |
-|  Outside filter                      ||                                                                              |
-|                                      ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                               *  M J O L N I R                               |
 |                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -208,6 +205,9 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 |                                      ||  claude-1  Claude Code  refreshing..                                         |
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Notifications (0) ---------------------------------------------------- -   = +
+|                                      ||Nothing needs you                                                             |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 
@@ -221,12 +221,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
 |  |                                   ||                                                                              |
-|  Outside filter                      ||                                                                              |
-|                                      ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                               *  M J O L N I R                               |
 |                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -250,6 +247,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  claude-1  Claude Code  refreshing..                                         |
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Notifications (0) ---------------------------------------------------- -   = +
+|                                      ||Nothing needs you                                                             |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 click=(6,3); action=None; filter retained=true
@@ -264,12 +264,9 @@ click=(6,3); action=None; filter retained=true
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
 |  |                                   ||                                                                              |
-|  Outside filter                      ||                                                                              |
-|                                      ||                               *  M J O L N I R                               |
+|  Outside filter                      ||                               *  M J O L N I R                               |
 |                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -293,6 +290,9 @@ click=(6,3); action=None; filter retained=true
 |                                      ||  claude-1  Claude Code  refreshing..                                         |
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Notifications (0) ---------------------------------------------------- -   = +
+|                                      ||Nothing needs you                                                             |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 click=(19,3); action=None; filter retained=true
@@ -307,12 +307,9 @@ click=(19,3); action=None; filter retained=true
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
 |  | No messages yet                   ||                                                                              |
-|  |                                   ||                                                                              |
-|                                      ||                               *  M J O L N I R                               |
+|  |                                   ||                               *  M J O L N I R                               |
 |                                      ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
-|                                      ||                                                                              |
-|                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -336,6 +333,9 @@ click=(19,3); action=None; filter retained=true
 |                                      ||  claude-1  Claude Code  refreshing..                                         |
 |                                      ||  codex-1   Codex        refreshing..                                         |
 |                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Notifications (0) ---------------------------------------------------- -   = +
+|                                      ||Nothing needs you                                                             |
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : / ? palette
 chip=(21,3) glyph='x'; action=None; filter active=false
@@ -350,12 +350,9 @@ chip=(21,3) glyph='x'; action=None; filter active=false
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -379,6 +376,9 @@ chip=(21,3) glyph='x'; action=None; filter active=false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 Sessions action row: "│ Create   Open   Filter: ___________________│"; filter active: false
@@ -393,12 +393,9 @@ Sessions action row: "│ Create   Open   Filter: ___________________│"; filte
 │› · ACP pretty name               ◇ ⋯ ││                                      │
 │  Idle  podman  codex-1               ││                                      │
 │  │ No messages yet                   ││                                      │
-│  │                                   ││                                      │
-│                                      ││           ✦  M J O L N I R           │
+│  │                                   ││           ✦  M J O L N I R           │
 │                                      ││                                      │
 │                                      ││Select a session to open its conversat│
-│                                      ││                                      │
-│                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -423,6 +420,9 @@ Sessions action row: "│ Create   Open   Filter: ___________________│"; filte
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 Sessions action row: "│ Create   Open   Filter: _____________│"; filter active: false
 
@@ -436,12 +436,9 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 │  Idle            ││                                                                                                                      │
 │  Outside filter  ││                                                                                                                      │
 │                  ││                                                                                                                      │
-│                  ││                                                                                                                      │
 │                  ││                                                   ✦  M J O L N I R                                                   │
 │                  ││                                                                                                                      │
 │                  ││                                      Select a session to open its conversation.                                      │
-│                  ││                                                                                                                      │
-│                  ││                                                                                                                      │
 │                  ││                                                                                                                      │
 │                  ││                                                                                                                      │
 │                  ││                                                                                                                      │
@@ -465,6 +462,9 @@ Sessions action row: "│ Create   Open   Filter: _____________│"; filter acti
 │                  ││  claude-1  Claude Code  refreshing…                                                                                  │
 │                  ││  codex-1   Codex        refreshing…                                                                                  │
 │                  ││  codex-2   Codex        refreshing…                                                                                  │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                  ││Nothing needs you                                                                                                     │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 action row: "│ Create   Open    │"; hidden sessions: 0
@@ -480,12 +480,9 @@ click Filter input: None; editing: true
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -509,6 +506,9 @@ click Filter input: None; editing: true
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filter: nomatch ___________│"
@@ -523,12 +523,9 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -552,6 +549,9 @@ query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filt
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 filter active: false
@@ -566,12 +566,9 @@ filter active: false
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -595,6 +592,9 @@ filter active: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@15
@@ -609,12 +609,9 @@ input/cursor: "alpha beta gamma"@15
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -638,6 +635,9 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
@@ -652,12 +652,9 @@ input/cursor: "alpha beta gamma"@16
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -681,6 +678,9 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@0
@@ -695,12 +695,9 @@ input/cursor: "alpha beta gamma"@0
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -724,6 +721,9 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
@@ -738,12 +738,9 @@ input/cursor: "alpha beta gamma"@16
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -767,6 +764,9 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@0
@@ -781,12 +781,9 @@ input/cursor: "alpha beta gamma"@0
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -810,6 +807,9 @@ input/cursor: "alpha beta gamma"@0
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
@@ -824,12 +824,9 @@ input/cursor: "alpha beta gamma"@16
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -853,6 +850,9 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@15
@@ -867,12 +867,9 @@ input/cursor: "alpha beta gamma"@15
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -896,6 +893,9 @@ input/cursor: "alpha beta gamma"@15
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@16
@@ -910,12 +910,9 @@ input/cursor: "alpha beta gamma"@16
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -939,6 +936,9 @@ input/cursor: "alpha beta gamma"@16
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@11
@@ -953,12 +953,9 @@ input/cursor: "alpha beta gamma"@11
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -982,6 +979,9 @@ input/cursor: "alpha beta gamma"@11
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@6
@@ -996,12 +996,9 @@ input/cursor: "alpha beta gamma"@6
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1025,6 +1022,9 @@ input/cursor: "alpha beta gamma"@6
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha beta gamma"@10
@@ -1039,12 +1039,9 @@ input/cursor: "alpha beta gamma"@10
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1068,6 +1065,9 @@ input/cursor: "alpha beta gamma"@10
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha betagamma"@10
@@ -1082,12 +1082,9 @@ input/cursor: "alpha betagamma"@10
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1111,6 +1108,9 @@ input/cursor: "alpha betagamma"@10
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha betgamma"@9
@@ -1125,12 +1125,9 @@ input/cursor: "alpha betgamma"@9
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1154,6 +1151,9 @@ input/cursor: "alpha betgamma"@9
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha begamma"@8
@@ -1168,12 +1168,9 @@ input/cursor: "alpha begamma"@8
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1197,6 +1194,9 @@ input/cursor: "alpha begamma"@8
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha gamma"@6
@@ -1211,12 +1211,9 @@ input/cursor: "alpha gamma"@6
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1240,6 +1237,9 @@ input/cursor: "alpha gamma"@6
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@6
@@ -1254,12 +1254,9 @@ input/cursor: "alpha "@6
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1283,6 +1280,9 @@ input/cursor: "alpha "@6
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@0
@@ -1297,12 +1297,9 @@ input/cursor: "alpha "@0
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1326,6 +1323,9 @@ input/cursor: "alpha "@0
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "xalpha "@1
@@ -1340,12 +1340,9 @@ input/cursor: "xalpha "@1
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1369,6 +1366,9 @@ input/cursor: "xalpha "@1
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 input/cursor: "alpha "@0
@@ -1383,12 +1383,9 @@ input/cursor: "alpha "@0
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1412,6 +1409,9 @@ input/cursor: "alpha "@0
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query/cursor after Up: ("alpha ", 0)
@@ -1426,12 +1426,9 @@ query/cursor after Up: ("alpha ", 0)
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1455,6 +1452,9 @@ query/cursor after Up: ("alpha ", 0)
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 editing after slash: true
@@ -1469,12 +1469,9 @@ editing after slash: true
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1498,6 +1495,9 @@ editing after slash: true
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 query after Enter: ("q", 1); editing: false
@@ -1512,12 +1512,9 @@ query after Enter: ("q", 1); editing: false
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1541,6 +1538,9 @@ query after Enter: ("q", 1); editing: false
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 editing after slash: true
@@ -1555,12 +1555,9 @@ editing after slash: true
 │› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  │                                         ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1584,6 +1581,9 @@ editing after slash: true
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 filter active: false
@@ -1598,12 +1598,9 @@ filter active: false
 |  Idle  podman  codex-1                     ||                                                                                            |
 |  | No messages yet                         ||                                                                                            |
 |  |                                         ||                                                                                            |
-|  Outside filter                            ||                                                                                            |
-|                                            ||                                      *  M J O L N I R                                      |
+|  Outside filter                            ||                                      *  M J O L N I R                                      |
 |                                            ||                                                                                            |
 |                                            ||                         Select a session to open its conversation.                         |
-|                                            ||                                                                                            |
-|                                            ||                                                                                            |
 |                                            ||                                                                                            |
 |                                            ||                                                                                            |
 |                                            ||                                                                                            |
@@ -1627,6 +1624,9 @@ filter active: false
 |                                            ||  claude-1  Claude Code  refreshing..                                                       |
 |                                            ||  codex-1   Codex        refreshing..                                                       |
 |                                            ||  codex-2   Codex        refreshing..                                                       |
+|                                            |+--------------------------------------------------------------------------------------------+
+|                                            |+ Notifications (0) ------------------------------------------------------------------ -   = +
+|                                            ||Nothing needs you                                                                           |
 +--------------------------------------------++--------------------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - : / ? palette
 filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
@@ -1641,15 +1641,12 @@ filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 │  Idle  podman [1]  codex-1                 ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│                                            ││                                                                                            │
-│› · ACP pretty name                     ◇ ⋯ ││                                      ✦  M J O L N I R                                      │
-│  Idle  podman [2]  codex-1                 ││                                                                                            │
-│  │ No messages yet                         ││                         Select a session to open its conversation.                         │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman [2]  codex-1                 ││                         Select a session to open its conversation.                         │
+│  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
 │  Outside filter                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1670,6 +1667,9 @@ filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 hidden sessions: 0
@@ -1684,12 +1684,9 @@ hidden sessions: 0
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
-│  Outside filter                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
+│  Outside filter                            ││                                      ✦  M J O L N I R                                      │
 │                                            ││                                                                                            │
 │                                            ││                         Select a session to open its conversation.                         │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
@@ -1713,6 +1710,9 @@ hidden sessions: 0
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 hidden sessions: 1

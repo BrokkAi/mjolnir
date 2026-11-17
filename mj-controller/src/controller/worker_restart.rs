@@ -276,11 +276,7 @@ impl Controller {
             .context("prepare the current managed harness before replacing the worker")?;
         let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &worker)
             .context("stage the current worker while the old worker remains available")?;
-        let Some(owner) =
-            crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "worker upgrade")?
-        else {
-            return Ok(WorkerUpgradeOutcome::Deferred);
-        };
+        let owner = crate::worker_lifecycle::WorkerPermit::acquire(session_id, admission)?;
         owner
             .scope(async {
                 let target = self.state.sessions[session_id]
@@ -864,22 +860,27 @@ mod tests {
             yielded: AtomicBool::new(false),
         };
         let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
-        let error = match controller
-            .restart_worker_with_installed_binary(
-                ID,
-                &executor,
-                InstalledWorkerRestart {
-                    backend: &backend,
-                    worker_root: &root,
-                    reconnect: &reconnect,
-                    launch: None,
-                    prepared: true,
-                    discard_queued_prompts: Some("discard-before-boot".into()),
-                    swap_admission: Some(crate::upgrade::activity_unless_draining(LABEL).unwrap()),
-                    messages: &RESTART_FOR_UPGRADE,
-                },
-            )
-            .await
+        let error = match crate::controller::test_support::worker_test_scope_async(ID, async {
+            controller
+                .restart_worker_with_installed_binary(
+                    ID,
+                    &executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &root,
+                        reconnect: &reconnect,
+                        launch: None,
+                        prepared: true,
+                        discard_queued_prompts: Some("discard-before-boot".into()),
+                        swap_admission: Some(
+                            crate::upgrade::activity_unless_draining(LABEL).unwrap(),
+                        ),
+                        messages: &RESTART_FOR_UPGRADE,
+                    },
+                )
+                .await
+        })
+        .await
         {
             Ok(_) => panic!("handoff must cancel observation"),
             Err(error) => error,
@@ -998,8 +999,10 @@ mod tests {
             worker_root: worker_root.clone(),
         };
         let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
-        let result = bare_restart_controller()
-            .restart_worker_with_installed_binary(
+        let controller = bare_restart_controller();
+        let result = crate::controller::test_support::worker_test_scope_async(
+            session_id,
+            controller.restart_worker_with_installed_binary(
                 session_id,
                 executor,
                 InstalledWorkerRestart {
@@ -1012,8 +1015,9 @@ mod tests {
                     swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
-            )
-            .await;
+            ),
+        )
+        .await;
         match result {
             Ok(_) => panic!("a failing executor unexpectedly restarted the worker"),
             Err(error) => error,
@@ -1090,7 +1094,7 @@ mod tests {
             }
         }
         let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let upgrading = crate::worker_lifecycle::WorkerPermit::try_acquire(id, "worker upgrade")
+        let upgrading = crate::controller::test_support::worker_test_permit(id, "worker upgrade")
             .unwrap()
             .unwrap();
         let executor = FailingCommands(AtomicUsize::new(0));

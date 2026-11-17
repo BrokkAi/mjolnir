@@ -889,6 +889,14 @@ pub trait CommandExecutor {
     fn begin_resumable_work(&self) -> Result<()> {
         Ok(())
     }
+    /// Release daemon admission, if this operation holds it and the next
+    /// daemon restarts the operation from a durable record. Returns whether
+    /// admission was released; the caller then owes
+    /// [`Self::end_resumable_work`]. For a wait that can take minutes, such as
+    /// shared target content, so a handoff does not wait for it.
+    fn yield_admission_if_resumable(&self) -> bool {
+        false
+    }
     /// The daemon is yielding a durable operation to its replacement.
     fn shutdown_interrupted(&self) -> bool {
         false
@@ -1009,6 +1017,10 @@ impl<E: CommandExecutor + ?Sized> CommandExecutor for WithoutDeadline<'_, E> {
 
     fn begin_resumable_work(&self) -> Result<()> {
         self.executor.begin_resumable_work()
+    }
+
+    fn yield_admission_if_resumable(&self) -> bool {
+        self.executor.yield_admission_if_resumable()
     }
 
     fn shutdown_interrupted(&self) -> bool {

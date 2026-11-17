@@ -100,23 +100,40 @@ pub(crate) fn ensure_control_worker(
     if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
         return Ok(());
     }
+    // Publishing a build waits behind other uploads of it and can take
+    // minutes. A resumable operation does not hold daemon admission for that:
+    // a handoff cancels the wait and the next daemon starts it again.
+    let yielded = caller.yield_admission_if_resumable();
+    let installed = install_control_worker(caller, locator, session_id, &root);
+    if yielded && !caller.cancellation_requested() {
+        caller.end_resumable_work("control worker install")?;
+    }
+    installed
+}
+
+fn install_control_worker(
+    caller: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+) -> Result<()> {
     let untimed = &targets::WithoutDeadline::new(caller);
     let worker = WorkerInstall::for_target(locator, untimed).with_context(|| {
         format!(
             "the current worker cannot be installed for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    let name = Path::new(&targets::control_worker_path(&root))
+    let name = Path::new(&targets::control_worker_path(root))
         .file_name()
         .and_then(|name| name.to_str())
         .context("the control worker has a file name")?
         .to_owned();
     install_worker_binary(untimed, locator, session_id, &worker, &name)
         .with_context(|| format!("install the current worker for {root}"))?;
-    let current = targets::control_worker_path(&root);
+    let current = targets::control_worker_path(root);
     let cleanup = format!(
         "for path in {}'/hel-control-'*; do [ \"$path\" = {} ] || rm -f -- \"$path\"; done",
-        targets::posix_quote(&root),
+        targets::posix_quote(root),
         targets::posix_quote(&current),
     );
     execute_checked(

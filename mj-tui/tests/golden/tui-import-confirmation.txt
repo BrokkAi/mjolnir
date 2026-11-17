@@ -3,7 +3,7 @@
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
 │hel ───────                                                                                                           │
 │› ■ ACP pre                                                                                                           │
 │  Stopped    ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
@@ -11,22 +11,22 @@
 │  │          │/work/repo — 1 tracked change · 2 untracked paths                                        │              │
 │             │                                                                                         │              │
 │             │These scratch repositories are in temporary directories and stay outside the import:     │              │
-│             │/tmp/mj-golden-scratch                                                                   │              │
-│             │                                                                                         │              │
+│             │/tmp/mj-golden-scratch                                                                   │  ────────────╯
+│             │                                                                                         │  ────────────╮
 │             │Checked creates a clean, separate checkout. Unchecked uses the original directory with   │              │
-│             │its current files.                                                                       │  ────────────╯
-│             │Project root on daemon host:                                                             │  ────────────╮
-│             │/work/repo                                                                               │              │
+│             │its current files.                                                                       │              │
+│             │Project root on daemon host:                                                             │  ────────────╯
+│             │/work/repo                                                                               │  ───── ▁   ▄ ╮
 │             │☒ Create isolated checkout                                                               │              │
 │             │                                                                                         │  ────────────╯
 │             │  Cancel     Continue                                                                    │  ───── ▁   ▄ ╮
 │             ╰─────────────────────────────────────────────────────────────────────────────────────────╯              │
-│                                                                                                          ────────────╯
-│                                                                                                          ───── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 
@@ -35,29 +35,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
-│› ■ ACP pretty name               ◇ ⋯ ││                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│hel ──────────────────────────────────││                                                                              │
+│› ■ ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Stopped                                                                                                             │
 │  │ No mess                                                                                                           │
 │  │          ╭ × Importing session · progress 1/? ─────────────────────────────────────────────────────╮              │
 │             │Imported session                                                                         │              │
 │             │                                                                                         │              │
-│             │Registering on the daemon — cannot be cancelled.                                         │              │
-│             │The dashboard remains responsive while the import runs.                                  │              │
+│             │Registering on the daemon — cannot be cancelled.                                         │  ────────────╯
+│             │The dashboard remains responsive while the import runs.                                  │  ────────────╮
+│             │                                                                                         │              │
 │             │                                                                                         │              │
 │             │                                                                                         │  ────────────╯
-│             │                                                                                         │  ────────────╮
-│             │                                                                                         │              │
+│             │                                                                                         │  ───── ▁   ▄ ╮
 │             │                                         Cancel                                          │              │
 │             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ────────────╯
 │                                                                                                          ───── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette

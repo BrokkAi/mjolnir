@@ -204,7 +204,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
     assert_eq!(entry_meta.nlink(), 2, "the store entry and the root's link");
     unchanged();
 
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
+    let owner = crate::controller::test_support::worker_test_permit(SESSION, "test stop")
         .unwrap()
         .unwrap();
     stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
@@ -300,6 +300,146 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     assert_eq!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
     plan.execute(&ProcessExecutor).unwrap();
     assert!(!root.exists());
+}
+
+// Hard-won: #1573: a sub-agent suspend queued behind another upload of this
+// build held daemon admission for the whole wait, so a handoff waited 440 s on
+// it. The wait now releases admission and a handoff's cancellation ends it
+// without taking admission back.
+#[cfg(unix)]
+#[test]
+fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    const CHILD: &str = "MJ_CONTROL_INSTALL_ADMISSION_CHILD";
+    const SESSION: &str = "19191919191919191919191919191919";
+    struct Admission {
+        inner: targets::CancellableProcessExecutor,
+        cancelled: Arc<AtomicBool>,
+        held: AtomicBool,
+        reacquired: AtomicUsize,
+    }
+    impl CommandExecutor for Admission {
+        fn execute(&self, command: &CommandSpec) -> Result<mj_core::targets::CommandOutput> {
+            self.inner.execute(command)
+        }
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            self.inner.pause_deadline()
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+        fn execute_without_deadline(
+            &self,
+            command: &CommandSpec,
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.inner.execute_without_deadline(command)
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<mj_core::targets::CommandOutput> {
+            self.inner
+                .execute_with_stdin_without_deadline(command, input)
+        }
+        fn yield_admission_if_resumable(&self) -> bool {
+            self.held.swap(false, Ordering::SeqCst)
+        }
+        fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
+            self.reacquired.fetch_add(1, Ordering::SeqCst);
+            self.held.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-worker");
+        let mut body = format!(
+            "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
+            mj_core::worker_build::WORKER_BUILD_ID
+        )
+        .into_bytes();
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(&current, body).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-1573-control-admission")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", current.clone())
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hel"), "#!/bin/sh\nexit 2\n").unwrap();
+    let root_text = root.to_string_lossy().into_owned();
+    let control = std::path::PathBuf::from(targets::control_worker_path(&root_text));
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root_text,
+    };
+    let digest = mj_core::worker_launch::worker_executable_digest(Path::new(
+        &std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+    ))
+    .unwrap();
+    let directory_key = format!(
+        "{}/{digest}",
+        mj_core::target_path::text(&store::store_root(&locator, SESSION).unwrap())
+    );
+    // Another upload of this build owns the publication.
+    let gate = store::store_gate(&locator, &directory_key);
+    let other_upload = gate
+        .try_lock("other-session", "publish a worker build")
+        .unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let executor = Arc::new(Admission {
+        inner: targets::CancellableProcessExecutor::new(cancelled.clone()),
+        cancelled: cancelled.clone(),
+        held: AtomicBool::new(true),
+        reacquired: AtomicUsize::new(0),
+    });
+    let waiter = {
+        let executor = executor.clone();
+        let locator = locator.clone();
+        std::thread::spawn(move || ensure_control_worker(&*executor, &locator, SESSION))
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while executor.held.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "the wait never released admission"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the install finished behind a held gate"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // A handoff cancels the wait; admission stays released.
+    cancelled.store(true, Ordering::SeqCst);
+    let error = waiter.join().unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+    assert_eq!(executor.reacquired.load(Ordering::SeqCst), 0);
+    assert!(!executor.held.load(Ordering::SeqCst));
+    assert!(!control.exists());
+    // Once the other upload is gone, the same install completes and takes
+    // admission back before returning.
+    drop(other_upload);
+    cancelled.store(false, Ordering::SeqCst);
+    executor.held.store(true, Ordering::SeqCst);
+    ensure_control_worker(&*executor, &locator, SESSION).unwrap();
+    assert!(control.exists());
+    assert_eq!(executor.reacquired.load(Ordering::SeqCst), 1);
+    assert!(executor.held.load(Ordering::SeqCst));
 }
 
 // A diagnosis reports and installs nothing: a root with no control worker for
@@ -668,7 +808,7 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
     assert!(!abandoned_path.exists());
     assert!(worker_root.join(&*staging).exists());
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "test upgrade")
+    let owner = crate::controller::test_support::worker_test_permit(session_id, "test upgrade")
         .unwrap()
         .unwrap();
     install_staged_worker_binary(&owner, &staging, &executor, &locator, session_id).unwrap();
@@ -1551,7 +1691,7 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             commands: RefCell::new(Vec::new()),
         };
         start_worker(
-            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+            &crate::controller::test_support::worker_test_permit(
                 "13131313131313131313131313131313",
                 "test start",
             )
@@ -1593,7 +1733,7 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         crate::database::save_session(&session).unwrap();
         executor.commands.borrow_mut().clear();
         start_worker(
-            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+            &crate::controller::test_support::worker_test_permit(
                 &session.id,
                 "credential-free start",
             )
@@ -1666,7 +1806,7 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
         commands: RefCell::new(Vec::new()),
     };
     stop_worker(
-        &crate::worker_lifecycle::WorkerPermit::try_acquire(
+        &crate::controller::test_support::worker_test_permit(
             "14141414141414141414141414141414",
             "test stop",
         )
@@ -1785,7 +1925,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
         workspace_storage: Default::default(),
     };
 
-    crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test stop")
+    crate::controller::test_support::worker_test_permit(session, "test stop")
         .unwrap()
         .unwrap()
         .scope_blocking(|| {
@@ -2105,7 +2245,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             None,
             &[],
         )?;
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             &session,
             "test binary replacement",
         )?
