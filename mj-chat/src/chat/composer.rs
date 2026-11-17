@@ -26,6 +26,10 @@ pub(super) enum ComposerIoUpdate {
         staging: bool,
         result: Result<ClipboardContent, String>,
     },
+    SessionHistoryListed {
+        generation: u64,
+        result: Result<Vec<mj_core::storage::PromptHistoryEntry>, String>,
+    },
     HistorySearchResults {
         generation: u64,
         result: Result<mj_core::storage::PromptHistoryPage, String>,
@@ -101,6 +105,8 @@ pub(super) struct ComposerRuntime {
     pub(super) preview_origins: BTreeMap<String, Option<String>>,
     pub(super) prepared_startup: VecDeque<StartupPrompt>,
     pub(super) remote_streams: Vec<RemoteResultForwarder>,
+    pub(super) history_task: Option<RemoteResultForwarder>,
+    pub(super) session_history_task: Option<RemoteResultForwarder>,
 }
 impl Default for ComposerRuntime {
     fn default() -> Self {
@@ -123,6 +129,8 @@ impl Default for ComposerRuntime {
             preview_origins: BTreeMap::new(),
             prepared_startup: VecDeque::new(),
             remote_streams: Vec::new(),
+            history_task: None,
+            session_history_task: None,
         }
     }
 }
@@ -157,10 +165,12 @@ pub struct LiveComposer {
     pending_queue_images: BTreeMap<String, Vec<PromptImage>>,
     history_search: Option<HistorySearch>,
     next_history_search_generation: u64,
-    pending_history_search: Option<HistorySearchRequest>,
+    composer_requests: VecDeque<super::history::ComposerRequest>,
+    session_history: Vec<String>,
+    session_history_error: Option<String>,
+    session_history_generation: u64,
     pending_submissions: Vec<submissions::PendingSubmission>,
     submission_renders: Vec<(String, std::time::Instant)>,
-    pending_abandoned_prompt: Option<active::ChatDaemonRequest>,
     plan_command_pending: bool,
     operation_feedback: BTreeMap<String, String>,
     conversation_notices: Vec<feedback::ConversationNotice>,
@@ -310,10 +320,12 @@ impl ChatState {
             next_history_search_generation: std::mem::take(
                 &mut self.next_history_search_generation,
             ),
-            pending_history_search: std::mem::take(&mut self.pending_history_search),
+            composer_requests: std::mem::take(&mut self.composer_requests),
+            session_history: std::mem::take(&mut self.session_history),
+            session_history_error: std::mem::take(&mut self.session_history_error),
+            session_history_generation: self.session_history_generation,
             pending_submissions: std::mem::take(&mut self.pending_submissions),
             submission_renders: std::mem::take(&mut self.submission_renders),
-            pending_abandoned_prompt: std::mem::take(&mut self.pending_abandoned_prompt),
             plan_command_pending: std::mem::take(&mut self.plan_command_pending),
             operation_feedback: std::mem::take(&mut self.operation_feedback),
             conversation_notices: std::mem::take(&mut self.conversation_notices),
@@ -344,10 +356,12 @@ impl ChatState {
         self.pending_queue_images = composer.pending_queue_images;
         self.history_search = composer.history_search;
         self.next_history_search_generation = composer.next_history_search_generation;
-        self.pending_history_search = composer.pending_history_search;
+        self.composer_requests = composer.composer_requests;
+        self.session_history = composer.session_history;
+        self.session_history_error = composer.session_history_error;
+        self.session_history_generation = composer.session_history_generation;
         self.pending_submissions = composer.pending_submissions;
         self.submission_renders = composer.submission_renders;
-        self.pending_abandoned_prompt = composer.pending_abandoned_prompt;
         self.plan_command_pending = composer.plan_command_pending;
         self.operation_feedback = composer.operation_feedback;
         self.conversation_notices = composer.conversation_notices;
@@ -484,10 +498,13 @@ impl ChatState {
     pub fn has_composer_updates(&self) -> bool {
         !self.composer_runtime.rx.is_empty()
     }
-    pub fn drain_composer(&mut self) -> Option<StartupPrompt> {
+    pub fn drain_composer_updates(&mut self) {
         while let Ok(update) = self.composer_runtime.rx.try_recv() {
             self.apply_composer_update(update);
         }
+    }
+    pub fn drain_composer(&mut self) -> Option<StartupPrompt> {
+        self.drain_composer_updates();
         self.pump_attachment_queue();
         self.composer_runtime
             .remote_streams
@@ -517,6 +534,13 @@ impl ChatState {
     }
     pub(super) fn apply_composer_update(&mut self, update: ComposerIoUpdate) {
         match update {
+            ComposerIoUpdate::SessionHistoryListed { generation, result } => match result {
+                Ok(entries) => self.set_session_history(generation, entries),
+                Err(error) => {
+                    tracing::warn!(%error, "session chat history listing failed");
+                    self.set_session_history_unavailable(generation, error);
+                }
+            },
             ComposerIoUpdate::HistorySearchResults { generation, result } => {
                 self.apply_history_search_results(generation, result)
             }

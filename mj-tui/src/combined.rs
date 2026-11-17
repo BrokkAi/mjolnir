@@ -656,10 +656,10 @@ fn render_combined_themed(
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
         let lines = Paragraph::new(notification_text.as_str())
             .wrap(Wrap { trim: false })
-            .line_count(notification_width.saturating_sub(2).max(1));
+            .line_count(notification_width.saturating_sub(4).max(1));
         u16::try_from(lines)
             .unwrap_or(u16::MAX)
-            .saturating_add(4 + u16::from(entry.target.is_none()))
+            .saturating_add(8 + u16::from(entry.target.is_none()))
     });
     let dimensions = [
         (
@@ -696,7 +696,8 @@ fn render_combined_themed(
             PaneDimensions {
                 minimized: SUMMARY_ROW,
                 full: notification_full,
-                standard_cap: area.height / 4,
+                // Nine rows fit the header, one text row and the reply controls/margins.
+                standard_cap: (area.height / 4).max(9),
             },
         ),
     ];

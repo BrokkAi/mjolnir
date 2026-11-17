@@ -825,6 +825,7 @@ pub(super) fn viewer_snapshot_selected(
                 })
             && session.operation.is_none();
         session.question_message = question_message(live, session.attention);
+        session.supports_open_request = live.is_some_and(|state| state.supports_open_request());
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
             mj_core::acp::AcpSessionFacts::from_operational(

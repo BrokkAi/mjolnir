@@ -63,7 +63,7 @@ fn open_test_chat_with_notices(session_id: &str, notices: Notices) -> ActiveChat
 
 /// A dashboard with profiles and a target, so the adaptive layout draws
 /// its three panes with text in them.
-fn populated_dashboard() -> DashboardState {
+pub(super) fn populated_dashboard() -> DashboardState {
     populated_dashboard_with(|_| {})
 }
 
@@ -504,7 +504,7 @@ fn focused_chats(dashboard: &mut DashboardState, chat: ActiveChat) -> BTreeMap<S
 fn draw_with_selection(
     terminal: &mut Terminal<TestBackend>,
     dashboard: &mut DashboardState,
-    selection: &SelectionState,
+    selection: &mut SelectionState,
 ) -> Option<String> {
     let mut text = None;
     terminal
@@ -564,7 +564,7 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
     let mut dashboard = populated_dashboard();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     let mut selection = SelectionState::new();
-    draw_with_selection(&mut terminal, &mut dashboard, &selection);
+    draw_with_selection(&mut terminal, &mut dashboard, &mut selection);
     let quotas = *dashboard
         .frame_surfaces()
         .surface(SurfaceId::DashboardPane(2))
@@ -608,7 +608,7 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
         }
     );
 
-    let text = draw_with_selection(&mut terminal, &mut dashboard, &selection)
+    let text = draw_with_selection(&mut terminal, &mut dashboard, &mut selection)
         .expect("the selection covers text");
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
@@ -647,7 +647,7 @@ fn dragging_over_a_failed_session_copies_its_error() {
         dashboard.select_active_session("session-1");
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         let mut selection = SelectionState::new();
-        draw_with_selection(&mut terminal, &mut dashboard, &selection);
+        draw_with_selection(&mut terminal, &mut dashboard, &mut selection);
         let failure = *dashboard
             .frame_surfaces()
             .surface(SurfaceId::FailurePane(dashboard.focused_pane().raw()))
@@ -678,7 +678,7 @@ fn dragging_over_a_failed_session_copies_its_error() {
             SelectionRouting::Copy { surface, .. } if surface == failure.id
         ));
 
-        let text = draw_with_selection(&mut terminal, &mut dashboard, &selection)
+        let text = draw_with_selection(&mut terminal, &mut dashboard, &mut selection)
             .expect("the selection covers the error");
         assert!(
             text.lines().any(|line| line == error_line),

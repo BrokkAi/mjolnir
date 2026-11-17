@@ -186,6 +186,20 @@ impl DashboardContext {
 
     pub(crate) fn collect_prepared_startup_prompts(&mut self) -> bool {
         let (mut changed, actions) = self.dashboard.drain_standby_composers();
+        let bridges = &mut self.composer_daemon_requests;
+        let updates = self.dashboard_io_tx.clone();
+        let notices = self.notices.clone();
+        changed |= self.dashboard.service_notification_composers(
+            self.worker_commands_tx.client(),
+            |session_id| {
+                Some(super::drafts::chat_daemon_requests(
+                    bridges,
+                    session_id,
+                    updates.clone(),
+                    notices.clone(),
+                ))
+            },
+        );
         for action in actions {
             if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
                 self.startup_prompts.enqueue(

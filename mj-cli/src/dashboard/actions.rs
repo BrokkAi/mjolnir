@@ -957,6 +957,25 @@ pub(crate) async fn apply_dashboard_action(
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
         }
+        DashboardAction::NotificationReply {
+            card,
+            session_id,
+            prompt,
+        } => {
+            context.startup_prompts.enqueue(
+                super::io::NamedSession {
+                    name: super::io::session_notice_name(
+                        &context.controller.state,
+                        &card.session_id,
+                    ),
+                    id: session_id,
+                },
+                prompt,
+                None,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::QueueStartupPrompt { session_id, prompt } => {
             // The daemon clears the saved draft only when it still holds the
             // text this prompt was typed from; anything else stays put.
@@ -1380,7 +1399,7 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
-        DashboardAction::NotificationLater { .. } => {}
+        DashboardAction::NotificationSkip { .. } => {}
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }

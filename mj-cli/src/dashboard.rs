@@ -396,6 +396,7 @@ pub(crate) struct DashboardContext {
     /// inherited shared value is retained only as a compare-and-clear baseline
     /// for the detach persistence task.
     composer_drafts: ComposerDraftCache,
+    composer_daemon_requests: BTreeMap<String, mj_chat::chat::ChatDaemonSender>,
     /// Retain save failures so quitting cannot erase their notice before it is read.
     draft_save_failures: BTreeMap<String, String>,
     /// Session-manager attachment is asynchronous: an actor may need to
@@ -2022,6 +2023,7 @@ impl DashboardContext {
             transcript_positions: BTreeMap::new(),
             question_targets_seen: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
+            composer_daemon_requests: BTreeMap::new(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),
             attachments: BTreeMap::new(),
@@ -2487,14 +2489,18 @@ fn dispatch_event(
 /// frame, and the highlight is all that band is good for.
 fn draw_selection(
     frame: &mut ratatui::Frame,
-    selection: &SelectionState,
+    selection: &mut SelectionState,
     surfaces: &FrameSurfaces,
 ) -> Option<String> {
+    selection.reconcile_surfaces(surfaces);
     let id = selection.active_surface()?;
     let range = selection.range()?;
     let surface = *surfaces.surface(id)?;
     mj_chat::selection::highlight(frame.buffer_mut(), &surface, &range);
-    if matches!(id, SurfaceId::Transcript | SurfaceId::ElicitationMessage) {
+    if matches!(
+        id,
+        SurfaceId::Transcript | SurfaceId::ElicitationMessage | SurfaceId::NotificationText(_)
+    ) {
         return None;
     }
     Some(mj_chat::selection::extract_rows(
@@ -2531,6 +2537,7 @@ fn route_selection_event(
     surfaces: &FrameSurfaces,
     event: Event,
 ) -> SelectionRouting {
+    selection.reconcile_surfaces(surfaces);
     match event {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {

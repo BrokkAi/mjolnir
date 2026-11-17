@@ -291,7 +291,12 @@ pub enum DashboardAction {
     Open {
         session_id: String,
     },
-    NotificationLater {
+    NotificationReply {
+        card: NotificationCard,
+        session_id: String,
+        prompt: mj_chat::chat::StartupPrompt,
+    },
+    NotificationSkip {
         card: NotificationCard,
     },
     /// Open a session in a new conversation pane beside or under the focused

@@ -120,6 +120,7 @@ const SILENCE_WORTH_REPORTING_SECONDS = 60;
 /// Every page, by the route name that shows it.
 const PAGES = {
   dashboard: document.querySelector('#dashboard'),
+  notifications: document.querySelector('#notifications-page'),
   new: document.querySelector('#new-page'),
   resume: document.querySelector('#resume-page'),
   move: document.querySelector('#move-page'),
@@ -277,6 +278,10 @@ const ROUTE_PATTERNS = [
   [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})$`), ([id]) => ({ name: 'dashboard', workspaceId: id })],
   [new RegExp(`^#conversation/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id })],
+  // Routes opened from the notifications screen carry that origin for Back.
+  [new RegExp(`^#notifications/(${ID})/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId, from: 'notifications' })],
+  [new RegExp(`^#notifications/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id, from: 'notifications' })],
+  [/^#notifications$/, () => ({ name: 'notifications' })],
   [/^#targets$/, () => ({ name: 'targets' })],
   [/^#quota$/, () => ({ name: 'quota' })],
   // A settings path names keys the user chose, such as an environment
@@ -329,6 +334,7 @@ function routeHash(next) {
     case 'new':
       return `#workspace/${next.workspaceId}/new`;
     case 'resume':
+      if (next.from === 'notifications') return `#notifications/${next.workspaceId}/${next.sessionId}`;
       if (next.wikiId) return `#workspace/${next.workspaceId}/resume/archive/${next.wikiId}`;
       return next.sessionId
         ? `#workspace/${next.workspaceId}/resume/${next.sessionId}`
@@ -336,7 +342,11 @@ function routeHash(next) {
     case 'move':
       return `#workspace/${next.workspaceId}/move/${next.sessionId}`;
     case 'conversation':
-      return `#conversation/${next.sessionId}`;
+      return next.from === 'notifications'
+        ? `#notifications/${next.sessionId}`
+        : `#conversation/${next.sessionId}`;
+    case 'notifications':
+      return '#notifications';
     case 'targets':
       return '#targets';
     case 'quota':
@@ -366,7 +376,6 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
-  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -385,6 +394,8 @@ function applyRoute() {
   cancelSessionPress();
   const previousRoute = route;
   route = parseRoute(location.hash);
+  // Coming back to the screen tries a failed message read again.
+  if (route.name !== 'notifications') inboxShownKey = null;
   if (routeHash(previousRoute) !== routeHash(route)) {
     resumeRouteVisit += 1;
     if (previousRoute.name === 'resume' && !previousRoute.sessionId && !previousRoute.wikiId && snapshot) {
@@ -392,7 +403,6 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
-  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -437,10 +447,11 @@ function applyRoute() {
 
   const name = PAGES[route.name] ? route.name : 'dashboard';
   for (const [key, page] of Object.entries(PAGES)) page.classList.toggle('hidden', key !== name);
-  workspaceStrip.classList.toggle('hidden', name === 'conversation' && !route.subagentParentId);
+  workspaceStrip.classList.toggle('hidden', (name === 'conversation' && !route.subagentParentId) || name === 'notifications');
   backButton.classList.toggle('hidden', name === 'dashboard');
   shellTitle.textContent =
     {
+      notifications: 'Notifications',
       new: 'New session',
       resume: 'Resume',
       move: 'Move session',
@@ -512,6 +523,9 @@ function renderRoute() {
       renderSettings();
       break;
     case 'conversation':
+      break;
+    case 'notifications':
+      renderInbox();
       break;
     default:
       renderSessions();
@@ -969,8 +983,8 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard'
-      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+    // The notifications screen lists launch failures as cards of its own.
+    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId()
       && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
@@ -999,19 +1013,18 @@ function renderLaunchFailures() {
     card.append(dismiss);
     return card;
   });
-  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards);
+  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards, ...inboxNoticeCards());
 }
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
+  const workspaces = snapshot.workspaces || [];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
-  const notificationCount = notificationRows().length;
-  notificationsBadge.classList.toggle('hidden', Boolean(parentId) || !notificationCount);
-  notificationsBadge.textContent = String(notificationCount);
-  notificationsBadge.setAttribute('aria-label',
-    `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
+  const notificationCount = inboxEntries().length;
+  notificationsBadge.classList.toggle('hidden', !notificationCount || route.name === 'notifications');
+  notificationsBadge.textContent = `${notificationCount} notification${notificationCount === 1 ? '' : 's'}`;
+  notificationsBadge.setAttribute('aria-label', `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
   if (parentId) {
     const parent = sessionById(parentId);
     const reviewers = route.childKind === 'reviewer';
@@ -1026,7 +1039,7 @@ function renderWorkspaces() {
   // Every snapshot re-renders the route, and Firefox for Android stacks a
   // new native picker on each change to an open select until the page stops
   // responding. So nothing that changes with attention lives in the select:
-  // the notification count is the badge beside it, and the options are
+  // the notification count is the header button, and the options are
   // rebuilt only when the workspace list itself changes.
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
@@ -1183,85 +1196,582 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
-// Notifications retain cleared rows only for the current inbox visit.
-class NotificationSnapshot {
-  constructor() { this.entries = []; }
-  reset() { this.entries = []; }
-  update(rows, allRows = rows) {
-    const current = new Map(allRows.map(row => [row.id, row]));
-    const retained = new Set(this.entries.map(entry => entry.row.id));
-    this.entries = [
-      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
-      ...this.entries.map(entry => ({
-        row: current.get(entry.row.id) || {
-          ...entry.row, capabilities: {}, operation: null, transitioning: false,
-          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
-        },
-      })),
-    ];
-    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
-    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
-    return this.entries;
+// ---------------------------------------------------------------------------
+// The notifications screen
+// ---------------------------------------------------------------------------
+//
+// One card at a time, as in the terminal dashboard's pane: the sessions whose
+// daemon-owned attention is `?` or `!`, `?` first and newest first within each
+// band, followed by launch failures and sessions with `×`. Sub-agents are left
+// out; a parent promoted by a child's pending form opens that child.
+
+/// Cards the person skipped, oldest skip first, by card identity: the session
+/// and the notification it shows. Skipping rotates a card to the back, so a key
+/// is in the list at most once, and a new notification from a skipped session is
+/// a new card that is not deferred.
+const inboxSkipped = [];
+const LAUNCH_FAILURE_TEXT = 'A session could not be started. Check the project and target, then retry. Details are in the daemon logs.';
+
+function launchFailureEntries() {
+  return (snapshot?.launch_failures || [])
+    .filter(failure => !dismissedLaunchFailures.has(failure.id))
+    .map(failure => ({
+      id: `launch-failure:${failure.id}`,
+      launchFailure: failure,
+      title: 'Session could not be started',
+      attention: 'failed',
+      last_message_at_ms: 0,
+    }));
+}
+
+function inboxSessionFailed(entry) {
+  return entry.attention === 'failed' || entry.attention === 'unreachable';
+}
+
+/// The session a card is about: it shows that session's message, Quick reply
+/// sends to it and Go to Session opens it. A parent promoted by a child's
+/// pending request is about the child (the form holder); a launch failure is
+/// about the session it was for, when there is one.
+function inboxDestination(entry) {
+  if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
+  if (inboxSessionFailed(entry)) return entry.id;
+  const holder = childFormHolder(entry);
+  return holder && sessionById(holder) ? holder : entry.id;
+}
+
+/// The identity of a card, and the one owner of it: the session, the
+/// destination holding the request, the pending request ids, the question
+/// message and the dismissal target. Skip, the message cache and a gesture's
+/// captured card all key on this, so a new request, a new holder or a new
+/// notification is a new card for every one of them.
+function inboxKey(entry) {
+  if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
+  const identity = inboxTextIdentity(entry);
+  return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
+    JSON.stringify(entry.notification_dismissal ?? null), entry.last_message_at_ms || ''].join('|');
+}
+
+/// What a gesture on a card acts on, captured when the gesture starts so a
+/// snapshot that changes the first card meanwhile cannot redirect it.
+function inboxCard(entry) {
+  return {
+    key: inboxKey(entry),
+    id: entry.id,
+    destination: inboxDestination(entry),
+    dismissal: entry.notification_dismissal ?? null,
+    launchFailureId: entry.launchFailure?.id ?? null,
+    canReply: !entry.launchFailure && !inboxSessionFailed(entry),
+    important: entry.attention === 'important',
+  };
+}
+
+/// Every card, in order. The one place the list, the count and the bulk clear
+/// read from, so they cannot disagree.
+function inboxEntries() {
+  const rows = [...viewerState.rows.values()].filter(row => !isSubagentSession(row) && hasNotification(row));
+  const band = row => row.attention === 'needs_input' ? 0 : row.attention === 'important' ? 1 : row.launchFailure ? 2 : 3;
+  const all = [...rows, ...launchFailureEntries()].sort((left, right) =>
+    band(left) - band(right)
+    || sessionMessageMs(right) - sessionMessageMs(left)
+    || String(left.title || '').localeCompare(String(right.title || ''))
+    || left.id.localeCompare(right.id));
+  const byKey = new Map(all.map(entry => [inboxKey(entry), entry]));
+  for (let index = inboxSkipped.length - 1; index >= 0; index -= 1) {
+    if (!byKey.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
+  }
+  return [
+    ...all.filter(entry => !inboxSkipped.includes(inboxKey(entry))),
+    ...inboxSkipped.map(key => byKey.get(key)),
+  ];
+}
+
+// The full message per card, read from the daemon because a summary row
+// carries no text. The key names what the card shows, including which pending
+// request and which holder, so a new message or form reads again. A failed read
+// is not kept: it is tried again when the card is shown again or on Retry.
+const inboxTexts = new Map();
+/// What the card shows the message of: the destination, its pending request
+/// ids and its question message. The daemon answers for exactly this identity
+/// or reports a conflict, so a text is never kept under another card's key.
+function inboxTextIdentity(row) {
+  const holder = inboxDestination(row);
+  const holderRow = sessionById(holder) || row;
+  const requests = holderRow.pending_elicitations?.map(request => request.id)
+    ?? holderRow.pending_elicitation_ids ?? [];
+  return { holder, requests: requests.join(','), question: holderRow.question_message || '' };
+}
+function inboxText(row, key) {
+  const known = inboxTexts.get(key);
+  // A conflict waits for the next snapshot, once, rather than asking again.
+  if (known && !(known.state === 'stale' && known.sequence !== viewerState.cursor?.sequence)) return known;
+  const entry = { state: 'loading', text: '' };
+  inboxTexts.set(key, entry);
+  const identity = inboxTextIdentity(row);
+  const query = new URLSearchParams({ holder: identity.holder, requests: identity.requests, question: identity.question });
+  // An `!` card names the message by its ReadThrough ordinal, so a newer reply
+  // can never answer for it.
+  const through = row.notification_dismissal?.read_through;
+  if (through !== undefined) query.set('through', String(through));
+  request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message?${query}`)
+    .then(answer => {
+      entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
+      entry.text = answer?.text || '';
+    }, error => {
+      if (error.code === 'notification_changed') {
+        entry.state = 'stale';
+        entry.sequence = viewerState.cursor?.sequence;
+      } else {
+        entry.state = 'error';
+        entry.text = error.message;
+      }
+    })
+    .then(() => { if (route.name === 'notifications') renderInbox(); });
+  return entry;
+}
+
+/// Quick-reply drafts belong to the session they were typed for.
+const inboxDrafts = new Map();
+const inboxSending = new Set(); // destinations with a submission in flight
+let inboxError = null; // { key | destination, text }: the refusal the card shows
+let inboxBusy = false;
+let inboxShown = null; // the destination the quick-reply line currently holds
+let inboxShownKey = null; // the text key last rendered, to retry a failed read
+
+const inboxNodes = (() => {
+  const container = document.querySelector('#inbox');
+  const header = el('p', 'inbox-header');
+  const glyph = el('span', 'session-attention-item alert');
+  glyph.setAttribute('role', 'img');
+  const headerText = el('span', 'inbox-header-text');
+  header.append(glyph, headerText);
+  const body = el('pre', 'inbox-message');
+  const retry = button('Retry', 'secondary', { inboxAction: 'retry' });
+  retry.type = 'button';
+  const reply = el('form', 'inbox-reply');
+  const label = el('label', '', 'Quick reply');
+  const input = el('input');
+  input.type = 'text';
+  input.id = 'inbox-reply-input';
+  input.autocomplete = 'off';
+  label.htmlFor = 'inbox-reply-input';
+  const send = button('Send', '', { inboxAction: 'send' });
+  send.type = 'submit';
+  reply.append(label, input, send);
+  const actions = el('div', 'row inbox-actions');
+  const open = button('Go to Session', '', { inboxAction: 'open' });
+  const clear = button('Clear & Next', 'secondary', { inboxAction: 'clear' });
+  const skip = button('Skip', 'secondary', { inboxAction: 'skip' });
+  const clearAll = button('Clear all !', 'secondary', { inboxAction: 'clear-all' });
+  for (const control of [open, clear, skip, clearAll]) control.type = 'button';
+  actions.append(open, clear, skip, clearAll);
+  const cardError = el('p', 'error');
+  cardError.setAttribute('role', 'alert');
+  const card = el('div', 'card inbox-card');
+  card.append(header, body, retry, cardError, reply, actions);
+  const empty = el('p', 'dim', 'No notifications.');
+  container.append(card, empty);
+  return { card, empty, glyph, headerText, body, retry, input, send, open, clear, skip, clearAll, cardError, reply };
+})();
+
+/// The persistent buttons outlive the card they show, so a gesture acts on the
+/// card its control showed when the press began (as `bindTurnControlButton`
+/// does), never on whichever card a snapshot has put first since.
+function bindInboxControl(target, act) {
+  target._binding = null;
+  target._press = null;
+  for (const start of ['pointerdown', 'keydown']) {
+    target.addEventListener?.(start, event => {
+      if (start === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+      target._press = target._binding;
+    });
+  }
+  target.addEventListener?.('pointercancel', () => { target._press = null; });
+  target.onclick = event => {
+    event?.preventDefault?.();
+    const owned = target._press || target._binding;
+    target._press = null;
+    if (owned) void act(owned);
+  };
+}
+
+async function inboxDismiss(identity) {
+  const key = `dismiss-notification:${identity.session_id}`;
+  pendingActions.add(key);
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'dismiss-notification', ...identity }),
+    });
+    dismissedNotifications.set(identity.session_id, JSON.stringify(identity.target));
+  } finally {
+    pendingActions.delete(key);
   }
 }
-const notificationSnapshot = new NotificationSnapshot();
 
-function notificationRows() {
-  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
-    && hasNotification(row));
-}
-
-/// Dismiss every notification that names a target. Failures and forms carry
-/// no target and stay flagged, as does any row whose dismissal is refused.
-let clearingNotifications = false;
-async function dismissAllNotifications() {
-  if (clearingNotifications) return;
-  clearingNotifications = true;
-  renderRoute();
-  const rows = notificationRows().filter(row => row.notification_dismissal);
-  const failures = [];
-  await Promise.all(rows.map(async row => {
-    const key = `dismiss-notification:${row.id}`;
-    pendingActions.add(key);
-    try {
-      await request('/api/actions', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'dismiss-notification', session_id: row.id, target: row.notification_dismissal }),
-      });
-      dismissedNotifications.set(row.id, JSON.stringify(row.notification_dismissal));
-    } catch (error) {
-      failures.push(`${row.title || row.id}: ${error.message}`);
-    } finally {
-      pendingActions.delete(key);
-    }
-  }));
-  clearingNotifications = false;
-  actionError.textContent = failures.join('\n');
+async function inboxClearNext(card) {
+  if (inboxBusy) return;
+  if (card.launchFailureId) {
+    // A launch failure is only a notice: its dismissal is the viewer's own.
+    dismissedLaunchFailures.add(card.launchFailureId);
+    renderRoute();
+    return;
+  }
+  if (!card.dismissal) return;
+  const identity = { session_id: card.id, target: card.dismissal };
+  inboxBusy = true;
+  inboxError = null;
+  renderInbox();
+  try {
+    await inboxDismiss(identity);
+  } catch (error) {
+    inboxError = { key: card.key, text: error.message };
+  }
+  inboxBusy = false;
+  renderInbox();
   await refresh();
 }
 
-function renderNotifications() {
-  const clearAll = button('Clear all', 'secondary');
-  clearAll.id = 'notifications-clear-all';
-  // Only rows naming a dismissal target can be cleared; the rest stay flagged.
-  clearAll.hidden = clearingNotifications
-    || !notificationRows().some(row => row.notification_dismissal);
-  clearAll.onclick = () => dismissAllNotifications();
-  const header = el('div', 'notifications-header');
-  header.append(el('h2', '', 'Notifications'), clearAll);
-  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
-    let card = sessionCards.get(row.id);
-    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
-    else updateSessionCard(card, row);
+/// Dismiss every `!` card the control showed. A `?` dismissal sets the ask
+/// aside for the turn classifier, so a bulk clear leaves questions alone.
+async function inboxClearAll(cards) {
+  if (inboxBusy || !cards.length) return;
+  const identities = cards.map(card => ({ session_id: card.id, target: card.dismissal }));
+  inboxBusy = true;
+  inboxError = null;
+  renderInbox();
+  const failures = [];
+  await Promise.all(identities.map(identity => inboxDismiss(identity).catch(error => {
+    failures.push(`${sessionById(identity.session_id)?.title || identity.session_id}: ${error.message}`);
+  })));
+  inboxBusy = false;
+  document.querySelector('#inbox-error').textContent = failures.join('\n');
+  renderInbox();
+  await refresh();
+}
+
+/// Rotate a card to the back of the stack.
+function inboxSkip(card) {
+  if (inboxEntries().length < 2) return;
+  const at = inboxSkipped.indexOf(card.key);
+  if (at >= 0) inboxSkipped.splice(at, 1);
+  inboxSkipped.push(card.key);
+  renderInbox();
+}
+
+function inboxOpen(card) {
+  const session = sessionById(card.destination);
+  if (!session) return;
+  const from = 'notifications';
+  if (!card.canReply && !canViewConversation(session) && session.workspace_id) {
+    navigate({ name: 'resume', workspaceId: session.workspace_id, sessionId: session.id, from });
+  } else {
+    navigate({ name: 'conversation', sessionId: session.id, from });
+  }
+}
+
+/// Drop what was sent, but only if the line still holds exactly that text: a
+/// newer edit made while the request was in flight stays.
+function inboxClearSubmitted(destination, submitted) {
+  if (inboxDrafts.get(destination) !== submitted) return;
+  inboxDrafts.delete(destination);
+  if (inboxShown === destination && inboxNodes.input.value === submitted) inboxNodes.input.value = '';
+}
+
+/// Failed Quick replies, by session and submission, shown in the notice area
+/// with their full text whatever became of the card they were typed on.
+const inboxFailureNotices = new Map();
+
+function inboxHasReplyCard(destination) {
+  return inboxEntries().some(entry => {
+    const card = inboxCard(entry);
+    return card.canReply && card.destination === destination;
+  });
+}
+
+function removeInboxNotice(notice) {
+  inboxFailureNotices.delete(notice.key);
+  if (composerHandoffs.get(notice.destination)?.notice === notice) {
+    composerHandoffs.delete(notice.destination);
+  }
+}
+
+function stageInboxNoticeHandoff(notice) {
+  composerHandoffs.set(notice.destination, {
+    notice,
+    text: notice.text,
+    placed: () => {
+      removeInboxNotice(notice);
+      inboxClearSubmitted(notice.destination, notice.text);
+      renderRoute();
+    },
+    blocked: () => {
+      notice.note = "Hand to conversation needs an empty composer. Your text is kept here.";
+      renderRoute();
+    },
+  });
+}
+
+/// Report one failed submission. A refusal keeps its text: in Quick reply when
+/// the card is still there, else in the session's composer (unsent, through the
+/// in-page hand-off) when that composer is empty, else only in the notice. An
+/// unconfirmed delivery is reported but never handed back, since it may have
+/// arrived. A hand-off never overwrites an existing draft.
+async function inboxReportFailure(card, submission, status, text, refused) {
+  const destination = card.destination;
+  const notice = {
+    key: `${destination}|${submission}`,
+    destination,
+    title: sessionById(destination)?.title || destination,
+    status,
+    text,
+    refused,
+    note: '',
+  };
+  inboxFailureNotices.set(notice.key, notice);
+  inboxError = { destination, text: status };
+  if (!refused) {
+    // The full text is shown for reference only.
+    renderRoute();
+    return;
+  }
+  if (!inboxEntries().some(entry => inboxKey(entry) === card.key)) {
+    let draft;
+    let known = true;
+    try {
+      draft = draftWriters.get(destination)?.desired
+        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+    } catch {
+      known = false;
+    }
+    if (known && !draft) {
+      if (inboxFailureNotices.has(notice.key) && !composerHandoffs.has(destination)) {
+        stageInboxNoticeHandoff(notice);
+        notice.note = "It will be placed in the session's composer, unsent, when you open it. Until then it is kept here.";
+      }
+    } else {
+      notice.note = known
+        ? "The session's composer has a draft, which is kept. You can copy your reply here."
+        : 'You can copy your reply here.';
+    }
+  }
+  renderRoute();
+}
+
+/// The failed-reply notices as cards for the notice area.
+function inboxNoticeCards() {
+  return [...inboxFailureNotices.values()].map(notice => {
+    const card = el('div', 'card');
+    card.setAttribute('role', 'status');
+    const status = notice.refused ? notice.status : 'Delivery unconfirmed: it may already be running.';
+    card.append(el('p', '', `Quick reply to ${notice.title} · ${status}`), el('pre', 'inbox-message', notice.text));
+    const canRestore = notice.refused && inboxHasReplyCard(notice.destination);
+    const textInReply = canRestore && inboxDrafts.get(notice.destination) === notice.text;
+    const note = notice.note || (textInReply ? 'Your text is kept in Quick reply.'
+      : notice.refused ? 'You can copy your reply here.' : '');
+    if (note) card.append(el('p', 'dim', note));
+    if (canRestore) {
+      const restore = el('button', 'secondary', 'Restore to Quick reply');
+      restore.onclick = () => {
+        if (!inboxFailureNotices.has(notice.key) || !inboxHasReplyCard(notice.destination)) {
+          renderRoute();
+          return;
+        }
+        const held = inboxDrafts.get(notice.destination);
+        if (held && held !== notice.text) {
+          notice.note = 'Quick reply already has text for this session, so this was not restored; copy it from here.';
+        } else {
+          inboxDrafts.set(notice.destination, notice.text); // already there, when held
+          if (inboxShown === notice.destination) inboxNodes.input.value = notice.text;
+          removeInboxNotice(notice);
+        }
+        renderRoute();
+      };
+      card.append(restore);
+    } else if (notice.refused) {
+      const hand = el('button', 'secondary', 'Hand to conversation');
+      hand.onclick = () => {
+        if (!inboxFailureNotices.has(notice.key)) return;
+        const destination = notice.destination;
+        const session = sessionById(destination);
+        if (!session || (session.detail !== false && !canViewConversation(session))) {
+          notice.note = 'The conversation is unavailable. You can copy your reply here.';
+          renderRoute();
+          return;
+        }
+        if (currentSession === destination && (composerText() || promptImages.length)) {
+          notice.note = "Hand to conversation needs an empty composer. Your text is kept here.";
+          renderRoute();
+          return;
+        }
+        stageInboxNoticeHandoff(notice);
+        if (currentSession === destination) void restoreDraft(destination, conversationGeneration);
+        else navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
+      };
+      card.append(hand);
+    }
+    const dismiss = el('button', 'secondary', 'Dismiss notice');
+    dismiss.onclick = () => { removeInboxNotice(notice); renderRoute(); };
+    card.append(dismiss);
     return card;
   });
-  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+}
+
+async function inboxSend(card) {
+  const destination = card.destination;
+  const submitted = inboxDrafts.get(destination) ?? '';
+  if (!destination || !card.canReply || !submitted.trim()) {
+    if (!submitted.trim()) inboxOpen(card);
+    return;
+  }
+  if (inboxSending.has(destination)) return;
+  inboxError = null;
+  // A slash command is the conversation composer's to run: it needs the
+  // session's own settings. The line goes there as its draft, unsent.
+  if (submitted.startsWith('/')) {
+    // The session's own unsent draft is never touched: the command is handed
+    // over only when the composer there is empty, and Quick reply keeps its
+    // text until the composer actually holds it.
+    let draft;
+    try {
+      draft = draftWriters.get(destination)?.desired
+        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+    } catch (error) {
+      inboxError = { key: card.key, text: `Not sent: could not check the conversation's draft: ${error.message}` };
+      renderInbox();
+      return;
+    }
+    if (draft) {
+      inboxError = {
+        key: card.key,
+        text: 'Slash commands run in the conversation; your draft there is kept. Go to Session to run it.',
+      };
+      renderInbox();
+      return;
+    }
+    composerHandoffs.set(destination, { text: submitted, placed: () => inboxClearSubmitted(destination, submitted) });
+    navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
+    return;
+  }
+  let body;
+  try {
+    body = submissionBody(destination, submitted, []);
+  } catch (error) {
+    inboxError = { key: card.key, text: `Not sent: ${error.message}` };
+    renderInbox();
+    return;
+  }
+  inboxSending.add(destination);
+  renderInbox();
+  try {
+    // The composer's own submission: the command id is minted once, and a lost
+    // acknowledgement is "Delivery unconfirmed", never a second command.
+    const pending = await sendSubmission(body, [], null, submitted);
+    if (pending.failed) {
+      // Refused before the daemon accepted it: nothing was sent. The failure
+      // is reported in the notice area whatever became of the card.
+      pendingSubmissions.delete(pending.id);
+      await inboxReportFailure(card, pending.id, pending.status, submitted, true);
+    } else {
+      inboxClearSubmitted(destination, submitted);
+      if (pending.status.startsWith('Delivery unconfirmed')) {
+        await inboxReportFailure(card, pending.id, pending.status, submitted, false);
+      }
+    }
+  } finally {
+    inboxSending.delete(destination);
+  }
+  renderInbox();
+}
+
+bindInboxControl(inboxNodes.open, inboxOpen);
+bindInboxControl(inboxNodes.clear, inboxClearNext);
+bindInboxControl(inboxNodes.skip, inboxSkip);
+bindInboxControl(inboxNodes.clearAll, inboxClearAll);
+bindInboxControl(inboxNodes.retry, card => {
+  const entry = inboxEntries().find(item => inboxKey(item) === card.key);
+  if (entry && !entry.launchFailure) inboxTexts.delete(inboxKey(entry));
+  renderInbox();
+});
+// Send and Enter in the line are one gesture on the card the form showed. An
+// empty line is Go to Session.
+bindInboxControl(inboxNodes.send, inboxSend);
+inboxNodes.input.addEventListener?.('keydown', event => {
+  if (event.key === 'Enter') inboxNodes.send._press = inboxNodes.send._binding;
+});
+inboxNodes.reply.onsubmit = event => {
+  event.preventDefault();
+  inboxNodes.send.onclick();
+};
+inboxNodes.input.oninput = () => {
+  if (!inboxShown) return;
+  if (inboxNodes.input.value) inboxDrafts.set(inboxShown, inboxNodes.input.value);
+  else inboxDrafts.delete(inboxShown);
+};
+
+/// Assign text only when it differs: replacing the text node of the message
+/// would collapse a selection the person is making in it.
+function setInboxText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function renderInbox() {
+  const entries = inboxEntries();
+  const entry = entries[0];
+  const nodes = inboxNodes;
+  nodes.card.hidden = !entry;
+  nodes.empty.hidden = Boolean(entry);
+  if (!entry) { inboxShown = null; inboxShownKey = null; return; }
+  const card = inboxCard(entry);
+  const cards = entries.filter(item => item.attention === 'important' && item.notification_dismissal).map(inboxCard);
+  for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.retry, nodes.send]) control._binding = card;
+  nodes.clearAll._binding = cards;
+  const launchFailure = entry.launchFailure;
+  const failure = !card.canReply;
+  const waiting = entry.attention === 'needs_input';
+  setInboxText(nodes.glyph, failure ? '×' : waiting ? '?' : '!');
+  nodes.glyph.className = `session-attention-item alert inbox-glyph ${failure ? 'failed' : waiting ? 'waiting' : 'important'}`;
+  const label = launchFailure ? 'Launch failed' : entry.attention === 'unreachable' ? 'Unreachable'
+    : failure ? 'Failed' : waiting ? 'Input needed' : 'Important';
+  nodes.glyph.setAttribute('aria-label', label);
+  const age = launchFailure ? '' : `${formatClock(serverClockMs() - sessionMessageMs(entry))} ago`;
+  setInboxText(nodes.headerText, [entry.title || entry.id, entry.project_label, age, `${entries.length} left`]
+    .filter(Boolean).join(' · '));
+  let retryable = false;
+  if (failure) {
+    inboxShownKey = null;
+    setInboxText(nodes.body, launchFailure ? launchFailure.error || LAUNCH_FAILURE_TEXT
+      : entry.launch_error || entry.storage_problem || entry.configuration_issue || entry.move_recovery?.failure_notice || label);
+  } else {
+    const key = inboxKey(entry);
+    // Showing a card again tries a failed read again; the same card never loops.
+    if (key !== inboxShownKey && inboxTexts.get(key)?.state === 'error') inboxTexts.delete(key);
+    inboxShownKey = key;
+    const text = inboxText(entry, key);
+    retryable = text.state === 'error';
+    setInboxText(nodes.body, text.state === 'loading' || text.state === 'stale' ? 'loading…'
+      : text.state === 'missing' ? 'message not available'
+      : text.state === 'error' ? `Could not read the message: ${text.text}`
+      : text.text || (waiting ? 'Waiting for your input' : 'Important update'));
+  }
+  nodes.retry.hidden = !retryable;
+  nodes.reply.hidden = failure;
+  if (inboxShown !== card.destination) {
+    inboxShown = card.destination;
+    nodes.input.value = inboxDrafts.get(card.destination) || '';
+  }
+  const error = inboxError?.key === card.key || inboxError?.destination === card.destination ? inboxError.text : '';
+  setInboxText(nodes.cardError, error);
+  nodes.cardError.hidden = !error;
+  nodes.send.disabled = inboxSending.has(card.destination);
+  nodes.open.hidden = !card.destination;
+  nodes.clear.disabled = inboxBusy || (!launchFailure && !card.dismissal);
+  nodes.skip.disabled = inboxBusy || entries.length < 2;
+  nodes.clearAll.hidden = !cards.length;
+  nodes.clearAll.disabled = inboxBusy;
+  setInboxText(nodes.clearAll, `Clear all ! (${cards.length})`);
 }
 
 function renderSessions() {
-  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
-  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
-  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -2109,7 +2619,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
+        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -6395,8 +6905,9 @@ function presentSnapshot(detailChangedIds = []) {
     initialWorkspaceSelectionDone = true;
     route = parseRoute(location.hash);
     // Only workspace views; a conversation or sub-agent link opens as linked.
-    if (route.name === 'dashboard' && !route.subagentParentId && notificationRows().length > 0) {
-      const hash = routeHash({ name: 'dashboard', workspaceId: 'notifications' });
+    // An empty hash is a first visit; a link that names a workspace opens it.
+    if (route.name === 'dashboard' && !route.workspaceId && !route.subagentParentId && inboxEntries().length > 0) {
+      const hash = routeHash({ name: 'notifications' });
       history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
       route = parseRoute(hash);
     }
@@ -7609,6 +8120,12 @@ function queueDraftSave(sessionId, draft) {
   return writer.task;
 }
 
+/// Text from a notification's Quick reply (a slash command, or a reply that
+/// could not be sent), by the session whose conversation it waits for:
+/// `{ text, placed, blocked? }`. Held in the page until the text is placed in
+/// the conversation, where it is an ordinary unsaved draft.
+const composerHandoffs = new Map();
+
 /// Put back what this viewer last typed here and did not send.
 async function restoreDraft(sessionId, generation) {
   const revision = composerGeneration;
@@ -7619,13 +8136,24 @@ async function restoreDraft(sessionId, generation) {
     // not to the server.
     const local = draftWriters.get(sessionId);
     const draft = local ? local.desired : stored.draft;
+    const handoff = composerHandoffs.get(sessionId);
+    composerHandoffs.delete(sessionId);
+    let handedOff = false;
     if (revision === composerGeneration) {
       if (draft) {
         setComposerText(draft);
         updateCommandPalette();
+        draftComposerBaseline = composerGeneration;
+      } else if (handoff && !composerText() && !promptImages.length) {
+        setComposerText(handoff.text);
+        updateCommandPalette();
+        // Leaving this conversation must save the hand-off just like typed text.
+        draftComposerBaseline = null;
+        handedOff = true;
+        handoff.placed();
       }
-      draftComposerBaseline = composerGeneration;
     }
+    if (!handedOff) handoff?.blocked?.();
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
     }
@@ -8116,9 +8644,13 @@ function renderPendingSubmissions() {
   if (wasAtTail) scrollToTail();
 }
 
-async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+function newCommandId(action) {
   const entropy = crypto.getRandomValues(new Uint8Array(16));
-  const id = `web-${body.action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  return `web-${action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+  const id = newCommandId(body.action);
   body.command_id = id;
   const pending = {
     id, sessionId: body.session_id, text: body.action === 'run-shell' ? `!${body.command}` : body.text,
@@ -8151,6 +8683,7 @@ async function sendSubmission(body, images = [], prerequisite = null, recoveryTe
   }
   renderPendingSubmissions();
   await refresh();
+  return pending;
 }
 
 /// Guard against sending twice.
@@ -8158,6 +8691,33 @@ async function sendSubmission(body, images = [], prerequisite = null, recoveryTe
 /// Enter calls submit directly, so it bypasses the disabled button entirely;
 /// without this a fast double press sends the same prompt twice.
 let promptInFlight = false;
+
+/// The action a typed line becomes: `!command` runs in the session's shell and
+/// anything else is a prompt. The conversation composer and the notifications
+/// quick reply both build their submission here and send it with
+/// `sendSubmission`, so a line means the same thing on both. Throws a message
+/// for a line that cannot be sent.
+function submissionBody(sessionId, value, images) {
+  if (value.startsWith('!') && images.length) throw new Error('Shell commands cannot carry images.');
+  const body = value.startsWith('!')
+    ? { action: 'run-shell', session_id: sessionId, command: value.slice(1) }
+    : {
+        action: 'prompt',
+        session_id: sessionId,
+        text: value,
+        images: images.map(image => ({
+          data_base64: '',
+          mime_type: image.mime_type,
+          width: image.width,
+          height: image.height,
+          attachment: image.attachment,
+        })),
+      };
+  if (new TextEncoder().encode(JSON.stringify(body)).byteLength > MAX_PROMPT_REQUEST_BYTES) {
+    throw new Error('Prompt attachments exceed the 32 MiB request limit.');
+  }
+  return body;
+}
 
 async function submitPrompt() {
   if (!currentSession || promptInFlight) return;
@@ -8177,27 +8737,11 @@ async function submitPrompt() {
   try {
     if (value.startsWith('/') && (await runLocalCommand(value.trim()))) return;
 
-    if (value.startsWith('!') && images.length) {
-      error.textContent = 'Shell commands cannot carry images.';
-      return;
-    }
-    const body = value.startsWith('!')
-      ? { action: 'run-shell', session_id: currentSession, command: value.slice(1) }
-      : {
-          action: 'prompt',
-          session_id: currentSession,
-          text: value,
-          images: images.map(image => ({
-            data_base64: '',
-            mime_type: image.mime_type,
-            width: image.width,
-            height: image.height,
-            attachment: image.attachment,
-          })),
-        };
-    const payload = JSON.stringify(body);
-    if (new TextEncoder().encode(payload).byteLength > MAX_PROMPT_REQUEST_BYTES) {
-      error.textContent = 'Prompt attachments exceed the 32 MiB request limit.';
+    let body;
+    try {
+      body = submissionBody(currentSession, value, images);
+    } catch (refusal) {
+      error.textContent = refusal.message;
       return;
     }
     setComposerText('');
@@ -9313,6 +9857,10 @@ logout.onclick = async () => {
 };
 
 backButton.onclick = () => {
+  if (route.from === 'notifications') {
+    navigate({ name: 'notifications' });
+    return;
+  }
   if (route.name === 'settings' && route.path?.length) {
     navigate({ name: 'settings', path: route.path.slice(0, -1) });
     return;
@@ -9329,7 +9877,8 @@ backButton.onclick = () => {
 };
 
 resumeDetailBack.onclick = () => {
-  navigate({ name: 'resume', workspaceId: route.workspaceId || selectedWorkspaceId() });
+  navigate(route.from === 'notifications' ? { name: 'notifications' }
+    : { name: 'resume', workspaceId: route.workspaceId || selectedWorkspaceId() });
 };
 
 resumeSearch.oninput = () => {
@@ -9341,7 +9890,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
-notificationsBadge.onclick = () => navigate({ name: 'dashboard', workspaceId: 'notifications' });
+notificationsBadge.onclick = () => navigate({ name: 'notifications' });
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };
