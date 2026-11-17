@@ -64,5 +64,7 @@
   "handcheck_rows": 88,
   "outputs": 270,
   "individual_verdicts": 540,
-  "contains_status": "pending V2 census completion and Gemini week >=3%; no replacement model"
+  "contains_status": "completed: one Sol/high diagnostic on codex4 under amendment 5a00ed102; writer decision unchanged",
+  "contains_summary": "contains-summary.json",
+  "contains_output_sha256": "5bcf9c8c2b5ec54caeb6a37f0d87066aff479cb3973b4631f89e820fa753c234"
 }
