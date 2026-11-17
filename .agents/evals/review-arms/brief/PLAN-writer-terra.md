@@ -46,6 +46,8 @@ the same outputs, and a difference over 10 points for any arm is reported
 as a caveat. To save judge tokens, round J may leave out the no-brief Sol
 sessions, which the reading doesn't use.
 
+Amendment, 2026-11-17, before containment ran: Gemini quota closure moves the contains comparison from Carbon to one GPT-6.1 Sol/high session on codex4; it remains diagnostic and does not change the registered writer decision.
+
 ## Reading
 
 Terra/high reviewers only, mean catch rate over the 18 primary diffs, with
