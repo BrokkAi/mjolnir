@@ -123,12 +123,15 @@ pub(super) async fn run_session_actor(
     // resumes when the storage owner changes its mind, not on a backoff.
     let mut storage_wait: Option<String> = None;
     let mut storage = crate::target_storage::subscribe();
+    let mut owner_changes = updates.session_gate.subscribe();
+    let mut recovery_waiting = None;
     enum Event {
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
         RelayChanged,
         Policy,
+        OwnerChanged(bool),
         Command(Option<Box<ActorCommand>>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
         Storage(std::result::Result<(), watch::error::RecvError>),
@@ -169,6 +172,13 @@ pub(super) async fn run_session_actor(
                         }
                     } => Event::RelayChanged,
                     _ = policies.changed() => Event::Policy,
+                    ready = async {
+                        match recovery_waiting.expect("guarded recovery wait") {
+                            crate::recovery_gate::RefusalCause::Closed => false,
+                            crate::recovery_gate::RefusalCause::DaemonDraining => crate::upgrade::gate().wait_after_draining().await,
+                            crate::recovery_gate::RefusalCause::SessionHeld => updates.session_gate.wait_for_background_release(&target.session_id, crate::recovery_gate::BackgroundWork::RelayRecovery, &mut owner_changes).await,
+                        }
+                    }, if recovery_waiting.is_some() => Event::OwnerChanged(ready),
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
@@ -185,6 +195,14 @@ pub(super) async fn run_session_actor(
                 {
                     schedule.no_later_than(Duration::ZERO);
                 }
+            }
+            Event::OwnerChanged(ready) => {
+                if !ready {
+                    break;
+                }
+                recovery_waiting = None;
+                last_recovery_probe = None;
+                schedule.after(Duration::ZERO);
             }
             Event::Policy => {
                 policies.borrow_and_update();
@@ -292,7 +310,9 @@ pub(super) async fn run_session_actor(
                     continue;
                 }
                 let sync = async {
-                    let snapshot = sync_actor_connection(&target, &mut connection).await?;
+                    let snapshot =
+                        sync_actor_connection(&updates.session_gate, &target, &mut connection)
+                            .await?;
                     let observed_at = tokio::time::Instant::now();
                     let now = tokio::time::Instant::now();
                     if now >= next_cpu_read {
@@ -339,6 +359,7 @@ pub(super) async fn run_session_actor(
                 match result {
                     Ok((snapshot, observed_at)) => {
                         failures = 0;
+                        recovery_waiting = None;
                         let cause = if updates.harness_failure.get().is_some() {
                             harness_readiness.observe_worker(
                                 observed_at,
@@ -420,9 +441,7 @@ pub(super) async fn run_session_actor(
                             "session relay sync failed: {error:#}"
                         );
                         let recovery_due = !integrity
-                            && !crate::controller::move_session::move_owns_session(
-                                &target.session_id,
-                            )
+                            && recovery_waiting.is_none()
                             && failures >= UNREACHABLE_FAILURE_THRESHOLD
                             && worker_connect_needs_restart(&error)
                             && target.worker_recovery.is_some()
@@ -530,7 +549,11 @@ pub(super) async fn run_session_actor(
                                 session_id = target.session_id,
                                 "relay worker is unreachable; probing it before recovery: {error:#}"
                             );
+                            // Subscribe before deciding, so a release between refusal
+                            // and the next event-loop iteration cannot be lost.
+                            owner_changes.borrow_and_update();
                             match recover_worker_for_session(
+                                updates.session_gate.clone(),
                                 plan,
                                 restart_unresponsive,
                                 Some(target.session_id.clone()),
@@ -554,6 +577,7 @@ pub(super) async fn run_session_actor(
                                         | WorkerRecoveryOutcome::Starting
                                         | WorkerRecoveryOutcome::TargetMissing
                                         | WorkerRecoveryOutcome::Suppressed
+                                        | WorkerRecoveryOutcome::AdmissionRefused(_)
                                         | WorkerRecoveryOutcome::StorageFull { .. }
                                         | WorkerRecoveryOutcome::WorkspaceMissing(_) => {
                                             unreachable!()
@@ -637,6 +661,26 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
+                                    schedule.after(reconnect_delay(failures));
+                                }
+                                Ok(WorkerRecoveryOutcome::AdmissionRefused(refusal)) => {
+                                    recovery_waiting = Some(refusal.cause);
+                                    let snapshot = view_tx.borrow().snapshot.clone();
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            attention: Default::default(),
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(format!(
+                                                "{error:#}; waiting for {} before worker recovery",
+                                                refusal.holders.join(" and ")
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
+                                    last_recovery_probe = None;
                                     schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Suppressed) => {
@@ -832,7 +876,7 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let result =
-                            sync_actor_connection(&target, &mut connection)
+                            sync_actor_connection(&updates.session_gate, &target, &mut connection)
                                 .await
                                 .map(|snapshot| {
                                     if let Some(snapshot) = snapshot {
@@ -947,7 +991,8 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let result = async {
-                            sync_actor_connection(&target, &mut connection).await?;
+                            sync_actor_connection(&updates.session_gate, &target, &mut connection)
+                                .await?;
                             let connection =
                                 connection.as_mut().context("relay is disconnected")?;
                             connection
@@ -997,7 +1042,8 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let result = async {
-                            sync_actor_connection(&target, &mut connection).await?;
+                            sync_actor_connection(&updates.session_gate, &target, &mut connection)
+                                .await?;
                             let connection =
                                 connection.as_mut().context("relay is disconnected")?;
                             connection.install_prompt_context(text).await?;
@@ -1072,7 +1118,8 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let result = async {
-                            sync_actor_connection(&target, &mut connection).await?;
+                            sync_actor_connection(&updates.session_gate, &target, &mut connection)
+                                .await?;
                             let connection =
                                 connection.as_mut().context("relay is disconnected")?;
                             connection.stop_background_task(background_task_id).await?;
@@ -1158,7 +1205,9 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let lease_id = next_lease_id;
-                        let synced = sync_actor_connection(&target, &mut connection).await;
+                        let synced =
+                            sync_actor_connection(&updates.session_gate, &target, &mut connection)
+                                .await;
                         if let Err(error) = synced {
                             connection = None;
                             tracing::warn!(session_id = %target.session_id, %error, "could not sync before leasing the session");
@@ -1316,7 +1365,14 @@ pub(super) async fn deliver_submit(
     let started = Instant::now();
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
         %command_id, queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0, "submission dispatched");
-    let result = submit_actor_command(target, connection, &command_id, &command).await;
+    let result = submit_actor_command(
+        &updates.session_gate,
+        target,
+        connection,
+        &command_id,
+        &command,
+    )
+    .await;
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
         %command_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         accepted_ordinal = ?result.as_ref().ok(), "submission answered");
@@ -1477,6 +1533,7 @@ pub(super) fn is_final_rejection(error: &anyhow::Error) -> bool {
 }
 
 pub(super) async fn submit_actor_command(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
     command_id: &str,
@@ -1488,7 +1545,7 @@ pub(super) async fn submit_actor_command(
             // Synchronize and decide inside the serialized session owner on
             // every attempt. A clear completion must retire its outbox rows
             // before a stale batch can reach the fresh native conversation.
-            sync_actor_connection(target, connection).await?;
+            sync_actor_connection(gate, target, connection).await?;
             let session_id = target.session_id.clone();
             let event_key = event.key.clone();
             let status = tokio::task::spawn_blocking(move || {
@@ -1520,7 +1577,7 @@ pub(super) async fn submit_actor_command(
             }
         }
         if connection.is_none()
-            && let Err(error) = sync_actor_connection(target, connection).await
+            && let Err(error) = sync_actor_connection(gate, target, connection).await
         {
             // Before any send was attempted, a failure to reach the worker
             // proves the command was not delivered. Callers may then retry
@@ -1695,18 +1752,26 @@ fn sync_delay(connection: Option<&StandaloneSession>) -> Duration {
 }
 
 pub(super) async fn sync_actor_connection(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
 ) -> Result<Option<ManagedSessionSnapshot>> {
     let observation = if target.worker_recovery.is_some() {
         let id = target.session_id.clone();
+        let gate = gate.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
             // If there is no intent, a snapshot cannot complete one. Skip
             // ownership so ordinary actor sync never competes with a swap.
             if crate::database::load_worker_restart(&id)?.is_none() {
                 return Ok(None);
             }
-            crate::worker_lifecycle::WorkerPermit::try_observation(&id)
+            match gate.try_start(&id, crate::recovery_gate::BackgroundWork::WorkerObservation) {
+                Ok(admission) => crate::worker_lifecycle::WorkerPermit::acquire(&id, &admission).map(Some),
+                Err(refusal) => {
+                    tracing::debug!(session_id = id, holders = ?refusal.holders, "worker readiness settlement deferred");
+                    Ok(None)
+                }
+            }
         })
         .await
         .context("admit worker readiness observation")??
@@ -1716,7 +1781,8 @@ pub(super) async fn sync_actor_connection(
     if connection.is_none() {
         let mut fresh = StandaloneSession::connect(target).await?;
         if let Err(error) =
-            reopen_subagent_admission_after_move(target, &mut fresh, observation.as_ref()).await
+            reopen_subagent_admission_after_move(gate, target, &mut fresh, observation.as_ref())
+                .await
         {
             tracing::warn!(
                 session_id = target.session_id,
@@ -1745,6 +1811,7 @@ pub(super) async fn sync_actor_connection(
 }
 
 async fn reopen_subagent_admission_after_move(
+    gate: &Arc<crate::recovery_gate::RecoveryGate>,
     target: &RelaySessionTarget,
     connection: &mut StandaloneSession,
     readiness_owner: Option<&crate::worker_lifecycle::WorkerPermit>,
@@ -1757,10 +1824,16 @@ async fn reopen_subagent_admission_after_move(
     let owner = if let Some(owner) = readiness_owner {
         Some(owner.clone())
     } else {
-        crate::worker_lifecycle::WorkerPermit::try_acquire(
+        match gate.try_start(
             &target.session_id,
-            "repair sub-agent admission",
-        )?
+            crate::recovery_gate::BackgroundWork::WorkerObservation,
+        ) {
+            Ok(admission) => Some(crate::worker_lifecycle::WorkerPermit::acquire(
+                &target.session_id,
+                &admission,
+            )?),
+            Err(_) => None,
+        }
     };
     let Some(owner) = owner else {
         // A lifecycle operation already owns this worker. Its durable phase

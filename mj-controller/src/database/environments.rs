@@ -360,7 +360,42 @@ pub fn begin_environment_retirement(
             "UPDATE environments SET phase='retiring' WHERE environment_id=?1",
             [&id],
         )?;
-        let workers = read_environment_workers(&transaction, &id)?;
+        let mut workers = read_environment_workers(&transaction, &id)?;
+        let parents: BTreeMap<String, String> = transaction
+            .prepare("SELECT child_session_id,parent_session_id FROM subagent_sessions")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut depths = BTreeMap::new();
+        for worker in &workers {
+            let mut current = worker.session_id.as_str();
+            let mut seen = BTreeSet::new();
+            let mut depth = 0;
+            while current != environment.owner_session_id {
+                ensure!(
+                    seen.insert(current),
+                    "cyclic sub-agent ancestry during environment retirement: {}",
+                    worker.session_id
+                );
+                depth += 1;
+                let Some(parent) = parents.get(current) else {
+                    // Historical rows outlive relations. Attach an orphan
+                    // directly under this root, keeping known descendants below it.
+                    break;
+                };
+                current = parent;
+            }
+            depths.insert(worker.session_id.clone(), depth);
+        }
+        // Reviewers can nest under workers; Suspend/ForceDestroy acquire
+        // parent then child. Taking a lower-ID descendant first could
+        // deadlock against its parent's close.
+        workers.sort_by(|a, b| {
+            (depths[&a.session_id], &a.session_id, &a.lease_id).cmp(&(
+                depths[&b.session_id],
+                &b.session_id,
+                &b.lease_id,
+            ))
+        });
         transaction.commit()?;
         environment.phase = EnvironmentPhase::Retiring;
         Ok((environment, workers))
@@ -531,7 +566,7 @@ pub fn worker_environments(session_id: &str) -> Result<Vec<EnvironmentRecord>> {
 }
 
 /// Launch admission and retirement use the same serialized writer. The caller
-/// holds its WorkerPermit until launch finishes; retirement drains that permit.
+/// retains its owner admission until launch finishes; retirement drains it.
 pub fn admit_environment_worker(session_id: &str, target: &TargetLocator) -> Result<()> {
     let session_id = session_id.to_owned();
     let target = target.clone();

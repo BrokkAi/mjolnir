@@ -20,7 +20,7 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         mut before_close: Option<BeforeClose>,
     ) -> Result<bool> {
-        let close = crate::worker_lifecycle::run(session_id, "close sub-agent", executor, async {
+        let close = crate::worker_lifecycle::run_admitted(admission, session_id, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
             ensure!(
                 self.state.subagents.contains_key(session_id),

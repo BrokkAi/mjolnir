@@ -635,14 +635,28 @@ pub(super) async fn handle_action(
             all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
-            blocking(move || {
-                Controller::load()?.destroy_orphan_worker(
+            let admission = state
+                .recovery_observer
+                .gate
+                .enter_foreground(
                     &session_id,
-                    &target_id,
-                    &confirmation,
-                    all_instances,
+                    "destroy recovered environment",
+                    crate::recovery_gate::LifecycleOrigin::Person,
+                    &AtomicBool::new(false),
                     &ProcessExecutor,
                 )
+                .await?;
+            let owner = crate::worker_lifecycle::WorkerPermit::acquire(&session_id, &admission)?;
+            blocking(move || {
+                owner.scope_blocking(|| {
+                    Controller::load()?.destroy_orphan_worker(
+                        &session_id,
+                        &target_id,
+                        &confirmation,
+                        all_instances,
+                        &ProcessExecutor,
+                    )
+                })
             })
             .await?;
             Ok(DaemonReply::Done)
@@ -1135,17 +1149,46 @@ pub(super) async fn handle_action(
             session_id,
             cleanup_operation_id,
         } => {
+            let admission = if cleanup_operation_id.is_some() {
+                Some(
+                    state
+                        .recovery_observer
+                        .gate
+                        .enter_foreground(
+                            &session_id,
+                            "retained Move source cleanup",
+                            crate::recovery_gate::LifecycleOrigin::Person,
+                            &AtomicBool::new(false),
+                            &ProcessExecutor,
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let owner = admission
+                .as_ref()
+                .map(|admission| {
+                    crate::worker_lifecycle::WorkerPermit::acquire(&session_id, admission)
+                })
+                .transpose()?;
             let sources = blocking(move || {
-                let _guard =
-                    crate::controller::move_session::MoveMutationGuard::reserve(&session_id)?;
-                if let Some(operation_id) = cleanup_operation_id {
-                    Controller::load()?.cleanup_retained_move_source(
-                        &session_id,
-                        &operation_id,
-                        &ProcessExecutor,
-                    )?;
+                let cleanup = || {
+                    let _guard =
+                        crate::controller::move_session::MoveMutationGuard::reserve(&session_id)?;
+                    if let Some(operation_id) = cleanup_operation_id {
+                        Controller::load()?.cleanup_retained_move_source(
+                            &session_id,
+                            &operation_id,
+                            &ProcessExecutor,
+                        )?;
+                    }
+                    crate::database::retained_move_sources(&session_id)
+                };
+                match owner {
+                    Some(owner) => owner.scope_blocking(cleanup),
+                    None => cleanup(),
                 }
-                crate::database::retained_move_sources(&session_id)
             })
             .await?;
             Ok(DaemonReply::MoveSources(sources))

@@ -14,6 +14,7 @@ impl Controller {
     ) -> Result<()> {
         let retained = source_relay.owner();
         crate::worker_lifecycle::run_with_owner(
+            admission,
             session_id,
             "prepare move source checkpoint",
             executor,

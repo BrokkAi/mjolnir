@@ -90,6 +90,8 @@ impl Drop for ForegroundHolder {
 pub enum BackgroundWork {
     /// Stops and replaces the worker, so it shares the session with nothing.
     WorkerReplacement,
+    RelayRecovery,
+    WorkerObservation,
     /// Copies the session's state from the running worker. A large remote
     /// copy takes minutes and the next one is due soon after (#1564).
     RecoveryCopyCapturing,
@@ -113,6 +115,8 @@ impl BackgroundWork {
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkerReplacement => "worker upgrade",
+            Self::RelayRecovery => "relay recovery",
+            Self::WorkerObservation => "worker readiness observation",
             Self::RecoveryCopyCapturing => "recovery copy",
             Self::RecoveryCopyTransferring => "recovery copy transfer",
             Self::RecoveryCopyAbandoning => "recovery copy cleanup",
@@ -159,9 +163,17 @@ impl BackgroundWork {
 /// It is shared rather than per-coordinator so that one place decides which
 /// kinds of work may run together on a session, and a foreground lifecycle
 /// operation preempts all of them.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
+    pub cause: RefusalCause,
     pub holders: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCause {
+    Closed,
+    DaemonDraining,
+    SessionHeld,
 }
 
 pub struct RecoveryGate {
@@ -368,7 +380,7 @@ impl RecoveryGate {
         let mut previous = Vec::new();
         loop {
             anyhow::ensure!(
-                !cancelled.load(Ordering::Acquire),
+                !cancelled.load(Ordering::Acquire) && !notices.cancellation_requested(),
                 "operation cancelled while waiting for session admission"
             );
             let holders = {
@@ -429,7 +441,11 @@ impl RecoveryGate {
             }
             tokio::select! {
                 result = busy.changed() => { result?; }
-                () = wait_until_cancelled(cancelled) => {}
+                () = async {
+                    while !cancelled.load(Ordering::Acquire) && !notices.cancellation_requested() {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                } => {}
             }
         }
     }
@@ -473,6 +489,7 @@ impl RecoveryGate {
     ) -> Result<RecoveryAttempt, Refusal> {
         if crate::upgrade::is_draining() {
             return Err(Refusal {
+                cause: RefusalCause::DaemonDraining,
                 holders: vec!["daemon handoff"],
             });
         }
@@ -480,46 +497,8 @@ impl RecoveryGate {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Replies finish the work a review accepted and the work a foreground
-        // Move explicitly yields to while draining. Neither reservation can
-        // defer these completions for the lifetime of the review/drain.
-        if state.closed
-            || (kind.needs_lease() && state.leases.contains_key(session_id))
-            || state
-                .reservations
-                .get(session_id)
-                .into_iter()
-                .flatten()
-                .any(|holder| match holder.kind {
-                    ReservationKind::Foreground => true,
-                    ReservationKind::Review | ReservationKind::ForegroundDelegationDrain => {
-                        kind != BackgroundWork::DelegationDelivery
-                    }
-                })
-            || state
-                .busy
-                .get(session_id)
-                .is_some_and(|holders| holders.iter().any(|holder| !kind.runs_beside(holder.work)))
-        {
-            let mut holders = state
-                .busy
-                .get(session_id)
-                .into_iter()
-                .flatten()
-                .map(|holder| holder.work.label())
-                .collect::<Vec<_>>();
-            holders.extend(
-                state
-                    .reservations
-                    .get(session_id)
-                    .into_iter()
-                    .flatten()
-                    .map(|holder| holder.label),
-            );
-            if state.closed {
-                holders.push("daemon shutdown");
-            }
-            return Err(Refusal { holders });
+        if let Some(refusal) = Self::session_refusal(&state, session_id, kind) {
+            return Err(refusal);
         }
         let cancelled = Arc::new(AtomicBool::new(false));
         state
@@ -588,6 +567,129 @@ impl RecoveryGate {
             .unwrap_or_else(|error| error.into_inner())
             .busy
             .contains_key(session_id)
+    }
+
+    fn session_refusal(
+        state: &RecoveryGateState,
+        session_id: &str,
+        kind: BackgroundWork,
+    ) -> Option<Refusal> {
+        // Replies finish the work a review accepted and the work a foreground
+        // Move explicitly yields to while draining. Neither reservation can
+        // defer these completions for the lifetime of the review/drain.
+        if state.closed
+            || (kind.needs_lease() && state.leases.contains_key(session_id))
+            || state
+                .reservations
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .any(|holder| match holder.kind {
+                    ReservationKind::Foreground => true,
+                    ReservationKind::Review => !matches!(
+                        kind,
+                        BackgroundWork::DelegationDelivery
+                            | BackgroundWork::RelayRecovery
+                            | BackgroundWork::WorkerObservation
+                    ),
+                    ReservationKind::ForegroundDelegationDrain => {
+                        kind != BackgroundWork::DelegationDelivery
+                    }
+                })
+            || state
+                .busy
+                .get(session_id)
+                .is_some_and(|holders| holders.iter().any(|holder| !kind.runs_beside(holder.work)))
+        {
+            let mut holders = state
+                .busy
+                .get(session_id)
+                .into_iter()
+                .flatten()
+                .map(|holder| holder.work.label())
+                .collect::<Vec<_>>();
+            holders.extend(
+                state
+                    .reservations
+                    .get(session_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|holder| holder.label),
+            );
+            if state.closed {
+                holders.push("daemon shutdown");
+            }
+            return Some(Refusal {
+                cause: if state.closed {
+                    RefusalCause::Closed
+                } else {
+                    RefusalCause::SessionHeld
+                },
+                holders,
+            });
+        }
+        None
+    }
+
+    /// Observe the same admission decision without claiming resources. A
+    /// global publication can wake this; only this session's release returns.
+    pub(crate) async fn wait_for_background_release(
+        &self,
+        session_id: &str,
+        kind: BackgroundWork,
+        changed: &mut watch::Receiver<BTreeSet<String>>,
+    ) -> bool {
+        loop {
+            let refusal = Self::session_refusal(
+                &self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                session_id,
+                kind,
+            );
+            match refusal.map(|r| r.cause) {
+                None => return true,
+                Some(RefusalCause::Closed) => return false,
+                _ => {
+                    if changed.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reviews coexist with foreground lifecycles, so their exchanges wait
+    /// for the owner's physical lease return before trying the worker again.
+    pub(crate) async fn wait_for_lease_return(
+        &self,
+        session_id: &str,
+        changed: &mut watch::Receiver<BTreeSet<String>>,
+    ) -> anyhow::Result<()> {
+        let held = Self::session_refusal(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            session_id,
+            BackgroundWork::WorkerObservation,
+        )
+        .is_some();
+        anyhow::ensure!(
+            held || changed.has_changed()?,
+            "worker reported lifecycle contention without an owner for session {session_id}"
+        );
+        anyhow::ensure!(
+            self.wait_for_background_release(
+                session_id,
+                BackgroundWork::WorkerObservation,
+                changed
+            )
+            .await,
+            "session owner is closed"
+        );
+        Ok(())
     }
 
     /// Asks all in-flight work for this session, if any, to stop.
@@ -699,12 +801,16 @@ impl HoldsSession for SessionAdmission {
     }
 }
 impl SessionAdmission {
-    fn gate_and_session(&self) -> (&Arc<RecoveryGate>, &str) {
+    pub(crate) fn gate_and_session(&self) -> (&Arc<RecoveryGate>, &str) {
         match self {
             Self::Foreground(a) => (&a.0.gate, &a.0.session_id),
             Self::Background(a) => (&a.0.gate, &a.0.session_id),
         }
     }
+    pub(crate) fn session_id(&self) -> &str {
+        self.gate_and_session().1
+    }
+
     pub(crate) fn drain_delegation(&self) -> anyhow::Result<ForegroundDelegationDrain> {
         let Self::Foreground(admission) = self else {
             anyhow::bail!("delegation drain requires foreground ownership");
@@ -1387,6 +1493,19 @@ mod tests {
                 .is_ok(),
             "other sessions are free"
         );
+        for kind in [
+            BackgroundWork::RelayRecovery,
+            BackgroundWork::WorkerObservation,
+        ] {
+            let repair = gate
+                .try_start("session-1", kind)
+                .expect("a live review must allow worker repair and readiness settlement");
+            assert!(
+                gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                    .is_err()
+            );
+            drop(repair);
+        }
         let foreground = gate
             .enter_foreground(
                 "session-1",

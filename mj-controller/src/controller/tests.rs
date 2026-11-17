@@ -2736,9 +2736,14 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             .as_ref(),
         Some(&runtime)
     );
-    controller
-        .force_destroy_session(&child.child_session_id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&child.child_session_id, || {
+        controller.force_destroy_session(
+            &child.child_session_id,
+            &executor,
+            BranchDisposition::Keep,
+        )
+    })
+    .unwrap();
     assert!(controller.state.sessions.contains_key(&id));
     let commands = executor.commands.lock().unwrap();
     assert!(
@@ -2751,16 +2756,21 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     executor
         .fail
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(controller.stop_subagent(&id, &executor).is_err());
+    assert!(
+        crate::controller::test_support::worker_test_scope(&id, || controller
+            .stop_subagent(&id, &executor))
+        .is_err()
+    );
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
     assert!(saved.sessions[&id].target.is_some());
     executor
         .fail
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    controller
-        .force_destroy_session(&id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&id, || {
+        controller.force_destroy_session(&id, &executor, BranchDisposition::Keep)
+    })
+    .unwrap();
     assert!(
         !crate::database::load_state()
             .unwrap()
@@ -2864,9 +2874,9 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert!(refusal.message().contains(&session.id));
     assert!(refusal.message().contains("podman"));
     assert!(
-        controller
-            .stop_subagent(&session.id, &UnusedExecutor)
-            .is_err()
+        crate::controller::test_support::worker_test_scope(&session.id, || controller
+            .stop_subagent(&session.id, &UnusedExecutor))
+        .is_err()
     );
     assert!(
         crate::database::load_state()

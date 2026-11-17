@@ -11,6 +11,7 @@ pub(crate) fn spawn_session_manager_observed(
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
     let (mut updates_tx, updates_rx) = coalesced_update_channel();
     updates_tx.delegation = delegation;
+    let session_gate = updates_tx.session_gate.clone();
     let session_cpu = updates_tx.cpu.subscribe();
     let model_policies = updates_tx.model_policies.clone();
     let harness_failure = updates_tx.harness_failure.clone();
@@ -116,6 +117,7 @@ pub(crate) fn spawn_session_manager_observed(
         session_cpu: session_cpu.clone(),
         targets: targets_tx,
         control: SessionManagerControl {
+            session_gate,
             harness_failure,
             model_policies,
             commands: commands_tx,

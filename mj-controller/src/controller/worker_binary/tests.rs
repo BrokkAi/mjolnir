@@ -204,7 +204,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
     assert_eq!(entry_meta.nlink(), 2, "the store entry and the root's link");
     unchanged();
 
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(SESSION, "test stop")
+    let owner = crate::controller::test_support::worker_test_permit(SESSION, "test stop")
         .unwrap()
         .unwrap();
     stop_worker(&owner, &ProcessExecutor, &locator, &root_text).unwrap();
@@ -668,7 +668,7 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
     assert!(!abandoned_path.exists());
     assert!(worker_root.join(&*staging).exists());
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "test upgrade")
+    let owner = crate::controller::test_support::worker_test_permit(session_id, "test upgrade")
         .unwrap()
         .unwrap();
     install_staged_worker_binary(&owner, &staging, &executor, &locator, session_id).unwrap();
@@ -1551,7 +1551,7 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             commands: RefCell::new(Vec::new()),
         };
         start_worker(
-            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+            &crate::controller::test_support::worker_test_permit(
                 "13131313131313131313131313131313",
                 "test start",
             )
@@ -1593,7 +1593,7 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         crate::database::save_session(&session).unwrap();
         executor.commands.borrow_mut().clear();
         start_worker(
-            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+            &crate::controller::test_support::worker_test_permit(
                 &session.id,
                 "credential-free start",
             )
@@ -1666,7 +1666,7 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
         commands: RefCell::new(Vec::new()),
     };
     stop_worker(
-        &crate::worker_lifecycle::WorkerPermit::try_acquire(
+        &crate::controller::test_support::worker_test_permit(
             "14141414141414141414141414141414",
             "test stop",
         )
@@ -1785,7 +1785,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
         workspace_storage: Default::default(),
     };
 
-    crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test stop")
+    crate::controller::test_support::worker_test_permit(session, "test stop")
         .unwrap()
         .unwrap()
         .scope_blocking(|| {
@@ -2105,7 +2105,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             None,
             &[],
         )?;
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             &session,
             "test binary replacement",
         )?

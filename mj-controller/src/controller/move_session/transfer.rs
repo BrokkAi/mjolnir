@@ -1427,9 +1427,14 @@ mod tests {
             config: resume_compatibility_config(),
             state: crate::database::load_state().unwrap(),
         };
-        let error = controller
-            .cleanup_retained_move_source(id, &operation.operation_id, &targets::ProcessExecutor)
-            .unwrap_err();
+        let error = crate::controller::test_support::worker_test_scope(id, || {
+            controller.cleanup_retained_move_source(
+                id,
+                &operation.operation_id,
+                &targets::ProcessExecutor,
+            )
+        })
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2213,9 +2218,10 @@ mod tests {
                 .controller_stage
                 .exists()
         );
-        controller
-            .cleanup_retained_move_source(id, &operation.operation_id, &executor)
-            .unwrap();
+        crate::controller::test_support::worker_test_scope(id, || {
+            controller.cleanup_retained_move_source(id, &operation.operation_id, &executor)
+        })
+        .unwrap();
         assert!(
             crate::database::retained_move_sources(id)
                 .unwrap()
