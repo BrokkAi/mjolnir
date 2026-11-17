@@ -1026,14 +1026,20 @@ impl Controller {
                 executor,
                 |_| None,
                 |outputs| {
-                    super::backend::locator_after_provision_named(
+                    let locator = super::backend::locator_after_provision_named(
                         template,
                         &target,
                         session_id,
                         outputs.first(),
                         executor,
                         &resource_name,
-                    )
+                    )?;
+                    // Creation owns HOME readiness before checkout and worker
+                    // staging split into independent background operations.
+                    targets::initialize_container_home(
+                        &backend_locator(&locator, &session, &self.config)?, executor,
+                    )?;
+                    Ok(locator)
                 },
             )
             .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));

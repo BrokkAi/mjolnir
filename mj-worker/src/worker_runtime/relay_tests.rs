@@ -372,7 +372,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
     mpsc::channel(1)
 }
 
-fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
+pub(super) fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         cpu_accounting: Default::default(),
         no_github_credentials: false,

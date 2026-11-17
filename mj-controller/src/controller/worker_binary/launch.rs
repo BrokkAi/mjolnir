@@ -1279,6 +1279,19 @@ pub(super) fn worker_launch_config_with_checkout(
         // the container, preserving both for stopped legacy sessions.
         environment.insert("IS_SANDBOX".into(), "1".into());
     }
+    // Placement owns this directive; profile/target environment cannot enable
+    // system-package installation on a bare target.
+    environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    target_environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
+    if backend.container_engine().is_some() {
+        let roots = std::iter::once(&workspace.0)
+            .chain(workspace.1.iter())
+            .collect::<Vec<_>>();
+        environment.insert(
+            mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS.into(),
+            serde_json::to_string(&roots)?,
+        );
+    }
     Ok((
         WorkerLaunchConfig {
             cpu_accounting: backend.cpu_accounting(),

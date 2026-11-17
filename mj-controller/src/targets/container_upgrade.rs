@@ -691,7 +691,8 @@ impl RetainedContainer {
             .as_ref()
             .context("container image has not been prepared")?;
         if matches!(host, ImageHost::SshNitro(_)) {
-            return self.nitro_replace(&host, session_id, executor);
+            self.nitro_replace(&host, session_id, executor)?;
+            return initialize_container_home(&self.locator, executor);
         }
         if let Some(current) = inspect(&host, &self.name, executor)? {
             owned(&current, session_id)?;
@@ -699,7 +700,7 @@ impl RetainedContainer {
                 if !current.state.running {
                     checked(&host, vec!["start".into(), self.name.clone()], executor)?;
                 }
-                return Ok(());
+                return initialize_container_home(&self.locator, executor);
             }
             ensure!(
                 current.id == self.source_id,
@@ -885,6 +886,7 @@ impl RetainedContainer {
             "replacement start failed; source and all storage retained: {}",
             String::from_utf8_lossy(&result.stderr)
         );
+        initialize_container_home(&self.locator, executor)?;
         Ok(())
     }
 
@@ -1947,6 +1949,14 @@ mod tests {
             };
             // ssh sends the remote command as one quoted line.
             let remote = command.args.last().cloned().unwrap_or_default();
+            if command.purpose == "initialize session container home" {
+                // HOME initialization is a shell transaction of engine execs,
+                // after the replacement VM has started.
+                assert!(remote.contains(&engine_shell_words(MICROVM_ENGINE)));
+                assert!(self.vm.borrow().running);
+                self.log.borrow_mut().push("exec initialize-home".into());
+                return ok("");
+            }
             let Some(position) = remote.find("mj-microvm") else {
                 bail!("unexpected command that does not go through the engine: {remote}");
             };

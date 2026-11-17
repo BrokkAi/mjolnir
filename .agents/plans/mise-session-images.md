@@ -19,7 +19,7 @@ To see it working, in an isolated instance: create a session for a repository th
 ## Progress
 
 - [x] (2026-11-16) Reconnaissance: create pipeline and image selection, custom-image worker and bridge installation, CLI/API/config/secrets patterns, kitchen-sink inventory, mise spike. Findings are folded into Context and Surprises below; raw reports live in this session's `.mj/agents/*/findings.md` (not committed).
-- [ ] Milestone 1: pinned mise artifact (`mj-core/assets/mise/runtime.json`) and the worker's post-clone project-tools step.
+- [x] (2026-11-16) Milestone 1 implementation and real Podman acceptance: pinned mise artifact, post-clone tools step, durable nonfatal notices, preserved image homes and shims. Rust1.99.1/Node24, Node18 bridge isolation, broken recipe, empty repo and HOME ownership all passed in isolated `mise-w`; all four containers were removed and its daemon stopped. Final crate validation/review continues below.
 - [ ] Milestone 2: per-project session images in configuration and one effective-image resolution used by every image consumer.
 - [ ] Milestone 3: `mj image build` and `mj image status` (Containerfile generator, daemon build operation, push, assignment).
 - [ ] Milestone 4: mjolnir's own `mise.toml` (the `mj-dev` recipe), built and pushed with `mj image build`.
@@ -42,6 +42,15 @@ To see it working, in an isolated instance: create a session for a repository th
   Evidence: mise spike `DETAILS.md` and the Podman command output for this milestone.
 - Observation: the release image is also the image for the opt-in daemon-container mode and for quota-check containers, which run harness CLIs and need them baked in.
   Evidence: `docs/src/content/docs/daemon-container.md`; `mj-controller/src/quota_runtime.rs` (around 113-146).
+
+- Observation (Milestone 1): static raw binaries published at `mise-v2026.11.9-linux-{x64,arm64}-musl`; independently fetched official `SHASUMS256.txt`. x64 SHA256 `e55de2c37a08a9dfdb3ca95490f90f914b5ef362b62761f1bb2110e5d57210f7`, arm64 `b15e52c9285a07854f4e81ec7e281625b56b0c23e4c0e8a553eb0e06fe4ae0a3`. No extraction needed.
+- Observation (Milestone 1): `RelayObservation::Notice` already renders a session notice before the harness starts. A container launch's `additional_directories` also includes mounts, so recipe roots must come from the controller's repository workspace paths before mounts are added.
+
+- Observation (Milestone 1): managed npm bridges and Codex's explicit provider use `#!/usr/bin/env node`, so a project selecting Node 18 could override Mjolnir's compatible Node after shims are restored first. Freeze the bridge to the actual `node -p process.execPath` interpreter; provider paths accepted as one executable get worker-private shell launchers that invoke the same interpreter. Keep the tool PATH unchanged. Parent approved this fix and a real Node18 project regression.
+
+- Observation (Milestone 1 real Podman run): `buildpack-deps:noble` has no `/home/hel`; Podman sets that HOME, and Git bootstrap failed before clone with `could not lock config file /home/hel/.gitconfig: No such file or directory` (first e2e daemon log, 2026-11-17T03:50:08Z). Container creation now initializes the configured user's HOME before checkout/profile staging diverge; retained-storage replacement uses the same initialization. The initializer queries the image's effective HOME and uid/gid and creates/chowns just that directory as container root. Parent approved this prerequisite fix; the existing real-container e2e checks its ownership.
+
+- Validation note (Milestone 1): complete worker suites passed (862 unit tests plus 33 integration cases; 11 unit tests ignored). The core suite had 661 passes, four ignores and an `ETXTBSY` launching the existing cached-Node repair fixture; that one test passed alone. The controller run completed 2,675 passes and 28 ignores, with three existing API selection failures and one review-host hang. Per parent direction the whole controller suite was not repeated: all three API failures reproduced alone on this worktree and unchanged base `30d5959ec`; the review-host test also hung alone here and on that same unchanged base, where it was stopped after the parent-approved 300s execution limit. The temporary baseline worktree was removed after comparison. The affected Nitro replacement retry regression passed after updating its handwritten fake for the new HOME transaction.
 
 ## Decision Log
 
@@ -76,9 +85,12 @@ To see it working, in an isolated instance: create a session for a repository th
   Rationale: user ("we don't need to solve every corner case").
   Date/Author: 2026-11-16, jbellis.
 
+- Decision (Milestone 1): use one controller-authored `MJ_SESSION_PROJECT_TOOLS_ROOTS` JSON-array directive in the existing launch environment, parsed and removed by the worker. Older workers ignore it and retain their current behavior; a new launch field would be rejected by older readers. Documented in `.agents/docs/internal-environment-variables.md`. The existing relay notice path needs no protocol revision. Preparation runs package/tool commands without a deadline and streams both outputs directly into `project-tools.log`; cancellation retains the preparation supervisor's process-group ownership.
+  Date/Author: 2026-11-16, parent-approved worker implementation.
+
 ## Outcomes & Retrospective
 
-(None yet.)
+Milestone 1 works on unmodified `docker.io/library/buildpack-deps:noble` with a real Codex bridge and no model prompts. The clone's Rust1.99.1 and Node24 are usable through the session's user-shell surface. A Node18 project uses Node24.22.1 for the bridge while its user tools see Node18. A failed recipe records a visible notice and log without preventing the session from running. Repositories without a recipe skip installation. Two prerequisite defects were fixed at their owners: container creation establishes HOME before concurrent writers begin, and JavaScript bridge/provider entrypoints bind their compatible interpreter independently of project PATH. Milestones2–5 remain separate work.
 
 ## Context and Orientation
 
@@ -150,7 +162,16 @@ The project-tools step is idempotent: mise skips installed tools and packages, s
 
 ## Artifacts and Notes
 
-(To be filled with the golden Containerfile excerpt, timings from the end-to-end tests, and the `mj-dev` digest.)
+Milestone 1 real-container transcript (2026-11-16 local, isolated `--instance mise-w`):
+
+    tools: Install project tools; user shell: cargo 1.99.1, node v24.x
+    old-node: bridge started on v24.22.1; session user shell: node v18.x; shims first
+    broken: session running; visible mise install failure notice names project-tools.log
+    empty: session running; no tools step
+
+The actual tools transcript reported `cargo 1.99.1 (5f94df478 2026-08-27)` and `v24.22.3`. `tests/e2e/mise_project_tools.py` reproduces these checks with a real portable worker and Codex bridge, without paid prompts; pass the built binaries, a logged-in source profile and a text-artifact directory. The driver copies only the login into a private profile, uses private configuration/data paths, and destroys its sessions before stopping the daemon. The first pre-fix run reproduced the missing-HOME bootstrap failure; the complete second run passed every case.
+
+Later milestones will add the golden Containerfile excerpt, image-build timings and `mj-dev` digest.
 
 ## Interfaces and Dependencies
 
