@@ -25,6 +25,8 @@ pub(crate) struct SubagentDraft {
     harness: Option<mj_core::config::HarnessKind>,
     /// The profile whose remembered policy initialized this draft.
     profile_id: Option<String>,
+    /// Whether the destination target runs with `permissions = "yolo"`.
+    yolo: bool,
 }
 
 /// One entry of the delegation combo box.
@@ -275,6 +277,7 @@ impl SubagentDraft {
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
         remembered: &SubagentPolicy,
         remembered_oracle: bool,
+        yolo: bool,
     ) {
         if self.profile_id.as_deref() != Some(profile) {
             self.oracle = remembered_oracle;
@@ -286,7 +289,7 @@ impl SubagentDraft {
             self.policy = remembered.clone();
             self.combo = ComboBoxState::default();
         }
-        self.update_choices(profile, config, snapshot);
+        self.update_choices(profile, config, snapshot, yolo);
         // Keep the user's intent separate from the available displayed policy.
         let desired = self
             .chosen_policy
@@ -312,9 +315,11 @@ impl SubagentDraft {
         profile: &str,
         config: &Config,
         _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+        yolo: bool,
     ) {
+        self.yolo = yolo;
         self.harness = config.profiles.get(profile).map(|profile| profile.kind);
-        self.oracle_configured = config.subagents.oracle_configured();
+        self.oracle_configured = config.subagents.oracle_configured_for(yolo);
         self.discovery = Some(SubagentDiscovery {
             result: Some(
                 if !config
@@ -325,14 +330,20 @@ impl SubagentDraft {
                     Err("Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile".into())
                 } else if config
                     .subagents
-                    .effective_choice(
+                    .effective_choice_for(
                         self.last_mjolnir_policy.as_deref().unwrap_or(&self.policy),
                         mj_core::subagent::SubagentTaskType::Straightforward,
+                        yolo,
                     )
                     .is_some()
                 {
                     // Subtle and Oracle are optional; straightforward alone enables Mjolnir.
                     Ok(SubagentOptions::default())
+                } else if yolo {
+                    Err(
+                        "Set up YOLO target sub-agents in Settings -> Sub-agents (uncheck \"Use the same subagents on all targets\")"
+                            .into(),
+                    )
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())
                 },
@@ -344,20 +355,38 @@ impl SubagentDraft {
 impl DashboardState {
     /// The review step's delegation draft and the profile it is for, when
     /// the open wizard offers the choice.
-    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String)> {
+    fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String, bool)> {
         let applies = matches!(&self.mode, Mode::New(_))
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review && wizard.subagent_choice_applies(self));
         if !applies {
             return None;
         }
-        let profile = match &self.mode {
-            Mode::New(wizard) => self.offered_profiles().nth(wizard.profile)?.0.to_owned(),
-            Mode::Resume(wizard) => wizard.destination_profile(self),
+        let (profile, yolo) = match &self.mode {
+            Mode::New(wizard) => {
+                let target = nth_key(&self.config.targets, wizard.target);
+                (
+                    self.offered_profiles().nth(wizard.profile)?.0.to_owned(),
+                    self.config
+                        .targets
+                        .get(&target)
+                        .is_some_and(TargetTemplate::is_yolo),
+                )
+            }
+            Mode::Resume(wizard) => {
+                let target = nth_key(&self.config.targets, wizard.target);
+                (
+                    wizard.destination_profile(self),
+                    self.config
+                        .targets
+                        .get(&target)
+                        .is_some_and(TargetTemplate::is_yolo),
+                )
+            }
             _ => unreachable!("checked above"),
         };
         match &mut self.mode {
-            Mode::New(wizard) => Some((&mut *wizard.subagents, profile)),
-            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile)),
+            Mode::New(wizard) => Some((&mut *wizard.subagents, profile, yolo)),
+            Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile, yolo)),
             _ => None,
         }
     }
@@ -373,7 +402,7 @@ impl DashboardState {
         let config = self.config.clone();
         let snapshot = self.profile_capabilities.clone();
         let oracle_choices = self.state.last_oracle_choices.clone();
-        let (draft, profile) = self.review_subagent_draft()?;
+        let (draft, profile, yolo) = self.review_subagent_draft()?;
         let remembered_oracle = oracle_choices.get(&profile).copied().unwrap_or(true);
         if creating {
             draft.refresh_create(
@@ -382,9 +411,10 @@ impl DashboardState {
                 &snapshot,
                 remembered.as_ref().expect("Create preference was resolved"),
                 remembered_oracle,
+                yolo,
             );
         } else {
-            draft.update_choices(&profile, &config, &snapshot);
+            draft.update_choices(&profile, &config, &snapshot, yolo);
         }
         None
     }

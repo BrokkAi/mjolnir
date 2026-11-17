@@ -1,0 +1,357 @@
+{
+  "status": "valid",
+  "issues": [],
+  "run": {
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "profile": "codex4",
+    "target": "podman",
+    "concurrency": 1,
+    "items": 44,
+    "expected_briefs_per_writer": 22,
+    "quota_floor_percent": 25,
+    "quota_before_run_week_percent": 65,
+    "amendment_commit": "5a00ed1025fafe34608a1ee620a535a5300992ee",
+    "session_id": "a5adcac30a88976dd06ff83b406b0412",
+    "session_profile": "codex4",
+    "completed_normally": true
+  },
+  "validation": {
+    "key_ids": 44,
+    "input_ids": 44,
+    "output_rows": 44,
+    "unique_output_ids": 44,
+    "labels_valid": true,
+    "all_brief_hashes_match": true,
+    "item_brief_text_matches_published": true,
+    "matching_item_quotes_exact": true,
+    "required_output_fields_present": true,
+    "output_schema_valid": true
+  },
+  "counts_by_writer_group_label": {
+    "Sol_P": {
+      "no": 3,
+      "partial": 8,
+      "yes": 7
+    },
+    "Sol_S": {
+      "no": 1,
+      "partial": 1,
+      "yes": 2
+    },
+    "Terra_P": {
+      "no": 4,
+      "partial": 13,
+      "yes": 1
+    },
+    "Terra_S": {
+      "partial": 3,
+      "yes": 1
+    }
+  },
+  "paired_yes_by_group": {
+    "P": {
+      "both_yes": 1,
+      "neither_yes": 11,
+      "only_Sol": 6
+    },
+    "S": {
+      "both_yes": 1,
+      "neither_yes": 2,
+      "only_Sol": 1
+    }
+  },
+  "paired_descriptive_catch_shares": {
+    "archive-resume-hint-without-prompt": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "no",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "catalog-cache-key-collision": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 1.0
+    },
+    "child-model-wrong-efforts": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "codex-effort-alias-lost": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "export-relative-read-root": {
+      "group": "P",
+      "Sol_contains": "no",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.6666666666666666
+    },
+    "github-token-in-container-argv": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "held-prompt-ignores-interrupt": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 1.0
+    },
+    "journal-valid-json-corruption": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "path-completion-lost-on-step-redraw": {
+      "group": "P",
+      "Sol_contains": "no",
+      "Terra_contains": "no",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "pending-assessment-hidden-when-idle": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "projection-mixed-sqlite-snapshots": {
+      "group": "P",
+      "Sol_contains": "no",
+      "Terra_contains": "no",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.3333333333333333
+    },
+    "reserved-workspace-internal-error": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "restore-through-profile-symlink": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "stale-model-launch-spec": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 1.0
+    },
+    "symbol-change-keeps-cached-transcript": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "no",
+      "TT_catch_share": 0.3333333333333333,
+      "BT_catch_share": 1.0
+    },
+    "terminal-id-reused": {
+      "group": "P",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "unused-thread-above-archive-floor": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "web-feed-self-deadlock": {
+      "group": "P",
+      "Sol_contains": "yes",
+      "Terra_contains": "yes",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "activity-recorder-kills-api": {
+      "group": "S",
+      "Sol_contains": "yes",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    },
+    "dropdown-click-hits-covered-field": {
+      "group": "S",
+      "Sol_contains": "partial",
+      "Terra_contains": "partial",
+      "TT_catch_share": 1.0,
+      "BT_catch_share": 1.0
+    },
+    "metadata-checkpoint-overwrites-checkout": {
+      "group": "S",
+      "Sol_contains": "yes",
+      "Terra_contains": "yes",
+      "TT_catch_share": 0.6666666666666666,
+      "BT_catch_share": 0.6666666666666666
+    },
+    "shortcut-escape-opens-unvisited-manager": {
+      "group": "S",
+      "Sol_contains": "no",
+      "Terra_contains": "partial",
+      "TT_catch_share": 0.0,
+      "BT_catch_share": 0.0
+    }
+  },
+  "usage_file": "contains-diagnostic-usage.json",
+  "raw_file_sha256": {
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/key.json": "fd6d89dc2d88073f49e89c016c3545dd1e19e1ae730119c66504ef52e3407404",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/run-metadata.json": "009521849a8d94decfa318701b36f7bec59459623ac86471085fa52bdf348081",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/sessions/batch-unit.json": "6f2c53b77cbc8bf700b6f309a97fc5fc3ef5199a66a5efa1f0e9a856f395c6e8",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/INSTRUCTIONS.md": "719d4c5326395d41ca6d13ab6f218ed3c6fa32555ad3a22f12f9bf6252816db5",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/CONTAINS.md": "d989e66e01df153ac98450c2e5906ccf5e8c37a0721924596cab6ab1c4ea5609",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/contains.jsonl": "5bcf9c8c2b5ec54caeb6a37f0d87066aff479cb3973b4631f89e820fa753c234",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-004e8271f8447296.json": "7662ca8cb588ee328a7d9e3c8b72697ae2f1e70b4665e85105ce560ef2bbfd21",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-017b8262416dc8d6.json": "d0876e6358ffe23c738fa46c900bd7d1eff86cae90923d7d11dffa980539592e",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-024d862ab4cd60da.json": "49d0036878b1c582fd72b1e396cc3957d0ab7bad74952984d1dbc7ffd5796369",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-12be1a23fb2384a4.json": "a86eeacc19170dc46f7db1227ad9aadd39743e2df561799c0cc50625b4c0cf79",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-12f7fe29f7b8c266.json": "a0a6b15a5843669e6968e513eadfc61b673bfbde54ae402190df71d47e266ef2",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-138f54f62fc585cf.json": "7b03c1072e0ea5242b0a1cc28cd19714288cc3d0a72482be2e6eb63355ebef08",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-15104ff1533f5624.json": "474bf135fb9cc8118bb03c23b22810b39b778bad497ebfb9666532d8e6537f9e",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-15272fc53714346b.json": "464b8fcf9285e367855600cd13ccb422a6bbe814266d99e6c02b7571800d5f23",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-178faf27bf54ab0d.json": "067b3dd2c3fd05f43c5e0961c5b77fab57edd97b684ae6abe4b9e4f281f0acae",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-22f208d7ecd910cd.json": "f4ba070494e3f9e8c295c2e3b9b828bb4277ec5d03df4d17bd8f1fbfb37493cc",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-2714663593cf3b31.json": "ad8b70b1177a4ea0c686632506a5d6f64f3410e43a5051c18da40d035e0623e7",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-304cfa5f65f9efd9.json": "a4c601c0e9eeba11960d9279ad749d88f112cb166fc4c8f7e103d7dc28431668",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-35c647044c6e5c0d.json": "3b6bceaf5ff0d4e8ecf328b82f21c14f1f2cb1f7f6a9d2c1c2525577fb2b2f29",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-39a616982c6b5853.json": "f1b35ff0e6321c897055988d41cda420334f784d44575004115822af8d475b47",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-3a0c05bde26acacf.json": "92d1f2c61fbed8539a9148ff4a65415bd76343694649253cff9720774b4917ad",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-4402488252f40536.json": "cbca69362832b8188e9b15c173b54dabc7e91790d81e590d2037b0f85fbcb6ed",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-4e7ffb97afc183d3.json": "3fc354b71d95c8c4135729066a455256d4a0122d3ecb5c317d09d61bd41e9d3a",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-504a3080552dd6f2.json": "0f21c664ea99c54c6b51df67a4046fef13203875161ec1a0ab4d1d95f0e29fa9",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-51d33454a964eb37.json": "49c7f58150f561d9aa5ff309947c2b8b86619edfb342bc046785371cb5f9b3b6",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-5a03fa3ca1994e44.json": "f39e8b3d99b93fd8cdf1502271b638d76e1c5a115694fa5619b7d3dca8c60ea3",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-607c11f5809f6e2c.json": "75e84969a39da49a74761d80397af9a9e161bf468e722e6b2217dbe233b1fd6c",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-69a23f934018a725.json": "538b6e20ee3427a7347f3091f180090f322e5cd30aadb1068ae136c6cfaa6a1f",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-6be8bfcd41a1d577.json": "7b503c69f3ca025a2be4bace77ed40b60028d6ce3d23ff6b24e226b324ed7326",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-7653345be6825993.json": "13e6263572eaa8c36448c039705c16087ac4bfc8aaf530ba752cc528a8285732",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-7b188f66ab7953e1.json": "9a21af12127acd9dea0c99189539da3a693d0d1f836165868ed10c78b28e2e52",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-7b7353b5c5060ec5.json": "a3f7fb6840d292a29bbb3c813b7d43403a2fe877b67a6b907b3e6b44c82388d2",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-83bc61d3afbc3c46.json": "5cd69a4d357790fd8a5c527c9f257d49e21e61e6f47046cb59deb88496fdef75",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-8a4b120f9a56cbf5.json": "2597e693a16daa78f575847f721e1effbd5d1c896d4dd10c2b292f1db14f582c",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-9d3c7e2ac742d5ab.json": "0255116662d4f6cf7cf5acb8ef96c90be0dc9dbb0eefa6ff84c8d1b0080cce7b",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-9debd55a54db170d.json": "e03840bf4a2b9fbb1e92fa151539069c0b283ab8ff8a757ff163784762b3834f",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-a9255fc7ba94e5b4.json": "f849ceeb022d744d90b9bc3bba3f50fc1f05b604eb13ad98983bc3dcf581b9d3",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-a9ab2d2ffba1318d.json": "5387913d1a2f1a6109a5d4f05b55ecccf09331f25c4fa0210fe8fe52019df4d6",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-afaf9ccafd3729a9.json": "e573ee80f99ea39ce936858c51598ef621d0e41479622545c100b1ccb7f6109c",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-b081809ebec87bad.json": "1d37bfccb61b5a30fe2291df2955eff67b2298105b09bf9acc422340f58beaff",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-b5e3e0eb092294e9.json": "ef1819624be43dcadeaeb05e179f792eccf06fc212bcfec3b7ed4cc0312ea193",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-c853b966c46b6f5a.json": "f73d6b758aa3ff8ba92716df1c8b8d213e6a435ad50093d551f9cb36f20dd9b0",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-ca19707558dbd76b.json": "b8f279c18e37c8f46f6635d9e3590d598d624f8b1b4f1bbffc3b6da657383bff",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-cfd506e5336ed152.json": "18d742946bde7103f3c52cf273851b34b9b19435d149da4450372e411e1ef751",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-cfd92c0498124f2b.json": "ee9c6473ad0e2b5f0d04d4666cb82fb2568cf8e73c1f6f52d1e1c09b9473e517",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-d14761a6a6c3c8e9.json": "19eae06b891f5ff900cb21175a9a4f4de1f4a691e336f0a3b357175fdaa9fcda",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-d72fbdcb7dfca58b.json": "fde1c51b923fc10e631d9e16c1bdf974dc0cd56c6926c72accbe7aed47b04ebf",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-dd8a9206b2249078.json": "ef9611c2f59bea4ac1d81a7ca0ff38471cede367b296603adbe60eb3fe2ba726",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-e5795e3058ca3499.json": "de0ed12550071cf5c338f0e4720ae18992dae398bbbdc1ae167267a8b67fa94c",
+    "/mnt/optane/review-arms-20261113/briefs/writer-contains/unit/item-ffba1d3d5b9334e7.json": "9ce598b547a4336ec0f1cdd7fdb9628aae67abefc9f8a70df1d725df3afecf77",
+    "/mnt/optane/review-arms-20261113/briefs/blind/archive-resume-hint-without-prompt/brief.md": "ac2f29d75384558d46d3328c4a74a7a792d3723af16c6a47b8ce49c5ad651795",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/archive-resume-hint-without-prompt/brief.md": "7dea21e29e00e0757a2cfd804014249b12d6cc42bbe39b3d3824fe792356662e",
+    "/mnt/optane/review-arms-20261113/briefs/blind/catalog-cache-key-collision/brief.md": "aa54fcd67a00e5b1dd390d08e0f3c65a0b9ac6eeb28bba8d700dd1011a89e5a9",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/catalog-cache-key-collision/brief.md": "a70e3af4f6d77f0069c6e17110c89a7e4d9eeaa257e0f13fd5da195052cbac50",
+    "/mnt/optane/review-arms-20261113/briefs/blind/child-model-wrong-efforts/brief.md": "de70481a90af3566f2615a3d1be4c565a05e68ef7172c54ac5ebeed6a06ac5af",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/child-model-wrong-efforts/brief.md": "93d328e4129fa1d5acf43656b6f5cf0c650ef46a1efc44e81f44b86f7d43d9d7",
+    "/mnt/optane/review-arms-20261113/briefs/blind/codex-effort-alias-lost/brief.md": "e0bb47b70aa61ebdd518b88c3798252a07b567b77bc09a683e68e4b0795ee9aa",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/codex-effort-alias-lost/brief.md": "6f5cdfa56d8fe4de5256b33509d3c1547657b91930f136682a8a61f546949a76",
+    "/mnt/optane/review-arms-20261113/briefs/blind/export-relative-read-root/brief.md": "7ac995fee77ea09c3455665b060403f737282f23e65538c296f4f27ebd7a4497",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/export-relative-read-root/brief.md": "58ed3c6ed5d706b0a901a06dfffbe0303210a52d3a93049aa9a7c5844d7da913",
+    "/mnt/optane/review-arms-20261113/briefs/blind/github-token-in-container-argv/brief.md": "e446f157539865c847ca15e8619312450b4be2cfb62083f3e9e4878929ef0999",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/github-token-in-container-argv/brief.md": "c341d5fa79da6b46141f2115b3cbe29f810c8b5811c821037563b33d652b08be",
+    "/mnt/optane/review-arms-20261113/briefs/blind/held-prompt-ignores-interrupt/brief.md": "62c7b0fb966870c75e413c80b630004eceb4c399de3240ad8aef2650e6a8f129",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/held-prompt-ignores-interrupt/brief.md": "2ad0da764353a9648bfd72e86233c8e9c4685ca1eb07b2fe4b508cb48407505c",
+    "/mnt/optane/review-arms-20261113/briefs/blind/journal-valid-json-corruption/brief.md": "e0c2beca7a01ae25b0d15cf94ee3d33d35441a34a016ba319ceb155eb39db50d",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/journal-valid-json-corruption/brief.md": "2ba02cb902afe7600a68cacce5b6070680913838bffc132985a108e636035c22",
+    "/mnt/optane/review-arms-20261113/briefs/blind/path-completion-lost-on-step-redraw/brief.md": "9bbcd02b8d05651e18106c30fcaf42748349c88f80776c38afbb9e048c023cf2",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/path-completion-lost-on-step-redraw/brief.md": "20bc3cf25b1e7e05111e44b5922e8e10d21eb6d291d9a667ea4c8cd1958a3e88",
+    "/mnt/optane/review-arms-20261113/briefs/blind/pending-assessment-hidden-when-idle/brief.md": "64899aad2029ea276d8acdc037d3d1940eca90a236b91ff88bec1b43f13a88ac",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/pending-assessment-hidden-when-idle/brief.md": "328c27de350a92bc2db57a49d521f1c8e98b99d4abaa4255a9e99801afd2d0e8",
+    "/mnt/optane/review-arms-20261113/briefs/blind/projection-mixed-sqlite-snapshots/brief.md": "73b33d8f2e15f8536bee178487006fa29fa2484164daec454111769b6bc901f5",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/projection-mixed-sqlite-snapshots/brief.md": "2465412a3e05731169b8523a51e87cb890a8d1b422ff334e9e1e0f8592efd5fb",
+    "/mnt/optane/review-arms-20261113/briefs/blind/reserved-workspace-internal-error/brief.md": "1e0b134bfb958b78f7e3959f3a78a82d47eec5c11b89382d0283bc83316cd3a4",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/reserved-workspace-internal-error/brief.md": "0bad6c658f59c7825331409dd9e201049c3ca4edf330d50b31a6ffdb2064fbad",
+    "/mnt/optane/review-arms-20261113/briefs/blind/restore-through-profile-symlink/brief.md": "f4873ab260335b9a2f8f9bbf59ab3aa36c9e629e70eeedc7b41e780d48c30bb8",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/restore-through-profile-symlink/brief.md": "45931b5a28fcabc3d83960c88ea837af17883cc3ca05ece8c230fdb2c2d9efa9",
+    "/mnt/optane/review-arms-20261113/briefs/blind/stale-model-launch-spec/brief.md": "7d4e991bdcfd6a8cdf21b8b512aa203208d1db5db48e557e1875a0b27b29e0d1",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/stale-model-launch-spec/brief.md": "0aac5cca752a513131ed3809102afdf5ee2fa1db89fa0332335d5a65e6e78960",
+    "/mnt/optane/review-arms-20261113/briefs/blind/symbol-change-keeps-cached-transcript/brief.md": "e1d2e8269128afafc38d89c2a71862d6c03c8c5c1a681895c0ed54d3e19f29de",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/symbol-change-keeps-cached-transcript/brief.md": "c51b31e75bdebe5acd4eedb46eedd84bc794611f6c471942e8c7a2af8f331dea",
+    "/mnt/optane/review-arms-20261113/briefs/blind/terminal-id-reused/brief.md": "6de7fe7327417d7ad6f29a7927f54f80669e4666825113911ae64ce2855abf32",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/terminal-id-reused/brief.md": "3f240348679daff2158ea84f479bcb924df78b010e195229863d6bfe13bffceb",
+    "/mnt/optane/review-arms-20261113/briefs/blind/unused-thread-above-archive-floor/brief.md": "40fd99f623bcdbf0db41726c6f4c7df12f49f7e0c92084752777848611ede149",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/unused-thread-above-archive-floor/brief.md": "7ba0312638f56d78987dc2117e4dce118a5de025533c87b033d280ac26b07f87",
+    "/mnt/optane/review-arms-20261113/briefs/blind/web-feed-self-deadlock/brief.md": "379c388b6e672130e51aee01f90b1d4e3aab64ced7eaa07b7935fb892be2df89",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/web-feed-self-deadlock/brief.md": "0798408ef53ef34804ab45980142b407415c89bc845e5f49795ac58c5723237a",
+    "/mnt/optane/review-arms-20261113/briefs/blind/activity-recorder-kills-api/brief.md": "ad83d21283cf02ccb55d27c59c25a1f1c4d579dae038c2d37e13c7935ce2a9b8",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/activity-recorder-kills-api/brief.md": "983ba593081b5c893eb16ce9b074a18f1a06434202493650872c66881c344fcb",
+    "/mnt/optane/review-arms-20261113/briefs/blind/dropdown-click-hits-covered-field/brief.md": "204a27b9af48a5be86997be908ef12352c7c27375b54aa2dd2dc678c7c4b72f5",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/dropdown-click-hits-covered-field/brief.md": "97e2da2f23c626c74c453c421ac1d1936f8a7836ae8d10694374d528ab2db210",
+    "/mnt/optane/review-arms-20261113/briefs/blind/metadata-checkpoint-overwrites-checkout/brief.md": "0056d7c498444e7a0929340999b6252b92d704e4310d3fd02e8bafc1789f3e9e",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/metadata-checkpoint-overwrites-checkout/brief.md": "a6525fa2bcee53fad9a5853a4c7db324e7997b8aa3f3141bb4b17af5a8abd382",
+    "/mnt/optane/review-arms-20261113/briefs/blind/shortcut-escape-opens-unvisited-manager/brief.md": "08213df09a0b775f8754246b1b73c30c09d5ce8d0fc30771190d08f356650aa4",
+    "/mnt/optane/review-arms-20261113/briefs/blind-terra/shortcut-escape-opens-unvisited-manager/brief.md": "5d17426c46b64fea6e197c5dc6f2e676f350ebedf010546e2e183e9d06547041",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/c8c109b6c1c9a2378fe25ca5c76c9016/.mj/agents/26c4a1aab82d17e1f715b331296d452f/contains-image.json": "1ad969a7e57d8563c2d3d3d635077e27ebc824828c08664c3c8ba78f110ffe02",
+    "/home/jonathan/Projects/mjolnir/.mj/clones/c8c109b6c1c9a2378fe25ca5c76c9016/.mj/agents/26c4a1aab82d17e1f715b331296d452f/contains-usage-raw.json": "ea7787fa48fd0e89d4643169358799ce3621d9223058537d6f05481f282396a8"
+  },
+  "image": {
+    "container_id": "d95e70931674",
+    "image_id": "84c6427949eb73b470132e4376cf4a4cbfee9814e6c0d11c188e86797fd0d111",
+    "source": "read-only Podman container label for diagnostic session"
+  },
+  "descriptive_pair_category_catch_means": {
+    "P_both_yes": {
+      "diffs": 1,
+      "mean_TT_catch_share": 1.0,
+      "mean_BT_catch_share": 1.0
+    },
+    "P_neither_yes": {
+      "diffs": 11,
+      "mean_TT_catch_share": 0.2727272727272727,
+      "mean_BT_catch_share": 0.45454545454545453
+    },
+    "P_only_Sol": {
+      "diffs": 6,
+      "mean_TT_catch_share": 0.2222222222222222,
+      "mean_BT_catch_share": 0.6666666666666666
+    },
+    "S_both_yes": {
+      "diffs": 1,
+      "mean_TT_catch_share": 0.6666666666666666,
+      "mean_BT_catch_share": 0.6666666666666666
+    },
+    "S_neither_yes": {
+      "diffs": 2,
+      "mean_TT_catch_share": 0.5,
+      "mean_BT_catch_share": 0.5
+    },
+    "S_only_Sol": {
+      "diffs": 1,
+      "mean_TT_catch_share": 0.0,
+      "mean_BT_catch_share": 0.0
+    }
+  },
+  "analysis_note": "Descriptive per-diff comparison only; contains labels were not interpreted or used to relabel reviewer outcomes."
+}

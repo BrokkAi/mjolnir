@@ -66,7 +66,7 @@ fn cli_login_targets_only_the_selected_profile_home_for_every_harness() {
 
     // Seed every harness's default home with a sentinel credential so any
     // write to the default home is detected immediately.
-    let mut config_toml = String::from("version = 22\n\n");
+    let mut config_toml = String::from("version = 23\n\n");
     for kind in HarnessKind::ALL {
         let default_home = default_home_for(root.path(), kind);
         let default_marker = default_home.join(kind.credential_file_name());
@@ -218,7 +218,7 @@ fn headless_antigravity_acp_login_falls_back_to_profile_scoped_terminal_login() 
     std::fs::write(
         config_dir.join("config.toml"),
         format!(
-            "version = 22\n\n[profiles.gemini2]\nkind = \"antigravity\"\nhome = \"{}\"\n",
+            "version = 23\n\n[profiles.gemini2]\nkind = \"antigravity\"\nhome = \"{}\"\n",
             profile_home.display()
         ),
     )
