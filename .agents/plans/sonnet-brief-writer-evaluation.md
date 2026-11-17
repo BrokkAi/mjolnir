@@ -16,8 +16,9 @@ Determine whether Sonnet/high is an acceptable cheaper writer for the relation b
 - [x] Added Sonnet writer kind and TS review-arm mappings; the writer CLI exposes the new kind and both quota windows were rechecked.
 - [x] Generalized the existing helper with isolated regression coverage; 10 new study checks, nine existing scorer checks and four workspace checks pass (23 total).
 - [x] Direct user approval received for 22 Sonnet/high writers on claude5, 66 Terra reviewers and Sol/high grading on codex4, with a 25% floor. The earlier rejected attempt executed nothing.
-- [ ] Wait for claude5's five-hour window to recover to at least 25%; its latest report is 7% five-hour, 79% weekly. Claude6 is not permitted for this study.
-- [ ] Commit the frozen plan and tested harness, then run one writer canary followed by the remaining writers.
+- [x] Committed the tested generalized harness as `d1fb2768b`; no study sessions were launched.
+- [ ] Wait for claude5's five-hour window to recover to at least 25%; the 18:25 UTC direct report is 0% five-hour, 78% weekly, with codex4 at 71%. Claude6 is not permitted for this study.
+- [ ] Run one writer canary followed by the remaining writers after quota admission clears.
 - [ ] Complete paired leak judgments, any allowed rewrite/recheck, and report the result before any Sonnet-brief reviewers start.
 - [ ] Run one reviewer-job canary, then complete all 22 jobs and 66 reviewers.
 - [ ] Build and judge round K, handcheck required outputs, compute paired results and round-J consistency, and run the blinded containment diagnostic.
@@ -47,6 +48,8 @@ Automatic approval review rejected the first attempted Sonnet canary before any 
 
 
 Local preparation is tested and the user has directly authorized execution. No Sonnet writing, review or grading output exists yet: claude5's five-hour quota remains below 25%. Existing V1 artifacts remain unchanged. A configured helper automatically used claude6 for local code preparation before the profile restriction arrived; that helper is now closed and all remaining work uses the permitted profiles.
+
+A read-only GPT-6-Luna/codex4 helper, session `85c513259ed477cfee5713704b7ac016`, now monitors quota. An initial unsupported readiness report was rejected by the parent's direct check; no canary launched. Its corrected `quota-polls.jsonl` records the exact driver path, environment and authoritative hold reason, currently `claude5: 0% left, below the floor of 25%`. Only the parent may launch the canary, with another quota check. Waiting state and manifests are in the data root's `writer-sonnet-state.json` and `writer-sonnet-jobs.json`.
 
 ## Context and Orientation
 
