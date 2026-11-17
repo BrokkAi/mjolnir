@@ -238,10 +238,13 @@ impl DashboardState {
         let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
         let located_read = self.notifications.message_read.as_ref().filter(|read| {
-            read.session_id == holder
-                && detail.is_some_and(|detail| {
-                    detail.question_message.as_deref() == Some(read.stable_id.as_str())
-                })
+            read.request.session_id == holder
+                && detail
+                    .and_then(|detail| detail.question_message.as_ref())
+                    .is_some_and(|id| {
+                        matches!(&read.request.source,
+                        crate::NotificationReadSource::Item(stable_id) if stable_id == id)
+                    })
         });
         match level {
             AttentionLevel::Waiting | AttentionLevel::Important => {
@@ -281,14 +284,8 @@ impl DashboardState {
                                     if read.status == crate::ingest::TranscriptHydration::Loading {
                                         return "loading…".to_owned();
                                     }
-                                    read.item
-                                        .as_deref()
-                                        .and_then(|item| {
-                                            mj_core::transcript::materialized_agent_message_text(
-                                                std::iter::once(item),
-                                                target,
-                                            )
-                                        })
+                                    read.text
+                                        .clone()
                                         .unwrap_or_else(|| "message not available".to_owned())
                                 })
                             })

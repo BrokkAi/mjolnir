@@ -1,10 +1,11 @@
 use super::*;
+use mj_tui::NotificationReadRequest;
 use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ReadKey {
     Summary(String),
-    Item(String, String),
+    Message(NotificationReadRequest),
 }
 
 struct Read {
@@ -34,15 +35,15 @@ impl SummaryReads {
     pub(super) fn reconcile(
         &mut self,
         wanted: BTreeMap<String, u64>,
-        item: Option<(String, String)>,
+        item: Option<NotificationReadRequest>,
         updates: &UnboundedSender<DashboardIoUpdate>,
     ) -> Vec<String> {
         let mut requests: BTreeMap<_, _> = wanted
             .into_iter()
             .map(|(id, viewed)| (ReadKey::Summary(id), viewed))
             .collect();
-        if let Some((session_id, stable_id)) = item {
-            requests.insert(ReadKey::Item(session_id, stable_id), 0);
+        if let Some(item) = item {
+            requests.insert(ReadKey::Message(item), 0);
         }
         let removed_keys = self
             .reads
@@ -70,9 +71,8 @@ impl SummaryReads {
                     Arc::clone(&self.permits),
                     updates.clone(),
                 ),
-                ReadKey::Item(session_id, stable_id) => io::spawn_stored_transcript_item(
-                    session_id.clone(),
-                    stable_id.clone(),
+                ReadKey::Message(request) => io::spawn_notification_message_read(
+                    request.clone(),
                     self.generation,
                     Arc::clone(&self.permits),
                     updates.clone(),
@@ -95,26 +95,22 @@ impl SummaryReads {
             .filter(|(_, read)| read.task.is_some())
             .filter_map(|(key, _)| match key {
                 ReadKey::Summary(id) => Some(id),
-                ReadKey::Item(..) => None,
+                ReadKey::Message(_) => None,
             })
     }
 
-    pub(super) fn item_loading(&self, session_id: &str, stable_id: &str) -> bool {
+    pub(super) fn item_loading(&self, request: &NotificationReadRequest) -> bool {
         self.reads
-            .get(&ReadKey::Item(session_id.to_owned(), stable_id.to_owned()))
+            .get(&ReadKey::Message(request.clone()))
             .is_some_and(|read| read.task.is_some())
     }
 
     pub(super) fn finish_item(
         &mut self,
-        session_id: &str,
-        stable_id: &str,
+        request: &NotificationReadRequest,
         generation: u64,
     ) -> bool {
-        self.finish_key(
-            &ReadKey::Item(session_id.to_owned(), stable_id.to_owned()),
-            generation,
-        )
+        self.finish_key(&ReadKey::Message(request.clone()), generation)
     }
 
     pub(super) fn finish(&mut self, id: &str, generation: u64) -> bool {
@@ -145,18 +141,29 @@ mod tests {
         let held = reads.permits.clone().acquire_many_owned(4).await.unwrap();
         let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
         let wanted = (0..1200).map(|id| (format!("child-{id}"), 0)).collect();
-        let item = Some(("notification".into(), "outside-tail".into()));
-        reads.reconcile(wanted, item.clone(), &updates);
-        let old_item =
-            reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
+        let item = NotificationReadRequest {
+            session_id: "notification".into(),
+            source: mj_tui::NotificationReadSource::Item("outside-tail".into()),
+            selection_revision: 1,
+        };
+        reads.reconcile(wanted, Some(item.clone()), &updates);
+        let old_item = reads.reads[&ReadKey::Message(item.clone())].generation;
         let old = reads.reads[&ReadKey::Summary("child-0".into())].generation;
         tokio::task::yield_now().await;
         assert_eq!(reads.reconcile(BTreeMap::new(), None, &updates).len(), 1200);
-        reads.reconcile(BTreeMap::from([("child-0".into(), 0)]), item, &updates);
-        let current_item =
-            reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
-        assert!(!reads.finish_item("notification", "outside-tail", old_item));
-        assert!(reads.finish_item("notification", "outside-tail", current_item));
+        let revisited = NotificationReadRequest {
+            selection_revision: 2,
+            ..item.clone()
+        };
+        reads.reconcile(
+            BTreeMap::from([("child-0".into(), 0)]),
+            Some(revisited.clone()),
+            &updates,
+        );
+        let current_item = reads.reads[&ReadKey::Message(revisited.clone())].generation;
+        assert!(!reads.finish_item(&item, old_item));
+        assert!(!reads.finish_item(&revisited, old_item));
+        assert!(reads.finish_item(&revisited, current_item));
         let current = reads.reads[&ReadKey::Summary("child-0".into())].generation;
         assert!(
             !reads.finish("child-0", old),

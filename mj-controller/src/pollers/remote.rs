@@ -169,6 +169,7 @@ fn runtime_state_update(
         notification_cards: metadata.notification_cards,
         unread_frontiers: metadata.unread_frontiers,
         notification_dismissals: metadata.notification_dismissals,
+        notification_cards: metadata.notification_cards,
         recent_launch: metadata.recent_launch,
         container_upgrade_sessions: metadata.container_upgrade_sessions,
         storage: metadata.storage.into_inner(),

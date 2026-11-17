@@ -1,4 +1,4 @@
-=== question notification card (120x44) ===
+=== multi-entry question notification card (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ?2                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
@@ -32,8 +32,8 @@
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (3) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? Newest question · hel · age unknown                                         │
+│                                      │╭ Notifications (2) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││? Newest question · hel · age unknown 2 of 2 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││                                                                              │
 │                                      ││ Which approach should we take?                                               │
 │                                      ││ The question stays here until you answer or clear it.                        │

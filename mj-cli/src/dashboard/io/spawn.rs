@@ -794,15 +794,14 @@ pub(crate) fn spawn_stopped_subagent_transcript(
     );
 }
 
-pub(crate) fn spawn_stored_transcript_item(
-    session_id: String,
-    stable_id: String,
+pub(crate) fn spawn_notification_message_read(
+    request: mj_tui::NotificationReadRequest,
     generation: u64,
     permits: Arc<tokio::sync::Semaphore>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    let reported_session_id = session_id.clone();
-    let reported_stable_id = stable_id.clone();
+    let session_id = request.session_id.clone();
+    let source = request.source.clone();
     tokio::spawn(async move {
         let _permit = permits
             .acquire_owned()
@@ -813,14 +812,30 @@ pub(crate) fn spawn_stored_transcript_item(
             updates,
             SAVE_ACK_TIMEOUT,
             async move {
-                daemon::connect_or_start()
-                    .await?
-                    .stored_transcript_item(session_id, stable_id)
-                    .await
+                let mut daemon = daemon::connect_or_start().await?;
+                let item = match source {
+                    mj_tui::NotificationReadSource::Item(stable_id) => {
+                        daemon.stored_transcript_item(session_id, stable_id).await?
+                    }
+                    mj_tui::NotificationReadSource::Through(through) => {
+                        daemon
+                            .stored_agent_message_through(session_id, through)
+                            .await?
+                    }
+                };
+                Ok(match item {
+                    mj_client::daemon::StoredTranscriptItem::Found(item) => {
+                        mj_core::transcript::materialized_agent_message_text(
+                            std::iter::once(item.as_ref()),
+                            &item.stable_id,
+                        )
+                    }
+                    mj_client::daemon::StoredTranscriptItem::Missing
+                    | mj_client::daemon::StoredTranscriptItem::Unsupported => None,
+                })
             },
-            move |result| DashboardIoUpdate::StoredTranscriptItem {
-                session_id: reported_session_id,
-                stable_id: reported_stable_id,
+            move |result| DashboardIoUpdate::NotificationMessageRead {
+                request,
                 generation,
                 result,
             },
