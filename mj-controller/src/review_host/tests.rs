@@ -145,7 +145,20 @@ impl FakeManager {
                     if matches!(action, ReviewerAction::CaptureDelta { .. })
                         && let Some(refusal) = self.capture_refusals.pop_front()
                     {
+                        let hold = self
+                            .control
+                            .session_gate
+                            .enter_foreground(
+                                &self.session,
+                                "test capture lifecycle",
+                                crate::recovery_gate::LifecycleOrigin::Person,
+                                &std::sync::atomic::AtomicBool::new(false),
+                                &crate::targets::ProcessExecutor,
+                            )
+                            .await
+                            .unwrap();
                         let _ = reply.send(Err(anyhow::anyhow!(refusal)));
+                        drop(hold);
                         continue;
                     }
                     if wanted(&role, &action) {
@@ -281,6 +294,7 @@ struct FakeEnvironment {
     review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
+    resolve_release: Mutex<Option<crate::recovery_gate::ForegroundAdmission>>,
     /// How many background holds the host took on the session.
     background_holds: std::sync::atomic::AtomicUsize,
     background_hangs: std::sync::atomic::AtomicBool,
@@ -367,6 +381,7 @@ impl FakeEnvironment {
             deleted_owner_saves: std::sync::atomic::AtomicUsize::new(0),
             review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
+            resolve_release: Mutex::new(None),
             background_holds: std::sync::atomic::AtomicUsize::new(0),
             background_hangs: std::sync::atomic::AtomicBool::new(false),
             live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -584,6 +599,7 @@ impl ReviewEnvironment for FakeEnvironment {
             .pop_front();
         Box::pin(async move {
             if let Some(refusal) = refusal {
+                self.resolve_release.lock().unwrap().take();
                 return Err(refusal);
             }
             if self
@@ -764,6 +780,20 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     environment.refuse_next_resolve("reviewer operation cancelled for session lifecycle change");
+    *environment.resolve_release.lock().unwrap() = Some(
+        manager
+            .control
+            .session_gate
+            .enter_foreground(
+                session,
+                "test reviewer lifecycle",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &std::sync::atomic::AtomicBool::new(false),
+                &crate::targets::ProcessExecutor,
+            )
+            .await
+            .unwrap(),
+    );
     let host = TurnReviewHost::spawn_in(
         manager.control.clone(),
         armed(Some("reviewer")),

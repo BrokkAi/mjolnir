@@ -336,9 +336,10 @@ fn worktree_choice_survives_reload_and_controls_creation() {
                 .managed_worktree
                 .is_none()
         );
-        controller
-            .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
-            .unwrap();
+        crate::controller::test_support::worker_test_scope(&record.id, || {
+            controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+        })
+        .unwrap();
     }
     assert!(root.join("dirty.txt").exists());
     assert!(!root.join(".mj/worktrees").exists());
@@ -386,9 +387,10 @@ fn worktree_choice_survives_reload_and_controls_creation() {
         controller.state.sessions[&record.id].project_directory,
         Some(managed.worktree_root.join("nested"))
     );
-    controller
-        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&record.id, || {
+        controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+    })
+    .unwrap();
     assert!(linked.join("nested/file.txt").exists());
     assert!(!managed.worktree_root.exists());
 
@@ -401,9 +403,10 @@ fn worktree_choice_survives_reload_and_controls_creation() {
             .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
             .unwrap()
     );
-    controller
-        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&record.id, || {
+        controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+    })
+    .unwrap();
 }
 
 #[test]
@@ -492,9 +495,10 @@ fn a_launch_base_starts_the_worktree_at_that_commit() {
         test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
         first
     );
-    controller
-        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&record.id, || {
+        controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+    })
+    .unwrap();
 
     // A revision the repository does not hold fails provisioning rather than
     // launching at HEAD and ignoring what the caller asked for.
@@ -598,9 +602,10 @@ fn a_new_clone_starts_at_the_remote_tip_the_host_had_not_fetched() {
     );
     assert_eq!(test_git(&root, &["rev-parse", "master"]), host_head);
     assert_eq!(test_git(&root, &["status", "--porcelain"]), "");
-    controller
-        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&record.id, || {
+        controller.cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
+    })
+    .unwrap();
 
     // A workspace session moving into a checkout gets its clone the same way.
     std::fs::write(teammate.path().join("nested/file.txt"), "pushed again\n").unwrap();
@@ -2478,16 +2483,17 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     // An exhausted cleanup budget must not be reset inside checkout removal.
     let expired = CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
     assert!(
-        controller
-            .cleanup_new_session_worktree_after_failure(session_id, &expired)
-            .is_err()
+        crate::controller::test_support::worker_test_scope(session_id, || controller
+            .cleanup_new_session_worktree_after_failure(session_id, &expired))
+        .is_err()
     );
     assert!(worktree.worktree_root.exists());
     let executor = super::super::failed_launch_cleanup_executor();
 
-    controller
-        .cleanup_new_session_worktree_after_failure(session_id, &executor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_new_session_worktree_after_failure(session_id, &executor)
+    })
+    .unwrap();
 
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());

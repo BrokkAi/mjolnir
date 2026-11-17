@@ -16,6 +16,15 @@ enum Phase {
 struct Entry {
     request: SubagentToolRequest,
     phase: Phase,
+    /// Set by the running attempt while the session gate defers it. A
+    /// deferred attempt waits on its holder, so it does not occupy a slot
+    /// that other sessions' work needs.
+    deferred: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Entry {
+    fn occupies_slot(&self) -> bool {
+        !self.deferred.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 #[derive(Default)]
 pub(super) struct SubagentDispatch {
@@ -47,7 +56,7 @@ impl SubagentDispatch {
                     tracing::debug!(parent_session_id = parent, request_id = %request.request_id,
                         age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(request.created_at_ms),
                         "delegation request observed");
-                    Entry { request: request.clone(), phase: Phase::Pending(Instant::now()) }
+                    Entry { request: request.clone(), phase: Phase::Pending(Instant::now()), deferred: Default::default() }
                 });
         }
     }
@@ -78,6 +87,9 @@ impl SubagentDispatch {
         let mut executing = [0usize; 2];
         let mut delivering = 0usize;
         for entry in self.entries.values() {
+            if !entry.occupies_slot() {
+                continue;
+            }
             match entry.phase {
                 Phase::Executing => executing[execution_lane(&entry.request)] += 1,
                 Phase::Delivering(_) => delivering += 1,
@@ -111,11 +123,17 @@ impl SubagentDispatch {
                     if *at <= now && executing[execution_lane(&entry.request)] < 32 =>
                 {
                     executing[execution_lane(&entry.request)] += 1;
+                    entry
+                        .deferred
+                        .store(false, std::sync::atomic::Ordering::Release);
                     entry.phase = Phase::Executing;
                     ready.push((id, Job::Execute(entry.request.clone())));
                 }
                 Phase::Delivery(result, at) if *at <= now && delivering < 32 => {
                     delivering += 1;
+                    entry
+                        .deferred
+                        .store(false, std::sync::atomic::Ordering::Release);
                     let result = result.clone();
                     entry.phase = Phase::Delivering(result.clone());
                     ready.push((id, Job::Deliver(result)));
@@ -124,6 +142,13 @@ impl SubagentDispatch {
             }
         }
         ready
+    }
+    /// The flag the running attempt of `id` raises while its session gate defers it.
+    pub fn deferral(&self, id: &Identity) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.entries
+            .get(id)
+            .map(|entry| entry.deferred.clone())
+            .unwrap_or_default()
     }
     pub fn executed(&mut self, id: &Identity, result: StoredDelegationResult) {
         if let Some(entry) = self.entries.get_mut(id) {
@@ -346,5 +371,22 @@ mod tests {
                 .1,
             Job::Execute(_)
         ));
+    }
+
+    // Hard-won: #1574: attempts waiting on a held session kept dispatch slots from other sessions.
+    #[test]
+    fn a_deferred_attempt_does_not_occupy_a_dispatch_slot() {
+        let mut queue = SubagentDispatch::default();
+        let requests = (0..33)
+            .map(|n| input(&format!("request-{n}"), &format!("child-{n}"), n))
+            .collect::<Vec<_>>();
+        queue.observe("parent", &requests);
+        let started = queue.ready(Instant::now());
+        assert_eq!(started.len(), 32);
+        assert!(queue.ready(Instant::now()).is_empty());
+        queue
+            .deferral(&started[0].0)
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(queue.ready(Instant::now()).len(), 1);
     }
 }

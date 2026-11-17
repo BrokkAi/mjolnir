@@ -12,6 +12,9 @@ impl DashboardContext {
                 parents.insert(child.parent_session_id.clone());
             }
         }
+        if let Some(parent) = self.dashboard.displayed_notification_parent_id() {
+            parents.insert(parent);
+        }
         self.runtime_subagent_parents.send_if_modified(|current| {
             if *current == parents {
                 return false;
@@ -91,31 +94,7 @@ impl DashboardContext {
     }
 
     fn wanted_summary_sessions(&self) -> BTreeMap<String, u64> {
-        let panes = self
-            .dashboard
-            .pane_sessions()
-            .into_iter()
-            .map(|(_, session)| session)
-            .collect::<BTreeSet<_>>();
-        self.controller
-            .state
-            .sessions
-            .values()
-            .filter(|session| {
-                panes.contains(&session.id)
-                    || (self.session_in_active_workspace(&session.id) && session.state.is_active())
-                    || self
-                        .controller
-                        .state
-                        .subagents
-                        .get(&session.id)
-                        .is_some_and(|child| {
-                            Some(child.parent_session_id.as_str())
-                                == self.dashboard.subagent_parent_id()
-                        })
-            })
-            .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
-            .collect()
+        self.dashboard.wanted_summary_sessions()
     }
 
     pub(crate) fn hydrate_stored_session_summaries(&mut self) {
@@ -126,9 +105,24 @@ impl DashboardContext {
 
     pub(crate) fn reconcile_stored_session_summaries(&mut self) {
         let wanted = self.wanted_summary_sessions();
-        for removed in self.summary_reads.reconcile(wanted, &self.dashboard_io_tx) {
+        let item = self.dashboard.wanted_notification_message();
+        for removed in self
+            .summary_reads
+            .reconcile(wanted, item.clone(), &self.dashboard_io_tx)
+        {
             self.finish_startup_summary(&removed);
         }
+        let pending = self
+            .summary_reads
+            .loading_sessions()
+            .chain(self.materialized_projections_in_flight.iter())
+            .cloned()
+            .collect();
+        self.dashboard.sync_transcript_hydration(&pending);
+        let loading = item.as_ref().is_some_and(|(session_id, stable_id)| {
+            self.summary_reads.item_loading(session_id, stable_id)
+        });
+        self.dashboard.sync_notification_message_read(item, loading);
     }
 
     /// Records that one live session's stored summary has arrived, however it

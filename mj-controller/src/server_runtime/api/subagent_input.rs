@@ -472,6 +472,10 @@ impl ApiBackend {
         }
     }
 
+    /// The parent's messages to its children and what became of them. The
+    /// mailbox's part comes from the store. The part kept in the parent's
+    /// worker queue is unknown while the parent has no session actor or its
+    /// actor has no snapshot yet; see [`InputProgress::queue_known`].
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
         let snapshot = self
             .session_handle(parent.to_owned())
@@ -905,11 +909,16 @@ async fn prompt_acceptance(child: &str, command: &str) -> Result<Option<u64>> {
 pub(super) struct InputProgress {
     pending: BTreeMap<String, Vec<String>>,
     deliveries: BTreeMap<String, Vec<serde_json::Value>>,
+    /// See [`Self::queue_known`]. The default is unknown.
+    queue_known: bool,
 }
 
 impl InputProgress {
     pub(super) fn from_snapshot(snapshot: &mj_core::state::ManagedSessionSnapshot) -> Self {
-        let mut progress = Self::default();
+        let mut progress = Self {
+            queue_known: true,
+            ..Self::default()
+        };
         let mut requests = snapshot.subagent_requests.iter().collect::<Vec<_>>();
         requests.sort_by_key(|r| (r.created_at_ms, &r.request_id));
         for request in requests {
@@ -1058,7 +1067,7 @@ impl InputProgress {
     /// that is queued for a child that can take it means the child is about
     /// to run, whatever its last turn said. Nothing else changes the state: a
     /// delivery that failed is a fact about the message (see
-    /// [`Self::last_failed_delivery`]), not about the child, whose record
+    /// [`Self::failed_deliveries`]), not about the child, whose record
     /// alone says whether it can be given work (#1381).
     pub fn status(
         &self,
@@ -1083,25 +1092,33 @@ impl InputProgress {
         current
     }
 
-    /// The request id and error of the child's newest message delivery, when
-    /// that delivery failed. A later delivery that succeeded supersedes it.
-    pub fn last_failed_delivery(&self, child: &str) -> Option<(&str, &str)> {
-        let last = self.deliveries.get(child)?.last()?;
-        (last["status"] == "failed").then(|| {
-            (
-                last["request_id"].as_str().unwrap_or_default(),
-                last["error"].as_str().unwrap_or("delivery failed"),
-            )
-        })
+    /// Whether the parent's worker queue was read: the messages still queued
+    /// in it and the outcome of every delivery made through it. It is not
+    /// read while the parent has no session actor, or its actor has no
+    /// snapshot yet, and then this progress holds only the mailbox's part.
+    /// Unknown is not empty: a failure in the unread queue is not absent.
+    pub fn queue_known(&self) -> bool {
+        self.queue_known
+    }
+
+    /// Every message delivery to the child that failed, oldest first. A
+    /// delivery that succeeded later does not undo one that failed: the work
+    /// in the failed message is still lost, so each one is news (#1459).
+    pub fn failed_deliveries(&self, child: &str) -> impl Iterator<Item = FailedDelivery<'_>> {
+        self.deliveries
+            .get(child)
+            .into_iter()
+            .flatten()
+            .filter(|delivery| delivery["status"] == "failed")
+            .map(|delivery| FailedDelivery {
+                request_id: delivery["request_id"].as_str().unwrap_or_default(),
+                error: delivery["error"].as_str().unwrap_or("delivery failed"),
+                delivery,
+            })
     }
 
     pub fn annotate(&self, child: &str, entry: &mut serde_json::Value) {
-        if let Some(pending) = self.pending.get(child) {
-            let pending = serde_json::json!(pending);
-            entry["pending_messages"] = pending.clone();
-            // Earlier parents already consume these field names.
-            entry["pending_inputs"] = pending;
-        }
+        self.annotate_pending(child, entry);
         if let Some(deliveries) = self.deliveries.get(child) {
             let deliveries = serde_json::json!(deliveries);
             entry["message_deliveries"] = deliveries.clone();
@@ -1109,6 +1126,22 @@ impl InputProgress {
             entry["input_deliveries"] = deliveries;
         }
     }
+
+    pub fn annotate_pending(&self, child: &str, entry: &mut serde_json::Value) {
+        if let Some(pending) = self.pending.get(child) {
+            let pending = serde_json::json!(pending);
+            entry["pending_messages"] = pending.clone();
+            // Earlier parents already consume these field names.
+            entry["pending_inputs"] = pending;
+        }
+    }
+}
+
+/// One failed message delivery, as `list_agents` shows it.
+pub(super) struct FailedDelivery<'a> {
+    pub request_id: &'a str,
+    pub error: &'a str,
+    pub delivery: &'a serde_json::Value,
 }
 
 #[cfg(test)]
@@ -1123,6 +1156,7 @@ mod tests {
         let progress = InputProgress {
             pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
             deliveries: BTreeMap::new(),
+            queue_known: true,
         };
         assert_eq!(
             progress.status("child", Some(&record), ("stopping".into(), None, false)),

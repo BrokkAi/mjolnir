@@ -11,9 +11,6 @@
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -25,7 +22,10 @@
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -44,21 +44,21 @@ matching paths: [["targets", "podman", "memory"]]
 │  │                  │ Machine                           local ▾                                                    │                     │
 │                     │ Container image                   ubuntu:24.04                                               │                     │
 │                     │ Download image policy             Pull if missing ▾                                          │                     │
-│                     │ CPU platform                      Default                                                    │                     │
-│                     │ CPU limit                         Default                                                    │                     │
+│                     │ CPU platform                      Default                                                    │  ───────────────────╯
+│                     │ CPU limit                         Default                                                    │  ───────────────────╮
 │                     │ Memory limit                      Default                                                    │                     │
-│                     │   Environment variables           0 settings  ›                                              │  ───────────────────╯
-│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
+│                     │   Environment variables           0 settings  ›                                              │                     │
+│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -77,9 +77,6 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │  │                  │ Context budget (bytes)          Agent Profiles › codex-2        262144 (256 KiB)             │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -91,7 +88,10 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette
@@ -110,9 +110,6 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │  │                  │ Container image                 Daemon                          Not set                      │                     │
 │                     │ Quota checks                                                    Auto · container when avail… │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -124,7 +121,10 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │   Back     Save and Close                                                                    │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▄ ╮
 │                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
 ╰───────────────────                                                                                                    ───────────────────╯
 Enter open · / searc                                                                                                     : / ? palette

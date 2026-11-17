@@ -700,6 +700,12 @@ impl ChatState {
         }
     }
 
+    fn transcript_message_entry(&self, stable_id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.message_id.as_deref() == Some(stable_id))
+    }
+
     pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {
         // Restoration owns the viewport; a fresh opening reveal would move
         // an explicitly followed tail back to the start of the latest reply.
@@ -724,17 +730,14 @@ impl ChatState {
                 stable_id,
                 row,
                 ..
-            } => self
-                .entries
-                .iter()
-                .position(|entry| {
-                    stable_id
-                        .as_ref()
-                        .map_or(entry.start_seq == *start_seq, |id| {
-                            entry.message_id.as_ref() == Some(id)
-                        })
-                })
-                .map(|entry| TranscriptAnchor::Row { entry, row: *row }),
+            } => match stable_id {
+                Some(id) => self.transcript_message_entry(id),
+                None => self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.start_seq == *start_seq),
+            }
+            .map(|entry| TranscriptAnchor::Row { entry, row: *row }),
         };
         if let Some(anchor) = anchor {
             self.anchor = anchor;

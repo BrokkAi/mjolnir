@@ -27,17 +27,27 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             axum::routing::patch(set_config),
         )
         .route("/workspaces", get(list_workspaces).post(create_workspace))
-        .route("/sessions", get(list_sessions).post(start_session))
+        .route(
+            "/sessions",
+            get(list_sessions)
+                .post(start_session)
+                .layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
         .route("/sessions/{session_id}", get(get_session))
         .route(
             "/sessions/{session_id}/subagents",
-            get(list_subagents).post(spawn_subagent),
+            get(list_subagents)
+                .post(spawn_subagent)
+                .layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route("/sessions/{session_id}/turn-control", post(turn_control))
-        .route("/sessions/{session_id}/prompt", post(prompt))
+        .route(
+            "/sessions/{session_id}/prompt",
+            post(prompt).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
         .route(
             "/sessions/{session_id}/message",
-            post(mailbox::send_message),
+            post(mailbox::send_message).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route(
             "/sessions/{session_id}/queued-prompts/clear",
@@ -45,7 +55,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route(
             "/sessions/{session_id}/events",
-            post(mailbox::enqueue_event),
+            post(mailbox::enqueue_event).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route("/sessions/{session_id}/transcript", get(transcript))
         .route("/sessions/{session_id}/history", get(transcript_history))
@@ -79,11 +89,9 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/diff", get(diff))
         .route(
             "/sessions/{session_id}/files",
-            get(read_file)
-                .put(write_file)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
-                )),
+            get(read_file).put(write_file).layer(named_body_limit(
+                mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
+            )),
         )
         .route("/sessions/{session_id}/elicitations", get(elicitations))
         .route(

@@ -412,8 +412,16 @@ pub(super) fn install_worker_binary_at(
         |root| format!("{root}/{name}"),
     );
     let Some((source, digest)) = binary else {
-        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
-            .execute(executor)?;
+        super::upgrade::execute_worker_upload_plan(
+            executor,
+            &super::upgrade::worker_binary_upload_plan(
+                locator,
+                session_id,
+                worker,
+                destination,
+                None,
+            )?,
+        )?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
         collect_if_due(executor, locator, session_id, &store, None);
@@ -666,15 +674,16 @@ fn transfer_binary(
                 .purpose("create private host worker transport"),
             )?;
             install_worker_binary_at(executor, &host, session_id, worker, &pin, None)?;
-            super::upgrade::worker_binary_upload_plan(
-                locator,
-                session_id,
-                worker,
-                destination,
-                Some(&pin),
-            )?
-            .execute(executor)
-            .map(|_| ())
+            super::upgrade::execute_worker_upload_plan(
+                executor,
+                &super::upgrade::worker_binary_upload_plan(
+                    locator,
+                    session_id,
+                    worker,
+                    destination,
+                    Some(&pin),
+                )?,
+            )
         })();
         let cleanup = executor.execute_cleanup(
             &targets::locator_command(
@@ -690,9 +699,16 @@ fn transfer_binary(
         }
         result
     } else {
-        super::upgrade::worker_binary_upload_plan(locator, session_id, worker, destination, None)?
-            .execute(executor)
-            .map(|_| ())
+        super::upgrade::execute_worker_upload_plan(
+            executor,
+            &super::upgrade::worker_binary_upload_plan(
+                locator,
+                session_id,
+                worker,
+                destination,
+                None,
+            )?,
+        )
     }
 }
 

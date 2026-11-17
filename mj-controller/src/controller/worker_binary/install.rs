@@ -1692,8 +1692,11 @@ fn upload_profile_archive(
             )
             .purpose("send profile content")
             .stage(ProvisionStage::Syncing);
+            // The byte stream takes as long as the link needs; an operation
+            // deadline would cut a progressing transfer off (#1571). A
+            // cancellation still stops it.
             let output = executor
-                .execute_with_stdin(&command, &mut file)
+                .execute_with_stdin_without_deadline(&command, &mut file)
                 .context("stream staged harness profile archive")?;
             targets::checked_command_output(&command, output)?;
             // Collection cannot unlink between publication and pinning. The

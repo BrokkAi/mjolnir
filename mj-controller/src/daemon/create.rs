@@ -866,6 +866,7 @@ mod capacity_admission_tests {
 mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
 
+    // Hard-won: #1562: a cancelled create stayed unfinished when cached eligibility omitted its durable record.
     #[tokio::test]
     #[cfg_attr(
         windows,
@@ -906,13 +907,14 @@ mod delegation_replay_tests {
         );
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
-        let runtime = crate::daemon::tests::test_runtime_state();
+        let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
         runtime.profile_catalog.get_or_init(|| {
             crate::server_runtime::profile_catalog::ProfileCatalog::new(
                 tokio_util::sync::CancellationToken::new(),
             )
         });
         let path = GoPreferences::path();
+        let mut stale_candidate = None;
         for remember in [false, true, false] {
             let before = std::fs::read(&path).ok();
             let recent_before = runtime
@@ -957,6 +959,7 @@ mod delegation_replay_tests {
                 .start_create_session_controlled(request, control.clone(), publication)
                 .await
                 .unwrap();
+            stale_candidate = Some(registered.session.clone());
             if remember {
                 let saved = GoPreferences::load(&path).unwrap();
                 let default = saved.default.unwrap();
@@ -1007,9 +1010,46 @@ mod delegation_replay_tests {
             control.request_cancel("create test cancelled");
             drop(publish);
             assert!(matches!(
-                runtime.wait_create_outcome(&registered.session.id).await,
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    runtime.wait_create_outcome(&registered.session.id)
+                )
+                .await
+                .expect("cancelled creation must settle its durable intent"),
                 super::CreateWait::Failed(_)
             ));
+        }
+        // Failure settlement reads the store even when the runtime's
+        // publication has not observed a registered create yet.
+        let mut pending = stale_candidate.unwrap();
+        pending.id = "77777777777777777777777777777777".into();
+        crate::database::save_new_session(&pending, None, false, false).unwrap();
+        let stale = crate::daemon::tests::test_runtime_state();
+        assert!(
+            !stale
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .contains_key(&pending.id)
+        );
+        stale
+            .fail_unfinished_provisioning(
+                &pending.id,
+                "cancelled before admission with a stale publication",
+            )
+            .await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stale.wait_create_outcome(&pending.id),
+        )
+        .await
+        .expect("stale publication must not retain a create intent")
+        {
+            super::CreateWait::Failed(error) => {
+                assert!(error.to_string().contains("stale publication"), "{error:#}")
+            }
+            super::CreateWait::Finished => panic!("cancelled provisioning was not successful"),
         }
     }
 

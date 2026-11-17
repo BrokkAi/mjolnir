@@ -15,22 +15,22 @@
 │          │ │codex-1         localhost/bifrost-fird    Aug 9, 2026     ACP pretty name                                      │ │           │
 │          │ │codex-1         precision-3260/bifrost    Aug 9, 2026     ACP pretty name                                      │ │           │
 │          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
 │          │                                                                                                                   │  ─────────╯
 │          │                                                                                                                   │  ── ▁   ▄ ╮
 │          │                                                   bifrost-fird                                                    │           │
-│          │                                                                                                                   │  ─────────╯
-│          │   Cancel     Destroy     Resume                                                                                   │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │   Cancel     Destroy     Resume                                                                                   │           │
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                                                                                                                 ─────────╯
+│                                                                                                                                 ── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === native import target (140x34) ===
@@ -50,22 +50,22 @@
 │          │ │codex-1         local/hel                 just now        Native project                                       │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
 │          │                                                                                                                   │  ─────────╯
 │          │                                                                                                                   │  ── ▁   ▄ ╮
 │          │                                          master · 1.0KB · ~/Projects/hel                                          │           │
-│          │                                                                                                                   │  ─────────╯
-│          │   Cancel     Import                                                                                               │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │   Cancel     Import                                                                                               │           │
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                                                                                                                 ─────────╯
+│                                                                                                                                 ── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === stored target after config removal (120x34) ===
@@ -85,22 +85,22 @@
 │         │ │codex-1         retired-target            Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · : / ? palette
 ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pretty name"]
@@ -121,22 +121,22 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │          │ │codex-1         podman                    Jun 1, 2026     ? Newest record                                      │ │           │
 │          │ │codex-1         podman                    Jan 1, 2026     ? ACP pretty name                                    │ │           │
 │          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │  ─────────╯
 │          │ │                                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ── ▁   ▄ ╮
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
 │          │                                                                                                                   │  ─────────╯
 │          │                                                                                                                   │  ── ▁   ▄ ╮
 │          │                                         hel · Publication status unknown                                          │           │
-│          │                                                                                                                   │  ─────────╯
-│          │   Cancel     Destroy     Resume                                                                                   │  ── ▁   ▄ ╮
+│          │                                                                                                                   │           │
+│          │   Cancel     Destroy     Resume                                                                                   │           │
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                                                                                                                 ─────────╯
+│                                                                                                                                 ── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === history including older archived records (120x34) ===
@@ -156,22 +156,22 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │         │ │codex-1         podman                    Aug 9, 2026     ? Archived record                   │ │         │
 │         │ │codex-1         podman                    Aug 9, 2026     ? Current record                    │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 native archive metadata: true
@@ -192,22 +192,22 @@ native archive metadata: true
 │         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Import                                                                              │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Import                                                                              │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 archive shortcut action: None
@@ -228,22 +228,22 @@ archive shortcut action: None
 │         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Import                                                                              │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Import                                                                              │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 d key action: None
@@ -264,22 +264,22 @@ d key action: None
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 Destroy button action: None
@@ -290,8 +290,8 @@ Destroy button action: None
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                ╭ × Destroy suspended session? ──────────────────────────────────────────────────────╮                │
@@ -300,22 +300,22 @@ Destroy button action: None
 │                │Mjolnir will permanently destroy the recovery archive and session record.           │                │
 │                │The managed clone and any unpublished work in its recovery copy will be removed.    │                │
 │                │                                                                                    │                │
-│                │c Cancel  ·  d Destroy session                                                      │                │
+│                │c Cancel  ·  d Destroy session                                                      │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
 │                │                                                                                    │                │
 │                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
-│                │                                                                                    │  ──────────────╮
-│                │  Cancel     Destroy session                                                        │                │
+│                │  Cancel     Destroy session                                                        │  ─────── ▁   ▄ ╮
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 archived row archived bare profile/origin: ("codex-2", "localhost/project")
@@ -347,22 +347,22 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │          │                                                                                                                   │           │
 │          │ ╭ Archived transcript ──────────────────────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │Loading the archived transcript…                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
 │          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ │                                                                                                               │ │           │
-│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ─────────╯
-│          │                                                                                                                   │  ─────────╮
-│          │                                                                                                                   │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▄ ╮
 │          │                                  archived · 7 messages · the last thing it said                                   │           │
 │          │                                                                                                                   │  ─────────╯
 │          │   Cancel     Restore                                                                                              │  ── ▁   ▄ ╮
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
-│                                                                                                                                 ─────────╯
-│                                                                                                                                 ── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
-│                                            ││  claude-1  Claude Code  refreshing…                                                        │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                                                                                                                          │
+│                                                                                                                                          │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Notifications (0) ────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : / ? palette
 === Hel tab (120x34) ===
@@ -382,22 +382,22 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Import tab (120x34) ===
@@ -417,22 +417,22 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ │codex-1         local/hel                 just now        Native                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Import                                                                              │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Import                                                                              │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Left returns to Hel (120x34) ===
@@ -452,22 +452,22 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === select resumable Hel row (120x34) ===
@@ -487,22 +487,22 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Destroy     Resume                                                                  │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 resume selection action: None
@@ -524,9 +524,6 @@ mode after selecting Hel row: "Resume wizard"
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
 │                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
-│                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
 │                 │                                                                                  │  ───────────────╮
 │                 │                                                                                  │                 │
@@ -535,11 +532,14 @@ mode after selecting Hel row: "Resume wizard"
 │                 │                                                                                  │  ──────── ▁   ▄ ╮
 │                 │                                                                                  │                 │
 │                 │                                                                                  │  ───────────────╯
-│                 │   Cancel     Next                                                                │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │  ──────── ▁   ▄ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
 │                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                       ───────────────╯
+│                                                                                                       ──────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === select importable native row (120x34) ===
@@ -559,22 +559,22 @@ mode after selecting Hel row: "Resume wizard"
 │         │ │codex-1         local/hel                 just now        Native                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │  ───────╯
 │         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │   ▁   ▄ ╮
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │  ───────╯
 │         │                                                                                                  │   ▁   ▄ ╮
 │         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
-│         │                                                                                                  │  ───────╯
-│         │   Cancel     Import                                                                              │   ▁   ▄ ╮
+│         │                                                                                                  │         │
+│         │   Cancel     Import                                                                              │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 native import action: ImportSession { profile_id: "codex-1", native_session_id: "native-2", display_title: "Native" }
@@ -585,12 +585,9 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
+│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                      Create a session to start building.                     │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -611,6 +608,9 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === Live tab across workspaces (120x40) ===
@@ -636,22 +636,22 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
-│         │                                                                                                  │  ───────╮
-│         │                                                                                                  │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │  ───────╯
 │         │   Cancel     Open                                                                                │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                               ───────╯
-│                                                                                                                ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 === left wraps to Archived tab (120x40) ===
@@ -677,22 +677,22 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
-│         │                                                                                                  │  ───────╮
-│         │                                                                                                  │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
 │         │                                                                                                  │         │
 │         │                                                                                                  │  ───────╯
 │         │   Cancel     Restore                                                                             │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                               ───────╯
-│                                                                                                                ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 focus Live search action: None
@@ -723,21 +723,21 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
 │         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ │                                                                                              │ │         │
-│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
-│         │                                                                                                  │  ───────╮
-│         │                                                                                                  │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▄ ╮
 │         │                                 hel · Publication status unknown                                 │         │
 │         │                                                                                                  │  ───────╯
 │         │   Cancel     Open                                                                                │   ▁   ▄ ╮
 │         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                               ───────╯
-│                                                                                                                ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette

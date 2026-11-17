@@ -1,15 +1,21 @@
 use super::*;
 use tokio_util::task::AbortOnDropHandle;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ReadKey {
+    Summary(String),
+    Item(String, String),
+}
+
 struct Read {
     generation: u64,
     task: Option<AbortOnDropHandle<()>>,
 }
 
-/// Owns summary requests for the current view. Leaving it cancels queued reads;
+/// Owns summary and located-message requests for the current view. Leaving it cancels queued reads;
 /// generations reject answers already delivered by an earlier visit.
 pub(super) struct SummaryReads {
-    reads: BTreeMap<String, Read>,
+    reads: BTreeMap<ReadKey, Read>,
     generation: u64,
     permits: Arc<tokio::sync::Semaphore>,
 }
@@ -28,31 +34,52 @@ impl SummaryReads {
     pub(super) fn reconcile(
         &mut self,
         wanted: BTreeMap<String, u64>,
+        item: Option<(String, String)>,
         updates: &UnboundedSender<DashboardIoUpdate>,
     ) -> Vec<String> {
-        let removed = self
+        let mut requests: BTreeMap<_, _> = wanted
+            .into_iter()
+            .map(|(id, viewed)| (ReadKey::Summary(id), viewed))
+            .collect();
+        if let Some((session_id, stable_id)) = item {
+            requests.insert(ReadKey::Item(session_id, stable_id), 0);
+        }
+        let removed_keys = self
             .reads
             .keys()
-            .filter(|id| !wanted.contains_key(*id))
+            .filter(|key| !requests.contains_key(*key))
             .cloned()
             .collect::<Vec<_>>();
-        for id in &removed {
-            self.reads.remove(id);
+        let mut removed = Vec::new();
+        for key in removed_keys {
+            self.reads.remove(&key);
+            if let ReadKey::Summary(id) = key {
+                removed.push(id);
+            }
         }
-        for (id, viewed) in wanted {
-            if self.reads.contains_key(&id) {
+        for (key, viewed) in requests {
+            if self.reads.contains_key(&key) {
                 continue;
             }
             self.generation += 1;
-            let task = spawn_stored_session_summary(
-                id.clone(),
-                viewed,
-                self.generation,
-                Arc::clone(&self.permits),
-                updates.clone(),
-            );
+            let task = match &key {
+                ReadKey::Summary(id) => spawn_stored_session_summary(
+                    id.clone(),
+                    viewed,
+                    self.generation,
+                    Arc::clone(&self.permits),
+                    updates.clone(),
+                ),
+                ReadKey::Item(session_id, stable_id) => io::spawn_stored_transcript_item(
+                    session_id.clone(),
+                    stable_id.clone(),
+                    self.generation,
+                    Arc::clone(&self.permits),
+                    updates.clone(),
+                ),
+            };
             self.reads.insert(
-                id,
+                key,
                 Read {
                     generation: self.generation,
                     task: Some(AbortOnDropHandle::new(task)),
@@ -62,8 +89,40 @@ impl SummaryReads {
         removed
     }
 
+    pub(super) fn loading_sessions(&self) -> impl Iterator<Item = &String> {
+        self.reads
+            .iter()
+            .filter(|(_, read)| read.task.is_some())
+            .filter_map(|(key, _)| match key {
+                ReadKey::Summary(id) => Some(id),
+                ReadKey::Item(..) => None,
+            })
+    }
+
+    pub(super) fn item_loading(&self, session_id: &str, stable_id: &str) -> bool {
+        self.reads
+            .get(&ReadKey::Item(session_id.to_owned(), stable_id.to_owned()))
+            .is_some_and(|read| read.task.is_some())
+    }
+
+    pub(super) fn finish_item(
+        &mut self,
+        session_id: &str,
+        stable_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.finish_key(
+            &ReadKey::Item(session_id.to_owned(), stable_id.to_owned()),
+            generation,
+        )
+    }
+
     pub(super) fn finish(&mut self, id: &str, generation: u64) -> bool {
-        let Some(read) = self.reads.get_mut(id) else {
+        self.finish_key(&ReadKey::Summary(id.to_owned()), generation)
+    }
+
+    fn finish_key(&mut self, key: &ReadKey, generation: u64) -> bool {
+        let Some(read) = self.reads.get_mut(key) else {
             return false;
         };
         if read.generation != generation || read.task.is_none() {
@@ -86,12 +145,19 @@ mod tests {
         let held = reads.permits.clone().acquire_many_owned(4).await.unwrap();
         let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
         let wanted = (0..1200).map(|id| (format!("child-{id}"), 0)).collect();
-        reads.reconcile(wanted, &updates);
-        let old = reads.reads["child-0"].generation;
+        let item = Some(("notification".into(), "outside-tail".into()));
+        reads.reconcile(wanted, item.clone(), &updates);
+        let old_item =
+            reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
+        let old = reads.reads[&ReadKey::Summary("child-0".into())].generation;
         tokio::task::yield_now().await;
-        assert_eq!(reads.reconcile(BTreeMap::new(), &updates).len(), 1200);
-        reads.reconcile(BTreeMap::from([("child-0".into(), 0)]), &updates);
-        let current = reads.reads["child-0"].generation;
+        assert_eq!(reads.reconcile(BTreeMap::new(), None, &updates).len(), 1200);
+        reads.reconcile(BTreeMap::from([("child-0".into(), 0)]), item, &updates);
+        let current_item =
+            reads.reads[&ReadKey::Item("notification".into(), "outside-tail".into())].generation;
+        assert!(!reads.finish_item("notification", "outside-tail", old_item));
+        assert!(reads.finish_item("notification", "outside-tail", current_item));
+        let current = reads.reads[&ReadKey::Summary("child-0".into())].generation;
         assert!(
             !reads.finish("child-0", old),
             "a previous visit cannot finish the new read"

@@ -21,21 +21,21 @@
 │                │  Copy session ID                                                                  ││                │
 │                │  Destroy session…                                                                 ││                │
 │                │  Sessions pane  ───────────────────────────────────────────────────────────────── ││                │
-│                │  Open session                                                               Enter ││                │
-│                │  Create session                                                  n / N / ctrl+b c ││                │
+│                │  Open session                                                               Enter ││  ──────────────╯
+│                │  Create session                                                  n / N / ctrl+b c ││  ──────────────╮
 │                │  Mark all read                                                           ctrl+b a ││                │
-│                │  Search sessions                                                                / ││  ──────────────╯
-│                │  Fold project                                                               Space ││  ──────────────╮
-│                │  Panes  ───────────────────────────────────────────────────────────────────────── ││                │
+│                │  Search sessions                                                                / ││                │
+│                │  Fold project                                                               Space ││  ──────────────╯
+│                │  Panes  ───────────────────────────────────────────────────────────────────────── ││  ─────── ▁   ▄ ╮
 │                │  Split right                                                             ctrl+b v ││                │
 │                │  Split down                                                              ctrl+b - ││  ──────────────╯
 │                │  Close pane                                                              ctrl+b x ││  ─────── ▁   ▄ ╮
 │                │  Focus pane left                                                         ctrl+b h ││                │
-│                │  Focus pane down                                                         ctrl+b j ││  ──────────────╯
-│                │  Focus pane up                                                           ctrl+b k ││  ─────── ▁   ▄ ╮
+│                │  Focus pane down                                                         ctrl+b j ││                │
+│                │  Focus pane up                                                           ctrl+b k ││                │
 │                │  Focus pane right                                                        ctrl+b l  │                │
-│                │Keep a session visible while browsing others; when pinned, leaves this pane without │                │
-│                │  Run                                                                               │                │
+│                │Keep a session visible while browsing others; when pinned, leaves this pane without │  ──────────────╯
+│                │  Run                                                                               │  ─────── ▁   ▄ ╮
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 ╰──────────────                                                                                          ──────────────╯
 Enter open · /                                                                                            ? palette
@@ -62,21 +62,21 @@ Enter open · /                                                                 
 │                │  Copy session ID                                                                  ││                │
 │                │  Destroy session…                                                                 ││                │
 │                │  Sessions pane  ───────────────────────────────────────────────────────────────── ││                │
-│                │  Open session                                                               Enter ││                │
-│                │  Create session                                                  n / N / ctrl+b c ││                │
+│                │  Open session                                                               Enter ││  ──────────────╯
+│                │  Create session                                                  n / N / ctrl+b c ││  ──────────────╮
 │                │  Mark all read                                                           ctrl+b a ││                │
-│                │  Search sessions                                                                / ││  ──────────────╯
-│                │  Fold project                                                               Space ││  ──────────────╮
-│                │  Panes  ───────────────────────────────────────────────────────────────────────── ││                │
+│                │  Search sessions                                                                / ││                │
+│                │  Fold project                                                               Space ││  ──────────────╯
+│                │  Panes  ───────────────────────────────────────────────────────────────────────── ││  ─────── ▁   ▄ ╮
 │                │  Split right                                                             ctrl+b v ││                │
 │                │  Split down                                                              ctrl+b - ││  ──────────────╯
 │                │  Close pane                                                              ctrl+b x ││  ─────── ▁   ▄ ╮
 │                │  Focus pane left                                                         ctrl+b h ││                │
-│                │  Focus pane down                                                         ctrl+b j ││  ──────────────╯
-│                │  Focus pane up                                                           ctrl+b k ││  ─────── ▁   ▄ ╮
+│                │  Focus pane down                                                         ctrl+b j ││                │
+│                │  Focus pane up                                                           ctrl+b k ││                │
 │                │  Focus pane right                                                        ctrl+b l  │                │
-│                │Keep a session visible while browsing others; when pinned, leaves this pane without │                │
-│                │  Run                                                                               │                │
+│                │Keep a session visible while browsing others; when pinned, leaves this pane without │  ──────────────╯
+│                │  Run                                                                               │  ─────── ▁   ▄ ╮
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 ╰──────────────                                                                                          ──────────────╯
 Enter open · /                                                                                            ? palette
@@ -163,22 +163,22 @@ Enter open · /                                                                 
 │                │  CPU by session                                                                    │                │
 │                │  Usage by session                                                                  │                │
 │                │  Recent messages                                                                   │                │
-│                │  Detach from this terminal                                               ctrl+b q  │                │
-│                │  Toggle transcript rendering                                             ctrl+b t  │                │
+│                │  Detach from this terminal                                               ctrl+b q  │  ──────────────╯
+│                │  Toggle transcript rendering                                             ctrl+b t  │  ──────────────╮
 │                │  Dictation                                                               ctrl+b m  │                │
-│                │Keep a session visible while browsing others; when pinned, leaves this pane without │  ──────────────╯
-│                │  Run                                                                               │  ──────────────╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
+│                │Keep a session visible while browsing others; when pinned, leaves this pane without │                │
+│                │  Run                                                                               │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
 │                                                                                                                      │
 │                                                                                                        ──────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === palette opened from the composer (120x90) ===
@@ -254,22 +254,22 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Previous workspace                                                      ctrl+b p  │                │
 │                │  Next workspace                                                          ctrl+b n  │                │
 │                │  Web viewer                                                              ctrl+b u  │                │
-│                │  Restart the Mjolnir daemon                                                        │                │
-│                │  Refresh targets and quotas                                        ctrl+b shift+r  │                │
+│                │  Restart the Mjolnir daemon                                                        │  ──────────────╯
+│                │  Refresh targets and quotas                                        ctrl+b shift+r  │  ──────────────╮
 │                │  CPU by session                                                                    │                │
-│                │  Usage by session                                                                  │  ──────────────╯
-│                │  Recent messages                                                                   │  ──────────────╮
-│                │  Detach from this terminal                                               ctrl+b q  │                │
+│                │  Usage by session                                                                  │                │
+│                │  Recent messages                                                                   │  ──────────────╯
+│                │  Detach from this terminal                                               ctrl+b q  │  ─────── ▁   ▄ ╮
 │                │  Toggle transcript rendering                                             ctrl+b t  │                │
 │                │  Dictation                                                               ctrl+b m  │  ──────────────╯
 │                │Keep a session visible while browsing others; when pinned, leaves this pane without │  ─────── ▁   ▄ ╮
 │                │  Run                                                                               │                │
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
-│                                                                                                        ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 === label prefix match (120x44) ===
@@ -284,10 +284,10 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                ╭ × ✦ Commands ────────────────────────────────────────────────────────── 2 commands ╮                │
@@ -299,11 +299,8 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                │Save a recovery copy and release the environment. Resume this session later.        │                │
 │                │  Run                                                                               │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                                                                                        ──────────────╯
+│                                                                                                        ──────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -315,6 +312,9 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === description match (120x44) ===
@@ -329,10 +329,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -344,10 +344,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Run                                                                               │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                        ──────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
@@ -360,6 +357,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === search for Open settings (120x30) ===
@@ -367,30 +367,30 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+│  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                                                                                                   │
 │                                                                                                                      │
 │                ╭ × ✦ Commands ─────────────────────────────────────────────────────────── 1 command ╮                │
-│                │open settings                                                                       │                │
-│                │  Settings  ──────────────────────────────────────────────────────────────────────  │                │
+│                │open settings                                                                       │  ──────────────╯
+│                │  Settings  ──────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │› Open settings                                                           ctrl+b s  │                │
-│                │Edit all configuration in the Settings modal.                                       │  ──────────────╯
-│                │  Run                                                                               │  ──────────────╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
+│                │Edit all configuration in the Settings modal.                                       │                │
+│                │  Run                                                                               │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
 │                                                                                                                      │
 │                                                                                                        ──────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 action after selecting Open settings: None
@@ -408,21 +408,21 @@ mode after selecting Open settings: "Setup"
 │  │        │   Runtimes                        podman                                                     │           │
 │           │   Machines                        local                                                      │           │
 │           │   Daemon                          Host                                                       │           │
-│           │                                                                                              │           │
-│           │   Sessions                                                                                   │           │
+│           │                                                                                              │  ─────────╯
+│           │   Sessions                                                                                   │  ─────────╮
 │           │   Code Review                     Off                                                        │           │
-│           │   Sub-agents                      Up to 6 at once                                            │  ─────────╯
-│           │   Quota checks                    Auto · container when available                            │  ─────────╮
-│           │   SessionWiki                     Keeps every session                                        │           │
+│           │   Sub-agents                      Up to 6 at once                                            │           │
+│           │   Quota checks                    Auto · container when available                            │  ─────────╯
+│           │   SessionWiki                     Keeps every session                                        │  ── ▁   ▄ ╮
 │           │   Web Access                      On · 127.0.0.1:3765                                        │           │
 │           │                                                                                              │  ─────────╯
 │           │   Display                                                                                    │  ── ▁   ▄ ╮
 │           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │           │
-│           │   Notifications                   Terminal                                                   │  ─────────╯
-│           │   Advanced                        All off                                                    │  ── ▁   ▄ ╮
+│           │   Notifications                   Terminal                                                   │           │
+│           │   Advanced                        All off                                                    │           │
 │           │                                                                                              │           │
-│           │   Privacy                                                                                    │           │
-│           │   Save and Close                                                                             │           │
+│           │   Privacy                                                                                    │  ─────────╯
+│           │   Save and Close                                                                             │  ── ▁   ▄ ╮
 │           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
 ╰─────────                                                                                                    ─────────╯
 Enter open                                                                                                    lette
@@ -453,21 +453,21 @@ Enter open                                                                      
 │                │  Fold project                                                               Space ││                │
 │                │  Panes  ───────────────────────────────────────────────────────────────────────── ││                │
 │                │  Split right                                                             ctrl+b v ││                │
-│                │  Split down                                                              ctrl+b - ││                │
-│                │  Close pane                                                              ctrl+b x ││                │
+│                │  Split down                                                              ctrl+b - ││  ──────────────╯
+│                │  Close pane                                                              ctrl+b x ││  ──────────────╮
 │                │  Focus pane left                                                         ctrl+b h ││                │
-│                │  Focus pane down                                                         ctrl+b j ││  ──────────────╯
-│                │  Focus pane up                                                           ctrl+b k ││  ──────────────╮
-│                │  Focus pane right                                                        ctrl+b l ││                │
+│                │  Focus pane down                                                         ctrl+b j ││                │
+│                │  Focus pane up                                                           ctrl+b k ││  ──────────────╯
+│                │  Focus pane right                                                        ctrl+b l ││  ─────── ▁   ▄ ╮
 │                │  Focus last pane                                                         ctrl+b ; ││                │
 │                │  Zoom pane                                                               ctrl+b z ││  ──────────────╯
 │                │  Resize panes                                                            ctrl+b r ││  ─────── ▁   ▄ ╮
 │                │  Swap pane left                                                    ctrl+b shift+h ││                │
-│                │  Swap pane down                                                    ctrl+b shift+j ││  ──────────────╯
-│                │  Swap pane up                                                      ctrl+b shift+k ││  ─────── ▁   ▄ ╮
+│                │  Swap pane down                                                    ctrl+b shift+j ││                │
+│                │  Swap pane up                                                      ctrl+b shift+k ││                │
 │                │  Swap pane right                                                   ctrl+b shift+l  │                │
-│                │Keep a session visible while browsing others; when pinned, leaves this pane without │                │
-│                │  Run                                                                               │                │
+│                │Keep a session visible while browsing others; when pinned, leaves this pane without │  ──────────────╯
+│                │  Run                                                                               │  ─────── ▁   ▄ ╮
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 ╰──────────────                                                                                          ──────────────╯
 Enter open · /                                                                                            ? palette
@@ -483,10 +483,10 @@ Enter open · /                                                                 
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                ╭ × ✦ Commands ────────────────────────────────────────────────────────── 2 commands ╮                │
@@ -498,11 +498,8 @@ Enter open · /                                                                 
 │                │Save a recovery copy and release the environment. Resume this session later.        │                │
 │                │  Run                                                                               │                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                                                                                        ──────────────╯
+│                                                                                                        ──────────────╮
 │                                      ││No conversation open.                                                         │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -514,6 +511,9 @@ Enter open · /                                                                 
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 suspend action: Suspend { session_id: "session-1", acknowledge_unpublished_work: false }
@@ -529,12 +529,9 @@ suspend action: Suspend { session_id: "session-1", acknowledge_unpublished_work:
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -560,6 +557,9 @@ suspend action: Suspend { session_id: "session-1", acknowledge_unpublished_work:
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 Escape action: None
@@ -577,12 +577,9 @@ command session id after Escape: Some("session-1")
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
-│                                      ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -608,5 +605,8 @@ command session id after Escape: Some("session-1")
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
