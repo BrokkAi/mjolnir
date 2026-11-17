@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
 
 use mj_core::relay::RelayObservation;
-use mj_core::session_image::RECIPE_FILES;
+use mj_core::session_image::{IMAGE_RECIPE_DIR, RECIPE_FILES};
 
 use crate::relay::RelayCell;
 pub(super) const LOG_FILE: &str = "project-tools.log";
@@ -118,17 +118,25 @@ pub(super) struct Missing {
     /// Set when a status command failed; the message then names the recipe
     /// files instead of guessing tool names.
     status_failure: Option<String>,
+    /// The recipe file whose `[hooks] postinstall` still has to run.
+    hook: Option<&'static str>,
 }
 
 impl Missing {
     fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.packages.is_empty() && self.status_failure.is_none()
+        self.tools.is_empty()
+            && self.packages.is_empty()
+            && self.status_failure.is_none()
+            && self.hook.is_none()
     }
 
     fn describe(&self) -> String {
         let files = self.files.join(", ");
         let mut items = self.tools.clone();
         items.extend(self.packages.iter().cloned());
+        if let Some(hook) = self.hook {
+            items.push(format!("the postinstall hook in {hook}"));
+        }
         if self.status_failure.is_some() || items.is_empty() {
             format!(
                 "everything the recipe in {} declares ({files}; mise could not say what is missing)",
@@ -211,6 +219,7 @@ async fn missing_in(
         tools: Vec::new(),
         packages: Vec::new(),
         status_failure: None,
+        hook: None,
     };
     // `mise ls --missing --json`: an object keyed by tool name whose records
     // list the requested versions that are not installed.
@@ -248,7 +257,48 @@ async fn missing_in(
         missing.packages.clear();
         missing.status_failure = Some(format!("{error:#}"));
     }
+    if missing.is_empty() {
+        missing.hook = pending_postinstall_hook(root, Path::new(IMAGE_RECIPE_DIR)).await?;
+    }
     Ok(missing)
+}
+
+/// A global `[hooks] postinstall` runs on every `mise install`, and no status
+/// command says whether it is satisfied. An image built from exactly this
+/// recipe ran it at build time; anywhere else (a stale image, or a container
+/// whose earlier install stopped during the hook) it still has to run. Returns
+/// the recipe file that declares the hook in that case.
+async fn pending_postinstall_hook(root: &Path, baked: &Path) -> Result<Option<&'static str>> {
+    let mut hook = None;
+    let mut built_from_this_recipe = true;
+    for file in RECIPE_FILES {
+        let read = |path: PathBuf| async move {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+            }
+        };
+        let contents = read(root.join(file)).await?;
+        if contents != read(baked.join(file)).await? {
+            built_from_this_recipe = false;
+        }
+        let is_mise_config = file.ends_with(".toml") && *file != "rust-toolchain.toml";
+        if let (true, Some(contents)) = (is_mise_config, contents) {
+            let table: toml::Table = std::str::from_utf8(&contents)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .with_context(|| format!("parse {}", root.join(file).display()))?;
+            if table
+                .get("hooks")
+                .and_then(|hooks| hooks.get("postinstall"))
+                .is_some()
+            {
+                hook.get_or_insert(*file);
+            }
+        }
+    }
+    Ok(hook.filter(|_| !built_from_this_recipe))
 }
 
 /// `[bootstrap.packages]` entries that `mise bootstrap packages apply` would
@@ -474,6 +524,34 @@ impl Drop for BackgroundInstall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: review of 562a30751: an image whose tools were current skipped `mise install`, and with it a changed postinstall hook.
+    #[tokio::test]
+    async fn postinstall_hook_runs_unless_the_image_was_built_from_this_recipe() {
+        let checkout = tempfile::tempdir().unwrap();
+        let baked = tempfile::tempdir().unwrap();
+        let recipe =
+            "[tools]\nnode = \"24\"\n[hooks]\npostinstall = \"npx playwright@1.62.1 install\"\n";
+        std::fs::write(checkout.path().join("mise.toml"), recipe).unwrap();
+        std::fs::write(checkout.path().join(".nvmrc"), "24\n").unwrap();
+        std::fs::write(baked.path().join("mise.toml"), recipe).unwrap();
+        // Same hook, but the image lacks a recipe file the checkout has.
+        let pending = pending_postinstall_hook(checkout.path(), baked.path());
+        assert_eq!(pending.await.unwrap(), Some("mise.toml"));
+        std::fs::write(baked.path().join(".nvmrc"), "24\n").unwrap();
+        let pending = pending_postinstall_hook(checkout.path(), baked.path());
+        assert_eq!(pending.await.unwrap(), None);
+        std::fs::write(
+            checkout.path().join("mise.toml"),
+            recipe.replace("1.62.1", "1.63.0"),
+        )
+        .unwrap();
+        let pending = pending_postinstall_hook(checkout.path(), baked.path());
+        assert_eq!(pending.await.unwrap(), Some("mise.toml"));
+        let no_image_recipe = baked.path().join("absent");
+        let pending = pending_postinstall_hook(checkout.path(), &no_image_recipe);
+        assert_eq!(pending.await.unwrap(), Some("mise.toml"));
+    }
 
     // Hard-won: review of a045f704a: a version mismatch was not counted, so a recipe pinning a package the image has at another version skipped `apply`.
     #[test]

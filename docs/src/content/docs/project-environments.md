@@ -41,7 +41,9 @@ otherwise installs Mjolnir's pinned, checksum-verified mise. Installed tools
 are on `PATH` for the agent and its commands through mise's shims directory.
 
 If nothing is missing, as on an image built from the recipe, nothing else
-happens. Otherwise the agent starts at once and the worker runs, in the
+happens. mise cannot say whether a `[hooks] postinstall` command has run, so
+a recipe with one counts as satisfied only on an image built from exactly that
+recipe. Otherwise the agent starts at once and the worker runs, in the
 background, in each checkout that needs it:
 
     mise bootstrap packages apply --yes
