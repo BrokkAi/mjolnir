@@ -1,0 +1,17 @@
+{
+  "validated_at": "2026-11-17T10:52:03.462178+00:00",
+  "diffs": 40,
+  "jobs": 80,
+  "unique_reviewers": 240,
+  "exact_grid": true,
+  "all_output_stored_usage_hashes_rechecked": true,
+  "all80_api_carrier_states_suspended": true,
+  "historical_source_context_inventory_hashes_checked": true,
+  "runtime_and_input_hashes_rechecked": true,
+  "protected_artifact_checks": 5470,
+  "readback_failures": 1,
+  "reviewer_role_retries_or_replacements": 0,
+  "unknown_truth_controls": true,
+  "reviewer_tool_audit": null,
+  "reviewer_latency": null
+}
