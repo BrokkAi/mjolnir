@@ -8,15 +8,12 @@ pub(super) fn record_child_accounting(
     child: &SubagentRecord,
 ) -> Result<()> {
     connection.execute(
-        "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name, kind)
-        VALUES (?1, ?2, ?3, ?4) ON CONFLICT(child_session_id) DO UPDATE SET kind=excluded.kind",
+        "INSERT INTO subagent_accounting(child_session_id, parent_session_id, task_name)
+        VALUES (?1, ?2, ?3) ON CONFLICT(child_session_id) DO NOTHING",
         params![
             child.child_session_id,
             child.parent_session_id,
-            child.task_name,
-            serde_json::to_value(child.kind)?
-                .as_str()
-                .context("child kind is not a string")?
+            child.task_name
         ],
     )?;
     let stored: (String, String) = connection.query_row(

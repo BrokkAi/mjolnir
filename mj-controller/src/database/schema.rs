@@ -2560,7 +2560,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
-    // Compatible: old accounting writers name columns and preserve retained kinds.
+    // Compatible: old writers name columns; triggers retain their launch kinds too.
     // Leave kinds unknown when the authoritative launch record is gone.
     if version < 135 {
         let transaction =
@@ -2569,7 +2569,19 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             transaction.execute_batch("ALTER TABLE subagent_accounting ADD COLUMN kind TEXT;")?;
         }
         transaction.execute_batch(
-            "UPDATE subagent_accounting SET kind=(
+            "CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_insert
+             AFTER INSERT ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_update
+             AFTER UPDATE OF record_json ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             UPDATE subagent_accounting SET kind=(
                  SELECT COALESCE(json_extract(s.record_json, '$.kind'), 'worker')
                  FROM subagent_sessions s
                  WHERE s.child_session_id=subagent_accounting.child_session_id)
@@ -3326,7 +3338,9 @@ pub(super) fn drop_session_row_triggers(connection: &Connection) {
     drop_environment_schema(connection);
     connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS session_rows_deleted;
+            "DROP TRIGGER IF EXISTS subagent_accounting_kind_insert;
+             DROP TRIGGER IF EXISTS subagent_accounting_kind_update;
+             DROP TRIGGER IF EXISTS session_rows_deleted;
              DROP TRIGGER IF EXISTS session_rows_destroyed;
              DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
              DROP TRIGGER IF EXISTS github_watch_items_live_creator;

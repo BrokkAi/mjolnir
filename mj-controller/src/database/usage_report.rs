@@ -385,7 +385,9 @@ mod tests {
         }
         let connection = open(&path)?;
         connection.execute_batch(
-            "ALTER TABLE subagent_accounting DROP COLUMN kind;
+            "DROP TRIGGER subagent_accounting_kind_insert;
+             DROP TRIGGER subagent_accounting_kind_update;
+             ALTER TABLE subagent_accounting DROP COLUMN kind;
              DELETE FROM schema_migrations WHERE version=135;
              PRAGMA user_version=134;
              INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
@@ -408,10 +410,16 @@ mod tests {
             "INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
                  VALUES ('reviewer','root','review') ON CONFLICT(child_session_id) DO NOTHING;
              INSERT INTO subagent_accounting(child_session_id,parent_session_id,task_name)
-                 VALUES ('legacy','root','legacy');",
+                 VALUES ('legacy','root','legacy');
+             INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES ('legacy','root','legacy','{\"kind\":\"reviewer\"}');
+             UPDATE subagent_sessions
+                 SET record_json=json_set(record_json, '$.noticed_turn', 3)
+                 WHERE child_session_id='reviewer';",
         )?;
         drop(connection);
         delete_session_from(&path, "reviewer")?;
+        delete_session_from(&path, "legacy")?;
         let connection = open(&path)?;
         let retained: Vec<(String, Option<String>)> = connection
             .prepare(
@@ -423,7 +431,7 @@ mod tests {
             retained,
             vec![
                 ("destroyed".into(), None),
-                ("legacy".into(), None),
+                ("legacy".into(), Some("reviewer".into())),
                 ("oracle".into(), Some("oracle".into())),
                 ("reviewer".into(), Some("reviewer".into())),
                 ("worker".into(), Some("worker".into())),
@@ -484,7 +492,6 @@ mod tests {
                 reported_finish: None,
                 handback_tool: false,
             };
-            super::super::usage::record_child_accounting(&connection, &record)?;
             connection.execute(
                 "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
                  VALUES (?1,?2,?3,?4)",
