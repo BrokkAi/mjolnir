@@ -20,6 +20,10 @@ fn a_final_rejection_tells_the_submitter_only_the_relays_reason() {
     .context("relay 2.20.0 could not perform submit");
     let failure = actor::submit_failure(&rejected);
     assert!(!failure.unconfirmed);
+    assert_eq!(
+        failure.code,
+        Some(mj_core::relay::RelayErrorCode::InvalidState)
+    );
     assert_eq!(failure.message, "/clear requires an idle session");
 
     let lost = anyhow::anyhow!("connection reset").context("relay 2.20.0 could not perform submit");
@@ -1372,7 +1376,7 @@ const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
 const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
 #[cfg(unix)]
 const FULL_DISK_RECOVERY_TEST_CHILD: &str = "MJ_TEST_FULL_DISK_RECOVERY_CHILD";
-const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+pub(crate) const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 /// File in the relay root where the stdio relay child logs each request.
 const RELAY_REQUEST_LOG: &str = "requests.log";
 /// Makes the stdio relay child report an open harness session.
@@ -1427,6 +1431,25 @@ fn leased_relay_child_serves_stdio() {
                     .open(PathBuf::from(&root).join(RELAY_REQUEST_LOG))
                     .unwrap();
                 writeln!(log, "{}", request.request.method_name()).unwrap();
+            }
+            if matches!(
+                &request.request,
+                RelayRequest::Submit {
+                    command: RelayCommand::SetQuotaRecovery { .. },
+                    ..
+                }
+            ) {
+                let blocked = PathBuf::from(&root).join("block-quota-submit");
+                if blocked.exists() {
+                    std::fs::write(
+                        PathBuf::from(&root).join("quota-submit-waiting"),
+                        b"waiting",
+                    )
+                    .unwrap();
+                    while blocked.exists() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
             }
             let preparation: Option<mj_core::relay::HarnessPreparation> =
                 std::fs::read(PathBuf::from(&root).join("preparation.json"))
@@ -2616,7 +2639,7 @@ fn fail_if_the_actor_stalls(reason: &'static str) {
 
 /// A relay target served by this test binary over stdio.
 #[cfg(unix)]
-fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
+pub(crate) fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
     // `RelayClient` parses every stdout line as JSON, so libtest's own
     // progress lines are dropped before they reach the protocol reader.
     let script = format!(
@@ -3187,7 +3210,7 @@ async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
 /// Register the session the projection writes to. `apply_projection_event`
 /// rejects events for sessions the controller database does not know.
 #[cfg(unix)]
-fn register_leased_relay_session() {
+pub(crate) fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
@@ -3505,7 +3528,7 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
 #[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
-) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {
+) -> oneshot::Receiver<std::result::Result<u64, SubmitFailure>> {
     let (reply, mut response) = oneshot::channel();
     actor
         .commands

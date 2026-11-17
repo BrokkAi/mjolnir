@@ -50,6 +50,43 @@ struct Pending {
     evidence_ordinal: Option<u64>,
 }
 
+struct QuotaRetry {
+    revision: Option<u64>,
+    failures: u32,
+    after: tokio::time::Instant,
+}
+fn assessment_revision(view: &ManagedSessionView) -> Option<u64> {
+    view.snapshot
+        .as_ref()
+        .and_then(|s| s.operational.assessment.as_ref())
+        .map(|a| a.revision)
+}
+fn failed_quota_attempt(
+    retries: &mut BTreeMap<String, QuotaRetry>,
+    id: &str,
+    view: &ManagedSessionView,
+) {
+    let revision = assessment_revision(view);
+    let failures = retries
+        .get(id)
+        .filter(|r| r.revision == revision)
+        .map_or(1, |r| r.failures.saturating_add(1));
+    // Retain the existing 30-second retry cadence and recovery policy ceiling.
+    let delay = crate::recovery::backoff_delay(
+        Duration::from_secs(30),
+        crate::recovery::AUTO_CHECKPOINT_INTERVAL,
+        failures,
+    );
+    retries.insert(
+        id.to_owned(),
+        QuotaRetry {
+            revision,
+            failures,
+            after: tokio::time::Instant::now() + delay,
+        },
+    );
+}
+
 fn evidence_ordinal(view: &ManagedSessionView) -> Option<u64> {
     view.snapshot
         .as_ref()?
@@ -340,6 +377,8 @@ fn allowed(state: &RuntimeState, session: &str) -> bool {
 struct Environment {
     log: Option<mj_core::jev::DecisionLog>,
     control: SessionManagerControl,
+    session_gate: Arc<crate::recovery_gate::RecoveryGate>,
+    schedules: Arc<Mutex<BTreeMap<String, quota::Schedule>>>,
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// The same decision as `allowed`, with a Move told apart; see [`Claim`].
     claim: Arc<dyn Fn(&str) -> Claim + Send + Sync>,
@@ -465,6 +504,8 @@ pub(super) fn spawn(
             }
         },
         control: state.session_manager.clone(),
+        session_gate: state.recovery_observer.gate.clone(),
+        schedules: Default::default(),
         allowed: {
             let state = state.clone();
             Arc::new(move |id| allowed(&state, id))
@@ -543,7 +584,7 @@ fn spawn_with_gate(
         let mut admission_deferred = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
-        let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
+        let mut retry_after = BTreeMap::<String, QuotaRetry>::new();
         let mut skips = QuotaSkips::default();
         let mut jobs = JoinSet::new();
         let mut seed_jobs = JoinSet::new();
@@ -633,6 +674,11 @@ fn spawn_with_gate(
                             deferred.insert(id.clone(), p.completed.clone());
                         }
                         let previous = pending.remove(&id).expect("pending request");
+                        // A disconnected provider watch is deferred durable work,
+                        // not a failed scheduling attempt.
+                        if !matches!(previous.phase, Phase::WaitingQuota) {
+                            failed_quota_attempt(&mut retry_after, &id, &previous.view);
+                        }
                         if !matches!(previous.phase, Phase::Submitting(_)) {
                             previous.abort.abort();
                         }
@@ -646,9 +692,12 @@ fn spawn_with_gate(
                     let new_completion = worker_assessment.is_some_and(|a| assessed.get(&id).copied() != Some(a.revision));
                     // A deferred recovery is released once it can be recorded.
                     let released = !new_completion && deferred.contains_key(&id) && quota_schedulable(&view);
-                    let admission_retry = admission_deferred.remove(&id).is_some_and(|key| key == completed);
-                    if (new_completion || released || admission_retry) && check_eligible(&view) && (environment.allowed)(&id) {
+                    let retry_ready = retry_after.get(&id).is_some_and(|r| r.revision != assessment_revision(&view) || r.after <= tokio::time::Instant::now());
+                    let retry_blocked = retry_after.get(&id).is_some_and(|r| r.revision == assessment_revision(&view) && r.after > tokio::time::Instant::now());
+                    let admission_retry = !retry_blocked && admission_deferred.remove(&id).is_some_and(|key| key == completed);
+                    if !retry_blocked && (new_completion || released || admission_retry || retry_ready) && check_eligible(&view) && (environment.allowed)(&id) {
                         let Ok(upgrade_work) = gate.enter_unless_draining("quota assessment") else {
+                            failed_quota_attempt(&mut retry_after, &id, &view);
                             admission_deferred.insert(id.clone(), completed);
                             publish(&tx, &environment, id, view, false);
                             continue;
@@ -713,14 +762,17 @@ fn spawn_with_gate(
                                 Outcome::QuotaChanged(result) => {
                                     if let Err(error) = result {
                                         tracing::warn!(session=%id, %error, "quota publication wait failed");
+                                        failed_quota_attempt(&mut retry_after, &id, &p.view);
                                         publish(&tx, &environment, id, p.view, false);
                                         continue;
                                     }
                                     if !(environment.allowed)(&id) || !quota_schedulable(&p.view) {
+                                        failed_quota_attempt(&mut retry_after, &id, &p.view);
                                         publish(&tx, &environment, id, p.view, false);
                                         continue;
                                     }
                                     let Ok(work) = gate.enter_unless_draining("quota recovery") else {
+                                        failed_quota_attempt(&mut retry_after, &id, &p.view);
                                         admission_deferred.insert(id.clone(), Some(p.completed.clone()));
                                         publish(&tx, &environment, id, p.view, false);
                                         continue;
@@ -765,6 +817,7 @@ fn spawn_with_gate(
                                         }
                                         result => {
                                             tracing::warn!(session=%id, ?result, "quota recovery could not be scheduled");
+                                            failed_quota_attempt(&mut retry_after, &id, &p.view);
                                             publish(&tx, &environment, id, p.view, false);
                                         }
                                     }
@@ -773,6 +826,7 @@ fn spawn_with_gate(
                                 Outcome::Submitted(result) => {
                                     match result {
                                         Ok(view) => {
+                                            retry_after.remove(&id);
                                             latest.insert(id.clone(), (*view).clone());
                                             tx.send(SessionManagerUpdate {
                                                 raw_observation: None,
@@ -782,6 +836,7 @@ fn spawn_with_gate(
                                         }
                                         Err(error) => {
                                             tracing::warn!(session=%id, %error, "quota recovery not submitted");
+                                            failed_quota_attempt(&mut retry_after, &id, &p.view);
                                             publish(&tx, &environment, id, p.view, false);
                                         }
                                     }
@@ -796,6 +851,7 @@ fn spawn_with_gate(
                                 .map(|(id, _)| id.clone());
                             if let Some(id) = failed {
                                 let p = pending.remove(&id).unwrap();
+                                failed_quota_attempt(&mut retry_after, &id, &p.view);
                                 publish(&tx, &environment, id, p.view, false);
                             }
                         }
@@ -805,7 +861,12 @@ fn spawn_with_gate(
                 _ = tick.tick() => {
                     if !gate.is_draining() {
                         for id in admission_deferred.keys() {
-                            rechecks.insert(id.clone());
+                            if retry_after.get(id).is_none_or(|r| r.after <= tokio::time::Instant::now())
+                                && latest.get(id).is_some_and(|view| check_eligible(view) && (environment.allowed)(id)) { rechecks.insert(id.clone()); }
+                        }
+                        for (id, retry) in &retry_after {
+                            if retry.after <= tokio::time::Instant::now() && !pending.contains_key(id)
+                                && latest.get(id).is_some_and(|view| check_eligible(view) && (environment.allowed)(id)) { rechecks.insert(id.clone()); }
                         }
                     }
                     if gate.is_draining() {
@@ -827,13 +888,16 @@ fn spawn_with_gate(
                         .collect();
                     for id in invalid {
                         let p = pending.remove(&id).unwrap();
+                        if !matches!(p.phase, Phase::WaitingQuota) {
+                            failed_quota_attempt(&mut retry_after, &id, &p.view);
+                        }
                         if !matches!(p.phase, Phase::Submitting(_)) {
                             p.abort.abort();
                         }
                         publish(&tx, &environment, id, p.view, false);
                     }
                     for (id, view) in &latest {
-                        if pending.contains_key(id) || retry_after.get(id).is_some_and(|t| *t > std::time::Instant::now()) { continue; }
+                        if pending.contains_key(id) || retry_after.get(id).is_some_and(|r| r.revision == assessment_revision(view) && r.after > tokio::time::Instant::now()) { continue; }
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
                         // A timed record survives a Move; any other owner of the session clears it.
@@ -868,7 +932,6 @@ fn spawn_with_gate(
                             let result = quota::resume(&env, &session, &current, clear).await;
                             (session, epoch, Outcome::Submitted(result))
                         });
-                        retry_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
                         pending.insert(id.clone(), Pending { phase: Phase::Submitting(upgrade_work), generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
@@ -878,7 +941,6 @@ fn spawn_with_gate(
                         if view.snapshot.as_ref().is_some_and(unified) && (check_eligible(view) || seed_due) && !pending.contains_key(id)
                             && action_recheck.get(id).is_none_or(|at| *at <= std::time::Instant::now()) {
                             action_recheck.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
-                            assessed.remove(id);
                             rechecks.insert(id.clone());
                         }
                     }
@@ -888,6 +950,7 @@ fn spawn_with_gate(
                     rechecks.retain(|id| live.contains_key(id));
                     latest.retain(|id, _| live.contains_key(id));
                     retry_after.retain(|id, _| live.contains_key(id));
+                    environment.schedules.lock().unwrap().retain(|id, _| live.contains_key(id));
                     skips.retain(&live);
                     assessed.retain(|id, _| live.contains_key(id));
                     action_recheck.retain(|id, _| live.contains_key(id));

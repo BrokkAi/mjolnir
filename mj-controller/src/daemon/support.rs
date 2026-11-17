@@ -237,7 +237,20 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn end_resumable_work(&self, label: &'static str) -> Result<()> {
-        let work = crate::upgrade::activity_unless_draining(label)?;
+        // Synchronous callers include workspace copies. Hand the wait off
+        // async workers, and let the gate wake it on closure or drain lapse.
+        let admitted = mj_core::runtime::off_async_worker(|| {
+            crate::upgrade::gate().enter_after_draining(label)
+        });
+        if admitted.is_err() {
+            let mut owner = self.state.owner();
+            if let Some(active) = owner.lifecycle.get_mut(&self.session_id)
+                && self.operation_id.as_ref() == Some(&active.operation_id)
+            {
+                active.interrupt_for_shutdown();
+            }
+        }
+        let work = admitted?;
         let owner = self.state.owner();
         let active = owner
             .lifecycle

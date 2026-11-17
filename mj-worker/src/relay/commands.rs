@@ -721,6 +721,7 @@ impl DurableRelay {
                         }
                 });
             if !valid {
+                tracing::info!(command_id, expected_ordinal = expected.ordinal, expected_digest = %expected.digest, actual_ordinal = self.snapshot.latest_ordinal, actual_digest = %self.snapshot.latest_digest, "quota recovery evidence is stale");
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,
                     "quota recovery evidence is stale",

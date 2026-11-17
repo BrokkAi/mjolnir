@@ -88,6 +88,38 @@ fn quota_schedule(relay: &mut DurableRelay, reset_at_ms: Option<i64>) -> RelayCo
         })),
     }
 }
+// Hard-won: #1562: a lost quota schedule acknowledgement was retried with different stale evidence.
+#[test]
+fn quota_schedule_replays_its_original_acceptance_before_stale_evidence_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut relay = open(directory.path());
+    submit_relay(
+        &mut relay,
+        "original-prompt",
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    completed(&mut relay, "original-prompt");
+    let command = quota_schedule(&mut relay, None);
+    let first = relay
+        .submit_command("quota-schedule-3", command.clone())
+        .unwrap()
+        .unwrap();
+    let accepted = relay.snapshot.handled_commands["quota-schedule-3"].accepted_ordinal;
+    drop(relay);
+    let mut relay = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
+    let echoed = relay
+        .submit_command("quota-schedule-3", command)
+        .unwrap()
+        .unwrap();
+    assert_eq!(echoed, first);
+    assert_eq!(
+        relay.snapshot.handled_commands["quota-schedule-3"].accepted_ordinal,
+        accepted
+    );
+}
+
 fn quota_resume(relay: &DurableRelay) -> RelayCommand {
     let s = relay.operational_state();
     RelayCommand::ResumeAfterQuota {

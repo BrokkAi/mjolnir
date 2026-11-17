@@ -176,9 +176,9 @@ impl ManagedSessionHandle {
                         Ok(MailboxEventDelivery::Accepted(ordinal))
                     }
                     MailboxDeliveryState::Pending if !failure.unconfirmed && !failure.refused => {
-                        Ok(MailboxEventDelivery::Pending(failure.message))
+                        Ok(MailboxEventDelivery::Pending(failure.failure.message))
                     }
-                    MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.message)),
+                    MailboxDeliveryState::Pending => Err(anyhow::anyhow!(failure.failure.message)),
                 }
             }
         }
@@ -387,8 +387,7 @@ impl std::fmt::Display for SessionNotIdle {
 impl std::error::Error for SessionNotIdle {}
 
 pub struct PendingRelaySubmit {
-    pub(super) response:
-        oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>>,
+    pub(super) response: oneshot::Receiver<std::result::Result<u64, SubmitFailure>>,
 }
 
 impl PendingRelaySubmit {
@@ -399,7 +398,11 @@ impl PendingRelaySubmit {
                 anyhow::Error::new(error).context(mj_client::session::DeliveryUnconfirmed)
             })?
             .map_err(|failure| {
-                let error = anyhow::Error::msg(failure.message);
+                let SubmitFailure { failure, code } = failure;
+                let mut error = anyhow::Error::msg(failure.message);
+                if let Some(code) = code {
+                    error = error.context(SubmitRefusalCode(code));
+                }
                 if failure.unconfirmed {
                     error.context(mj_client::session::DeliveryUnconfirmed)
                 } else if failure.refused {
@@ -420,3 +423,13 @@ impl PendingRelaySync {
         self.response.await.context("session manager stopped")?
     }
 }
+
+/// In-process refusal detail; the client failure's wire representation is unchanged.
+#[derive(Debug)]
+pub(crate) struct SubmitRefusalCode(pub mj_core::relay::RelayErrorCode);
+impl std::fmt::Display for SubmitRefusalCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay refusal ({:?})", self.0)
+    }
+}
+impl std::error::Error for SubmitRefusalCode {}

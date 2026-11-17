@@ -1854,8 +1854,10 @@ impl Controller {
         record.resource_allocation = latest.resource_allocation;
         record.additional_mounts = latest.additional_mounts;
         if result.is_err()
-            && operation.workspace_transfer.is_some()
-            && !crate::upgrade::gate().is_open()
+            && ((operation.workspace_transfer.is_some() && !crate::upgrade::gate().is_open())
+                || (operation.in_place
+                    && operation.phase == MovePhase::ClosingSource
+                    && (executor.shutdown_interrupted() || !crate::upgrade::gate().is_open())))
         {
             // Handoff cancellation is not user cancellation. Leave the durable
             // phase active so the next daemon resumes the accepted Move.
@@ -2499,7 +2501,12 @@ impl Controller {
                         if !source_relay.is_held() {
                             source_relay = MoveSourceRelay::lease(admission, manager, &id).await?;
                         }
-                        match source_relay.drain_subagent_mutations(&id, executor).await? {
+                        // ClosingSource is durable: handoff cancels this wait and
+                        // the next daemon resumes it before sealing the source.
+                        executor.begin_resumable_work()?;
+                        let drained = source_relay.drain_subagent_mutations(&id, executor).await;
+                        executor.end_resumable_work("Move control transition")?;
+                        match drained? {
                             SubagentMutationDrain::Drained => {}
                             SubagentMutationDrain::UnsupportedWorkerProtocol(version) => {
                                 ensure!(operation.quota_stop_reason.is_none(),

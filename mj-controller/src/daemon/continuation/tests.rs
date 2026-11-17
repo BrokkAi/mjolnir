@@ -160,6 +160,8 @@ async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowan
         project_memory: None,
     }]);
     let environment = Environment {
+        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+        schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
@@ -262,6 +264,8 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             "moving" | "timed-moving" | "timed-moving-future" | "timed-moved"
         );
         let environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move start") })
             }),
@@ -369,6 +373,8 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
     }]);
     let log_dir = tempfile::tempdir().unwrap();
     let environment = Environment {
+        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+        schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
@@ -472,6 +478,8 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
         let log_dir = tempfile::tempdir().unwrap();
         let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
         let environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move start") })
             }),
@@ -567,6 +575,8 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             project_memory: None,
         }]);
         let environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move start") })
             }),
@@ -670,6 +680,8 @@ async fn handoff_defers_a_quota_assessment_without_consuming_its_trigger() {
     }]);
     let (calls, mut requests) = mpsc::unbounded_channel();
     let environment = Environment {
+        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+        schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
@@ -707,10 +719,20 @@ async fn handoff_defers_a_quota_assessment_without_consuming_its_trigger() {
     // When the upgrading client goes away, draining lapses. No new worker
     // publication is needed to recover the refused assessment.
     drop(blocker);
-    tokio::time::timeout(Duration::from_secs(12), requests.recv())
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while gate.is_draining() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    tokio::time::timeout(Duration::from_secs(3), requests.recv())
         .await
         .unwrap()
         .unwrap();
+    tokio::time::resume();
     assert!(!gate.is_draining());
     cancellation.cancel();
     task.await.unwrap().unwrap();
@@ -724,6 +746,8 @@ fn idle_feed(
     cancellation: CancellationToken,
 ) -> UpdateFeed {
     let environment = Environment {
+        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+        schedules: Default::default(),
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
@@ -977,6 +1001,8 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
         }]);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
             log: None,
             control: remote.control,
             allowed: Arc::new(|_| true),
@@ -1622,6 +1648,8 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         }]);
         let (prepared, mut preparations) = mpsc::unbounded_channel();
         let mut environment = Environment {
+            session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+            schedules: Default::default(),
             start_quota_move: Arc::new(|_, _, _| {
                 Box::pin(async { anyhow::bail!("unexpected Move") })
             }),
@@ -1954,4 +1982,432 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         task.await.unwrap().unwrap();
         remote.shutdown.shutdown().await.unwrap();
     }
+}
+
+// Hard-won: #1562: refused quota scheduling spun again on every policy tick.
+#[tokio::test(start_paused = true)]
+async fn refused_quota_scheduling_waits_for_backoff_or_a_new_assessment() {
+    let mut remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let holder = gate
+        .try_start(
+            "one",
+            crate::recovery_gate::BackgroundWork::WorkerReplacement,
+        )
+        .unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let environment = Environment {
+        session_gate: gate,
+        schedules: Default::default(),
+        log: None,
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
+        live: Arc::new(|| live_sessions(&["one"])),
+        review: Arc::new(|_, _| {}),
+        profile: Arc::new(|_| Some("test".into())),
+        start_quota_move: Arc::new(|_, _, _| Box::pin(async { bail!("unexpected Move") })),
+        quota: {
+            let calls = calls.clone();
+            Arc::new(move |_, view| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(quota::Plan::Wait(recovery_for(&view, None))) })
+            })
+        },
+    };
+    let cancellation = CancellationToken::new();
+    let (_updates, task) = spawn_with_gate(
+        environment,
+        remote.updates,
+        cancellation.clone(),
+        Arc::new(crate::upgrade::Gate::default()),
+    );
+    let mut blocked = view("one", true);
+    quota_assessed(&mut blocked);
+    remote
+        .publisher
+        .publish("one".into(), blocked.clone())
+        .await
+        .unwrap();
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(29)).await;
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "ticks cannot consume the backoff"
+    );
+    // A genuinely new assessment may reconsider immediately.
+    Arc::make_mut(
+        blocked
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .assessment
+            .as_mut()
+            .unwrap(),
+    )
+    .revision += 1;
+    remote
+        .publisher
+        .publish("one".into(), blocked)
+        .await
+        .unwrap();
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    drop(holder);
+    tokio::time::advance(Duration::from_secs(29)).await;
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let request = remote.requests.recv().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let RemoteSessionRequest::Submit { reply, .. } = request else {
+        panic!("expected admitted schedule")
+    };
+    reply.send(Err("end scheduling probe".into())).unwrap();
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+// Hard-won: #1562: the outer quota deadline expired while the worker was still accepting a command.
+#[tokio::test]
+async fn slow_quota_scheduling_finishes_and_yields_to_a_persons_move() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::session_manager::tests::{
+        LEASED_RELAY_SESSION as ID, leased_relay_target, register_leased_relay_session,
+    };
+    const CHILD: &str = "MJ_TEST_SLOW_QUOTA_ADMISSION";
+    if std::env::var_os(CHILD).is_none() {
+        for mode in ["complete", "move"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "slow_quota_scheduling_finishes_and_yields_to_a_persons_move",
+            ))
+            .env(CHILD, mode)
+            .isolated_store(directory.path())
+            .run();
+        }
+        return;
+    }
+    let mode = std::env::var(CHILD).unwrap();
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = mj_worker::relay::DurableRelay::open(root.path(), ID, "test").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "quota-fixture".into(),
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+            resumed: false,
+        })
+        .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    let accepted = relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "prompt".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: mj_core::relay::RelayRequest::Submit {
+            command_id: "quota-request".into(),
+            command: RelayCommand::Prompt {
+                prompt: mj_core::continuation::prompt_blocks(),
+            },
+        },
+    });
+    assert!(
+        matches!(accepted.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+        "{accepted:?}"
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "quota-request",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "quota_limit".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    if let Some(mut assessment) = relay.operational_state().assessment.as_deref().cloned() {
+        assessment.action = Some(mj_core::assessment::Action::RecoverQuota);
+        assessment.status = mj_core::assessment::Status::Deferred;
+        relay
+            .record_observation(mj_core::relay::RelayObservation::TurnAssessmentUpdated {
+                assessment: Box::new(assessment),
+            })
+            .unwrap();
+    }
+    drop(relay);
+    let manager = crate::session_manager::spawn_session_manager().unwrap();
+    manager
+        .targets
+        .send_replace(vec![leased_relay_target(root.path())]);
+    let handle = manager
+        .control
+        .wait_for_session(ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    handle.sync_now().await.unwrap();
+    let blocked = handle.view();
+    let session_gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let environment = Environment {
+        session_gate: session_gate.clone(),
+        schedules: Default::default(),
+        log: None,
+        control: manager.control.clone(),
+        allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
+        live: Arc::new(|| live_sessions(&[ID])),
+        review: Arc::new(|_, _| {}),
+        profile: Arc::new(|_| Some("test".into())),
+        quota: Arc::new(|_, _| Box::pin(async { bail!("unused resolver") })),
+        start_quota_move: Arc::new(|_, _, _| {
+            Box::pin(async { bail!("unexpected automatic Move") })
+        }),
+    };
+    std::fs::write(root.path().join("block-quota-submit"), b"hold").unwrap();
+    let recovery = recovery_for(&blocked, None);
+    let scheduling = tokio::spawn(async move {
+        quota::schedule(&environment, ID, blocked, quota::Plan::Wait(recovery)).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.path().join("quota-submit-waiting").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("real relay reached the held quota exchange");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(16)).await;
+    assert!(
+        !scheduling.is_finished(),
+        "transport queue time must not expire the whole schedule"
+    );
+    tokio::time::resume();
+    let moving = (mode == "move").then(|| {
+        tokio::spawn({
+            let gate = session_gate.clone();
+            let handle = handle.clone();
+            async move {
+                let admission = gate
+                    .enter_foreground(
+                        ID,
+                        "Move",
+                        &std::sync::atomic::AtomicBool::new(false),
+                        &crate::targets::ProcessExecutor,
+                    )
+                    .await
+                    .unwrap();
+                let lease = handle.lease_connection(&admission).await.unwrap();
+                lease.release();
+            }
+        })
+    });
+    if moving.is_some() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+    std::fs::remove_file(root.path().join("block-quota-submit")).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), scheduling)
+        .await
+        .unwrap()
+        .unwrap();
+    if let Some(moving) = moving {
+        assert!(
+            result.is_err(),
+            "a person's foreground Move preempts scheduling"
+        );
+        tokio::time::timeout(Duration::from_secs(5), moving)
+            .await
+            .unwrap()
+            .unwrap();
+    } else {
+        assert!(
+            result
+                .unwrap()
+                .snapshot
+                .unwrap()
+                .operational
+                .continuation
+                .quota_recovery
+                .is_some()
+        );
+    }
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1562: a new assessment changed the payload of an uncertain quota command.
+#[tokio::test]
+async fn quota_schedule_keeps_the_identical_command_until_acceptance_is_known() {
+    use futures::FutureExt;
+    let mut remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let environment = Environment {
+        session_gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+        schedules: Default::default(),
+        log: None,
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        claim: Arc::new(|_| Claim::Allowed),
+        live: Arc::new(|| live_sessions(&["one"])),
+        review: Arc::new(|_, _| {}),
+        profile: Arc::new(|_| Some("test".into())),
+        quota: Arc::new(|_, _| Box::pin(async { bail!("unused resolver") })),
+        start_quota_move: Arc::new(|_, _, _| Box::pin(async { bail!("unexpected Move") })),
+    };
+    let mut blocked = view("one", true);
+    remote
+        .publisher
+        .publish("one".into(), blocked.clone())
+        .await
+        .unwrap();
+    let first = tokio::spawn({
+        let env = environment.clone();
+        let view = blocked.clone();
+        async move {
+            let recovery = recovery_for(&view, None);
+            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+        }
+    });
+    let RemoteSessionRequest::Submit {
+        command_id,
+        command,
+        reply,
+        ..
+    } = remote.requests.recv().await.unwrap()
+    else {
+        panic!("first schedule")
+    };
+    reply
+        .send(Err(mj_client::session::SubmitFailure {
+            message: "lost acknowledgement".into(),
+            unconfirmed: true,
+            refused: false,
+        }))
+        .unwrap();
+    assert!(first.await.unwrap().is_err());
+    let snapshot = blocked.snapshot.as_mut().unwrap();
+    snapshot
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .completed_ordinal += 1;
+    snapshot
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .command_id = "next-request".into();
+    snapshot.operational.continuation.completed_command_id = Some("next-request".into());
+
+    blocked
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .latest_ordinal += 1;
+    blocked.snapshot.as_mut().unwrap().operational.latest_digest = "new evidence".into();
+    remote
+        .publisher
+        .publish("one".into(), blocked.clone())
+        .await
+        .unwrap();
+    let second = tokio::spawn({
+        let env = environment.clone();
+        let view = blocked.clone();
+        async move {
+            let mut recovery = recovery_for(&view, None);
+            recovery.notice = "new assessment notice".into();
+            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+        }
+    });
+    let RemoteSessionRequest::Submit {
+        command_id: retried_id,
+        command: retried,
+        reply,
+        ..
+    } = remote.requests.recv().await.unwrap()
+    else {
+        panic!("reconciliation")
+    };
+    assert_eq!(retried_id, command_id);
+    assert_eq!(
+        retried, command,
+        "unknown acceptance must retain the original cursor and notice"
+    );
+    reply.send(Ok(4)).unwrap();
+    let RemoteSessionRequest::Sync { reply, .. } = remote.requests.recv().await.unwrap() else {
+        panic!("acceptance sync")
+    };
+    reply.send(Ok(())).unwrap();
+    assert!(
+        second.await.unwrap().is_err(),
+        "reconciling the earlier completion must leave the newer one retryable"
+    );
+    let third = tokio::spawn({
+        let env = environment.clone();
+        let view = blocked.clone();
+        async move {
+            let recovery = recovery_for(&view, None);
+            quota::schedule(&env, "one", view, quota::Plan::Wait(recovery)).await
+        }
+    });
+    let RemoteSessionRequest::Submit {
+        command_id: next_id,
+        command: next,
+        reply,
+        ..
+    } = remote.requests.recv().await.unwrap()
+    else {
+        panic!("new completion after reconciliation")
+    };
+    assert_ne!(next_id, command_id);
+    assert_ne!(next, command);
+    reply.send(Ok(5)).unwrap();
+    let RemoteSessionRequest::Sync { reply, .. } = remote.requests.recv().await.unwrap() else {
+        panic!("new acceptance sync")
+    };
+    reply.send(Ok(())).unwrap();
+    third.await.unwrap().unwrap();
+    let recovery = recovery_for(&blocked, None);
+    quota::schedule(&environment, "one", blocked, quota::Plan::Wait(recovery))
+        .await
+        .unwrap();
+    assert!(
+        remote.requests.recv().now_or_never().is_none(),
+        "an answered completion must not resubmit"
+    );
+    remote.shutdown.shutdown().await.unwrap();
 }

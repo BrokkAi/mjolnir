@@ -672,7 +672,18 @@ impl RuntimeState {
                         operation_state
                             .recovery_observer
                             .gate
-                            .enter_foreground(&operation_id, kind.label(), &cancelled, &executor)
+                            .enter_foreground(
+                                &operation_id,
+                                if kind == LifecycleKind::Move
+                                    && origin == LifecycleOrigin::Automatic
+                                {
+                                    "automatic Move"
+                                } else {
+                                    kind.label()
+                                },
+                                &cancelled,
+                                &executor,
+                            )
                             .await
                     }
                     .await;

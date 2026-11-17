@@ -263,4 +263,32 @@ pub(super) enum ReconcileAction {
     Retire,
 }
 
-use mj_client::session::SubmitFailure;
+#[derive(Debug)]
+pub(super) struct SubmitFailure {
+    pub failure: mj_client::session::SubmitFailure,
+    pub code: Option<mj_core::relay::RelayErrorCode>,
+}
+impl std::ops::Deref for SubmitFailure {
+    type Target = mj_client::session::SubmitFailure;
+    fn deref(&self) -> &Self::Target {
+        &self.failure
+    }
+}
+impl From<mj_client::session::SubmitFailure> for SubmitFailure {
+    fn from(failure: mj_client::session::SubmitFailure) -> Self {
+        Self {
+            failure,
+            code: None,
+        }
+    }
+}
+impl From<&str> for SubmitFailure {
+    fn from(message: &str) -> Self {
+        mj_client::session::SubmitFailure::from(message).into()
+    }
+}
+impl From<String> for SubmitFailure {
+    fn from(message: String) -> Self {
+        mj_client::session::SubmitFailure::from(message).into()
+    }
+}

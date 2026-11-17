@@ -2853,6 +2853,9 @@ struct RecordingProcessExecutor {
     fail_purpose: Option<&'static str>,
     cancelled: std::sync::atomic::AtomicBool,
     drain_wait: Option<std::sync::Arc<tokio::sync::Notify>>,
+    handoff_gate: Option<std::sync::Arc<crate::upgrade::Gate>>,
+    handoff_work: std::sync::Mutex<Option<crate::upgrade::Work>>,
+    shutdown: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(unix)]
@@ -2886,6 +2889,19 @@ impl RecordingProcessExecutor {
 
 #[cfg(unix)]
 impl CommandExecutor for RecordingProcessExecutor {
+    fn begin_resumable_work(&self) -> Result<()> {
+        self.handoff_work.lock().unwrap().take();
+        Ok(())
+    }
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        if let Some(gate) = &self.handoff_gate {
+            *self.handoff_work.lock().unwrap() = Some(gate.enter_unless_draining(label)?);
+        }
+        Ok(())
+    }
+    fn shutdown_interrupted(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Acquire)
+    }
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
         mj_core::targets::DeadlinePause::none()
     }
@@ -4394,11 +4410,12 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 // Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 // Hard-won: dd56c0341: foreground Move blocked the result delivery its mutation drain needed.
 // Hard-won: 05b7a7f89: review holds blocked replies and legacy wait retirement discarded delivery state.
+// Hard-won: #1562: a Move drain held handoff admission while waiting on paused delivery.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
     if std::env::var_os("MJ_MOVE_NATIVE_DRAIN_CHILD").is_none() {
-        for mode in ["complete", "cancel"] {
+        for mode in ["complete", "cancel", "handoff"] {
             let directory = tempfile::tempdir().unwrap();
             IsolatedTest::new(name.clone())
                 .env("MJ_MOVE_NATIVE_DRAIN_MODE", mode)
@@ -4523,11 +4540,18 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             .unwrap()
             .unwrap();
     let wait = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mode = std::env::var("MJ_MOVE_NATIVE_DRAIN_MODE").unwrap();
+    let handoff_gate =
+        (mode == "handoff").then(|| std::sync::Arc::new(crate::upgrade::Gate::default()));
+    let handoff_work = handoff_gate
+        .as_ref()
+        .map(|gate| gate.enter("session Move").unwrap());
     let executor = RecordingProcessExecutor {
+        handoff_gate: handoff_gate.clone(),
+        handoff_work: std::sync::Mutex::new(handoff_work),
         drain_wait: Some(wait.clone()),
         ..Default::default()
     };
-    let mode = std::env::var("MJ_MOVE_NATIVE_DRAIN_MODE").unwrap();
     let stored = crate::database::StoredDelegationResult {
         result: mj_core::subagent::SubagentToolResult {
             request_id: "native-mutation".into(),
@@ -4601,7 +4625,11 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             serde_json::from_slice(&fs::read(&queue_path).unwrap()).unwrap();
         assert_eq!(queue["mutating_admission_open"], false, "{queue}");
         assert!(queue["requests"]["native-mutation"].is_object());
-        if mode == "cancel" {
+        if mode != "complete" {
+            if let Some(gate) = &handoff_gate {
+                assert!(gate.try_close(), "handoff must close while the Move awaits paused delivery");
+                executor.shutdown.store(true, std::sync::atomic::Ordering::Release);
+            }
             executor.cancelled.store(true, std::sync::atomic::Ordering::Release);
             tokio::select! {
                 () = crate::recovery_gate::wait_until_cancelled(&delivery) => {},
@@ -4617,16 +4645,24 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
             }).await.unwrap().unwrap();
             crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
             // A cached retry of the acknowledged result issues no second RPC.
-            crate::daemon::delegation::deliver(&handle, &delivery, stored, async {}).await.unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
         }
         drop(delivery);
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), &mut moving)
             .await
             .expect("Move drain must complete or cancel while dispatch keeps delivery ownership");
         drop(moving);
-        if mode == "cancel" {
+        if mode != "complete" {
             let error = result.unwrap_err();
-            assert!(format!("{error:#}").contains("Move cancelled"), "{error:#}");
+            if mode == "handoff" {
+                let outcome = controller.finish_move_result(&mut operation, Err(error), &executor).unwrap();
+                assert_eq!(outcome.outcome, "interrupted");
+                let durable = crate::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
+                assert_eq!(durable.phase, MovePhase::ClosingSource);
+                assert!(!durable.cancellation_requested, "handoff must not become a user cancellation");
+            } else {
+                assert!(format!("{error:#}").contains("Move cancelled"), "{error:#}");
+            }
             assert!(
                 crate::database::load_delegation(LATCH_RELAY_SESSION, "native-mutation")
                     .unwrap()
@@ -4651,6 +4687,24 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
         channels.shutdown.shutdown().await.unwrap();
         drop(admission);
         drop(review);
+        if mode == "handoff" {
+            // A fresh manager and owner model the next daemon. It reads the
+            // operation from storage, delivers the durable result, then resumes.
+            let channels = start_source_relay_manager(&source_relay);
+            let handle = channels.control.wait_for_session(LATCH_RELAY_SESSION, std::time::Duration::from_secs(10)).await.unwrap();
+            let fresh = std::sync::Arc::new(crate::recovery_gate::RecoveryGate::default());
+            crate::database::record_stored_delegation_result(LATCH_RELAY_SESSION.into(), stored.clone()).unwrap();
+            let delivery = fresh.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::DelegationDelivery).unwrap();
+            crate::daemon::delegation::deliver(&handle, &delivery, stored.clone(), async {}).await.unwrap();
+            drop(delivery);
+            let restored = crate::database::load_move_operation(LATCH_RELAY_SESSION).unwrap().unwrap();
+            let outcome = controller.recover_move_managed_controlled(
+                &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+                restored, &RecordingProcessExecutor::default(), &channels.control,
+            ).await.unwrap();
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+            channels.shutdown.shutdown().await.unwrap();
+        }
         assert!(gate.try_start(LATCH_RELAY_SESSION, crate::recovery_gate::BackgroundWork::DelegationDelivery).is_ok(),
             "completion and cancellation must both release the foreground phase");
     });

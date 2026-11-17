@@ -88,6 +88,7 @@ pub enum BackgroundWork {
     RecoveryCopyTransferring,
     RecoveryCopyAbandoning,
     DelegationDelivery,
+    QuotaScheduling,
     /// Reconciles the session's logins (harness, AWS, GitHub, skills) with a
     /// few relay requests.
     CredentialSync,
@@ -108,10 +109,13 @@ impl BackgroundWork {
             Self::RecoveryCopyTransferring => "recovery copy transfer",
             Self::RecoveryCopyAbandoning => "recovery copy cleanup",
             Self::DelegationDelivery => "delegation delivery",
+            Self::QuotaScheduling => "quota scheduling",
             Self::CredentialSync => "credential sync",
         }
     }
 
+    /// Needs exclusivity with connection holders. Quota scheduling uses
+    /// actor exchanges directly, but must exclude every competing lease.
     pub fn needs_lease(self) -> bool {
         !matches!(self, Self::CredentialSync | Self::RecoveryCopyTransferring)
     }
@@ -126,14 +130,18 @@ impl BackgroundWork {
                     | RecoveryCopyTransferring
                     | RecoveryCopyAbandoning
                     | DelegationDelivery
+                    | QuotaScheduling
             ) | (
                 RecoveryCopyCapturing
                     | RecoveryCopyTransferring
                     | RecoveryCopyAbandoning
-                    | DelegationDelivery,
+                    | DelegationDelivery
+                    | QuotaScheduling,
                 CredentialSync
             ) | (RecoveryCopyTransferring, DelegationDelivery)
                 | (DelegationDelivery, RecoveryCopyTransferring)
+                | (QuotaScheduling, RecoveryCopyTransferring)
+                | (RecoveryCopyTransferring, QuotaScheduling)
         )
     }
 }
