@@ -2775,6 +2775,9 @@ else:
         }
     }
 
+    // Runs the host's setup script with the local Bash. The script uses
+    // `mapfile`, which the Bash 3.2 that macOS ships does not have.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ebs_setup_selects_non_root_ebs_across_nvme_reordering_and_guards_signatures() {
         use std::os::unix::fs::PermissionsExt;
