@@ -27,6 +27,8 @@ const WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 /// How many holds of one label a notice describes before it counts the rest.
 const NAMED_HOLDS: usize = 3;
 
+const STARTUP_RECOVERY_LABEL: &str = "daemon startup recovery";
+
 /// The label a session destroy holds admission under.
 pub(crate) const DESTROY_LABEL: &str = "session destroy";
 
@@ -341,6 +343,18 @@ impl Gate {
         }
     }
 
+    async fn wait_for_startup_recovery(&self) {
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.lock().active.contains_key(STARTUP_RECOVERY_LABEL) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
         loop {
@@ -588,6 +602,10 @@ impl Drop for Registration {
         holds.remove(&self.hold);
         if holds.is_empty() {
             state.active.remove(self.label);
+            if self.label == STARTUP_RECOVERY_LABEL {
+                drop(state);
+                self.gate.1.notify_waiters();
+            }
         }
     }
 }
@@ -599,6 +617,15 @@ pub(crate) fn gate() -> &'static Arc<Gate> {
 
 pub(crate) fn activity(label: &'static str) -> anyhow::Result<Work> {
     gate().enter(label)
+}
+
+pub(crate) fn startup_recovery() -> anyhow::Result<Work> {
+    activity(STARTUP_RECOVERY_LABEL)
+}
+
+/// Observe the startup hold used by handoff without taking admission.
+pub(crate) async fn wait_for_startup_recovery() {
+    gate().wait_for_startup_recovery().await;
 }
 
 pub(crate) fn activity_unless_draining(label: &'static str) -> anyhow::Result<Work> {
@@ -645,6 +672,23 @@ pub(crate) fn blockers() -> Vec<Blocker> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_push_cutover_waits_for_the_last_startup_recovery_hold() {
+        let gate = Arc::new(Gate::default());
+        let startup = gate.enter(STARTUP_RECOVERY_LABEL).unwrap();
+        let recovery = startup.clone();
+        let unrelated = gate.enter("other control work").unwrap();
+        let waiting = gate.wait_for_startup_recovery();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(startup);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(recovery);
+        assert!(futures::poll!(&mut waiting).is_ready());
+        assert_eq!(gate.active_labels(), ["other control work"]);
+        drop(unrelated);
+    }
 
     #[test]
     fn handoff_waits_for_every_owner_and_closes_admission_atomically() {
