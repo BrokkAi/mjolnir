@@ -133,3 +133,5 @@ use workspaces::*;
 
 #[cfg(test)]
 mod tests;
+
+mod images;

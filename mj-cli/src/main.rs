@@ -99,6 +99,8 @@ struct Cli {
 // argument types do.
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    /// Build and inspect project session images from mise recipes.
+    Image(image_commands::ImageArgs),
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
     /// Open a minimal local session with direct Ctrl-key commands.
@@ -863,6 +865,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
 fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
+        Some(Command::Image(_)) => "image",
         Some(Command::Go(_)) => "go",
         Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
@@ -1164,6 +1167,9 @@ async fn run_command(
             }
             login(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Image(args)) => image_commands::run(args)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
             api_commands::new_session(args, workspace)
@@ -3098,3 +3104,5 @@ mod tests {
         assert!(controller.state.sessions.contains_key(session_id));
     }
 }
+
+mod image_commands;

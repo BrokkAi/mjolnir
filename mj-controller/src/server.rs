@@ -214,6 +214,7 @@ pub struct ServerOptions {
     /// task does not occupy the controller's action admission slot.
     background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
+    pub(crate) image_builds: crate::session_images::ImageBuilds,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
     /// disabled only for an explicitly trusted HTTP development endpoint.
@@ -285,6 +286,7 @@ impl ServerOptions {
             client_state_tx: requests.client_state_tx,
             background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
+            image_builds: crate::session_images::ImageBuilds::default(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
             tls_config: None,
@@ -421,6 +423,7 @@ pub async fn run_server_on_listener(
     let shutdown = options.shutdown.clone();
     let viewer_code = options.viewer_code.clone();
     let tls_config = options.tls_config.take();
+    let image_builds = options.image_builds.clone();
     let app = router(options);
     mj_core::diagnostic_stdout!("Mjolnir viewer code: {viewer_code}");
     let listener = listener.into_std().context("prepare web viewer listener")?;
@@ -440,14 +443,16 @@ pub async fn run_server_on_listener(
         }
     };
     tokio::pin!(serve);
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut serve => result,
         _ = shutdown.cancelled() => {
             shutdown_handle.graceful_shutdown(Some(Duration::from_secs(2)));
             serve.await
         }
     }
-    .with_context(|| format!("serve web viewer on {bind}"))
+    .with_context(|| format!("serve web viewer on {bind}"));
+    image_builds.finish().await;
+    result
 }
 
 mod viewer_feed;

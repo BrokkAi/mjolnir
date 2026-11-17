@@ -252,6 +252,7 @@ pub(crate) async fn run_server(
         local_address: None,
     };
 
+    let image_builds = options.image_builds.clone();
     let mut serve = ViewerServer::spawn({
         let daemon_runtime = daemon_runtime.clone();
         async move {
@@ -1598,6 +1599,9 @@ pub(crate) async fn run_server(
     {
         tracing::warn!(%error, "native API activity recorder panicked");
     }
+    // Image builds are reproducible work, so shutdown cancels and reaps them
+    // before aborting the HTTP task that accepted them.
+    image_builds.finish().await;
     // Dropping the handle aborts the server task, which is what dropping the
     // server future used to do when this `select!` owned it directly.
     drop(serve);

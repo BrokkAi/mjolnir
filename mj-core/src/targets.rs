@@ -1250,11 +1250,16 @@ impl CommandExecutor for ProcessExecutor {
                     &mut *input,
                     &|| false,
                     gate,
+                    None,
                 )
             })
         })
     }
 }
+
+/// Observe bytes as a supervised command drains them. The callback may run
+/// concurrently for stdout and stderr, and must finish without blocking.
+pub type CommandOutputObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 /// Streams `input` into a freshly spawned child and collects its output.
 ///
@@ -1275,6 +1280,7 @@ fn stream_command_with_stdin(
     input: &mut (dyn Read + Send),
     is_cancelled: &(dyn Fn() -> bool + Sync),
     gate: Option<&Arc<StartGate>>,
+    observer: Option<CommandOutputObserver>,
 ) -> Result<CommandOutput> {
     let started = Instant::now();
     if is_cancelled() {
@@ -1302,8 +1308,9 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let mut stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-    let mut stderr_reader = PipeCollector::spawn(stderr);
+    let mut stdout_reader =
+        PipeCollector::spawn_observed(stdout, gate.cloned(), None, observer.clone());
+    let mut stderr_reader = PipeCollector::spawn_observed(stderr, None, None, observer);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -1502,6 +1509,42 @@ impl Drop for ProcessCancellationGuard {
 }
 
 impl CancellableProcessExecutor {
+    /// Feed input, close stdin at EOF, and observe both output streams while
+    /// retaining the executor's process-group, cancellation and SSH ownership.
+    pub fn execute_with_stdin_observed(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+        observer: Option<CommandOutputObserver>,
+    ) -> Result<CommandOutput> {
+        self.describe_cancellation(
+            command,
+            crate::runtime::off_async_worker(|| {
+                let _running = BlockingOperation::command(command);
+                // The stream is not read until the session has started, so a
+                // refused session is retried with the same stream. The child
+                // runs in its own process group so cancellation can kill the
+                // whole group, which is what releases a writer blocked on a
+                // full pipe.
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        stream_command_with_stdin(
+                            cancellable_command(command),
+                            command,
+                            &mut *input,
+                            &|| self.is_cancelled(),
+                            gate,
+                            observer.clone(),
+                        )
+                    },
+                )
+            }),
+        )
+    }
+
     pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
         ProcessCancellationGuard(self.cancelled.clone())
     }
@@ -1709,9 +1752,18 @@ impl PipeCollector {
     }
 
     fn spawn_output(
+        pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Self {
+        Self::spawn_observed(pipe, gate, output, None)
+    }
+
+    fn spawn_observed(
         mut pipe: impl PollablePipe,
         gate: Option<Arc<StartGate>>,
         mut output: Option<std::fs::File>,
+        observer: Option<CommandOutputObserver>,
     ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1737,6 +1789,9 @@ impl PipeCollector {
                                     if scan.push(&chunk[..count], &mut passed) {
                                         gate.mark_started();
                                     }
+                                    if let Some(observer) = &observer {
+                                        observer(&passed);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&passed)?;
                                     } else {
@@ -1744,6 +1799,9 @@ impl PipeCollector {
                                     }
                                 }
                                 _ => {
+                                    if let Some(observer) = &observer {
+                                        observer(&chunk[..count]);
+                                    }
                                     if let Some(file) = &mut output {
                                         file.write_all(&chunk[..count])?;
                                     } else {
@@ -1762,6 +1820,9 @@ impl PipeCollector {
                 if let Some(scan) = &mut scan {
                     passed.clear();
                     scan.finish(&mut passed);
+                    if let Some(observer) = &observer {
+                        observer(&passed);
+                    }
                     if let Some(file) = &mut output {
                         file.write_all(&passed)?;
                     } else {
@@ -1933,6 +1994,7 @@ impl CancellableProcessExecutor {
                 &mut input,
                 &|| self.is_cancelled(),
                 gate,
+                None,
             );
         }
         let started = Instant::now();
@@ -2061,31 +2123,7 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        self.describe_cancellation(
-            command,
-            crate::runtime::off_async_worker(|| {
-                let _running = BlockingOperation::command(command);
-                // The stream is not read until the session has started, so a
-                // refused session is retried with the same stream. The child
-                // runs in its own process group so cancellation can kill the
-                // whole group, which is what releases a writer blocked on a
-                // full pipe.
-                with_ssh_refusal_retry(
-                    command,
-                    self,
-                    Some(&|| self.is_cancelled()),
-                    |command, gate| {
-                        stream_command_with_stdin(
-                            cancellable_command(command),
-                            command,
-                            &mut *input,
-                            &|| self.is_cancelled(),
-                            gate,
-                        )
-                    },
-                )
-            }),
-        )
+        self.execute_with_stdin_observed(command, input, None)
     }
 }
 
