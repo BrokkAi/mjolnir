@@ -35,7 +35,7 @@ use crate::relay::{
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
-use mj_core::config::{ExecutionPolicy, HarnessKind};
+use mj_core::config::HarnessKind;
 use mj_core::subprocess::terminate_process_group;
 use mj_core::worker_protocol::{DecodedRelayRequest, decode_relay_request};
 
@@ -87,6 +87,8 @@ struct RunningHarness {
     /// replacement gaps as well as the lifetime of any individual supervisor.
     _managed_harness: Option<super::harness::ManagedHarness>,
     _managed_node: Option<super::harness::ManagedNodeRuntime>,
+    /// Stopped when the harness ends, before a closed session is checkpointed.
+    project_tools: Option<super::project_tools::BackgroundInstall>,
 }
 
 struct HarnessPreparationCompletion {
@@ -206,6 +208,7 @@ impl StartedBridgeTasks {
                 .expect("shell tracker was prepared"),
             _managed_harness: None,
             _managed_node: None,
+            project_tools: None,
         }
     }
 }
@@ -1303,6 +1306,7 @@ pub async fn run_daemon_owned(
         shell_cleanup,
         _managed_harness,
         _managed_node,
+        project_tools,
         ..
     } = running_harness;
 
@@ -1402,6 +1406,11 @@ pub async fn run_daemon_owned(
         .operational_state()
         .execution
         == mj_core::relay::RelayExecutionState::Closed;
+    // The install belongs to the harness: a closed relay stays attachable for
+    // checkpointing, which must not see an installer still writing files.
+    if let Some(mut install) = project_tools {
+        install.stop().await;
+    }
     shell_cleanup.close();
     shell_cleanup.wait().await;
     drop(subagent_socket_guard);
@@ -1626,6 +1635,9 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Fast part of project tools. Whatever mise reports missing is installed by
+/// the returned [`super::project_tools::Install`] in the background; the agent
+/// has already been told, so the harness starts at once.
 async fn prepare_project_tools(
     root: &std::path::Path,
     roots: &[PathBuf],
@@ -1633,7 +1645,7 @@ async fn prepare_project_tools(
     base_environment: &BTreeMap<String, String>,
     status: &watch::Sender<PreparationSnapshot>,
     relay: &Arc<RelayCell>,
-) -> Result<bool> {
+) -> Result<(bool, Option<super::project_tools::Install>)> {
     let mut environment = base_environment.clone();
     environment.extend(config.environment.clone());
     let mut applied = false;
@@ -1642,13 +1654,11 @@ async fn prepare_project_tools(
         if recipes.is_empty() {
             // Without a recipe the image's own environment (its Rust homes,
             // PATH and tools) is left exactly as it was.
-            return Ok(Vec::new());
+            return Ok(None);
         }
         super::project_tools::apply_environment(&mut environment, roots, None)?;
         config.environment = environment.clone();
         applied = true;
-        // Toolchains can take minutes to download. The preparation owner
-        // cancels this future on close, but imposes no per-step deadline.
         status.send_modify(|snapshot| {
             snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
                 step: "Install project tools".into(),
@@ -1661,13 +1671,19 @@ async fn prepare_project_tools(
         })
         .await
         .context("record project tools startup step")?;
-        let result = super::project_tools::install(root, &recipes, &mut environment).await;
+        // Installing mise itself (when the image has none) and asking what is
+        // missing are short; the installation proper runs after the harness
+        // starts. The preparation owner cancels this future on close.
+        let install = super::project_tools::plan(root, &recipes, &mut environment).await?;
         config.environment = environment.clone();
-        result
+        if let Some(install) = &install {
+            install.tell_agent_started(relay)?;
+        }
+        anyhow::Ok(install)
     }
     .await;
-    let notices = match result {
-        Ok(notices) => notices,
+    let install = match result {
+        Ok(install) => install,
         Err(error) => {
             let message = format!(
                 "Project tools preparation failed: {error:#}. See {}. The session will continue.",
@@ -1688,14 +1704,14 @@ async fn prepare_project_tools(
                 }
                 Err(error) => tracing::warn!(%error, "open project tools failure log"),
             }
-            vec![message]
+            relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .record_observation(RelayObservation::Notice { message })?;
+            None
         }
     };
-    let mut journal = relay.lock().expect("relay state lock poisoned");
-    for message in notices {
-        journal.record_observation(RelayObservation::Notice { message })?;
-    }
-    Ok(applied)
+    Ok((applied, install))
 }
 
 async fn prepare_and_start_harness(
@@ -1786,12 +1802,8 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    if (config.execution_policy == ExecutionPolicy::ConfiguredApprovals
-        && matches!(
-            config.harness,
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Muse
-        ))
-        || super::json_gh_rules::configures_native_rules_always(config.harness)
+    // Every launch records its `gh` approval where the selected harness reads
+    // it, and OpenCode's denials apply in every execution policy.
     {
         let budget = preparation_step(
             root,
@@ -1801,18 +1813,11 @@ async fn prepare_and_start_harness(
             cancel,
         )
         .await?;
-        // Only the TOML-configured harnesses edit a file in their home.
-        let home = if matches!(config.harness, HarnessKind::Kimi | HarnessKind::Grok) {
-            Some(
-                credentials
-                    .as_ref()
-                    .map_err(|message| anyhow::anyhow!("{message}"))?
-                    .home
-                    .clone(),
-            )
-        } else {
-            None
-        };
+        let home = credentials
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?
+            .home
+            .clone();
         let root = root.to_owned();
         let session_id = config.session_id.clone();
         let harness = config.harness;
@@ -1831,16 +1836,10 @@ async fn prepare_and_start_harness(
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring command permissions");
                 }
-                if let Some(home) = &home {
-                    super::gh_rules::configure_toml_gh_rules(
-                        &root,
-                        &session_id,
-                        home,
-                        harness,
-                        policy,
-                    )?;
-                }
-                super::json_gh_rules::configure_json_gh_rules(
+                super::gh_rules::configure_native_rules(
+                    &root,
+                    &session_id,
+                    &home,
                     harness,
                     policy,
                     denials,
@@ -2101,12 +2100,12 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    let project_tools_applied = match &project_tools_roots {
+    let (project_tools_applied, project_tools_install) = match &project_tools_roots {
         Some(roots) => {
             prepare_project_tools(root, roots, &mut config, base_environment, status, &relay)
                 .await?
         }
-        None => false,
+        None => (false, None),
     };
 
     let harness_budget = preparation_step(
@@ -2195,6 +2194,7 @@ async fn prepare_and_start_harness(
     let dispatch_wakes = dispatch_wake_rx
         .take()
         .context("preparation lost ownership of relay dispatch wake channel")?;
+    let install_relay = relay.clone();
     let relay = relay.clone();
     let bridge_runtime = tokio::runtime::Handle::current();
     let bridge_cancel = cancel.clone();
@@ -2221,6 +2221,9 @@ async fn prepare_and_start_harness(
     let mut running = started.into_running();
     running._managed_harness = managed_harness;
     running._managed_node = managed_node;
+    running.project_tools = project_tools_install.map(|install| {
+        super::project_tools::BackgroundInstall::spawn(install, root.to_owned(), install_relay)
+    });
 
     Ok(running)
 }
@@ -3013,7 +3016,7 @@ mod preparation_tests {
             "MISE_DATA_DIR".into(),
             root.join("mise").to_string_lossy().into_owned(),
         );
-        prepare_project_tools(
+        let (_, install) = prepare_project_tools(
             root,
             &[checkout],
             &mut config,
@@ -3023,7 +3026,29 @@ mod preparation_tests {
         )
         .await
         .unwrap();
-        let journal = relay.lock().unwrap();
+        // mise failing its status commands falls back to naming the recipe
+        // files; the installation then runs after preparation returns.
+        install
+            .expect("installation planned")
+            .run(root, &relay)
+            .await;
+        let mut journal = relay.lock().unwrap();
+        let mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } =
+            journal.drain_mailbox("PostToolBatch").unwrap()
+        else {
+            panic!("drain returned another payload")
+        };
+        let text = text.unwrap();
+        assert_eq!(count, 2, "{text}");
+        let started = text.find("being installed in the background").unwrap();
+        let finished = text.find("did not finish").unwrap();
+        assert!(started < finished, "{text}");
+        assert!(text.contains("mise.toml") && text.contains("second message"));
+        assert!(
+            text.contains("42")
+                && text.contains("project-tools.log")
+                && text.contains("rerun `mise install`")
+        );
         let events = journal.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
         let notices = events
             .iter()

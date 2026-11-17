@@ -104,6 +104,29 @@ def main():
             row = database.execute("SELECT resource_id FROM session_targets WHERE session_id=?", (session,)).fetchone()
         return row[0] if row else None
 
+    def journal(cid, worker_root):
+        # The agent's mailbox messages are journaled when the worker queues
+        # them; no prompt is sent, so none is delivered to the model.
+        return run(["podman", "exec", cid, "sh", "-c", f"cat {worker_root}/relay-journal/*.jsonl 2>/dev/null; true"])
+
+    def mailbox_messages(cid, worker_root):
+        """The agent-bound project-tools messages (their texts), in journal order."""
+        texts = []
+        for line in journal(cid, worker_root).splitlines():
+            if '"source":"project-tools"' in line:
+                texts.extend(find_texts(json.loads(line)))
+        return texts
+
+    def find_texts(value):
+        if isinstance(value, dict):
+            if value.get("source") == "project-tools":
+                body = value["body"]
+                return [body["data"]["text"] if "data" in body else body["text"]]
+            return [t for item in value.values() for t in find_texts(item)]
+        if isinstance(value, list):
+            return [t for item in value for t in find_texts(item)]
+        return []
+
     try:
         for recipe in ["tools", "old-node", "broken", "empty"]:
             repo = root / recipe
@@ -168,6 +191,24 @@ destination = "fixture"
             wait(ready, f"{recipe} session ready")
             cid = container(session)
             worker_root = f"/var/lib/hel/workers/{session}"
+            at_ready = mailbox_messages(cid, worker_root)
+            if recipe == "tools":
+                # The session is running before the toolchain download ends:
+                # the agent was told what is installing and nothing more yet.
+                assert len(at_ready) == 1 and "being installed in the background" in at_ready[0], at_ready
+                assert "rust" in at_ready[0] and "node" in at_ready[0] and "second message" in at_ready[0], at_ready
+            if recipe != "empty":
+                messages = wait(lambda: len(m := mailbox_messages(cid, worker_root)) >= 2 and m, f"{recipe} install result message")
+                (args.artifacts / f"{recipe}-mailbox.json").write_text(json.dumps(messages, indent=2))
+                assert "being installed in the background" in messages[0], messages
+                assert len(messages) == 2, messages
+                if recipe == "broken":
+                    assert "did not finish" in messages[1] and "project-tools.log" in messages[1] and "mise install" in messages[1] and "failed" in messages[1], messages
+                else:
+                    assert "finished installing" in messages[1], messages
+            else:
+                assert not at_ready and not mailbox_messages(cid, worker_root), at_ready
+            (args.artifacts / f"{recipe}-journal.jsonl").write_text(journal(cid, worker_root))
             # Hard-won: #1493: generic images have no /home/hel before bootstrap writes Git config.
             run(["podman", "exec", cid, "sh", "-c", 'test -d "$HOME" && test "$(stat -c %u:%g "$HOME")" = "$(id -u):$(id -g)"'])
             run(["podman", "exec", cid, "python3", "-c",

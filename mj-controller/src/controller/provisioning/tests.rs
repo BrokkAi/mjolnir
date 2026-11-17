@@ -700,8 +700,8 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
     );
     assert_eq!(
         stop.commands().len(),
-        2,
-        "failed stop (after the control-worker check) must not reinstall or relaunch anything"
+        1,
+        "a failed stop must not reinstall or relaunch anything"
     );
     let mut recovered = Controller::load().unwrap();
     let child = &recovered.state.sessions[&child_id];

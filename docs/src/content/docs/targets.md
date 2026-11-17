@@ -80,7 +80,9 @@ current runtime until upgraded.
 ## Execution policy
 
 Mjolnir selects approval behavior from the runtime, then translates it into the
-chosen harness's controls:
+chosen harness's controls. *Guardian* means the agent asks (or an automatic
+reviewer decides) before risky actions; *yolo* means it may act without asking,
+which is safe only inside a sandbox:
 
 | Runtime | Effective policy |
 | --- | --- |
@@ -307,7 +309,7 @@ are found without editing shell startup files.
 
 ## AWS EC2
 
-Create a persistent Podman host with `mj ec2 create c8id.16xlarge --zone us-east-1a`.
+Create a persistent Podman host with `mj ec2 create c8id.4xlarge --zone us-east-1a`.
 It adds an SSH machine and Podman target. Sessions share that host and its build
 cache; closing a session removes its container. `mj ec2 list --region us-east-1`
 lists managed hosts and `mj ec2 destroy <name> --region us-east-1` terminates one.
@@ -369,6 +371,10 @@ Attachments are per-session state in `mj.sqlite3`, not target fields in
 command palette (**prefix+:**) → **Container settings** where supported. See [Session lifecycle](/sessions/).
 
 ## CPU, memory, and instance sizing
+
+To see how much CPU, memory, and disk each host has left before you launch,
+run `mj hosts` (see the [CLI reference](/cli-reference/)); the Targets pane
+shows the same figures.
 
 Container target `cpus` and `memory` values are backend fallbacks for launch
 requests that do not supply a per-session allocation. The terminal wizard does

@@ -91,10 +91,12 @@ a native `mj-worker` for local bare sessions.
 The default session image is `docker.io/library/buildpack-deps:noble`, Ubuntu
 24.04 with Git, compilers and common development headers. Mjolnir installs its
 matching worker and the selected harness, including Node.js when needed.
-After cloning, **Install project tools** runs mise against the repository's
+After cloning, **Install project tools** asks mise what the repository's
 recipe and version files, such as `mise.toml`, `rust-toolchain.toml` and
-`.nvmrc`. A failed tools install produces a visible notice with the log path;
-the harness still starts.
+`.nvmrc`, declare that the image lacks. The harness starts at once and the
+missing tools install in the background; the agent is told when the install
+starts and when it ends. A failed tools install produces a visible notice with
+the log path.
 
 Declare dependencies in [Project environments](/project-environments/). To
 avoid installing them in every new container, use `mj image build` to publish

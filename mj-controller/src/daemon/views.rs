@@ -1,3 +1,5 @@
+use mj_core::targets::CommandActivity;
+
 use super::*;
 
 /// What `RuntimeState::cancel_stalled_create` found.
@@ -6,12 +8,13 @@ pub(super) enum CreateProgress {
     NotRunning,
     /// A Create is running and is either in a stage or recently was.
     Running,
-    /// A Create has gone past the bound without a stage starting or
-    /// finishing.
+    /// A Create has gone past the bound without progress.
     Stalled {
         idle: Duration,
         /// The stages it is in; empty between stages.
         stages: Vec<String>,
+        /// The stalled stream, when a transfer owns the idle clock.
+        stream: Option<String>,
         /// What the stall check found when it asked the Create to cancel.
         phase: StalledCreate,
     },
@@ -599,7 +602,7 @@ impl RuntimeState {
             if operation.operation_id != operation_id || !operation.is_running() {
                 return;
             }
-            operation.last_stage_change = tokio::time::Instant::now();
+            operation.progress.last_stage_change = tokio::time::Instant::now();
             if active {
                 let started_at = stage
                     .started_at_epoch_seconds()
@@ -628,11 +631,79 @@ impl RuntimeState {
         }
     }
 
-    /// Decide, in one owner critical section, whether the session's running
-    /// Create has stalled, and cancel it when it has. A stall is `bound`
-    /// without a provisioning stage starting or finishing; a Create that is
-    /// queued for a slot or preparing a harness (`ProvisionStage::pauses_stall_clock`)
-    /// is never stalled.
+    pub(super) fn allocate_lifecycle_stream_id(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Option<u64> {
+        let mut owner = self.owner();
+        let operation = owner.lifecycle.get_mut(session_id)?;
+        if operation.operation_id != operation_id
+            || operation.kind != LifecycleKind::Create
+            || !operation.is_running()
+        {
+            return None;
+        }
+        let progress = &mut operation.progress;
+        let stream_id = progress.next_stream;
+        progress.next_stream += 1;
+        Some(stream_id)
+    }
+
+    pub(super) fn record_lifecycle_command_activity(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        stream_id: u64,
+        purpose: &str,
+        activity: CommandActivity,
+    ) {
+        let activity = match activity {
+            CommandActivity::StageStarted(stage) => {
+                return self.change_lifecycle_stage(session_id, operation_id, stage, true);
+            }
+            CommandActivity::StageFinished(stage) => {
+                return self.change_lifecycle_stage(session_id, operation_id, stage, false);
+            }
+            activity => activity,
+        };
+        let mut owner = self.owner();
+        let Some(operation) = owner.lifecycle.get_mut(session_id) else {
+            return;
+        };
+        if operation.operation_id != operation_id || !operation.is_running() {
+            return;
+        }
+        let progress = &mut operation.progress;
+        let now = tokio::time::Instant::now();
+        match activity {
+            CommandActivity::StdinStarted => {
+                progress.streams.insert(
+                    stream_id,
+                    ActiveStream {
+                        purpose: purpose.to_owned(),
+                        last_byte: now,
+                    },
+                );
+            }
+            CommandActivity::StdinBytes(bytes) => {
+                if bytes != 0
+                    && let Some(stream) = progress.streams.get_mut(&stream_id)
+                {
+                    stream.last_byte = now;
+                }
+            }
+            CommandActivity::StdinFinished => {
+                if progress.streams.remove(&stream_id).is_some() {
+                    progress.last_stage_change = now;
+                }
+            }
+            CommandActivity::StageStarted(_) | CommandActivity::StageFinished(_) => unreachable!(),
+        }
+    }
+
+    /// Decide and cancel a stalled Create under the same owner lock that
+    /// records provisioning stage changes and transfer progress.
     ///
     /// Cancelling is what ends the stall: failing only the reviewer start
     /// would leave the Create running with its lifecycle admission held, and
@@ -649,15 +720,27 @@ impl RuntimeState {
         if operation.kind != LifecycleKind::Create || !operation.is_running() {
             return CreateProgress::NotRunning;
         }
-        let idle = operation.last_stage_change.elapsed();
-        if idle < bound
-            || operation
+        let progress = &operation.progress;
+        let (since, stream) = match progress
+            .streams
+            .values()
+            .min_by_key(|stream| stream.last_byte)
+        {
+            Some(stream) => (stream.last_byte, Some(stream.purpose.as_str())),
+            None if operation
                 .active_stages
                 .keys()
-                .any(ProvisionStage::pauses_stall_clock)
-        {
+                .any(ProvisionStage::pauses_stall_clock) =>
+            {
+                return CreateProgress::Running;
+            }
+            None => (progress.last_stage_change, None),
+        };
+        let idle = since.elapsed();
+        if idle < bound {
             return CreateProgress::Running;
         }
+        let stream = stream.map(str::to_owned);
         let stages = operation.stage_labels();
         let phase = if operation.request_cancel(session_id, "create stalled") {
             StalledCreate::Cancelled
@@ -669,6 +752,7 @@ impl RuntimeState {
         CreateProgress::Stalled {
             idle,
             stages,
+            stream,
             phase,
         }
     }

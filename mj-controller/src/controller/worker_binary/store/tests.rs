@@ -254,6 +254,84 @@ fn a_gate_wait_outlasts_the_callers_deadline_but_not_a_cancel() {
     });
 }
 
+// Hard-won: #1577: the upgrade deadline killed a slow worker upload, and the next session restarted it from zero
+#[test]
+fn a_slow_worker_byte_stream_outlives_the_operation_deadline_but_short_commands_keep_it() {
+    // Record which commands consume the operation deadline.
+    struct Expired(std::cell::RefCell<Vec<String>>);
+    impl CommandExecutor for Expired {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            false
+        }
+        fn execute_without_deadline(
+            &self,
+            command: &CommandSpec,
+        ) -> anyhow::Result<targets::CommandOutput> {
+            panic!(
+                "only the byte stream may ignore the deadline: {}",
+                command.purpose
+            )
+        }
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<targets::CommandOutput> {
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes)?;
+            assert_eq!(bytes, vec![b'x'; 128 * 1024]);
+            self.0
+                .borrow_mut()
+                .push(format!("untimed {}", command.purpose));
+            Ok(targets::CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<targets::CommandOutput> {
+            self.0
+                .borrow_mut()
+                .push(format!("timed {}", command.purpose));
+            Ok(targets::CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("worker");
+    std::fs::write(&file, vec![b'x'; 128 * 1024]).unwrap();
+    let locator = targets::TargetLocator::SshBare {
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: "workspace".into(),
+        worker_id: None,
+    };
+    let executor = Expired(Default::default());
+    transfer_binary(
+        &executor,
+        &locator,
+        "session",
+        &WorkerInstall::Host(file),
+        "store/.upload/hel",
+    )
+    .unwrap();
+    assert_eq!(
+        *executor.0.borrow(),
+        [
+            "untimed stage replacement Mjolnir worker",
+            "timed make replaced Mjolnir worker executable"
+        ]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn store_collection_reclaims_only_old_unlinked_entries_and_corruption_is_replaced_privately() {

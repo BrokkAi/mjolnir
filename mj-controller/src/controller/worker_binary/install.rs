@@ -1,6 +1,10 @@
 use super::*;
+
+#[path = "profile_transfer.rs"]
+mod profile_transfer;
 use crate::targets::CommandOutput;
 use mj_core::targets::SshTrafficClass;
+pub(in crate::controller) use profile_transfer::ProfileContentManifest;
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub(super) fn append_hel_target_environment(
@@ -720,7 +724,7 @@ pub(super) struct StagedWorkerProfile<'a> {
     pub ownership: &'a Path,
     pub profile: &'a Path,
     pub shared_login: Option<&'a SharedLogin>,
-    pub shared_paths: &'a [&'a str],
+    pub shared_paths: &'a [&'a Path],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,7 +739,7 @@ pub(super) fn install_worker_files(
     ownership: &Path,
     profile_stage: &Path,
     shared_login: Option<&SharedLogin>,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
@@ -945,19 +949,35 @@ pub(super) fn install_worker_profile_files(
                 (launch_config, "launch.json"),
                 (ownership, "ownership.json"),
             ] {
-                execute_checked(
+                upload_worker_file(
                     executor,
-                    crate::targets::scp_upload(ssh, source, &format!("{upload}/{name}"), false)
-                        .purpose("upload remote container worker file"),
+                    ssh,
+                    source,
+                    &format!("{upload}/{name}"),
+                    "upload remote container worker file",
                 )?;
             }
-            upload_profile_archive(
-                executor,
-                ssh,
-                profile_stage,
-                &format!("{upload}/profile"),
-                shared_paths,
-            )?;
+            let staged_profile = format!("{upload}/profile");
+            match locator {
+                // A Nitro guest does not share its profile objects with the
+                // hypervisor account or another guest.
+                targets::TargetLocator::SshNitro { .. } => {
+                    upload_legacy_profile_archive(
+                        executor,
+                        ssh,
+                        profile_stage,
+                        &staged_profile,
+                        &[],
+                    )?;
+                }
+                _ => upload_profile_archive(
+                    executor,
+                    ssh,
+                    profile_stage,
+                    &staged_profile,
+                    shared_paths,
+                )?,
+            }
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
             let owned = [
@@ -1101,6 +1121,35 @@ pub(super) fn clear_profile_configuration(
     Ok(())
 }
 
+/// Stream a file into private staging, where the caller owns partial-file
+/// cleanup. OpenSSH's scp reads its input itself, outside the lifecycle's byte
+/// accounting. Carry the bytes on the same supervised stdin path as profiles.
+pub(super) fn upload_worker_file(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+    purpose: &str,
+) -> Result<()> {
+    let command = targets::ssh_command(
+        SshTrafficClass::Bulk,
+        ssh,
+        [
+            "sh",
+            "-c",
+            "umask 077; exec cat > \"$1\"",
+            "mj-upload",
+            destination,
+        ],
+    )
+    .purpose(purpose);
+    let mut input = std::fs::File::open(source)
+        .with_context(|| format!("open worker upload {}", source.display()))?;
+    let output = executor.execute_with_stdin(&command, &mut input)?;
+    targets::checked_command_output(&command, output)?;
+    Ok(())
+}
+
 /// Install the session-private SSH metadata; binary installation is shared
 /// with creation, upgrades and recovery in `install_worker_binary`.
 #[allow(clippy::too_many_arguments)]
@@ -1112,7 +1161,7 @@ pub(super) fn install_worker_over_ssh(
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<()> {
     execute_checked(
         executor,
@@ -1127,11 +1176,7 @@ pub(super) fn install_worker_over_ssh(
         (launch_config, format!("{worker_root}/launch.json")),
         (ownership, format!("{worker_root}/ownership.json")),
     ] {
-        execute_checked(
-            executor,
-            crate::targets::scp_upload(ssh, source, &remote, false)
-                .purpose("upload SSH worker file"),
-        )?;
+        upload_worker_file(executor, ssh, source, &remote, "upload SSH worker file")?;
     }
     let incoming_profile = format!("{profile_home}.incoming");
     upload_profile_archive(
@@ -1322,6 +1367,7 @@ mj_profile_restore() {
 }
 for work in "$store"/.stage-* "$store"/.retired-*; do
     [ -d "$work" ] || continue
+    [ "${work##*/}" != .stage-negotiated ] || continue
     name=$(cat -- "$work/.token" 2>/dev/null) || name=
     case $name in .stage-*) ;; *)
         mj_profile_warn_unknown "$work"; continue ;;
@@ -1462,12 +1508,12 @@ struct ProfileArchiveEntry {
 
 fn profile_archive_entries(
     source: &Path,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
 ) -> Result<Vec<ProfileArchiveEntry>> {
     fn visit(
         source: &Path,
         path: &Path,
-        shared_paths: &[&str],
+        shared_paths: &[&Path],
         entries: &mut Vec<ProfileArchiveEntry>,
     ) -> Result<()> {
         let absolute = source.join(path);
@@ -1475,6 +1521,11 @@ fn profile_archive_entries(
         let metadata = std::fs::metadata(&absolute)?;
         let directory = metadata.is_dir();
         let key = if !directory && shared_paths.iter().any(|shared| path.starts_with(shared)) {
+            ensure!(
+                metadata.is_file(),
+                "profile entry is not a regular file: {}",
+                path.display()
+            );
             let mut header = tar::Header::new_gnu();
             header.set_metadata(&metadata);
             let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
@@ -1582,16 +1633,31 @@ fn build_profile_archive(
     Ok(file)
 }
 
-/// One transfer per shared content set; unrelated profiles transfer together.
-/// Only querying/collecting and publishing/pinning share the store-wide gate.
-/// The destination is staging only: callers copy it into a private profile,
-/// then remove it.
 fn upload_profile_archive(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
     source: &Path,
     destination: &str,
-    shared_paths: &[&str],
+    shared_paths: &[&Path],
+) -> Result<()> {
+    let manifest = ProfileContentManifest::from_staged(source, shared_paths)?;
+    if manifest.try_transfer(executor, ssh, Some(destination))? {
+        Ok(())
+    } else {
+        upload_legacy_profile_archive(executor, ssh, source, destination, shared_paths)
+    }
+}
+
+/// One transfer per shared content set; unrelated profiles transfer together.
+/// Only querying/collecting and publishing/pinning share the store-wide gate.
+/// The destination is staging only: callers copy it into a private profile,
+/// then remove it.
+fn upload_legacy_profile_archive(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+    shared_paths: &[&Path],
 ) -> Result<()> {
     let entries = profile_archive_entries(source, shared_paths)?;
     let keys: HashSet<_> = entries
@@ -1662,8 +1728,9 @@ fn upload_profile_archive(
     for attempt in 0..2 {
         let mut file = build_profile_archive(source, &entries, &missing)?;
         tracing::info!(
-            archive_bytes = file.metadata()?.len(),
-            shared_content_files = missing.len(),
+            bytes_sent = file.metadata()?.len(),
+            objects_sent = missing.len(),
+            legacy = true,
             destination,
             "send profile content"
         );
@@ -2131,7 +2198,7 @@ mod profile_archive_tests {
     }
 
     fn upload(executor: &SystemTar, source: &Path, destination: &Path) -> Result<()> {
-        upload_profile_archive(
+        upload_legacy_profile_archive(
             executor,
             &SshTarget {
                 destination: "unused".into(),
@@ -2216,12 +2283,12 @@ mod profile_archive_tests {
                     reached: reached_tx,
                     release: release_rx,
                 };
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &held,
                     ssh_ref,
                     first_ref,
                     home.join("held").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 assert!(held.tar.uploads.borrow()[0].len() > 64 * 1024);
@@ -2230,24 +2297,24 @@ mod profile_archive_tests {
             let (done_tx, done_rx) = mpsc::channel();
             let independent = scope.spawn(move || {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     ssh_ref,
                     &second,
                     home.join("independent").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 done_tx.send(()).unwrap();
             });
             let same = scope.spawn(|| {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     &ssh,
                     &first,
                     home.join("same").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 let archives = tar.uploads.borrow();
@@ -2285,12 +2352,12 @@ mod profile_archive_tests {
                     reached: reached_tx,
                     release: release_rx,
                 };
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &held,
                     ssh_ref,
                     first_ref,
                     home.join("cached-held").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
             });
@@ -2298,12 +2365,12 @@ mod profile_archive_tests {
             let (done_tx, done_rx) = mpsc::channel();
             let cached = scope.spawn(move || {
                 let tar = SystemTar::new(home);
-                upload_profile_archive(
+                upload_legacy_profile_archive(
                     &tar,
                     ssh_ref,
                     first_ref,
                     home.join("cached-parallel").to_str().unwrap(),
-                    &["plugins"],
+                    &[Path::new("plugins")],
                 )
                 .unwrap();
                 done_tx.send(()).unwrap();
@@ -2725,7 +2792,7 @@ mod profile_archive_tests {
             .file_name()
             .unwrap()
             .to_owned();
-        let entries = profile_archive_entries(&source, &["plugins"]).unwrap();
+        let entries = profile_archive_entries(&source, &[Path::new("plugins")]).unwrap();
         let mut archive = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
         fs::remove_file(executor.store().join(&key)).unwrap();
         let destination = temp.path().join("missing");

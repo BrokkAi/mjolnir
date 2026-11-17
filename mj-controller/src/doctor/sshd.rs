@@ -99,7 +99,7 @@ pub(super) fn check(
         DoctorCheck::ready(check_id, title, detail)
     } else {
         let mut content = String::from(
-            "# mj multiplexes worker relay sessions over shared SSH connections.\n# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).\n",
+            "# mj multiplexes worker relay sessions over shared SSH connections.\n# OpenSSH defaults (MaxSessions 10, MaxStartups 10:30:100) refuse relay sessions at about 40 containers.\n",
         );
         if low_sessions {
             content.push_str("MaxSessions 200\n");

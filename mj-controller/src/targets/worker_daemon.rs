@@ -1,68 +1,74 @@
 use super::*;
 use mj_core::targets::SshTrafficClass;
 
-/// Where this build's control worker lives: `hel-control-<hash of the build>`
-/// in the session's own worker root, a hard link to this build's entry in the
-/// worker store. The worker never executes it, so installing it is not a worker
-/// swap. The root is its one owner: the link keeps the store entry alive under
-/// the collector's ordinary link-count rule, whichever daemon collects, and
-/// goes with the root. The name carries the build, so daemons of different
-/// builds each install and use their own file in the same root and never
-/// overwrite another's. The build is known statically, so plans can embed the
-/// path without any I/O. Files of older builds stay until the root is removed.
+/// Where the staged control worker lives: one stable name in the session's
+/// own worker root, a hard link to a worker-store entry. It exists only when
+/// the root's own `hel` cannot serve a control subcommand, and it is staged
+/// only on demand (`controller::worker_binary::run_control_command`). Any
+/// build that passes the control scripts' `--help` probe serves, so the name
+/// does not encode the daemon's build and daemons of every build share the
+/// file. The root is its one owner: the link keeps the store entry alive under
+/// the collector's ordinary link-count rule and goes with the root; installing
+/// a `hel` that carries the interface removes it.
 pub fn control_worker_path(worker_root: &str) -> String {
-    control_worker_path_for_build(worker_root, mj_core::worker_build::WORKER_BUILD_ID)
-}
-
-/// [`control_worker_path`] for a named build.
-pub fn control_worker_path_for_build(worker_root: &str, build_id: &str) -> String {
-    use sha2::Digest as _;
-    let name = format!(
-        "hel-control-{}",
-        &mj_core::hex::lower_hex(sha2::Sha256::digest(build_id.as_bytes()))[..16]
-    );
     mj_core::target_path::text(&mj_core::target_path::join(
         std::path::Path::new(worker_root),
-        std::path::Path::new(&name),
+        std::path::Path::new(CONTROL_WORKER_NAME),
     ))
 }
 
-/// Exit status of a control script whose control worker is not in the root.
-/// Nothing ran. Decisions install it first
-/// (`controller::worker_binary::ensure_control_worker`); a read-only diagnosis
-/// reports it as a finding.
+/// File name of the staged control worker. Also the prefix the control scripts
+/// glob (`hel-control*`), which keeps files staged under the hashed names of
+/// earlier releases usable.
+pub const CONTROL_WORKER_NAME: &str = "hel-control";
+
+/// Exit status of a control script when nothing in the root serves its
+/// subcommand. Nothing ran. The caller stages the control worker and reruns the
+/// command once (`controller::worker_binary::run_control_command`); a
+/// read-only diagnosis reports it as a finding.
 pub const WORKER_CONTROL_UNSTAGED_STATUS: i32 = 78;
 
-/// Shell that runs `hel worker <subcommand> --root <root>` from this build's
-/// control worker ([`control_worker_path`]), never from the root's own `hel`. A
-/// root keeps the build that last started a worker there, which can predate
-/// these subcommands; the lock they inspect (`<root>/worker.lock`, which no
-/// shell can test portably) and the startup record are older than they are, so
-/// the current build judges and stops an older worker correctly. A root without
-/// a `hel` never had a worker started from it, so `when_no_binary` answers for
-/// it.
+/// Shell that runs `hel worker <subcommand> <args> --root <root>` from the
+/// first binary in the root that proves it serves the subcommand: the root's
+/// own `hel`, then any `hel-control*`. A binary proves it by exiting 0 for
+/// `worker <subcommand> --help`; every other result (status 2 from a build
+/// that predates the subcommand, 126 or 127, a crash, a wrong-architecture
+/// file) counts as not proven. When none proves it the script exits
+/// [`WORKER_CONTROL_UNSTAGED_STATUS`] before doing anything. The decision is
+/// made on the target against the file about to run, so the daemon keeps no
+/// record of which build can do what. A root without a `hel` never had a
+/// worker started from it, so `when_no_binary` answers for it. The contract the
+/// subcommands keep is in `mj-worker/src/worker_stop.rs`.
 fn installed_worker_script(
     worker_root: &str,
     subcommand: &str,
+    args: &str,
     when_no_binary: &str,
 ) -> ControlScript {
     ControlScript::new(
         worker_root,
         format!(
             r#"hel_root={root}
-hel_control={control}
 if [ -e "$hel_root/hel" ]; then
-    if [ ! -x "$hel_control" ]; then
-        echo "control worker for this build not installed in $hel_root" >&2
+    hel_bin=
+    for hel_candidate in "$hel_root/hel" "$hel_root"/{control_name}*; do
+        if [ -f "$hel_candidate" ] && [ -x "$hel_candidate" ] \
+            && "$hel_candidate" worker {subcommand} --help >/dev/null 2>&1; then
+            hel_bin=$hel_candidate
+            break
+        fi
+    done
+    if [ -z "$hel_bin" ]; then
+        echo "no worker in $hel_root serves 'worker {subcommand}'" >&2
         exit {unstaged}
     fi
-    "$hel_control" worker {subcommand} --root "$hel_root" || exit $?
+    "$hel_bin" worker {subcommand}{args} --root "$hel_root" || exit $?
 else
     {when_no_binary}
 fi
 "#,
             root = posix_quote(worker_root),
-            control = posix_quote(&control_worker_path(worker_root)),
+            control_name = CONTROL_WORKER_NAME,
             unstaged = WORKER_CONTROL_UNSTAGED_STATUS,
         ),
     )
@@ -100,7 +106,7 @@ impl ControlScript {
         }
     }
 
-    /// Explicit escape for the staging check itself and read-only diagnoses.
+    /// Explicit escape for a caller that handles status 78 itself, and for read-only diagnoses.
     pub fn unstaged_script(&self) -> &str {
         &self.script
     }
@@ -114,7 +120,7 @@ pub struct ControlCommand {
 }
 
 impl ControlCommand {
-    /// Only for a caller that stages separately or reports an unstaged diagnosis.
+    /// Only for a caller that handles status 78 itself or reports it as a diagnosis.
     pub fn unstaged_command(self) -> CommandSpec {
         self.command
     }
@@ -179,21 +185,25 @@ impl WorkerControlPlan {
         self.control.is_some()
     }
 
-    /// Stage the control worker (on its own executor, without `executor`'s
-    /// deadline), then run every command with `executor`.
+    /// Run every command with `executor`. A command whose script finds nothing
+    /// in the root to serve its subcommand (status 78) has the control worker
+    /// staged and is rerun once ([`crate::controller::run_control_command`]).
     pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
-        if let Some((locator, session_id, root)) = &self.control {
-            ensure!(
-                Path::new(&worker_root(locator, session_id)?) == root,
-                "control script root differs from the staging target"
-            );
-            crate::controller::ensure_control_worker(executor, locator, session_id)?;
+        let mut outputs = Vec::with_capacity(self.commands.len());
+        for command in &self.commands {
+            let output = match &self.control {
+                Some((locator, session_id, root)) => {
+                    ensure!(
+                        Path::new(&worker_root(locator, session_id)?) == root,
+                        "control script root differs from the staging target"
+                    );
+                    crate::controller::run_control_command(executor, locator, session_id, command)?
+                }
+                None => executor.execute(command)?,
+            };
+            outputs.push(mj_core::targets::checked_command_output(command, output)?);
         }
-        CommandPlan {
-            description: self.description.clone(),
-            commands: self.commands.clone(),
-        }
-        .execute(executor)
+        Ok(outputs)
     }
 
     /// The commands of a plan that does not run the control worker, for a
@@ -229,37 +239,16 @@ impl From<CommandPlan> for WorkerControlPlan {
     }
 }
 
-/// Print `absent` when the root never ran a worker (no `hel`), `present` when
-/// this build's control worker is installed in the root, and `missing`
-/// otherwise.
-pub fn control_worker_state_script(worker_root: &str) -> ControlScript {
-    ControlScript::new(
-        worker_root,
-        format!(
-            r#"hel_root={root}
-hel_control={control}
-if [ ! -e "$hel_root/hel" ]; then printf 'absent\n'
-elif [ -x "$hel_control" ] && [ "$("$hel_control" worker build-id 2>/dev/null)" = {build} ]; then printf 'present\n'
-else printf 'missing\n'
-fi
-"#,
-            root = posix_quote(worker_root),
-            control = posix_quote(&control_worker_path(worker_root)),
-            build = posix_quote(mj_core::worker_build::WORKER_BUILD_ID),
-        ),
-    )
-}
-
 /// Report whether the exact session worker is alive without signaling it.
 /// A successful probe prints one of `alive`, `starting` or `dead`; transport or
 /// shell failures stay distinguishable from a confirmed absent worker.
 pub fn worker_daemon_liveness_script(worker_root: &str) -> ControlScript {
-    installed_worker_script(worker_root, "liveness", "printf 'dead\\n'")
+    installed_worker_script(worker_root, "liveness", "", "printf 'dead\\n'")
 }
 
 /// The pid of the worker that holds the root's lock, printed alone, or nothing.
 pub fn worker_daemon_holder_script(worker_root: &str) -> ControlScript {
-    installed_worker_script(worker_root, "holder", ":")
+    installed_worker_script(worker_root, "holder", "", ":")
 }
 
 /// Stop the detached worker daemon rooted at `worker_root`: TERM, then KILL
@@ -267,14 +256,14 @@ pub fn worker_daemon_holder_script(worker_root: &str) -> ControlScript {
 /// the worker and its harness can shut down in order. Returns once the root's
 /// lock is free and nothing the worker started is left.
 pub fn stop_worker_daemon_script(worker_root: &str) -> ControlScript {
-    installed_worker_script(worker_root, "stop", ":")
+    installed_worker_script(worker_root, "stop", "", ":")
 }
 
 /// Kill a retired worker daemon rooted at `worker_root`, and its process tree,
 /// at once. Only for retirement: the caller removes the root next, and a sealed
 /// checkpoint (or a discard) means nothing in it needs an orderly shutdown.
 pub fn kill_worker_daemon_script(worker_root: &str) -> ControlScript {
-    installed_worker_script(worker_root, "stop --kill", ":")
+    installed_worker_script(worker_root, "stop", " --kill", ":")
 }
 
 /// Stop a leaked worker and delete the durable relay state under its root.

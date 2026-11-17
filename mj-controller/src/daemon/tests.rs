@@ -1063,7 +1063,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: Some("workspace-a".into()),
             resume_destination: None,
             notice: None,
@@ -1094,7 +1094,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3033,7 +3033,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
             kind,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3087,7 +3087,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             kind: LifecycleKind::Suspend,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3936,6 +3936,89 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     check_progress(&state, bound).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(check_progress(&state, bound).is_err());
+}
+
+// Hard-won: #1583: a reviewer Create cancelled a profile stream that was still moving bytes.
+#[tokio::test(start_paused = true)]
+async fn a_create_watches_each_stream_for_byte_progress() {
+    use mj_core::targets::CommandActivity;
+
+    let state = test_runtime_state();
+    start_idle_create(&state).await;
+    tokio::task::yield_now().await;
+    let operation_id = state.owner().lifecycle["session-1"].operation_id.clone();
+    let profile = state
+        .allocate_lifecycle_stream_id("session-1", &operation_id)
+        .unwrap();
+    let worker = state
+        .allocate_lifecycle_stream_id("session-1", &operation_id)
+        .unwrap();
+    let report = |id, purpose, activity| {
+        state.record_lifecycle_command_activity("session-1", &operation_id, id, purpose, activity);
+    };
+    let send_profile = "send profile content";
+    let upload_worker = "stage replacement Mjolnir worker";
+    let bound = create::CREATE_STALL_BOUND;
+    let half = bound / 2;
+
+    // The stream has to queue for SSH first. Its idle clock begins only after
+    // admission, even when queueing takes more than ten minutes.
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageStarted(ProvisionStage::WaitingForSshConnection),
+    );
+    tokio::time::advance(bound * 2).await;
+    check_progress(&state, bound).unwrap();
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageFinished(ProvisionStage::WaitingForSshConnection),
+    );
+    report(profile, send_profile, CommandActivity::StdinStarted);
+    for _ in 0..4 {
+        tokio::time::advance(half).await;
+        report(
+            profile,
+            send_profile,
+            CommandActivity::StdinBytes(32 * 1024),
+        );
+        check_progress(&state, bound).expect("the profile is still transferring");
+    }
+
+    // A second stream stops moving bytes. Profile bytes and a queue on
+    // another lane must not hide the stalled worker upload.
+    report(worker, upload_worker, CommandActivity::StdinStarted);
+    tokio::time::advance(half).await;
+    report(
+        worker,
+        upload_worker,
+        CommandActivity::StdinBytes(16 * 1024),
+    );
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StdinBytes(32 * 1024),
+    );
+    tokio::time::advance(half).await;
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StdinBytes(32 * 1024),
+    );
+    check_progress(&state, bound).unwrap();
+    report(
+        profile,
+        send_profile,
+        CommandActivity::StageStarted(ProvisionStage::WaitingForWorkerStore),
+    );
+    tokio::time::advance(half).await;
+    let error = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(
+        error.contains("stage replacement Mjolnir worker moved no bytes for 600 s"),
+        "{error}"
+    );
+    assert!(error.contains("its Create was cancelled"), "{error}");
 }
 
 /// Harness preparation reports its own progress and failure, and one step (a
@@ -5538,6 +5621,176 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
         .send(Ok(2))
         .expect("the drain awaits the submit reply");
     assert!(notice_texts(&state).is_empty(), "delivery posted a notice");
+}
+
+/// Peer messages accepted while a session is starting stay behind its first
+/// prompt, then land in the mailbox in send order. They are not a second
+/// prompt (#1553).
+#[tokio::test]
+async fn session_messages_while_starting_follow_the_first_prompt() {
+    let Some(_writer) =
+        startup_prompt_test_store("session_messages_while_starting_follow_the_first_prompt")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "api-startup-order".into(),
+            crate::server::api::StartFollowup {
+                prompt: Some("open the brief".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("queue the startup prompt");
+    for (request_id, text, at) in [
+        ("first-note", "first note", 1),
+        ("second-note", "second note", 2),
+    ] {
+        state
+            .queue_startup_session_message(
+                "session-1",
+                crate::daemon::startup_followup::QueuedSessionMessage {
+                    request_id: request_id.into(),
+                    sender_id: "sender-1".into(),
+                    sender_title: "sender".into(),
+                    text: text.into(),
+                    created_at_ms: at,
+                    waited_on_group: Some("api-startup-order".into()),
+                },
+            )
+            .await
+            .expect("queue the session message");
+    }
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "open the brief");
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+
+    let pending = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            if pending.len() >= 2 {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the session messages were not queued behind the prompt");
+    let texts = pending
+        .iter()
+        .map(|row| {
+            assert_eq!(row.target_session_id, "session-1");
+            assert!(!row.unpark);
+            let event: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&row.event_json).unwrap();
+            assert_eq!(event.source, "session_message");
+            assert!(event.wake);
+            let mj_core::mailbox::MailboxEventBody::SessionMessage { text, .. } = event.body else {
+                panic!("expected a session message");
+            };
+            text
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["first note", "second note"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "a held session message was submitted as its own prompt"
+    );
+}
+
+/// A message held for a session that will never finish starting is returned
+/// to the sender, and the startup row stays so a retry is not delivered later.
+#[tokio::test]
+async fn a_session_message_while_starting_is_returned_when_startup_fails() {
+    let Some(_writer) = startup_prompt_test_store(
+        "a_session_message_while_starting_is_returned_when_startup_fails",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let sender = runtime_test_session(
+        "sender-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&sender).unwrap();
+    let command_id =
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("bring-logs");
+    state
+        .queue_startup_session_message(
+            "session-1",
+            crate::daemon::startup_followup::QueuedSessionMessage {
+                request_id: "bring-logs".into(),
+                sender_id: "sender-1".into(),
+                sender_title: "sender".into(),
+                text: "bring the logs".into(),
+                created_at_ms: 5,
+                waited_on_group: None,
+            },
+        )
+        .await
+        .expect("queue the session message");
+
+    let mut session = state
+        .session_record("session-1")
+        .expect("the starting session is published");
+    session.state = SessionState::Error;
+    session.last_error = Some("provisioning failed".into());
+    crate::database::save_session(&session).unwrap();
+
+    // The notice is committed before the failed phase. Both are the receipt.
+    let (notice, stored_error) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = crate::database::pending_mailbox_events(10).unwrap();
+            let notice = pending.iter().find_map(|row| {
+                (row.target_session_id == "sender-1").then(|| row.event_json.clone())
+            });
+            let failed = crate::database::load_startup_delivery(&command_id)
+                .unwrap()
+                .filter(|row| row.phase == "failed")
+                .and_then(|row| row.error);
+            if let (Some(notice), Some(error)) = (notice, failed) {
+                return (notice, error);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the sender was not told the message was dropped");
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&notice).unwrap();
+    let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
+        panic!("the undelivered notice is plain text, not a reply from the target");
+    };
+    assert!(text.contains("was not delivered"), "{text}");
+    assert!(text.contains("bring the logs"), "{text}");
+    assert!(text.contains("provisioning failed"), "{text}");
+    assert!(
+        stored_error.contains("was not delivered"),
+        "a retry has to read that the message was not delivered: {stored_error}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "the undelivered message was submitted"
+    );
 }
 
 /// A restored session's hand-off is queued ahead of any prompt, so the prompt
@@ -10748,7 +11001,6 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
-                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };
@@ -11186,7 +11438,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
             kind: LifecycleKind::Move,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
-            last_stage_change: tokio::time::Instant::now(),
+            progress: LifecycleProgress::new(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,

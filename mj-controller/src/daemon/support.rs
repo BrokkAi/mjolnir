@@ -21,7 +21,7 @@ pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
         if result.deferred {
             tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
         } else if result.cancelled {
-            tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
+            tracing::info!(session_id = %result.session_id, %error, reason = "cancelled by a session operation (close, suspend, destroy, move or upgrade)", "daemon recovery checkpoint cancelled");
         } else {
             tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
         }
@@ -95,6 +95,38 @@ impl<E> DaemonStageReportingExecutor<E> {
 }
 
 impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
+    fn staged_stream(
+        &self,
+        command: &CommandSpec,
+        run: impl FnOnce(&CommandSpec) -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        self.staged(command, "session streaming command stage finished", || {
+            let Some(operation_id) = &self.operation_id else {
+                return run(command);
+            };
+            let Some(stream_id) = self
+                .state
+                .allocate_lifecycle_stream_id(&self.session_id, operation_id)
+            else {
+                return run(command);
+            };
+            let state = self.state.clone();
+            let session_id = self.session_id.clone();
+            let operation_id = operation_id.clone();
+            let purpose = command.purpose.clone();
+            let observed = command.clone().observe(move |activity| {
+                state.record_lifecycle_command_activity(
+                    &session_id,
+                    &operation_id,
+                    stream_id,
+                    &purpose,
+                    activity,
+                );
+            });
+            run(&observed)
+        })
+    }
+
     /// Hold the command's lifecycle stage while `run` executes it, and log the
     /// outcome.
     fn staged(
@@ -165,7 +197,7 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         command: &CommandSpec,
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
-        self.staged(command, "session streaming command stage finished", || {
+        self.staged_stream(command, |command| {
             self.inner.execute_with_stdin(command, input)
         })
     }
@@ -183,7 +215,7 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         command: &CommandSpec,
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
-        self.staged(command, "session streaming command stage finished", || {
+        self.staged_stream(command, |command| {
             self.inner
                 .execute_with_stdin_without_deadline(command, input)
         })

@@ -162,7 +162,17 @@ impl RelayClient {
                         timeout_seconds = timeout.map(|duration| duration.as_secs_f64()),
                         "relay operation is still waiting for its response"
                     );
-                    response.await
+                    let response = response.await;
+                    // The warning above says an operation is slow; this says
+                    // for how long, so a stall can be sized per target.
+                    tracing::warn!(
+                        %session_id,
+                        %operation,
+                        elapsed_seconds = started.elapsed().as_secs_f64(),
+                        answered = response.is_ok(),
+                        "slow relay operation finished"
+                    );
+                    response
                 }
             };
             response

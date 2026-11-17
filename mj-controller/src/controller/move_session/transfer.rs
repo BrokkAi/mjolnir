@@ -170,10 +170,8 @@ fn utility(
         }
         WorkerInstall::Host(binary) => {
             let root = targets::worker_root(backend, id)?;
-            let helper = format!(
-                "{root}/move-helper-{}",
-                mj_core::worker_build::WORKER_BUILD_ID
-            );
+            let name = format!("move-helper-{}", mj_core::worker_build::WORKER_BUILD_ID);
+            let helper = format!("{root}/{name}");
             let probe = executor.execute(&targets::command_on_locator(
                 SshTrafficClass::Control,
                 backend,
@@ -182,7 +180,7 @@ fn utility(
                 "check Move helper",
             )?)?;
             if probe.status != 0 {
-                install_helper(executor, backend, id, &binary, &helper)?;
+                install_helper(executor, backend, id, &binary, &name)?;
             }
             helper
         }
@@ -211,41 +209,21 @@ fn utility(
 }
 
 fn install_helper(
-    executor: &(impl CommandExecutor + Sync),
+    executor: &impl CommandExecutor,
     backend: &targets::TargetLocator,
     id: &str,
     binary: &Path,
-    helper: &str,
+    name: &str,
 ) -> Result<()> {
-    // Each uploader owns its temporary inode. Rename publishes only a complete
-    // immutable helper; neither checkpoint staging nor a running binary is overwritten.
-    let script = r#"set -eu
-temporary=$(mktemp "$1.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT
-cat > "$temporary"
-chmod 700 "$temporary"
-mv -f -- "$temporary" "$1"
-"#;
-    let command = targets::command_on_locator(
-        SshTrafficClass::Bulk,
+    use super::super::worker_binary::{WorkerInstall, install_worker_binary};
+    install_worker_binary(
+        executor,
         backend,
         id,
-        vec![
-            "sh".into(),
-            "-c".into(),
-            script.into(),
-            "install-move-helper".into(),
-            helper.into(),
-        ],
-        "install immutable Move helper",
-    )?;
-    let output = executor.execute_with_stdin(&command, &mut std::fs::File::open(binary)?)?;
-    ensure!(
-        output.status == 0,
-        "Move helper installation failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
+        &WorkerInstall::Host(binary.to_owned()),
+        name,
+    )
+    .context("install immutable Move helper")
 }
 
 /// Options shared by GNU rsync, openrsync and older macOS rsync.
@@ -1449,33 +1427,38 @@ mod tests {
     // Needs a POSIX shell.
     #[cfg(unix)]
     #[test]
-    fn concurrent_move_helper_uploads_publish_complete_files_without_shared_staging() {
+    fn move_helper_reuses_a_published_worker_without_uploading() {
+        use super::super::super::worker_binary::{WorkerInstall, install_worker_binary};
+        use std::os::unix::fs::MetadataExt;
+
         let directory = tempfile::tempdir().unwrap();
         let id = "move-helper-upload";
         let root = directory.path().join(id);
         std::fs::create_dir(&root).unwrap();
         let binary = directory.path().join("binary");
-        let body = vec![0x5a; 512 * 1024 + 17];
+        let mut body = vec![0x5a; 512 * 1024 + 17];
+        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
         std::fs::write(&binary, &body).unwrap();
-        let helper = root
-            .join("move-helper-build")
-            .to_string_lossy()
-            .into_owned();
         let backend = targets::TargetLocator::LocalBare {
             worker_root: root.to_string_lossy().into_owned(),
         };
-        std::thread::scope(|scope| {
-            let first = scope.spawn(|| {
-                install_helper(&targets::ProcessExecutor, &backend, id, &binary, &helper)
-            });
-            let second = scope.spawn(|| {
-                install_helper(&targets::ProcessExecutor, &backend, id, &binary, &helper)
-            });
-            first.join().unwrap().unwrap();
-            second.join().unwrap().unwrap();
-        });
+        let executor = targets::ProcessExecutor;
+        install_worker_binary(
+            &executor,
+            &backend,
+            id,
+            &WorkerInstall::Host(binary.clone()),
+            "hel",
+        )
+        .unwrap();
+        install_helper(&executor, &backend, id, &binary, "move-helper-build").unwrap();
+        let worker = root.join("hel");
+        let helper = root.join("move-helper-build");
         assert_eq!(std::fs::read(&helper).unwrap(), body);
-        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::metadata(worker).unwrap().ino(),
+            std::fs::metadata(helper).unwrap().ino()
+        );
     }
 
     #[test]

@@ -618,7 +618,7 @@ impl RuntimeState {
                         kind,
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
-                        last_stage_change: tokio::time::Instant::now(),
+                        progress: LifecycleProgress::new(),
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,

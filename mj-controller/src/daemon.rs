@@ -575,6 +575,18 @@ pub(crate) enum StartupStep {
     ApiPrompt {
         text: String,
     },
+    /// A peer message accepted while this session was still starting.
+    /// Delivered after earlier startup steps: through the mailbox when the
+    /// worker can take one, otherwise as the next turn. `waited_on_group` is
+    /// the startup group this message queued behind, when one was still
+    /// pending. The request id is the command id's `SessionMessageTurn` suffix.
+    SessionMessage {
+        sender_id: String,
+        sender_title: String,
+        text: String,
+        created_at_ms: u64,
+        waited_on_group: Option<String>,
+    },
 }
 
 /// One supervised drain per session. Pending payloads stay in SQLite.
@@ -583,6 +595,27 @@ struct StartupQueue {
     last_error: Option<String>,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct LifecycleProgress {
+    last_stage_change: tokio::time::Instant,
+    next_stream: u64,
+    streams: BTreeMap<u64, ActiveStream>,
+}
+
+struct ActiveStream {
+    purpose: String,
+    last_byte: tokio::time::Instant,
+}
+
+impl LifecycleProgress {
+    fn new() -> Self {
+        Self {
+            last_stage_change: tokio::time::Instant::now(),
+            next_stream: 0,
+            streams: BTreeMap::new(),
+        }
+    }
 }
 
 struct ActiveLifecycle {
@@ -598,9 +631,7 @@ struct ActiveLifecycle {
     kind: LifecycleKind,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
-    /// When a stage last started or finished: the one record of whether this
-    /// operation is making progress. Set by `change_lifecycle_stage` only.
-    last_stage_change: tokio::time::Instant,
+    progress: LifecycleProgress,
     /// The workspace a resume is claiming before its durable record changes.
     /// Workspace deletion consults this so it cannot race the claim.
     resume_workspace_id: Option<String>,
