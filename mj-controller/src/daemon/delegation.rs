@@ -133,7 +133,12 @@ impl CompletionRetry {
 }
 
 enum Completed {
-    Executed(StoredDelegationResult, bool),
+    /// The durable result, and how its first delivery attempt ended (a
+    /// real failure carries its cause).
+    Executed(
+        StoredDelegationResult,
+        std::result::Result<Delivery, String>,
+    ),
     Delivered,
     /// The owner closed during a deferral; the entry stays with the daemon
     /// that is exiting.
@@ -263,14 +268,16 @@ async fn run(
                                 };
                                 Some(work)
                             };
-                            let result = backend.execute_subagent_tool_durable(parent.clone(), request).await?;
+                            let result = backend
+                                .execute_subagent_tool_durable(parent.clone(), request)
+                                .await?;
                             // Durable results can wait for the replacement daemon.
                             drop(_admission);
-                            let delivered = deliver_background(&runtime, &parent, result.clone(), &deferral).await;
-                            if let Err(error) = &delivered {
-                                tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
-                            }
-                            Ok(Completed::Executed(result, matches!(delivered, Ok(Delivery::Delivered))))
+                            let delivered =
+                                deliver_background(&runtime, &parent, result.clone(), &deferral)
+                                    .await
+                                    .map_err(|error| format!("{error:#}"));
+                            Ok(Completed::Executed(result, delivered))
                         }
                         Job::Deliver(result) => {
                             match deliver_background(&runtime, &parent, result, &deferral).await? {
@@ -371,14 +378,28 @@ async fn run(
                 if let Some(id) = identities.remove(&task_id) {
                     match result {
                         Ok(Completed::Executed(result, delivered)) => {
-                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1, delivered,
+                            tracing::debug!(parent_session_id = %id.0, request_id = %id.1,
+                                delivered = matches!(delivered, Ok(Delivery::Delivered)),
                                 is_error = result.result.is_error, "delegation execution completed");
                             dispatch.executed(&id, result);
-                            dispatch.delivered(&id, delivered);
+                            match delivered {
+                                Ok(Delivery::Delivered) => {
+                                    dispatch.delivered(&id, true, None);
+                                }
+                                // The exiting daemon keeps the durable result for the next one.
+                                Ok(Delivery::Stopped) => {}
+                                Err(error) => {
+                                    if dispatch.delivered(&id, false, Some(error.clone())) {
+                                        tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation delivery failed; retaining result for retry");
+                                    } else {
+                                        tracing::debug!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation delivery failed; retaining result for retry");
+                                    }
+                                }
+                            }
                         },
                         Ok(Completed::Delivered) => {
                             tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation result delivered");
-                            dispatch.delivered(&id, true);
+                            dispatch.delivered(&id, true, None);
                         }
                         Ok(Completed::Stopped) => {
                             tracing::debug!(parent_session_id = %id.0, request_id = %id.1, "delegation delivery stopped by shutdown");
@@ -388,8 +409,11 @@ async fn run(
                             tracing::error!("untracked quota source scan completion");
                         }
                         Err(error) => {
-                            tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
-                            dispatch.failed_task(&id);
+                            if dispatch.failed_task(&id, error.to_string()) {
+                                tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
+                            } else {
+                                tracing::debug!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
+                            }
                         }
                     }
                 }
