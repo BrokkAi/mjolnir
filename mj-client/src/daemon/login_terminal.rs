@@ -37,7 +37,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::LoginTerminalReady => Ok(LoginTerminal {
-                stream: self.stream,
+                stream: self.take_stream()?,
                 connector: self.connector,
             }),
             reply => bail!("unexpected login terminal reply {reply:?}"),

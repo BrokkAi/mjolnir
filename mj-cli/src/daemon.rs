@@ -945,10 +945,7 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     if !ensure_supported_or_gone(&metadata).await? {
         return Ok(ExistingDaemon::Absent);
     }
-    let daemon =
-        BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
-    let release = daemon.version().cmp_precedence(this_build().version());
-    if metadata.protocol_version < PROTOCOL_VERSION || release.is_lt() {
+    if metadata.protocol_version < PROTOCOL_VERSION {
         // The same-protocol path below treats an unreachable daemon as absent.
         // This path replaces a daemon it cannot ask, so it first has to know
         // that one still owns the store: a record left by a daemon that died
@@ -978,30 +975,12 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     if ping_daemon(&mut client).await.is_err() {
         return Ok(ExistingDaemon::Absent);
     }
-    let identity = match tokio::time::timeout(Duration::from_secs(2), client.identity()).await {
-        Ok(Ok(identity)) => identity,
-        Ok(Err(error)) => {
-            // A daemon of this protocol must answer. If it did not, keep the
-            // old answer for this decision only; nothing below trusts it.
-            tracing::debug!(
-                error = format!("{error:#}"),
-                "the daemon did not report its identity"
-            );
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-        Err(_) => {
-            tracing::debug!("the daemon did not report its identity before the deadline");
-            DaemonIdentity {
-                instance_id: String::new(),
-                build_version: metadata.build_version.clone(),
-                placement: legacy_placement(metadata.pid),
-            }
-        }
-    };
+    // This protocol reports its own placement. A failed discovery cannot safely
+    // decide whether to use or replace it, and may have interrupted the connection.
+    let identity = tokio::time::timeout(Duration::from_secs(2), client.identity())
+        .await
+        .context("time out reading the running daemon's identity")?
+        .context("read the running daemon's identity")?;
     let build = daemon_build(&metadata, &identity.placement)?;
     // A container daemon's store is in its volume; the host store says
     // nothing about it. The daemon reports its own migration failure.
@@ -2025,6 +2004,81 @@ pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    // Hard-won: #1566: startup guessed a legacy identity after abandoning a supported daemon's request.
+    #[tokio::test]
+    async fn startup_propagates_identity_failure_instead_of_guessing_placement() {
+        const CHILD: &str = "MJ_TEST_STARTUP_IDENTITY_FAILURE";
+        const TEST: &str =
+            "daemon::tests::startup_propagates_identity_failure_instead_of_guessing_placement";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        for (refuse, build_version) in [
+            (true, env!("CARGO_PKG_VERSION")),
+            (false, env!("CARGO_PKG_VERSION")),
+            (true, "0.0.1"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let metadata = DaemonMetadata {
+                protocol_version: PROTOCOL_VERSION,
+                pid: std::process::id(),
+                address: listener.local_addr().unwrap(),
+                token: "isolated-identity-failure".into(),
+                started_at: "test".into(),
+                build_version: build_version.into(),
+                instance_id: String::new(),
+                placement: DaemonPlacement::Host,
+            };
+            fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let ping: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(ping.action, DaemonAction::Ping));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: ping.protocol_version,
+                        request_id: ping.request_id,
+                        result: Ok(DaemonReply::Pong),
+                    },
+                )
+                .await
+                .unwrap();
+                let identity: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(identity.action, DaemonAction::Identity));
+                if refuse {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: identity.protocol_version,
+                            request_id: identity.request_id,
+                            result: Err("identity unavailable".into()),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                use tokio::io::AsyncReadExt;
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            });
+            let error = match decide_existing_daemon().await {
+                Err(error) => error,
+                Ok(_) => panic!("startup used a daemon without its identity"),
+            };
+            let message = format!("{error:#}");
+            if refuse {
+                assert!(message.contains("identity unavailable"), "{message}");
+            } else {
+                assert!(
+                    message.contains("time out reading the running daemon's identity"),
+                    "{message}"
+                );
+            }
+            server.await.unwrap();
+        }
+    }
 
     // Hard-won: 413864386: the startup splash displayed frozen blocker ages for thirty seconds.
     #[tokio::test]
