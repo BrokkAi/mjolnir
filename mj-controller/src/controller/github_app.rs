@@ -899,8 +899,10 @@ mv -f -- "$temporary" "$path"
 "#;
     let mut bytes = token.into_bytes();
     bytes.push(b'\n');
+    // A token is a few bytes and a session waits on it, so it must not queue
+    // behind bulk transfers to the same target.
     let command = crate::targets::locator_command(
-        SshTrafficClass::Bulk,
+        SshTrafficClass::Control,
         locator,
         vec![
             "sh".into(),
