@@ -175,6 +175,38 @@ impl std::fmt::Debug for StreamReply {
     }
 }
 
+#[derive(Clone)]
+struct CommandObserver(Arc<dyn Fn(CommandActivity) + Send + Sync>);
+
+impl CommandObserver {
+    fn report(&self, activity: CommandActivity) {
+        (self.0)(activity);
+    }
+}
+
+/// Events from the process executor during one streamed command.
+pub enum CommandActivity {
+    StdinStarted,
+    StdinBytes(usize),
+    StdinFinished,
+    StageStarted(ProvisionStage),
+    StageFinished(ProvisionStage),
+}
+
+impl std::fmt::Debug for CommandObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CommandObserver")
+    }
+}
+
+impl PartialEq for CommandObserver {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CommandObserver {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub program: String,
@@ -258,6 +290,8 @@ pub struct CommandSpec {
     sensitive_stdin: Option<SensitiveCommandInput>,
     #[serde(skip)]
     stream_reply: Option<StreamReply>,
+    #[serde(skip)]
+    observer: Option<CommandObserver>,
 }
 
 impl CommandSpec {
@@ -288,7 +322,15 @@ impl CommandSpec {
             ssh_start_marker: false,
             sensitive_stdin: None,
             stream_reply: None,
+            observer: None,
         }
+    }
+
+    /// Observe streamed stdin and any stages reported while opening SSH.
+    /// Callbacks may run on the writer thread and are local to this execution.
+    pub fn observe(mut self, report: impl Fn(CommandActivity) + Send + Sync + 'static) -> Self {
+        self.observer = Some(CommandObserver(Arc::new(report)));
+        self
     }
 
     /// Start the program with a specific `argv[0]`.
@@ -419,7 +461,11 @@ impl CommandSpec {
         let lease = if self.ssh_session_probe {
             SshSessions::lease_probe(ssh, walk)
         } else {
-            SshSessions::lease(ssh, request.class, executor, walk)?
+            let reporting = SshStageReporter {
+                executor,
+                observer: self.observer.as_ref(),
+            };
+            SshSessions::lease(ssh, request.class, &reporting, walk)?
         };
         let mut command = self.clone();
         command.ssh_session = None;
@@ -971,6 +1017,60 @@ pub trait CommandExecutor {
     fn pause_deadline(&self) -> DeadlinePause;
 }
 
+/// Forward SSH admission stages through the command's owner while the process
+/// executor retains cancellation and executes the actual master commands.
+struct SshStageReporter<'a> {
+    executor: &'a dyn CommandExecutor,
+    observer: Option<&'a CommandObserver>,
+}
+
+impl CommandExecutor for SshStageReporter<'_> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute(command)
+    }
+
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.executor.execute_without_deadline(command)
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        self.executor
+            .execute_with_stdin_without_deadline(command, input)
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.executor.cancellation_requested_without_deadline()
+    }
+
+    fn pause_deadline(&self) -> DeadlinePause {
+        self.executor.pause_deadline()
+    }
+
+    fn stage_started(&self, stage: ProvisionStage) {
+        if let Some(observer) = self.observer {
+            observer.report(CommandActivity::StageStarted(stage));
+        } else {
+            self.executor.stage_started(stage);
+        }
+    }
+
+    fn stage_finished(&self, stage: ProvisionStage) {
+        if let Some(observer) = self.observer {
+            observer.report(CommandActivity::StageFinished(stage));
+        } else {
+            self.executor.stage_finished(stage);
+        }
+    }
+}
+
 /// An executor whose commands run without the wrapped executor's deadline but
 /// still stop when its supervisor cancels. Staging work that precedes a
 /// timeout-bound command runs on this, so the timeout covers only the command
@@ -1306,6 +1406,39 @@ impl CommandExecutor for ProcessExecutor {
 /// concurrently for stdout and stderr, and must finish without blocking.
 pub type CommandOutputObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
+struct ObservedStdin<'a>(&'a CommandObserver);
+
+impl Drop for ObservedStdin<'_> {
+    fn drop(&mut self) {
+        self.0.report(CommandActivity::StdinFinished);
+    }
+}
+
+struct ProgressWriter<'a> {
+    stdin: std::process::ChildStdin,
+    observer: Option<&'a CommandObserver>,
+}
+
+impl Write for ProgressWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(observer) = self.observer else {
+            return self.stdin.write(bytes);
+        };
+        // A blocking pipe write can wait for the whole request. Use smaller
+        // writes on observed streams so backpressure exposes progress before
+        // a full input buffer has drained.
+        let written = self.stdin.write(&bytes[..bytes.len().min(4096)])?;
+        if written != 0 {
+            observer.report(CommandActivity::StdinBytes(written));
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin.flush()
+    }
+}
+
 /// Streams `input` into a freshly spawned child and collects its output.
 ///
 /// Both executors share this one implementation because the pipe edge cases
@@ -1396,11 +1529,21 @@ fn stream_command_with_stdin(
                     StartWait::Cancelled => bail!("operation cancelled"),
                 }
             }
+            // The command stage owns SSH startup and post-EOF work. Start
+            // the transfer clock once the writer can send and close stdin
+            // before dropping the progress guard.
+            let _progress = command.observer.as_ref().map(|observer| {
+                observer.report(CommandActivity::StdinStarted);
+                ObservedStdin(observer)
+            });
+            let mut stdin = ProgressWriter {
+                stdin,
+                observer: command.observer.as_ref(),
+            };
             // Owning `stdin` here is what closes the pipe's write end once the
             // transfer finishes. A child that reads to EOF, such as
             // `mj worker export-checkpoint --spec -`, never exits while any
             // copy of the write end is still open.
-            let mut stdin = stdin;
             let mut buffer = [0_u8; 64 * 1024];
             loop {
                 // Checking before each chunk makes large checkpoint copies
@@ -4305,7 +4448,11 @@ mod executor_tests {
         let payload = vec![b'x'; 300 * 1024];
         for cancellable in [false, true] {
             let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
-            let command = fake.command(&["wc", "-c"]);
+            let activity = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = activity.clone();
+            let command = fake.command(&["wc", "-c"]).observe(move |event| {
+                observed.lock().unwrap().push(event);
+            });
             let mut input = std::io::Cursor::new(payload.clone());
             let output = if cancellable {
                 CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
@@ -4325,8 +4472,54 @@ mod executor_tests {
                 payload.len().to_string()
             );
             assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
+            let activity = activity.lock().unwrap();
+            let [
+                CommandActivity::StdinStarted,
+                writes @ ..,
+                CommandActivity::StdinFinished,
+            ] = &activity[..]
+            else {
+                panic!("only the admitted attempt should report stdin activity");
+            };
+            let bytes: usize = writes
+                .iter()
+                .map(|event| match event {
+                    CommandActivity::StdinBytes(count) => *count,
+                    _ => panic!("unexpected activity inside the admitted attempt"),
+                })
+                .sum();
+            assert!(writes.len() > 1);
+            assert_eq!(bytes, payload.len());
         }
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1583: a command still running after EOF was reported as a stalled stdin stream.
+    #[test]
+    fn streamed_stdin_finishes_before_the_command_exits() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        let (finished, watch) = std::sync::mpsc::channel();
+        let command =
+            CommandSpec::new("sh", ["-c", "cat >/dev/null; sleep 600"]).observe(move |event| {
+                if matches!(event, CommandActivity::StdinFinished)
+                    && let Err(error) = finished.send(())
+                {
+                    tracing::debug!(%error, "test stopped waiting for stdin completion");
+                }
+            });
+        let child = std::thread::spawn(move || {
+            let mut input = std::io::Cursor::new(vec![b'x'; 128 * 1024]);
+            executor.execute_with_stdin(&command, &mut input)
+        });
+        let ended = watch.recv_timeout(Duration::from_secs(10));
+        let pending = !child.is_finished();
+        cancelled.store(true, Ordering::Release);
+        let outcome = child.join().unwrap();
+        ended.expect("stdin completion should arrive while the command is still running");
+        assert!(pending);
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("cancelled"), "{error}");
     }
 
     #[test]

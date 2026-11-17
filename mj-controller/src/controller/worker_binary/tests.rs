@@ -2202,6 +2202,7 @@ fn rendered(commands: &[CommandSpec]) -> Vec<String> {
 struct SshHostExecutor {
     commands: RefCell<Vec<CommandSpec>>,
     host_files: RefCell<HashSet<String>>,
+    worker_uploads: RefCell<Vec<Vec<u8>>>,
 }
 impl CommandExecutor for SshHostExecutor {
     fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
@@ -2280,15 +2281,27 @@ impl CommandExecutor for SshHostExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        if command.purpose == "query host profile content" {
-            std::io::copy(input, &mut std::io::sink())?;
-            return self.execute(command);
-        }
-        // The transport boundary receives a complete archive, rather than a
-        // test-only fallback to file-by-file copy.
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
-        for entry in archive.entries()? {
-            std::io::copy(&mut entry?, &mut std::io::sink())?;
+        match command.purpose.as_str() {
+            "stage replacement Mjolnir worker" => {
+                let mut bytes = Vec::new();
+                input.read_to_end(&mut bytes)?;
+                self.worker_uploads.borrow_mut().push(bytes);
+            }
+            "upload SSH worker file" | "upload remote container worker file" => {
+                let mut bytes = Vec::new();
+                input.read_to_end(&mut bytes)?;
+                assert_eq!(bytes, b"{}");
+            }
+            "query host profile content" => {
+                std::io::copy(input, &mut std::io::sink())?;
+            }
+            "send profile content" => {
+                let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
+                for entry in archive.entries()? {
+                    std::io::copy(&mut entry?, &mut std::io::sink())?;
+                }
+            }
+            purpose => panic!("unexpected SSH input for {purpose}"),
         }
         self.execute(command)
     }
@@ -2334,15 +2347,6 @@ fn bare_locator_on_the_container_host(session: &str) -> targets::TargetLocator {
         workspace: format!(".local/share/hel/workspaces/{session}"),
     }
 }
-/// Scp commands that carry the worker binary itself.
-fn worker_uploads(lines: &[String], fixture: &PodmanInstallFixture) -> Vec<String> {
-    let source = format!("{} ", fixture.worker_binary.display());
-    lines
-        .iter()
-        .filter(|line| line.starts_with("scp ") && line.contains(&source))
-        .cloned()
-        .collect()
-}
 /// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session
@@ -2360,7 +2364,10 @@ fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
         &bare_locator_on_the_container_host(first),
         first,
     );
-    assert_eq!(worker_uploads(&lines, &fixture).len(), 1, "{lines:#?}");
+    assert_eq!(
+        executor.worker_uploads.take(),
+        [std::fs::read(&fixture.worker_binary).unwrap()]
+    );
     assert!(lines.iter().any(|line| line.contains("worker-binaries/")));
     let lines = install_on_ssh_host(
         &executor,
@@ -2368,18 +2375,17 @@ fn ssh_bare_installs_upload_the_worker_once_per_host_and_link_it_per_session() {
         &bare_locator_on_the_container_host(second),
         second,
     );
-    assert!(worker_uploads(&lines, &fixture).is_empty(), "{lines:#?}");
+    assert!(executor.worker_uploads.take().is_empty(), "{lines:#?}");
     assert!(
         lines
             .iter()
             .any(|line| line.contains("ln --") && line.contains("mv -f --"))
     );
     for name in ["launch.json", "ownership.json"] {
-        assert!(lines.iter().any(|line| line.starts_with("scp ")
-            && line.ends_with(&format!(
-                "user@example.test:{}/{name}",
-                session_worker_root(second)
-            ))));
+        let destination = format!("{}/{name}", session_worker_root(second));
+        assert!(lines.iter().any(|line| line.starts_with("ssh ")
+            && line.contains("mj-upload")
+            && line.contains(&destination)));
     }
 }
 // Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
@@ -2395,10 +2401,14 @@ fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
         bare,
     );
 
+    assert_eq!(
+        executor.worker_uploads.take(),
+        [std::fs::read(&fixture.worker_binary).unwrap()]
+    );
     let container = "fedcba9876543210fedcba9876543210";
     let lines = install_on_ssh_host(&executor, &fixture, &fixture.locator, container);
     assert!(
-        worker_uploads(&lines, &fixture).is_empty(),
+        executor.worker_uploads.take().is_empty(),
         "a container session on the same host reuses the cached worker, got {lines:#?}"
     );
 }
@@ -2951,7 +2961,7 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
             session,
             &WorkerInstall::Host(source.path().to_path_buf()),
             &format!("/var/lib/hel/workers/{session}/hel.private"),
-            None,
+            (kind == "ssh").then_some(".private-host-worker/hel"),
         )
         .unwrap();
         let commands = rendered(&upgrade.commands);

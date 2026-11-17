@@ -4,9 +4,8 @@ use super::*;
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long a reviewer child's Create may go with no provisioning stage
-/// starting or finishing before its start is failed. It bounds idleness, not
-/// the whole Create, so a slow Create that keeps progressing is never failed.
+/// The existing ten-minute reviewer Create idle bound (#1438) also measures
+/// time since the last byte of an active transfer (#1583).
 ///
 /// The longest single stage measured on 2026-11-06 under a load average of
 /// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
@@ -325,7 +324,7 @@ impl RuntimeState {
     }
 
     /// Fail when the child's running Create has gone `bound` without a
-    /// provisioning stage starting or finishing, and cancel that Create in
+    /// provisioning stage change or transfer progress, and cancel that Create in
     /// the same decision, through the cancellation close and destroy use, so
     /// it stops holding its lifecycle admission. The stage signal is the one
     /// the lifecycle already keeps for its progress display. Waiting for a
@@ -348,6 +347,7 @@ impl RuntimeState {
             CreateProgress::Stalled {
                 idle,
                 stages,
+                stream,
                 phase,
             } => {
                 let stage = if stages.is_empty() {
@@ -360,10 +360,16 @@ impl RuntimeState {
                     StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
                     StalledCreate::Committed => "its Create had committed and was left running",
                 };
-                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?phase, "reviewer child Create stalled");
+                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?stream, ?phase, "reviewer child Create stalled");
+                let detail = match stream {
+                    Some(stream) => format!("{stream} moved no bytes for {} s", idle.as_secs()),
+                    None => format!(
+                        "no stage started or finished for {} s (stalled in: {stage})",
+                        idle.as_secs()
+                    ),
+                };
                 anyhow::bail!(
-                    "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
-                    idle.as_secs()
+                    "the reviewer child {child} stalled while provisioning: {detail}; {outcome}"
                 )
             }
         }
