@@ -16,11 +16,11 @@ Each Sonnet brief gets stage B's checks, bound to the brief hash: the paired lea
 
 ## Judging
 
-Round K: two GPT-6.1 Sol/high judges and a hand check of every caught or partial verdict and every disagreement, as in round J. To check judge drift against round J, round K also judges BT's sessions on 5 primary diffs, chosen by seed 20261117 before any TS output exists. If round K's BT labels differ from round J's by more than 10 points on those diffs, that's reported as a caveat.
+Round K judges TS, BT and no-brief together, in blind mixed batches, as round J did. Two GPT-6.1 Sol/high judges label every output, and a hand check covers every caught or partial verdict and every disagreement. All three arms are scored in the same round, so judge drift between rounds can't confound the writer comparison. Round J's labels for BT and no-brief are reported beside round K's as a consistency check. A difference over 10 points for either arm is a caveat; it doesn't decide the outcome.
 
 ## Reading
 
-Terra/high reviewers only, mean catch rate over the 18 primary diffs, with paired 95% bootstrap intervals over diffs. TS is compared with round J's stored BT and no-brief labels.
+Terra/high reviewers only, mean catch rate over the 18 primary diffs, with paired 95% bootstrap intervals over diffs. All three arms use round K's labels.
 
 - **Sonnet writes:** TS ≥ BT − 10 points, and TS − no-brief has its interval above 0. Sonnet/high becomes an acceptable writer.
 - **Sol writes:** otherwise.
