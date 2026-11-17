@@ -2648,6 +2648,18 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: older daemons neither read nor write the new push ledger.
+    // Their episode tables remain available and the compatibility floor stays put.
+    if version < 138 {
+        connection.execute_batch(concat!(
+            "BEGIN IMMEDIATE;",
+            include_str!("web_push_entries.sql"),
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (138, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 138;
+             COMMIT;",
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

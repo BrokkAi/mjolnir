@@ -88,7 +88,7 @@ pub(super) async fn run_daemon_runtime(
     // Before this daemon can start a checkpoint, so every checkpoint file older
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
-    let startup_work = crate::upgrade::activity("daemon startup recovery")?;
+    let startup_work = crate::upgrade::startup_recovery()?;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
     tokio::task::spawn_blocking(crate::controller::pin_worker_binary_sources)

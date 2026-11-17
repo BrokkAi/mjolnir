@@ -1,6 +1,7 @@
 //! Durable Web Push reservations and receipts, owned by the dispatch service.
 use super::*;
-use crate::web_push::{Notice, Subscription};
+use crate::web_push::{Notice, PushEntry, Subscription, card_entries};
+use mj_client::runtime_feed::RuntimeProjection;
 
 pub(crate) fn push_subscribe(subscription: Subscription) -> Result<()> {
     submit_database_write("subscribe Web Push device", move |db| {
@@ -35,7 +36,7 @@ fn push_subscribe_in(db: &Connection, subscription: Subscription) -> Result<()> 
             // Replacement releases the old owner's reservations in the same
             // transaction. An opaque ID also prevents ABA after delete/recreate.
             db.execute(
-                "UPDATE push_deliveries SET accepted=0,retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted IN (0,3)",
+                "UPDATE push_entry_deliveries SET accepted=0,flight_session=NULL,retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted IN (0,3)",
                 [&subscription.endpoint],
             )?;
             mj_core::state::new_session_id().context("generate Web Push enrollment identifier")?
@@ -59,10 +60,10 @@ fn push_renew_with(db: &Connection, old_endpoint: &str, subscription: Subscripti
     // Preserve known receipts across native endpoint rotation. Old in-flight
     // attempts become uncertain queued work under the new encryption owner.
     tx.execute("UPDATE push_devices SET retry_at=max(retry_at,coalesce((SELECT retry_at FROM push_devices WHERE endpoint=?1),0)) WHERE endpoint=?2",params![old_endpoint,subscription.endpoint])?;
-    tx.execute("INSERT INTO push_deliveries(endpoint,episode,payload,accepted,retry_at,failures,error)
-        SELECT ?2,q.episode,q.payload,CASE WHEN q.accepted=3 THEN 0 ELSE q.accepted END,q.retry_at,q.failures,q.error
-        FROM push_deliveries q WHERE q.endpoint=?1
-        ON CONFLICT(endpoint,episode) DO UPDATE SET accepted=CASE WHEN push_deliveries.accepted=3 THEN 3 WHEN push_deliveries.accepted=1 OR excluded.accepted=1 THEN 1 ELSE push_deliveries.accepted END",params![old_endpoint,subscription.endpoint])?;
+    tx.execute("INSERT INTO push_entry_deliveries(endpoint,identity,accepted,retry_at,failures,error)
+        SELECT ?2,q.identity,CASE WHEN q.accepted=3 THEN 0 ELSE q.accepted END,q.retry_at,q.failures,q.error
+        FROM push_entry_deliveries q WHERE q.endpoint=?1
+        ON CONFLICT(endpoint,identity) DO UPDATE SET accepted=CASE WHEN push_entry_deliveries.accepted=3 THEN 3 WHEN push_entry_deliveries.accepted=1 OR excluded.accepted=1 THEN 1 ELSE push_entry_deliveries.accepted END",params![old_endpoint,subscription.endpoint])?;
     tx.execute("DELETE FROM push_devices WHERE endpoint=?1", [old_endpoint])?;
     tx.commit()?;
     Ok(())
@@ -78,103 +79,85 @@ fn push_unsubscribe_with(db: &Connection, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn push_observe(
-    presence: OperatorPresence,
-    episodes: Vec<(String, String, Notice)>,
-    unavailable: Vec<String>,
-) -> Result<()> {
-    submit_database_write("reserve Web Push episodes", move |db| {
-        push_observe_at_with(db, presence, episodes, unavailable)
+/// Reconcile the authoritative card snapshot and admit its sends in one
+/// transaction. Presence controls delivery and never changes entry identity.
+pub(crate) fn push_reconcile(
+    runtime: RuntimeProjection,
+) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+    submit_database_write("reconcile Web Push entries", move |db| {
+        push_reconcile_with(db, &runtime, Utc::now().timestamp())
     })
 }
-fn push_observe_at_with(
+
+fn push_reconcile_with(
     db: &mut Connection,
-    presence: OperatorPresence,
-    episodes: Vec<(String, String, Notice)>,
-    unavailable: Vec<String>,
-) -> Result<()> {
-    let away = presence.away;
-    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    tx.execute("INSERT INTO push_observation VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET away=excluded.away",[away])?;
-    let previous_episodes = tx
-        .prepare("SELECT session,identity,signature,payload FROM push_episodes")?
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                (
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ),
-            ))
-        })?
-        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-    tx.execute("DELETE FROM push_episodes", [])?;
-    // A disconnected or still-recovering worker supplies no evidence that its
-    // question was answered. Retain episode identity but pause its sends.
-    for session in unavailable {
-        if let Some((identity, signature, payload)) = previous_episodes.get(&session) {
-            tx.execute(
-                "INSERT INTO push_episodes VALUES(?1,?2,?3,?4,0)",
-                params![session, identity, payload, signature],
-            )?;
-        }
+    runtime: &RuntimeProjection,
+    now: i64,
+) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+    let entries = card_entries(runtime);
+    let automatic = runtime.metadata.operator_presence.away && entries.is_some();
+    let tx = db.transaction()?;
+    if let Some(entries) = &entries {
+        push_observe_in(&tx, entries, automatic, now)?;
     }
-    let mut reserved_episodes = Vec::new();
-    for (session, signature, mut payload) in episodes {
-        let identity = match previous_episodes.get(&session) {
-            Some((identity, previous, _)) if same_episode(previous, &signature)? => {
-                identity.clone()
-            }
-            _ => {
-                let sequence:i64=tx.query_row("INSERT INTO push_episode_counters VALUES(?1,1) ON CONFLICT(session) DO UPDATE SET sequence=sequence+1 RETURNING sequence",[&session],|r|r.get(0))?;
-                format!("{session}:{sequence}")
-            }
-        };
-        payload.episode = Some(identity.clone());
-        tx.execute(
-            "INSERT INTO push_episodes VALUES(?1,?2,?3,?4,1)",
-            params![
-                session,
-                identity,
-                serde_json::to_string(&payload)?,
-                signature
-            ],
-        )?;
-        reserved_episodes.push((session, identity, payload));
-    }
-    let episodes = reserved_episodes;
-    if away {
-        let devices = tx
-            .prepare("SELECT endpoint FROM push_devices")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for endpoint in devices {
-            for (_, identity, notice) in &episodes {
-                reserve(&tx, &endpoint, identity, notice)?;
-            }
-        }
-    }
-    tx.execute("DELETE FROM push_deliveries WHERE accepted=0 AND episode NOT LIKE 'test:%' AND episode NOT IN (SELECT identity FROM push_episodes)", [])?;
+    let due = push_claim_in(&tx, runtime, entries.as_ref(), automatic, now)?;
+    let next = tx.query_row(
+        &format!("{READY_PUSH} SELECT min(due) FROM ranked WHERE rank=1"),
+        [automatic],
+        |r| r.get(0),
+    )?;
     tx.commit()?;
+    Ok((due, next))
+}
+
+fn push_observe_in(
+    tx: &Transaction<'_>,
+    entries: &BTreeMap<String, PushEntry<'_>>,
+    away: bool,
+    now: i64,
+) -> Result<()> {
+    // The cutover baseline applies even to devices enrolled later. An absent
+    // card map cannot consume it, and a locator still in flight has no identity.
+    let baseline = tx.execute("INSERT OR IGNORE INTO push_entry_cutover VALUES(1)", [])? == 1;
+    let visible = tx
+        .prepare("SELECT identity FROM push_entries WHERE visible=1 AND session IS NOT NULL")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut hide = tx.prepare("UPDATE push_entries SET visible=0 WHERE identity=?1")?;
+    for id in visible {
+        if !entries.contains_key(&id) {
+            hide.execute([id])?;
+        }
+    }
+    let mut upsert = tx.prepare(
+        "INSERT INTO push_entries(identity,session,completed_ordinal,visible,baseline,first_seen_at_ms)
+         VALUES(?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(identity) DO UPDATE SET session=excluded.session,
+             completed_ordinal=excluded.completed_ordinal,visible=excluded.visible
+         WHERE session IS NOT excluded.session OR completed_ordinal IS NOT excluded.completed_ordinal
+             OR visible IS NOT excluded.visible",
+    )?;
+    for (identity, entry) in entries {
+        upsert.execute(params![
+            identity,
+            entry.session,
+            entry.completed_ordinal,
+            !entry.paused,
+            baseline,
+            now.saturating_mul(1_000),
+        ])?;
+    }
+    if away {
+        tx.execute(
+            "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity)
+             SELECT d.endpoint,e.identity FROM push_entries e CROSS JOIN push_devices d
+             WHERE e.visible=1 AND e.session IS NOT NULL AND e.baseline=0",
+            [],
+        )?;
+    }
     Ok(())
 }
-#[cfg(test)]
-pub(crate) fn same_episode_for_tests(previous: &str, next: &str) -> Result<bool> {
-    same_episode(previous, next)
-}
-fn same_episode(previous: &str, next: &str) -> Result<bool> {
-    let (old_kind, old): (String, Vec<String>) =
-        serde_json::from_str(previous).context("read persisted push episode sources")?;
-    let (kind, new): (String, Vec<String>) =
-        serde_json::from_str(next).context("read published push episode sources")?;
-    Ok(old_kind == kind && new.iter().all(|source| old.contains(source)))
-}
-fn reserve(tx: &Transaction<'_>, endpoint: &str, episode: &str, notice: &Notice) -> Result<()> {
-    // One durable state: 0 queued, 1 accepted, 3 in flight.
-    tx.execute("INSERT OR IGNORE INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,?2,?3,0)",params![endpoint,episode,serde_json::to_string(notice)?])?;
-    Ok(())
-}
+
 pub(crate) fn push_test(endpoint: String) -> Result<()> {
     submit_database_write("reserve Web Push test", move |db| {
         push_test_with(db, endpoint)
@@ -190,84 +173,148 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
         )?,
         "this device is not subscribed"
     );
-    reserve(
-        &tx,
-        &endpoint,
-        &format!(
-            "test:{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ),
-        &Notice {
-            title: "Mjolnir".into(),
-            body: "Notifications are enabled on this device".into(),
-            session_id: None,
-            url: "/".into(),
-            tag: "test".into(),
-            episode: None,
-            observed_revision: 0,
-        },
+    let now = Utc::now();
+    let identity = format!("test:{}", now.timestamp_nanos_opt().unwrap_or_default());
+    tx.execute(
+        "INSERT OR IGNORE INTO push_entries(identity,visible,baseline,first_seen_at_ms) VALUES(?1,1,0,?2)",
+        params![identity, now.timestamp_millis()],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO push_entry_deliveries(endpoint,identity) VALUES(?1,?2)",
+        params![endpoint, identity],
     )?;
     tx.commit()?;
     Ok(())
 }
-#[derive(Clone)]
+
 pub(crate) struct PushDelivery {
     pub subscription: Subscription,
     pub enrollment: String,
-    pub episode: String,
+    pub identity: String,
     pub payload: String,
     pub failures: u32,
 }
-// Admission and scheduling consume the same durable readiness rule. The
-// database writer alone owns per-device/tag flight admission.
-const READY_PUSH: &str = "FROM push_deliveries q JOIN push_devices d USING(endpoint)
- WHERE q.accepted=0 AND (q.episode LIKE 'test:%' OR ((SELECT away FROM push_observation WHERE singleton=1)=1
- AND q.episode IN (SELECT identity FROM push_episodes WHERE eligible=1)))
- AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))";
-fn push_due_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
-    let sql = format!(
-        "SELECT d.subscription,q.episode,q.payload,q.failures,d.enrollment {READY_PUSH} AND q.retry_at<=?1 AND d.retry_at<=?1"
-    );
-    db.prepare(&sql)?
-        .query_map([now], |r| {
+
+// Rank before checking deadlines so an older retry holds its device/tag while
+// other tags can proceed. A permanent rejection is retired until re-enrollment.
+// The flight keeps the tag it sent even if a live form moves to another card.
+const READY_PUSH: &str = "WITH ranked AS (
+ SELECT d.subscription,d.enrollment,q.identity,q.failures,e.session,
+        max(q.retry_at,d.retry_at) AS due,
+        row_number() OVER (
+            PARTITION BY q.endpoint,e.session
+            ORDER BY e.completed_ordinal IS NULL,e.completed_ordinal,e.identity
+        ) AS rank
+ FROM push_entry_deliveries q JOIN push_devices d USING(endpoint) JOIN push_entries e USING(identity)
+ WHERE q.accepted=0 AND q.retry_at<9223372036854775807
+   AND e.visible=1 AND (e.session IS NULL OR ?1)
+   AND NOT EXISTS(
+       SELECT 1 FROM push_entry_deliveries flight
+       WHERE flight.endpoint=q.endpoint AND flight.accepted=3
+         AND flight.flight_session IS e.session
+   )
+)";
+
+fn push_claim_in(
+    tx: &Transaction<'_>,
+    runtime: &RuntimeProjection,
+    entries: Option<&BTreeMap<String, PushEntry<'_>>>,
+    automatic: bool,
+    now: i64,
+) -> Result<Vec<PushDelivery>> {
+    let due = tx
+        .prepare(&format!(
+            "{READY_PUSH} SELECT subscription,enrollment,identity,failures,session
+         FROM ranked WHERE rank=1 AND due<=?2"
+        ))?
+        .query_map(params![automatic, now], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, u32>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .map(|(subscription, episode, payload, failures, enrollment)| {
-            Ok(PushDelivery {
-                subscription: serde_json::from_str(&subscription)?,
-                enrollment,
-                episode,
-                payload,
-                failures,
-            })
-        })
-        .collect()
-}
-pub(crate) fn push_claim(now: i64) -> Result<Vec<PushDelivery>> {
-    submit_database_write("admit Web Push sends", move |db| push_claim_with(db, now))
-}
-fn push_claim_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
-    let tx = db.unchecked_transaction()?;
-    let due = push_due_with(&tx, now)?;
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut admitted = Vec::new();
-    for delivery in due {
-        let changed=tx.execute("UPDATE push_deliveries AS q SET accepted=3 WHERE endpoint=?1 AND episode=?2 AND accepted=0
-            AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))",params![delivery.subscription.endpoint,delivery.episode])?;
-        if changed == 1 {
-            admitted.push(delivery);
-        }
+    let mut notices = BTreeMap::new();
+    for (subscription, enrollment, identity, failures, session) in due {
+        let subscription: Subscription = serde_json::from_str(&subscription)?;
+        let payload = if let Some(session) = &session {
+            let entry = entries
+                .and_then(|entries| entries.get(&identity))
+                .with_context(|| format!("missing current Web Push entry for session {session}"))?;
+            if let Some(payload) = notices.get(&identity) {
+                String::clone(payload)
+            } else {
+                let message = push_entry_text(tx, runtime, entry)?;
+                let payload = serde_json::to_string(&entry.notice(
+                    runtime,
+                    identity.clone(),
+                    message.as_deref(),
+                ))?;
+                notices.insert(identity.clone(), payload.clone());
+                payload
+            }
+        } else {
+            serde_json::to_string(&Notice {
+                title: "Mjolnir".into(),
+                body: "Notifications are enabled on this device".into(),
+                session_id: None,
+                url: "/".into(),
+                tag: "test".into(),
+                episode: None,
+                observed_revision: 0,
+            })?
+        };
+        tx.execute(
+            "UPDATE push_entry_deliveries SET accepted=3,flight_session=?3 WHERE endpoint=?1 AND identity=?2",
+            params![subscription.endpoint, identity, session],
+        )?;
+        admitted.push(PushDelivery {
+            subscription,
+            enrollment,
+            identity,
+            payload,
+            failures,
+        });
     }
-    tx.commit()?;
     Ok(admitted)
 }
+
+fn push_entry_text(
+    db: &Connection,
+    runtime: &RuntimeProjection,
+    entry: &PushEntry<'_>,
+) -> Result<Option<String>> {
+    use mj_core::transcript::materialized_agent_message_text;
+    if let Some(text) = entry.text {
+        return Ok(Some(text.to_owned()));
+    }
+    if let Some(id) = entry.message_id {
+        let tail = runtime.transcripts.get(entry.session);
+        if let Some(text) = materialized_agent_message_text(
+            tail.into_iter()
+                .flat_map(|tail| tail.items.values())
+                .map(AsRef::as_ref),
+            id,
+        ) {
+            return Ok(Some(text));
+        }
+        let stored = load_materialized_transcript_item(entry.session, id)?;
+        return Ok(materialized_agent_message_text(stored.iter(), id));
+    }
+    Ok(materialized::last_materialized_agent_message_in(
+        db,
+        entry.session,
+        0,
+        None,
+        entry.completed_ordinal,
+    )?
+    .map(|(_, text)| text))
+}
+
 pub(crate) fn push_recover() -> Result<()> {
     submit_database_write("recover uncertain Web Push sends", |db| {
         push_recover_with(db)
@@ -276,13 +323,16 @@ pub(crate) fn push_recover() -> Result<()> {
 fn push_recover_with(db: &Connection) -> Result<()> {
     // Only service startup, under the daemon's store ownership, recovers flight
     // reservations. Remote acceptance may be unknown; receipts never reset.
-    db.execute("UPDATE push_deliveries SET accepted=0 WHERE accepted=3", [])?;
+    db.execute(
+        "UPDATE push_entry_deliveries SET accepted=0,flight_session=NULL WHERE accepted=3",
+        [],
+    )?;
     Ok(())
 }
 pub(crate) fn push_result(
     subscription: Subscription,
     enrollment: String,
-    episode: String,
+    identity: String,
     status: Option<u16>,
     retry_at: i64,
     error: Option<String>,
@@ -292,7 +342,7 @@ pub(crate) fn push_result(
             db,
             subscription,
             &enrollment,
-            episode,
+            identity,
             status,
             retry_at,
             error,
@@ -303,7 +353,7 @@ fn apply_push_result_with(
     db: &Connection,
     subscription: Subscription,
     enrollment: &str,
-    episode: String,
+    identity: String,
     status: Option<u16>,
     retry_at: i64,
     error: Option<String>,
@@ -328,7 +378,7 @@ fn apply_push_result_with(
         tx.commit()?;
         return Ok(());
     }
-    let owns_flight:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM push_deliveries WHERE endpoint=?1 AND episode=?2 AND accepted=3)",params![subscription.endpoint,episode],|r|r.get(0))?;
+    let owns_flight:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM push_entry_deliveries WHERE endpoint=?1 AND identity=?2 AND accepted=3)",params![subscription.endpoint,identity],|r|r.get(0))?;
     if !owns_flight {
         return Ok(());
     }
@@ -336,7 +386,7 @@ fn apply_push_result_with(
     // backpressure is reserved for transient service/transport failures.
     if status.is_none() || status.is_some_and(|status| status == 429 || status >= 500) {
         // Retry-After constrains follow-up requests to this endpoint, including
-        // newly queued episodes, not just the rejected intent.
+        // newly queued entries, not just the rejected intent.
         tx.execute(
             "UPDATE push_devices SET retry_at=max(retry_at,?2) WHERE endpoint=?1",
             params![subscription.endpoint, retry_at],
@@ -345,7 +395,7 @@ fn apply_push_result_with(
     push_result_with(
         &tx,
         subscription.endpoint,
-        episode,
+        identity,
         status.is_some_and(|status| (200..300).contains(&status)),
         retry_at,
         error,
@@ -356,21 +406,13 @@ fn apply_push_result_with(
 fn push_result_with(
     db: &Connection,
     endpoint: String,
-    episode: String,
+    identity: String,
     accepted: bool,
     retry_at: i64,
     error: Option<String>,
 ) -> Result<()> {
-    db.execute("UPDATE push_deliveries SET accepted=?3,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND episode=?2 AND accepted IN (0,3)",params![endpoint,episode,accepted,retry_at,error])?;
+    db.execute("UPDATE push_entry_deliveries SET accepted=?3,flight_session=NULL,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND identity=?2 AND accepted IN (0,3)",params![endpoint,identity,accepted,retry_at,error])?;
     Ok(())
-}
-pub(crate) fn push_next_due() -> Result<Option<i64>> {
-    let db = open_reader(&database_path())?;
-    Ok(db.query_row(
-        &format!("SELECT min(max(q.retry_at,d.retry_at)) {READY_PUSH}"),
-        [],
-        |r| r.get(0),
-    )?)
 }
 pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> {
     let db = open_reader(&database_path())?;
@@ -379,47 +421,81 @@ pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> 
         [&endpoint],
         |r| r.get::<_, bool>(0),
     )?;
-    let error:Option<String>=db.query_row("SELECT error FROM push_deliveries WHERE endpoint=?1 AND accepted IN (0,3) AND error IS NOT NULL ORDER BY retry_at DESC LIMIT 1",[endpoint],|r|r.get(0)).optional()?.flatten();
+    let error:Option<String>=db.query_row("SELECT error FROM push_entry_deliveries WHERE endpoint=?1 AND accepted IN (0,3) AND error IS NOT NULL ORDER BY retry_at DESC LIMIT 1",[endpoint],|r|r.get(0)).optional()?.flatten();
     Ok(serde_json::json!({"subscribed":subscribed,"error":error}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_client::runtime_feed::{CardForm, NotificationCard, SessionTail};
+    use mj_core::attention::{
+        EntryMessage, NotificationKind, NotificationStackEntry, SessionAttention,
+    };
 
-    fn episode(id: &str) -> (String, String, Notice) {
-        (
-            id.into(),
-            serde_json::to_string(&("needs_input", vec![format!("{id}:form:unique")])).unwrap(),
-            Notice {
-                title: id.into(),
-                body: "Which option?".into(),
-                session_id: Some(id.into()),
-                url: format!("/#conversation/{id}"),
-                tag: id.into(),
-                episode: None,
-                observed_revision: 40,
+    fn subscription() -> Subscription {
+        Subscription {
+            endpoint: "https://push.example.com/device".into(),
+            keys: crate::web_push::SubscriptionKeys {
+                p256dh: "key".into(),
+                auth: "auth".into(),
             },
-        )
+            expiration_time: None,
+        }
     }
-    fn observe(db: &mut Connection, away: bool, ids: &[&str]) {
-        push_observe_at_with(
-            db,
-            OperatorPresence {
-                away,
-                revision: u64::from(away),
-            },
-            ids.iter().map(|id| episode(id)).collect(),
-            vec![],
-        )
-        .unwrap();
+
+    fn runtime(away: bool) -> RuntimeProjection {
+        let mut runtime = RuntimeProjection::default();
+        runtime.metadata.operator_presence.away = away;
+        runtime.metadata.notification_cards = Some(Default::default());
+        runtime.revision = 40;
+        runtime
     }
+
+    fn show(runtime: &mut RuntimeProjection, session: &str, entries: Vec<NotificationStackEntry>) {
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .insert(
+                session.into(),
+                NotificationCard {
+                    badge: NotificationKind::NeedsInput,
+                    entries,
+                    dismissal: None,
+                    holder: None,
+                    form: None,
+                },
+            );
+    }
+
+    fn completion(ordinal: u64, message: EntryMessage) -> NotificationStackEntry {
+        NotificationStackEntry {
+            completed_ordinal: ordinal,
+            kind: NotificationKind::NeedsInput,
+            message,
+        }
+    }
+
+    fn turn_only(runtime: &mut RuntimeProjection, ids: &[&str]) {
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .clear();
+        for id in ids {
+            show(runtime, id, vec![completion(1, EntryMessage::None)]);
+        }
+    }
+
     fn result(db: &Connection, delivery: &PushDelivery, status: Option<u16>, retry_at: i64) {
         apply_push_result_with(
             db,
             delivery.subscription.clone(),
             &delivery.enrollment,
-            delivery.episode.clone(),
+            delivery.identity.clone(),
             status,
             retry_at,
             None,
@@ -427,154 +503,300 @@ mod tests {
         .unwrap();
     }
 
-    // Hard-won: c146a8a89: worker recovery must retain the pending question's identity.
+    fn claim(db: &mut Connection, runtime: &RuntimeProjection, now: i64) -> Vec<PushDelivery> {
+        push_reconcile_with(db, runtime, now).unwrap().0
+    }
+
+    fn add_message(transcript: &mut MaterializedSession, id: &str, ordinal: u64, text: &str) {
+        transcript.transcript.push(Arc::new(TranscriptItem {
+            stable_id: id.into(),
+            position: ordinal,
+            latest_content_event_ordinal: Some(ordinal),
+            created_at_ms: ordinal as i64,
+            last_changed_at_ms: ordinal as i64,
+            body: TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text","text":text}})],
+                streaming: false,
+            },
+        }));
+    }
+
     #[test]
-    fn push_restart_receipts_presence_and_expiry_are_durable() {
+    fn push_locator_settles_once_across_working_restart_and_reclassification() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("push-test.sqlite3");
         let mut db = open(&path).unwrap();
-        let subscription = Subscription {
-            endpoint: "https://push.example.com/device".into(),
-            keys: crate::web_push::SubscriptionKeys {
-                p256dh: "key".into(),
-                auth: "auth".into(),
-            },
-            expiration_time: None,
-        };
-        push_subscribe_with(&db, subscription.clone()).unwrap();
-        observe(&mut db, false, &["a", "b"]);
-        assert!(push_claim_with(&db, 0).unwrap().is_empty());
-        observe(&mut db, true, &["a", "b"]);
-        let due = push_claim_with(&db, 0).unwrap();
-        for delivery in &due {
-            let notice: Notice = serde_json::from_str(&delivery.payload).unwrap();
-            assert_eq!(notice.episode.as_deref(), Some(delivery.episode.as_str()));
-            assert_eq!(notice.observed_revision, 40);
-        }
-        assert_eq!(due.len(), 2); // Turning away sends individual open episodes.
-        assert!(due.iter().all(|q| {
-            serde_json::from_str::<Notice>(&q.payload)
-                .unwrap()
-                .session_id
-                .is_some()
-        }));
-        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        push_subscribe_with(&db, subscription()).unwrap();
+        let mut runtime = runtime(true);
+        assert!(claim(&mut db, &runtime, 0).is_empty()); // Cutover.
+        show(
+            &mut runtime,
+            "s",
+            vec![completion(10, EntryMessage::Locating)],
+        );
+        runtime
+            .metadata
+            .session_attention
+            .insert("child".into(), SessionAttention::NeedsInput);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+
+        let mut transcript = MaterializedSession::empty("s");
+        add_message(&mut transcript, "agent:original", 9, "Keep the old format?");
+        add_message(&mut transcript, "agent:latest", 20, "New unrelated reply");
+        runtime.transcripts.insert(
+            "s".into(),
+            SessionTail::of(&transcript, &ProjectionWindow::of(&transcript), 10),
+        );
+        let mut entry = completion(10, EntryMessage::Found("agent:original".into()));
+        show(&mut runtime, "s", vec![entry.clone()]);
+        let due = claim(&mut db, &runtime, 0);
+        assert_eq!(due.len(), 1);
+        let notice: Notice = serde_json::from_str(&due[0].payload).unwrap();
+        assert_eq!(notice.body, "Keep the old format?");
+        assert_eq!(notice.episode.as_deref(), Some(due[0].identity.as_str()));
+        assert_eq!(notice.observed_revision, 40);
         result(&db, &due[0], Some(201), 0);
-        // Crash after remote acceptance but before receipt: only the uncertain
-        // request replays; the acknowledged request never resets.
+
+        runtime
+            .metadata
+            .session_attention
+            .insert("s".into(), SessionAttention::Working);
+        turn_only(&mut runtime, &[]);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        runtime
+            .metadata
+            .session_attention
+            .insert("s".into(), SessionAttention::NeedsInput);
+        show(&mut runtime, "s", vec![entry.clone()]);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+
         drop(db);
         let mut db = open(&path).unwrap();
         push_recover_with(&db).unwrap();
-        observe(&mut db, true, &["a", "b"]);
-        let retry = push_claim_with(&db, 0).unwrap();
-        assert_eq!(retry.len(), 1);
-        assert_eq!(retry[0].episode, due[1].episode);
-        result(&db, &retry[0], Some(201), 0);
-        observe(&mut db, false, &["a", "b"]);
-        observe(&mut db, true, &["a", "b"]);
-        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        entry.kind = NotificationKind::Important;
+        show(&mut runtime, "s", vec![entry]);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+    }
 
-        // Temporary missing attention pauses, rather than clears, the episode.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 3,
-            },
-            vec![],
-            vec!["a".into(), "b".into()],
-        )
-        .unwrap();
-        observe(&mut db, true, &["a", "b"]);
-        assert!(push_claim_with(&db, 0).unwrap().is_empty());
-        // A newly promoted child question starts a new episode; removing an
-        // answered source keeps that episode and its receipt.
-        let mut question = episode("a");
-        question.1 =
-            serde_json::to_string(&("needs_input", vec!["a:form:unique", "child:form:new"]))
-                .unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 3,
-            },
-            vec![question],
-            vec![],
-        )
-        .unwrap();
-        let child = push_claim_with(&db, 0).unwrap().remove(0);
-        result(&db, &child, Some(201), 0);
-        observe(&mut db, true, &["a"]);
-        assert!(push_claim_with(&db, 0).unwrap().is_empty());
-        observe(&mut db, true, &[]);
-        observe(&mut db, true, &["a"]);
-        let reentry = push_claim_with(&db, 0).unwrap().remove(0);
-        assert_ne!(reentry.episode, child.episode);
-        result(&db, &reentry, Some(429), 100);
-        observe(&mut db, true, &["a", "c"]);
-        push_subscribe_with(&db, subscription.clone()).unwrap();
-        // Hard-won: routine browser reconciliation reset pending delivery state.
-        assert_eq!(
-            db.query_row(
-                "SELECT retry_at FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
-                params![subscription.endpoint, reentry.episode],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            100
+    #[test]
+    fn push_orders_one_device_tag_across_retry_and_worker_unavailability() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push-test.sqlite3");
+        let mut db = open(&path).unwrap();
+        push_subscribe_with(&db, subscription()).unwrap();
+        sessions::save_session_to(&path, &crate::database::tests::session("s", "project")).unwrap();
+        let mut transcript = MaterializedSession::empty("s");
+        transcript.applied_event_ordinal = 20;
+        transcript.applied_event_digest = format!("{:064x}", 20);
+        add_message(&mut transcript, "agent:first", 1, "First reply");
+        add_message(&mut transcript, "agent:second", 9, "Second reply");
+        add_message(&mut transcript, "agent:newer", 19, "Too new for both cards");
+        materialized::save_materialized_session_to(&path, &transcript).unwrap();
+        let mut runtime = runtime(false);
+        assert!(claim(&mut db, &runtime, 0).is_empty()); // Cutover.
+        show(
+            &mut runtime,
+            "s",
+            vec![
+                completion(2, EntryMessage::None),
+                completion(10, EntryMessage::None),
+            ],
         );
-        assert!(push_claim_with(&db, 99).unwrap().is_empty());
-        let after_backpressure = push_claim_with(&db, 100).unwrap();
-        assert_eq!(after_backpressure.len(), 2);
-        for q in &after_backpressure {
-            result(&db, q, Some(413), i64::MAX);
+        let card = runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("s")
+            .unwrap();
+        card.holder = Some("child".into());
+        card.form = Some(CardForm {
+            request_id: "form:1".into(),
+            message: "Accept changes?".into(),
+        });
+        assert!(claim(&mut db, &runtime, 0).is_empty()); // Presence.
+        runtime.metadata.operator_presence.away = true;
+        let first = claim(&mut db, &runtime, 0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].identity, r#"["completion","s",2]"#);
+        assert_eq!(
+            serde_json::from_str::<Notice>(&first[0].payload)
+                .unwrap()
+                .body,
+            "First reply"
+        );
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        result(&db, &first[0], Some(429), 10);
+        runtime
+            .metadata
+            .session_attention
+            .insert("child".into(), SessionAttention::Unreachable);
+        assert!(claim(&mut db, &runtime, 10).is_empty());
+        runtime.metadata.session_attention.remove("child");
+        assert!(claim(&mut db, &runtime, 9).is_empty());
+        let retry = claim(&mut db, &runtime, 10);
+        assert_eq!(retry[0].identity, first[0].identity);
+        result(&db, &retry[0], Some(201), 10);
+
+        let second = claim(&mut db, &runtime, 10);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].identity, r#"["completion","s",10]"#);
+        assert_eq!(
+            serde_json::from_str::<Notice>(&second[0].payload)
+                .unwrap()
+                .body,
+            "Second reply"
+        );
+        result(&db, &second[0], Some(413), i64::MAX); // Permanently retires only this intent.
+        let form = claim(&mut db, &runtime, 10);
+        assert_eq!(form.len(), 1);
+        assert_eq!(form[0].identity, r#"["form","child","form:1"]"#);
+        let notice: Notice = serde_json::from_str(&form[0].payload).unwrap();
+        assert_eq!(notice.body, "Accept changes?");
+        assert_eq!(notice.url, "/#conversation/child");
+        assert_eq!(notice.tag, "s");
+        let cards = runtime.metadata.notification_cards.as_mut().unwrap();
+        let moved = cards.remove("s").unwrap();
+        cards.insert(
+            "other".into(),
+            NotificationCard {
+                entries: vec![],
+                ..moved
+            },
+        );
+        show(&mut runtime, "s", vec![completion(20, EntryMessage::None)]);
+        assert!(claim(&mut db, &runtime, 10).is_empty());
+        result(&db, &form[0], Some(201), 10);
+        let after_form = claim(&mut db, &runtime, 10);
+        assert_eq!(after_form.len(), 1);
+        assert_eq!(after_form[0].identity, r#"["completion","s",20]"#);
+    }
+
+    #[test]
+    fn push_compatible_migration_baselines_first_authoritative_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push-test.sqlite3");
+        let mut db = open(&path).unwrap();
+        let subscription = subscription();
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        db.execute_batch(
+            "DROP TABLE push_entry_deliveries;
+             DROP TABLE push_entries;
+             DROP TABLE push_entry_cutover;
+             DELETE FROM schema_migrations WHERE version=138;
+             PRAGMA user_version=137;
+             INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,'legacy','{}',0)",
+            [&subscription.endpoint],
+        ).unwrap();
+        schema::migrate_schema(&db).unwrap();
+        let schema = schema::read_schema_state(&db).unwrap();
+        assert_eq!(schema.revision, 138);
+        schema.ensure_supported_by(137).unwrap();
+
+        let mut runtime = runtime(true);
+        runtime.metadata.notification_cards = None;
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        runtime.metadata.notification_cards = Some(Default::default());
+        turn_only(&mut runtime, &["s"]);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        assert!(
+            db.query_row(
+                "SELECT baseline FROM push_entries WHERE session='s'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        );
+        drop(db);
+        let mut db = open(&path).unwrap();
+        turn_only(&mut runtime, &[]);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        turn_only(&mut runtime, &["s", "new"]);
+        let due = claim(&mut db, &runtime, 0);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].identity, r#"["completion","new",1]"#);
+        assert_eq!(db.query_row(
+            "SELECT q.accepted FROM push_deliveries q JOIN push_episodes e ON e.identity=q.episode WHERE q.episode='legacy'",
+            [], |r| r.get::<_, u32>(0),
+        ).unwrap(), 0);
+    }
+
+    // Hard-won: c146a8a89: worker recovery must retain the pending question's identity.
+    #[test]
+    fn push_restart_receipts_enrollment_and_expiry_are_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push-test.sqlite3");
+        let mut db = open(&path).unwrap();
+        let subscription = subscription();
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        let mut runtime = runtime(true);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        turn_only(&mut runtime, &["a", "b"]);
+        let due = claim(&mut db, &runtime, 0);
+        assert_eq!(due.len(), 2);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        result(&db, &due[0], Some(201), 0);
+        // Only the uncertain request replays across restart.
+        drop(db);
+        let mut db = open(&path).unwrap();
+        push_recover_with(&db).unwrap();
+        let retry = claim(&mut db, &runtime, 0);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].identity, due[1].identity);
+        result(&db, &retry[0], Some(201), 0);
+
+        // Backpressure carries across a routine browser refresh and applies to
+        // new intents too.
+        turn_only(&mut runtime, &["c"]);
+        let pending = claim(&mut db, &runtime, 0).remove(0);
+        result(&db, &pending, Some(429), 100);
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        turn_only(&mut runtime, &["c", "d"]);
+        assert!(claim(&mut db, &runtime, 99).is_empty());
+        let ready = claim(&mut db, &runtime, 100);
+        assert_eq!(ready.len(), 2);
+        for delivery in &ready {
+            result(&db, delivery, Some(413), i64::MAX);
         }
-        // A rejected payload does not disable a device or future tests.
         push_test_with(&mut db, subscription.endpoint.clone()).unwrap();
-        let test = push_claim_with(&db, 100).unwrap().remove(0);
+        let test = claim(&mut db, &RuntimeProjection::default(), 100).remove(0);
         result(&db, &test, Some(201), 0);
 
-        // Hard-won enrollment races: refresh preserves ownership, key replacement
-        // releases old reservations, and ABA never revives an old completion.
-        observe(&mut db, true, &["d"]);
-        let old = push_claim_with(&db, 100).unwrap().remove(0);
+        // Expiry refresh preserves the flight, encryption replacement and ABA
+        // invalidate old results, and endpoint rotation recovers uncertainty.
+        turn_only(&mut runtime, &["e"]);
+        let old = claim(&mut db, &runtime, 100).remove(0);
         let mut refreshed = subscription.clone();
         refreshed.expiration_time = Some(123.0);
         push_subscribe_with(&db, refreshed).unwrap();
-        assert!(push_claim_with(&db, 100).unwrap().is_empty());
+        assert!(claim(&mut db, &runtime, 100).is_empty());
         let mut replaced = subscription.clone();
         replaced.keys.auth = "replacement".into();
         push_subscribe_with(&db, replaced).unwrap();
-        let replacement = push_claim_with(&db, 100).unwrap().remove(0);
+        let replacement = claim(&mut db, &runtime, 100).remove(0);
         result(&db, &old, Some(410), 0);
         push_subscribe_with(&db, subscription.clone()).unwrap();
-        let aba = push_claim_with(&db, 100).unwrap().remove(0);
+        let aba = claim(&mut db, &runtime, 100).remove(0);
         assert_ne!(aba.enrollment, old.enrollment);
         result(&db, &replacement, Some(410), 0);
         result(&db, &old, Some(201), 0);
         result(&db, &aba, Some(201), 0);
-        assert!(push_claim_with(&db, 100).unwrap().is_empty());
 
-        // Native endpoint rotation preserves acceptance and recovers uncertain
-        // work. A late result from the retired endpoint cannot delete its owner.
-        observe(&mut db, true, &["d", "e"]);
-        let uncertain = push_claim_with(&db, 100).unwrap().remove(0);
+        turn_only(&mut runtime, &["e", "f"]);
+        let uncertain = claim(&mut db, &runtime, 100).remove(0);
         let mut rotated = subscription.clone();
         rotated.endpoint = "https://push.example.com/rotated".into();
         push_renew_with(&db, &subscription.endpoint, rotated.clone()).unwrap();
-        push_renew_with(&db, &subscription.endpoint, rotated.clone()).unwrap();
+        push_renew_with(&db, &subscription.endpoint, rotated).unwrap();
         result(&db, &uncertain, Some(410), 0);
-        let rotated_due = push_claim_with(&db, 100).unwrap();
+        let rotated_due = claim(&mut db, &runtime, 100);
         assert_eq!(rotated_due.len(), 1);
-        assert_eq!(rotated_due[0].episode, uncertain.episode);
+        assert_eq!(rotated_due[0].identity, uncertain.identity);
         result(&db, &rotated_due[0], Some(410), 0);
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM push_devices", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        assert!(push_claim_with(&db, 100).unwrap().is_empty());
+        assert!(claim(&mut db, &runtime, 100).is_empty());
     }
 }
