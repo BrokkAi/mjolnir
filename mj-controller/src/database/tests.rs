@@ -5646,6 +5646,77 @@ fn a_failed_reviewer_keeps_no_handback_from_another_command() {
     );
 }
 
+/// A review cancelled after its reviewer reached a verdict must be reported as
+/// cancelled. The host clears the active group and passes its own decision,
+/// while the stored group still carries the verdict it never delivered.
+#[test]
+fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("cancelled-review.sqlite3");
+    let owner = "cancelled-review-owner";
+    let child = "cancelled-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+        },
+        "cancelled-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, child, "No findings.");
+    let state = TurnReviewState {
+        active: Some("cancelled-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+        }),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    // The verdict is in the stored driver; the host decides to cancel it.
+    let cleared = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    close_turn_review_state_in(
+        &database,
+        owner,
+        &cleared,
+        FinishedReviewResolution::Cancelled,
+    )
+    .unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the cancelled review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Cancelled);
+    assert_eq!(finished.roles.len(), 1);
+    assert_eq!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Clean),
+        "the reviewer's own outcome is still recorded"
+    );
+}
+
 // Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
 
 /// A projection page must carry the whole turn record, not just the transcript

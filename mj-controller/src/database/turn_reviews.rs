@@ -200,46 +200,43 @@ fn record_review_reports(
     close: Option<FinishedReviewResolution>,
 ) -> Result<()> {
     let current = state.active_group.as_ref();
-    match (previous, current) {
-        // A different review replaced the stored one without a close: the old
-        // one still has a durable outcome, which its own driver answers, and
-        // the new one starts over.
-        (Some(previous), Some(current)) if !same_review(previous, current) => {
-            sync_and_finalize_previous(connection, session_id, previous)?;
-            sync_review_report(connection, session_id, current)?;
+    let same = match (previous, current) {
+        (Some(previous), Some(current)) => previous.driver.review_id == current.driver.review_id,
+        _ => false,
+    };
+    // A stored group is finished when the saved state clears it or replaces it
+    // with another review. A close decision describes the review the saved
+    // state carries: the cleared one when there is none, otherwise the current
+    // one. A review a successor displaced has only its own driver to answer.
+    if let Some(previous) = previous.filter(|_| !same) {
+        sync_review_report(connection, session_id, previous)?;
+        let resolution = match current {
+            None => previous_resolution(previous, close),
+            Some(_) => inferred_resolution(previous),
+        };
+        finalize_review_report(connection, session_id, previous, resolution)?;
+    }
+    if let Some(current) = current {
+        sync_review_report(connection, session_id, current)?;
+        // The close decision, not the presence of an earlier row, decides that
+        // this review is finished: a first save may already be it.
+        if let Some(resolution) = close {
+            finalize_review_report(connection, session_id, current, resolution)?;
         }
-        (Some(previous), None) => {
-            sync_and_finalize_previous(connection, session_id, previous)?;
-        }
-        (_, Some(current)) => {
-            sync_review_report(connection, session_id, current)?;
-            // The close decision, not the presence of an earlier row, decides
-            // that this review is finished: a first save may already be it.
-            if let Some(resolution) = close {
-                finalize_review_report(connection, session_id, current, resolution)?;
-            }
-        }
-        (None, None) => {}
     }
     Ok(())
 }
 
-fn same_review(left: &ActiveReviewGroup, right: &ActiveReviewGroup) -> bool {
-    left.driver.review_id == right.driver.review_id
-}
-
-fn sync_and_finalize_previous(
-    connection: &Connection,
-    session_id: &str,
+/// The resolution for a review that is being cleared. The host's explicit
+/// decision wins: a cancelled review's stored group can still carry the verdict
+/// it was about to deliver, and a delivery failure can arrive after a clean
+/// verdict was recorded. Only a close with no decision, which no production
+/// path produces, reads the driver's own outcome.
+fn previous_resolution(
     previous: &ActiveReviewGroup,
-) -> Result<()> {
-    sync_review_report(connection, session_id, previous)?;
-    finalize_review_report(
-        connection,
-        session_id,
-        previous,
-        inferred_resolution(previous),
-    )
+    close: Option<FinishedReviewResolution>,
+) -> FinishedReviewResolution {
+    close.unwrap_or_else(|| inferred_resolution(previous))
 }
 
 /// A review whose state is cleared without an explicit close still has a
