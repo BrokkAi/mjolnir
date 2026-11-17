@@ -21,10 +21,12 @@ idiomatic_version_file_enable_tools = ["rust", "node", "python", "go"]
 
 [hooks]
 # mise runs this hook after every `mise install`, even when nothing was
-# installed, and `--with-deps` runs apt-get. Skip it once the headless shell
-# for this Playwright version (revision 1234 for 1.62.1) is present; update
-# both numbers together.
-postinstall = "test -d /opt/ms-playwright/chromium_headless_shell-1234 || npx --yes playwright@1.62.1 install --with-deps chromium-headless-shell"
+# installed, and `--with-deps` runs apt-get. Skip it when the headless shell
+# for this Playwright version (revision 1234 for 1.62.1; update both numbers
+# together) launches, which proves the download completed and its system
+# libraries are present. `--force` reinstalls over a partial download, which
+# Playwright would otherwise skip because its completion marker exists.
+postinstall = "/opt/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell --version >/dev/null 2>&1 || npx --yes playwright@1.62.1 install --force --with-deps chromium-headless-shell"
 
 [bootstrap.packages]
 "apt:bash" = "*"
