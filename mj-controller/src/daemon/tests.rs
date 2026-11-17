@@ -15455,6 +15455,15 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
         panic!("old question must be found outside the tail");
     };
     assert_eq!(*item, *history.transcript[0]);
+    let StoredTranscriptItem::Found(bounded) = client
+        .stored_agent_message_through("notification-history".into(), 1)
+        .await
+        .unwrap()
+    else {
+        panic!("completion-bound read must find the original reply outside the tail");
+    };
+    assert_eq!(bounded, item);
+
     assert!(matches!(
         client
             .stored_transcript_item("notification-history".into(), "missing".into())
@@ -15504,6 +15513,13 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     assert!(matches!(
         older
             .stored_transcript_item("notification-history".into(), "reply-1".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Unsupported
+    ));
+    assert!(matches!(
+        older
+            .stored_agent_message_through("notification-history".into(), 1)
             .await
             .unwrap(),
         StoredTranscriptItem::Unsupported

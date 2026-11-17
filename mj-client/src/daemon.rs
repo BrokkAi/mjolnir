@@ -1044,6 +1044,11 @@ pub enum DaemonAction {
         session_id: String,
         stable_id: String,
     },
+    /// The newest agent transcript item complete through this relay ordinal.
+    StoredAgentMessageThrough {
+        session_id: String,
+        through: u64,
+    },
     /// The stored projection summary of one session.
     StoredSessionSummary {
         session_id: String,
@@ -2997,6 +3002,27 @@ impl DaemonClient {
         }
     }
 
+    pub async fn stored_agent_message_through(
+        &mut self,
+        session_id: String,
+        through: u64,
+    ) -> Result<StoredTranscriptItem> {
+        if self.metadata.protocol_version < NOTIFICATION_STACK_PROTOCOL {
+            return Ok(StoredTranscriptItem::Unsupported);
+        }
+        match self
+            .request(DaemonAction::StoredAgentMessageThrough {
+                session_id,
+                through,
+            })
+            .await?
+        {
+            DaemonReply::StoredTranscriptItem(Some(item)) => Ok(StoredTranscriptItem::Found(item)),
+            DaemonReply::StoredTranscriptItem(None) => Ok(StoredTranscriptItem::Missing),
+            reply => bail!("unexpected stored agent message reply {reply:?}"),
+        }
+    }
+
     pub async fn stored_session_summary(
         &mut self,
         session_id: String,
@@ -3690,7 +3716,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 105: indexed single-item stored transcript reads for notification
 // text use chunked replies; legacy count-mode stored projection tails remain
 // unchunked.
-pub const PROTOCOL_VERSION: u32 = 105;
+/// The first protocol with notification cards and completion-bound transcript reads.
+pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
+pub const PROTOCOL_VERSION: u32 = NOTIFICATION_STACK_PROTOCOL;
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
