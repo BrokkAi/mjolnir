@@ -669,7 +669,7 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 Unknown
             };
             let holder = holders.get(id).filter(|_| state == NeedsInput);
-            let card = if matches!(state, NeedsInput | Important | Idle | Working)
+            let mut card = if matches!(state, NeedsInput | Important | Idle | Working)
                 && !transitioning
                 && record.state != mj_core::state::SessionState::Checkpointing
             {
@@ -685,6 +685,32 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
             } else {
                 None
             };
+            if let Some(card) = &mut card
+                && card.badge == NotificationKind::NeedsInput
+                && card.form.is_none()
+                && let Some(review) = review.filter(|review| {
+                    review.questions.is_empty()
+                        && matches!(
+                            review.phase,
+                            TurnReviewPhase::Verdict(ReviewVerdict::Findings { .. })
+                        )
+                })
+                && let Some(reviewer) = review
+                    .roles
+                    .iter()
+                    .filter(|role| role.role != mj_core::review::driver::BRIEF_WRITER_ROLE)
+                    .filter_map(|role| role.child_session_id.as_deref())
+                    .chain(review.child_session_id.as_deref())
+                    .min()
+            {
+                // The frozen registration identifies one review even when
+                // several reviewer roles contributed findings.
+                card.holder = Some(review.session_id.clone());
+                card.form = Some(CardForm {
+                    request_id: format!("review-verdict.{reviewer}.findings"),
+                    message: review.status.clone(),
+                });
+            }
             let state = match card.as_ref().map(|card| card.badge) {
                 Some(NotificationKind::NeedsInput) => NeedsInput,
                 Some(NotificationKind::Important) => Important,
@@ -904,17 +930,28 @@ fn notification_card(
                     })
             })
     });
-    let native_is_own = native.is_some_and(|(_, native)| native.agent.owner_session_id == id);
+    let native = native
+        .filter(|_| badge == NotificationKind::NeedsInput)
+        .and_then(|(source, native)| {
+            native
+                .pending_input_request_id
+                .as_deref()
+                .map(|request| (source, native, request))
+        });
+    let native_is_own = native.is_some_and(|(_, native, _)| native.agent.owner_session_id == id);
     let (holder, form) = if let Some(form) = direct_form
         && (holder.is_some_and(|holder| holder == id) || !native_is_own)
     {
         (holder.cloned(), Some(form))
-    } else if let Some((source, native)) = native.filter(|_| badge == NotificationKind::NeedsInput)
-    {
+    } else if let Some((source, native, request)) = native {
         (
             Some(native.agent.owner_session_id.clone()),
             Some(CardForm {
-                request_id: format!("native.{source}.{}", native.generation_ordinal),
+                request_id: format!(
+                    "native.{}:{source}.{}.{request}",
+                    source.len(),
+                    native.generation_ordinal
+                ),
                 message: native.pending_input_message.clone().unwrap_or_default(),
             }),
         )
@@ -1154,6 +1191,7 @@ mod tests {
         assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
     }
 
+    // Hard-won: 8dd7f6384: native requests shared one push identity and review verdicts had none.
     #[test]
     fn native_forms_promote_the_owner_and_finished_children_are_idle() {
         use mj_core::native_agent::*;
@@ -1180,6 +1218,7 @@ mod tests {
                 projection_digest: String::new(),
                 pending_input: true,
                 pending_input_message: Some("Approve the native action?".into()),
+                pending_input_request_id: Some("first-request".into()),
             },
         );
         let attention = project(&runtime);
@@ -1190,15 +1229,60 @@ mod tests {
         let card = &projection.cards["parent"];
         assert_eq!(card.holder.as_deref(), Some("parent"));
         let form = card.form.as_ref().unwrap();
-        assert_eq!(form.request_id, format!("native.{id}.1"));
+        let first_request = format!("native.{}:{id}.1.first-request", id.len());
+        assert_eq!(form.request_id, first_request);
         assert_eq!(form.message, "Approve the native action?");
         assert!(!projection.cards.contains_key(&id));
+        runtime
+            .native_agents
+            .get_mut(&id)
+            .unwrap()
+            .pending_input_request_id = Some("second-request".into());
+        let revised = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(
+            revised.cards["parent"].form.as_ref().unwrap().request_id,
+            format!("native.{}:{id}.1.second-request", id.len()),
+        );
         let native = runtime.native_agents.get_mut(&id).unwrap();
         native.agent.state = NativeAgentState::Completed;
         native.pending_input = false;
         native.pending_input_message = None;
+        native.pending_input_request_id = None;
         assert_eq!(project(&runtime)[&id], SessionAttention::Idle);
         assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+
+        let role = |id: &str| mj_core::review::driver::RoleStatus {
+            role: id.to_owned(),
+            label: id.to_owned(),
+            state: mj_core::review::driver::RoleState::Findings,
+            child_session_id: Some(id.to_owned()),
+        };
+        runtime
+            .metadata
+            .reviews
+            .push(mj_client::review::RuntimeReviewView {
+                session_id: "parent".into(),
+                child_session_id: None,
+                phase: TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+                    synthesis: "Codify the ownership rule".into(),
+                    evidence: Default::default(),
+                }),
+                roles: vec![role("reviewer-b"), role("reviewer-a")],
+                status: "Review found issues".into(),
+                verdict: None,
+                questions: vec![],
+            });
+        let review = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        let card = &review.cards["parent"];
+        assert_eq!(card.badge, NotificationKind::NeedsInput);
+        assert_eq!(card.holder.as_deref(), Some("parent"));
+        assert!(card.entries.is_empty());
+        let form = card.form.as_ref().unwrap();
+        assert_eq!(form.request_id, "review-verdict.reviewer-a.findings");
+        assert_eq!(form.message, "Review found issues");
+        runtime.metadata.reviews[0].roles.reverse();
+        let reordered = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(&reordered.cards["parent"], card);
     }
 
     #[test]
@@ -2046,6 +2130,7 @@ mod tests {
                 projection_digest: String::new(),
                 pending_input: true,
                 pending_input_message: None,
+                pending_input_request_id: None,
             },
         );
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
