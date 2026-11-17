@@ -506,18 +506,30 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--jobs", required=True)
     p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--stop-on-failure", action="store_true",
+                   help="stop admitting new jobs after a failed, held, or recovery-needed job")
     a = p.parse_args()
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
     # Serialize session creation and startup; reviews themselves run concurrently.
     gate = threading.Semaphore(2)
+    admission_lock = threading.Lock()
+    stopped = False
 
     def one(job):
+        nonlocal stopped
+        with admission_lock:
+            if a.stop_on_failure and stopped:
+                return job, "not-started", None
         try:
-            return job, run_job(job, gate), None
+            state, error = run_job(job, gate), None
         except Exception as e:  # report every failure with its job
             d = ROOT / "runs" / job["bug"] / job["arm"]
             save(d / "error.json", {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
-            return job, "failed", str(e)
+            state, error = "failed", str(e)
+        if a.stop_on_failure and state != "done":
+            with admission_lock:
+                stopped = True
+        return job, state, error
 
     unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:

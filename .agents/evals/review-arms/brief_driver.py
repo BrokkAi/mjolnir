@@ -96,6 +96,8 @@ def wait_command(sid, command, limit=1800):
         s = session(sid)
         outcome = s.get("last_turn_outcome") or {}
         if outcome.get("command_id") == command and s.get("is_idle"):
+            if (outcome.get("outcome") or {}).get("stop_reason") == "QuotaLimit":
+                raise RuntimeError(f"writer turn hit QuotaLimit: {json.dumps(outcome)[:600]}")
             if outcome["outcome"]["kind"] != "completed":
                 raise RuntimeError(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
             return outcome
@@ -226,6 +228,8 @@ def main():
     p.add_argument("--lint", action="store_true")
     p.add_argument("--kind", choices=sorted(KINDS), default="blind")
     p.add_argument("--profile", help="mj profile for the writers (default: load balancing)")
+    p.add_argument("--stop-on-failure", action="store_true",
+                   help="stop admitting new bugs after a failure, held job, or recovery-needed job")
     a = p.parse_args()
     global KIND, WRITER_MODEL, WRITER_EFFORT, WRITER_PROFILE
     KIND, WRITER_PROFILE = a.kind, a.profile
@@ -237,14 +241,25 @@ def main():
             print(json.dumps({"bug": b, "problems": lint(text, driver.CORPUS[b])}))
         return 0
     gate = threading.Semaphore(2)  # serialize session startup as driver.py does
+    admission_lock = threading.Lock()
+    stopped = False
 
     def one(b):
+        nonlocal stopped
+        with admission_lock:
+            if a.stop_on_failure and stopped:
+                return b, "not-started", None
         try:
-            return b, run(b, gate), None
+            state = run(b, gate)
+            error = None
         except Exception as e:  # report every failure with its diff
             save(ROOT / "briefs" / KIND / b / "error.json",
                  {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
-            return b, "failed", str(e)
+            state, error = "failed", str(e)
+        if a.stop_on_failure and (state != "done"):
+            with admission_lock:
+                stopped = True
+        return b, state, error
 
     unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
