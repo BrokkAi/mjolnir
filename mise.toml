@@ -1,4 +1,5 @@
 [tools]
+"aqua:aws-cli" = "latest"
 "cargo:cargo-nextest" = "0.9.143"
 "cargo:cargo-llvm-cov" = "0.8.7"
 "cargo:flamegraph" = "0.6.14"

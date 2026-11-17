@@ -2,6 +2,35 @@
 
 lockfile_version = 3
 
+[[tools."aqua:aws-cli"]]
+version = "2.40.3"
+backend = "aqua:aws-cli"
+specifiers = ["latest"]
+
+[tools."aqua:aws-cli"."platforms.linux-arm64"]
+checksum = "sha256:4c5f080c6c294eb0da77734c4520f5b5089cf45a4ee757ca34ddf7f9e512e66a"
+url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.40.3.zip"
+
+[tools."aqua:aws-cli"."platforms.linux-arm64-musl"]
+checksum = "sha256:4c5f080c6c294eb0da77734c4520f5b5089cf45a4ee757ca34ddf7f9e512e66a"
+url = "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.40.3.zip"
+
+[tools."aqua:aws-cli"."platforms.linux-x64"]
+checksum = "sha256:4770c06c4ecfc8ba94b60d89e6c7018ab7ea2cf5341b1ef05f6f93c5d6e8b705"
+url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.40.3.zip"
+
+[tools."aqua:aws-cli"."platforms.linux-x64-musl"]
+checksum = "sha256:4770c06c4ecfc8ba94b60d89e6c7018ab7ea2cf5341b1ef05f6f93c5d6e8b705"
+url = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.40.3.zip"
+
+[tools."aqua:aws-cli"."platforms.macos-arm64"]
+checksum = "sha256:be032742ff205f7f2d7c189010bbb1f3891d0a67be0b1df0fe9d3e7f5fc5ad30"
+url = "https://awscli.amazonaws.com/AWSCLIV2-2.40.3.pkg"
+
+[tools."aqua:aws-cli"."platforms.macos-x64"]
+checksum = "sha256:be032742ff205f7f2d7c189010bbb1f3891d0a67be0b1df0fe9d3e7f5fc5ad30"
+url = "https://awscli.amazonaws.com/AWSCLIV2-2.40.3.pkg"
+
 [[tools."cargo:cargo-llvm-cov"]]
 version = "0.8.7"
 backend = "cargo:cargo-llvm-cov"
