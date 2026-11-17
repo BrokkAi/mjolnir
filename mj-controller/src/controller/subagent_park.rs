@@ -285,7 +285,7 @@ impl Controller {
             executor.end_resumable_work("subagent unpark launch")?;
             // The launch holds handoff admission, so it is bounded; the slow
             // profile transfer before it is not (#1571).
-            executor.bound_admitted_work(ADMITTED_LAUNCH_TIMEOUT);
+            executor.bound_admitted_work(Some(ADMITTED_LAUNCH_TIMEOUT));
             let target = session
                 .target
                 .as_ref()
@@ -304,6 +304,8 @@ impl Controller {
             // The active record and boot intent are durable. Handoff may cancel
             // this wait; the next daemon attaches to the same live worker.
             executor.begin_resumable_work()?;
+            // Readiness observation has its own allowance and holds no admission.
+            executor.bound_admitted_work(None);
             self.observe_started_worker(
                 session_id,
                 executor,

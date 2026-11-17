@@ -781,8 +781,9 @@ pub trait CommandExecutor {
         false
     }
     /// Bound the work that follows `end_resumable_work`: it holds daemon
-    /// admission, so a hung command must not stall a handoff.
-    fn bound_admitted_work(&self, _timeout: Duration) {}
+    /// admission, so a hung command must not stall a handoff. `None` lifts the
+    /// bound when the work leaves admission.
+    fn bound_admitted_work(&self, _timeout: Option<Duration>) {}
     /// Reacquire named control admission before leaving resumable work.
     fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
         Ok(())
@@ -1472,12 +1473,12 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
-    fn bound_admitted_work(&self, timeout: Duration) {
+    fn bound_admitted_work(&self, timeout: Option<Duration>) {
         *self
             .armed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((Instant::now() + timeout, timeout));
+            timeout.map(|timeout| (Instant::now() + timeout, timeout));
     }
 
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -2798,7 +2799,7 @@ mod executor_tests {
         let command = CommandSpec::new("sh", ["-c", "sleep 30"]).purpose("launch a worker");
         let executor = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)));
         assert!(!executor.is_cancelled(), "no deadline before arming");
-        executor.bound_admitted_work(Duration::ZERO);
+        executor.bound_admitted_work(Some(Duration::ZERO));
         assert_eq!(
             executor.execute(&command).unwrap_err().to_string(),
             "timed out after 0 s while launch a worker"
@@ -2806,6 +2807,11 @@ mod executor_tests {
         // Cleanup runs on a clone with its own deadline, not the spent one.
         let cleanup = CommandSpec::new("true", Vec::<String>::new());
         executor.execute_cleanup(&cleanup).unwrap();
+        executor.bound_admitted_work(None);
+        assert!(
+            !executor.is_cancelled(),
+            "leaving admission lifts the bound"
+        );
     }
 
     #[test]

@@ -180,7 +180,7 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         }
     }
 
-    fn bound_admitted_work(&self, timeout: Duration) {
+    fn bound_admitted_work(&self, timeout: Option<Duration>) {
         self.inner.bound_admitted_work(timeout);
     }
 
