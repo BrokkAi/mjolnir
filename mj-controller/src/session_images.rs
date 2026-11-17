@@ -13,11 +13,11 @@ use tokio::sync::Notify;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
+/// An operation keeps its whole log and result until the daemon exits, so
+/// every follower, including one repeating a request whose response was
+/// lost, can read both. Image builds are rare user-started operations.
 struct OperationState {
-    /// Log bytes from offset `released` on; earlier bytes were delivered with
-    /// the result and dropped.
     log: Vec<u8>,
-    released: usize,
     result: Option<std::result::Result<ImageResult, String>>,
 }
 
@@ -96,19 +96,15 @@ impl ImageBuilds {
             tokio::pin!(changed);
             changed.as_mut().enable();
             {
-                let mut state = operation
+                let state = operation
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let released = state.released;
                 ensure!(
-                    offset <= released + state.log.len(),
+                    offset <= state.log.len(),
                     "log offset exceeds the operation's log"
                 );
-                // A follower repeating a request whose response was lost may
-                // ask for bytes already released; it gets the rest and the
-                // result.
-                let start = offset.max(released) - released;
+                let start = offset;
                 let mut end = start;
                 for chunk in state.log[start..].utf8_chunks() {
                     end += chunk.valid().len();
@@ -124,16 +120,9 @@ impl ImageBuilds {
                 if end > start || state.result.is_some() {
                     let follow = ImageFollow {
                         log: String::from_utf8_lossy(&state.log[start..end]).into_owned(),
-                        next_offset: released + end,
+                        next_offset: end,
                         result: state.result.clone(),
                     };
-                    // Once the whole log has gone out with the result, the
-                    // daemon drops the log and keeps only the small result, so
-                    // a repeated follow still learns how the build ended.
-                    if state.result.is_some() && end == state.log.len() {
-                        state.released = released + end;
-                        state.log = Vec::new();
-                    }
                     return Ok(Some(follow));
                 }
             }
@@ -884,15 +873,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(last.result.is_some());
-        // Hard-won: review of b0f32d6: a finished operation kept its whole engine log until the daemon exited.
-        assert!(operation.state.lock().unwrap().log.is_empty());
-        // Hard-won: review of aca53d0: releasing the operation lost the result when the final response was lost.
-        let repeated = builds
-            .follow("unicode", rest.next_offset)
-            .await
-            .unwrap()
-            .unwrap();
+        // Hard-won: review of aca53d0: releasing a finished operation lost its result and log for a repeated follow.
+        let repeated = builds.follow("unicode", 0).await.unwrap().unwrap();
+        assert_eq!(repeated.log, std::str::from_utf8(message).unwrap());
         assert!(repeated.result.is_some());
-        assert_eq!(repeated.next_offset, message.len());
     }
 }

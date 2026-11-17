@@ -412,6 +412,7 @@ pub(crate) fn inspect_retained_container(
         );
         None
     };
+    let user = numeric_user(&host, &record.image, &record.config.user, executor)?;
     Ok(RetainedContainer {
         locator: locator.clone(),
         source_id: record.id,
@@ -433,7 +434,7 @@ pub(crate) fn inspect_retained_container(
         image_pin_reserved: false,
         operation_id: operation_id.into(),
         mounts,
-        user: record.config.user,
+        user,
         environment: record.config.env,
         working_directory: record.config.working_dir,
         memory: record.host_config.memory,
@@ -1060,6 +1061,56 @@ impl RetainedContainer {
 enum ContainerStateGoal {
     NotRunning,
     Absent,
+}
+
+/// The source container's user as `uid:gid`, read from the source image. The
+/// replacement may run a different image that lacks the named account (the
+/// old agent-dev image's `hel` is absent from buildpack-deps), while files in
+/// the retained storage stay owned by these ids.
+fn numeric_user(
+    host: &ImageHost,
+    source_image: &str,
+    user: &str,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if user.is_empty() || user.split(':').all(numeric) {
+        return Ok(user.to_owned());
+    }
+    let (name, group) = user.split_once(':').unwrap_or((user, ""));
+    let script = r#"set -eu
+uid=$(id -u -- "$1")
+case $2 in
+'') gid=$(id -g -- "$1") ;;
+*[!0-9]*) gid=$(getent group "$2" | cut -d: -f3) ;;
+*) gid=$2 ;;
+esac
+printf '%s:%s' "$uid" "$gid""#;
+    let output = executor.execute(&host.command(
+        vec![
+            host.engine().into(),
+            "run".into(),
+            "--rm".into(),
+            "--entrypoint".into(),
+            "sh".into(),
+            "--user".into(),
+            "0".into(),
+            source_image.into(),
+            "-c".into(),
+            script.into(),
+            "mj-user".into(),
+            name.into(),
+            group.into(),
+        ],
+        "resolve the source container's user ids".into(),
+    ))?;
+    let resolved = String::from_utf8(output.stdout)?;
+    ensure!(
+        output.status == 0 && resolved.split(':').count() == 2 && resolved.split(':').all(numeric),
+        "cannot resolve the source container's user {user:?} to ids: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(resolved)
 }
 
 fn checked_container_state_change(
