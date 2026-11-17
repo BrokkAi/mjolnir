@@ -22,6 +22,10 @@ Usage:
   python3 brief_writer_terra.py contains-build
       the stage A contains rule on both writers' published briefs, blinded:
       -> briefs/writer-contains/unit/ (run verify_driver.py --kind task --output contains.jsonl)
+  python3 brief_writer_terra.py readout [--name brief-judge-j]
+      final handchecked Terra/high rates, paired diff bootstrap, primary-only writer decision
+      and round G judge consistency on identical Terra sessions of the 10 ablation diffs
+      -> results/brief-writer-terra/{summary.json,per-diff.json}
   python3 brief_writer_terra.py usage
       writer cost, tokens, turns and wall time per brief for both writers
       -> results/brief-writer-terra/usage.jsonl and a summary
@@ -30,11 +34,15 @@ import argparse
 import hashlib
 import json
 import pathlib
+import random
 import secrets
 import statistics
+from fractions import Fraction
 
+import brief_ablation
 import brief_driver
 import brief_oracle
+import brief_score
 import driver
 from driver import ROOT, SCRIPTS, save
 
@@ -219,6 +227,192 @@ def usage():
                           "unknown_cost": sum(r["cost_usd"] is None for r in rs)}))
 
 
+REVIEW_MODEL = "gpt-6.1-terra"
+READOUT_CONDITIONS = {"no-brief": "no-brief", "BT": "blind", "TT": KIND}
+BOOT_SEED = 20261116
+
+
+def judged_round(round_name):
+    """Validate coverage and labels before using the shared final-label helper."""
+    key = json.loads((ROOT / "private" / f"key-{round_name}.json").read_text())["outputs"]
+    merged = [json.loads(line) for line in (ROOT / round_name / "merged.jsonl").read_text().splitlines()
+              if line.strip()]
+    ids = [r["output_id"] for r in merged]
+    if len(ids) != len(set(ids)) or set(ids) != set(key):
+        raise SystemExit("incomplete or duplicate merged verdict coverage: must match the round key")
+    valid = {"caught", "partial", "missed"}
+    for r in merged:
+        if r.get("bug") != key[r["output_id"]]["bug"] or len(r["labels"]) != 2 or not set(r["labels"]) <= valid:
+            raise SystemExit(f"invalid merged verdict: {r['output_id']}")
+    try:
+        final = brief_ablation.final_labels(round_name)
+    except AssertionError as e:
+        raise SystemExit(str(e)) from e
+    if any(label not in valid for label in final.values()):
+        raise SystemExit("invalid final label: expected caught, partial or missed")
+    return key, final
+
+
+def readout_data(round_name, groups):
+    """Require every planned observation before using the shared rate helper."""
+    bugs = {b for g in groups.values() for b in g}
+    key, final = judged_round(round_name)
+    cells = {(b, cond): [] for b in bugs for cond in READOUT_CONDITIONS.values()}
+    for oid, k in key.items():
+        cell = (k["bug"], k["condition"])
+        if k["model"] != REVIEW_MODEL or cell not in cells:
+            continue
+        expected = brief_score.CONDITION.get(k["arm"], "no-brief"
+                                             if k["arm"] in brief_score.BASELINE_ARMS else None)
+        if expected != k["condition"] or (k["condition"] == "blind" and k["arm"] != "BT") or \
+                (k["condition"] == KIND and k["arm"] != "TT"):
+            raise SystemExit(f"wrong arm/condition in round key: {oid}")
+        cells[cell].append((oid, k["session"]))
+    gaps = []
+    for (bug, cond), rows in sorted(cells.items()):
+        n = len(rows)
+        if (n < 3 if cond == "no-brief" else n != 3):
+            gaps.append(f"{bug} {cond}: {n} sessions; need {'at least' if cond == 'no-brief' else 'exactly'} 3")
+    selected = [session for rows in cells.values() for _, session in rows]
+    if len(selected) != len(set(selected)):
+        gaps.append("duplicate reviewer session in selected observations")
+    if gaps:
+        raise SystemExit("incomplete sample; not scoring a subset:\n" + "\n".join(gaps))
+    caught = brief_ablation.rates(round_name, bugs)
+    return {bug: {arm: {"sessions": len(cells[(bug, cond)]),
+                        "caught": sum(final[oid] == "caught" for oid, _ in cells[(bug, cond)]),
+                        "partial": sum(final[oid] == "partial" for oid, _ in cells[(bug, cond)]),
+                        "catch_rate": caught[(cond, REVIEW_MODEL)][bug],
+                        "partial_rate": statistics.fmean(final[oid] == "partial"
+                                                         for oid, _ in cells[(bug, cond)])}
+                  for arm, cond in READOUT_CONDITIONS.items()} for bug in bugs}
+
+
+def paired_readout(bugs, per_diff):
+    """Resample the SAME ordered diff indices for every arm and both contrasts."""
+    rates = {arm: [Fraction(per_diff[b][arm]["caught"], per_diff[b][arm]["sessions"]) for b in bugs]
+             for arm in READOUT_CONDITIONS}
+    differences = {name: [a - b for a, b in zip(rates["TT"], rates[other])]
+                   for name, other in (("TT-BT", "BT"), ("TT-no-brief", "no-brief"))}
+    rng = random.Random(BOOT_SEED)
+    draws = {"TT-BT": [], "TT-no-brief": []}
+    for _ in range(brief_ablation.BOOT):
+        ix = rng.choices(range(len(bugs)), k=len(bugs))
+        for name, delta in differences.items():
+            draws[name].append(sum(delta[i] for i in ix) / len(bugs))
+    contrasts = {}
+    for name, delta in differences.items():
+        values = sorted(draws[name])
+        # Sort exact rational draws: cancellation must leave a truly zero bound
+        # for the strict >0 rule. Convert only the final reported values.
+        ci = [float(values[int(p * len(values))]) for p in (0.025, 0.975)]
+        contrasts[name] = {"difference": float(sum(delta) / len(bugs)), "ci95": ci}
+    return {"diffs": len(bugs), "arms": {
+        arm: {"condition": cond, "sessions": sum(per_diff[b][arm]["sessions"] for b in bugs),
+              "catch_rate": float(sum(rates[arm]) / len(bugs)),
+              "partial_rate": statistics.fmean(per_diff[b][arm]["partial_rate"] for b in bugs)}
+        for arm, cond in READOUT_CONDITIONS.items()}, "contrasts": contrasts}
+
+
+def judge_consistency(round_name):
+    """Compare final labels on the identical stored Terra sessions of the 10 ablation diffs."""
+    bugs = brief_ablation.diffs()
+    rounds = (round_name, "brief-judge-g")
+    selected, finals = {}, {}
+    for name in rounds:
+        key, finals[name] = judged_round(name)
+        cells = {}
+        for oid, k in key.items():
+            if k["model"] != REVIEW_MODEL or k["bug"] not in bugs or k["condition"] not in ("blind", "no-brief"):
+                continue
+            if (k["condition"] == "blind" and k["arm"] != "BT") or \
+                    (k["condition"] == "no-brief" and k["arm"] not in brief_score.BASELINE_ARMS):
+                raise SystemExit(f"{name}: wrong arm for judge consistency: {oid}")
+            identity = (k["bug"], k["condition"], k["session"])
+            if identity in cells:
+                raise SystemExit(f"{name}: duplicate consistency session: {identity}")
+            cells[identity] = oid
+        for bug in bugs:
+            for cond in ("blind", "no-brief"):
+                n = sum(b == bug and c == cond for b, c, _ in cells)
+                if (n != 3 if cond == "blind" else n < 3):
+                    raise SystemExit(f"{name}: incomplete consistency coverage: {bug} {cond}: {n}")
+        selected[name] = cells
+    current, previous = (selected[name] for name in rounds)
+    if current.keys() != previous.keys():
+        raise SystemExit("judge consistency requires identical sessions in both rounds; "
+                         f"only {round_name}: {sorted(current.keys() - previous.keys())}; "
+                         f"only brief-judge-g: {sorted(previous.keys() - current.keys())}")
+    per_diff = []
+    for bug in bugs:
+        row = {"bug": bug, "arms": {}}
+        for arm, cond in (("BT", "blind"), ("no-brief", "no-brief")):
+            identities = sorted(i for i in current if i[:2] == (bug, cond))
+            labels = [{"session": i[2], "outputs": {
+                name: {"output_id": selected[name][i], "label": finals[name][selected[name][i]]}
+                for name in rounds}} for i in identities]
+            row["arms"][arm] = {"sessions": len(identities), "labels": labels,
+                                 "rates": {name: {
+                                     "catch_rate": statistics.fmean(finals[name][selected[name][i]] == "caught"
+                                                                    for i in identities),
+                                     "partial_rate": statistics.fmean(finals[name][selected[name][i]] == "partial"
+                                                                      for i in identities)} for name in rounds}}
+        per_diff.append(row)
+    arms, caveats = {}, []
+    for arm in ("BT", "no-brief"):
+        rates = {name: {metric: statistics.fmean(r["arms"][arm]["rates"][name][metric] for r in per_diff)
+                        for metric in ("catch_rate", "partial_rate")} for name in rounds}
+        # Count exactly at the registered 10-point boundary; float subtraction
+        # can turn equality into a spurious greater-than flag.
+        difference = sum(
+            Fraction(sum(label["outputs"][round_name]["label"] == "caught" for label in r["arms"][arm]["labels"]),
+                     r["arms"][arm]["sessions"])
+            - Fraction(sum(label["outputs"]["brief-judge-g"]["label"] == "caught"
+                           for label in r["arms"][arm]["labels"]), r["arms"][arm]["sessions"])
+            for r in per_diff) / len(bugs)
+        over = abs(difference) > Fraction(1, 10)
+        arms[arm] = {"sessions": sum(r["arms"][arm]["sessions"] for r in per_diff),
+                     "rates": rates, "difference_points": float(100 * difference), "differs_over_10_points": over}
+        if over:
+            caveats.append(f"{arm}: {round_name} minus brief-judge-g catch rate differs by {float(100 * difference):.1f} points")
+    return {"reference_round": "brief-judge-g", "reviewer_model": REVIEW_MODEL,
+            "judges": {round_name: {"model": "gpt-6.1-sol", "effort": "high", "profile": "codex4"},
+                       "brief-judge-g": {"model": "gemini-4-carbon", "effort": "high"}},
+            "scope": "10 ablation diffs, identical session IDs; mean per-diff caught share",
+            "affects_writer_decision": False, "diffs": len(bugs), "arms": arms,
+            "caveats": caveats, "per_diff": per_diff}
+
+
+def readout(round_name):
+    frozen = brief_oracle.sets()
+    groups = {g: frozen[g] for g in ("P", "S")}
+    per_diff = readout_data(round_name, groups)
+    results = {g: paired_readout(bugs, per_diff) for g, bugs in groups.items()}
+    consistency = judge_consistency(round_name)
+    primary = results["P"]
+    within_margin = primary["arms"]["TT"]["catch_rate"] >= primary["arms"]["BT"]["catch_rate"] - 0.10
+    above_zero = primary["contrasts"]["TT-no-brief"]["ci95"][0] > 0
+    report = {"round": round_name, "reviewer_model": REVIEW_MODEL, "reviewer_effort": "high",
+              "writer_models": {"TT": "gpt-6.1-terra", "BT": "gpt-6.1-sol"}, "writer_effort": "high",
+              "metric": "mean per-diff caught share; partial is separate and never counts as caught",
+              "bootstrap": {"resamples": brief_ablation.BOOT, "seed": BOOT_SEED,
+                            "unit": "diff", "paired": True, "confidence": 0.95,
+                            "interval": "percentile order statistics at floor(0.025*n), floor(0.975*n)"},
+              "decision_rule": "Primary P only: TT >= BT - 0.10 AND lower95(TT-no-brief) > 0; else Sol",
+              "margin_criterion": "point estimate only; no significance claim for TT-BT",
+              "decision_checks": {"TT_at_least_BT_minus_10_points": within_margin,
+                                  "TT_minus_no_brief_lower95_above_zero": above_zero},
+              "default_writer": "Terra/high" if within_margin and above_zero else "Sol/high",
+              "sets": results, "judge_consistency": {k: v for k, v in consistency.items() if k != "per_diff"}}
+    base = SCRIPTS / "results/brief-writer-terra"
+    save(base / "per-diff.json", {"round": round_name, "reviewer_model": REVIEW_MODEL,
+                                  "judge_consistency": consistency["per_diff"],
+                                  "sets": {g: [{"bug": b, **per_diff[b]} for b in bugs]
+                                           for g, bugs in groups.items()}})
+    save(base / "summary.json", report)
+    print(json.dumps(report, indent=2))
+
+
 def save_jsonl(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -227,12 +421,13 @@ def save_jsonl(path, rows):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("step", choices=["leak-build", "leak-collect", "rewrite-build", "rewrite-collect",
-                                    "contains-build", "usage"])
+                                    "contains-build", "usage", "readout"])
     p.add_argument("--round", type=int, choices=[0, 1], default=0)
+    p.add_argument("--name", default="brief-judge-j", help="readout: judging round")
     a = p.parse_args()
     {"leak-build": lambda: leak_build(a.round), "leak-collect": lambda: leak_collect(a.round),
      "rewrite-build": rewrite_build, "rewrite-collect": rewrite_collect,
-     "contains-build": contains_build, "usage": usage}[a.step]()
+     "contains-build": contains_build, "usage": usage, "readout": lambda: readout(a.name)}[a.step]()
 
 
 if __name__ == "__main__":
