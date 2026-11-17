@@ -416,6 +416,7 @@ test('entering Review does not wait for project preflight', async () => {
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
+    inboxNoticeCards: () => [],
     snapshot: { sessions: [], launch_failures: [
       { id: 'first', workspace_id: 'test' },
       { id: 'second', workspace_id: 'primary' },
@@ -443,6 +444,7 @@ test('rolled-back launch errors remain visible only in their workspace and can b
 test('cleanup warnings remain visible after their session is removed and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
+    inboxNoticeCards: () => [],
     snapshot: { sessions: [], notices: [
       { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
     ] },

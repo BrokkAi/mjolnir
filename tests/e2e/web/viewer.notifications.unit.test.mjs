@@ -99,7 +99,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     },
   });
   vm.runInContext(sourceBetween('function el(', 'const bootStatus'), context);
-  vm.runInContext(sourceBetween('/// A slash command typed in a notification', 'let historyOpen'), context);
+  vm.runInContext(sourceBetween('/// Text from a notification', 'let historyOpen'), context);
   vm.runInContext(sourceBetween('function newCommandId(', '/// Guard against sending twice.'), context);
   vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
   vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
@@ -477,7 +477,7 @@ test('a slash command never overwrites the conversation draft and keeps the quic
   view.nodes.reply.onsubmit({ preventDefault() {} });
   await settle();
   assert.deepEqual(view.nav, []);
-  assert.equal(view.read('composerHandoff'), null);
+  assert.equal(view.read('composerHandoffs.size'), 0);
   assert.equal(view.nodes.input.value, '/model fast');
   assert.equal(view.nodes.cardError.textContent, 'Slash commands run in the conversation; your draft there is kept. Go to Session to run it.');
   assert.deepEqual(view.drafts, []);
@@ -503,7 +503,7 @@ test('when the draft cannot be checked, or the composer is no longer empty, noth
   await typed.read("restoreDraft('a', 1)");
   assert.equal(typed.context.composer, 'hello');
   assert.equal(typed.nodes.input.value, '/model fast', 'the command stays in Quick reply');
-  assert.equal(typed.read('composerHandoff'), null);
+  assert.equal(typed.read('composerHandoffs.size'), 0);
 });
 
 test('the message request carries the identity the card captured, and a conflict is discarded until the next snapshot', async () => {
@@ -570,4 +570,80 @@ test('an ! card asks for the message at its ReadThrough ordinal, and the cache k
   assert.equal(view.read('[...inboxTexts.keys()][0]'), view.read('inboxKey(inboxEntries()[0])'));
   assert.equal(view.read('inboxCard(inboxEntries()[0]).key'), view.read('inboxKey(inboxEntries()[0])'));
   assert.ok(entry);
+});
+
+/// A Quick reply whose refusal arrives after `act` has run; resolves with the view.
+async function refusedReply(act, { draft = '' } = {}) {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'needs_input', 2)],
+    { texts: { '/api/sessions/a/client-state': { draft, through_event_ordinal: 0 } } });
+  view.nodes.input.value = 'my reply, in full';
+  view.nodes.input.oninput();
+  let refuse;
+  view.answers.set('prompt:a', () => new Promise((_, reject) => {
+    refuse = () => reject(Object.assign(new Error('session is closed'), { status: 409 }));
+  }));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  act(view);
+  refuse();
+  await settle();
+  return view;
+}
+const notices = view => plain(view.read('[...inboxFailureNotices.values()]'));
+
+test('a refusal after Clear is reported with the full text and handed to an empty composer', async () => {
+  const view = await refusedReply(v => { v.context.dismissedNotifications.set('a', JSON.stringify({ question: { turn_id: 'a' } })); });
+  assert.deepEqual(view.ids(), ['b'], 'the card is gone');
+  const [notice] = notices(view);
+  assert.equal(notice.destination, 'a');
+  assert.equal(notice.text, 'my reply, in full');
+  assert.match(notice.status, /^Not sent: session is closed/);
+  assert.match(notice.note, /placed in the session's composer/);
+  assert.equal(view.read('composerHandoffs.get("a").text'), 'my reply, in full');
+  const cards = view.read('inboxNoticeCards()');
+  assert.match(cards[0].children[0].textContent, /^Quick reply to A was not sent: Not sent: session is closed/);
+  assert.equal(cards[0].children[1].textContent, 'my reply, in full', 'the full unsent text is on the notice');
+  // Opening the session shows it, unsent, and the notice goes.
+  await view.read("restoreDraft('a', 1)");
+  assert.equal(view.context.composer, 'my reply, in full');
+  assert.deepEqual(notices(view), []);
+  assert.equal(view.read('inboxDrafts.has("a")'), false);
+  assert.deepEqual(view.drafts, [], 'the saved draft is never written');
+});
+
+test('a refusal after the notification changed is reported, and an occupied composer is never overwritten', async () => {
+  const view = await refusedReply(v => { v.context.viewerState.rows.get('a').notification_dismissal = { question: { turn_id: 'a2' } }; },
+    { draft: 'my unsent thoughts' });
+  const [notice] = notices(view);
+  assert.equal(notice.text, 'my reply, in full');
+  assert.match(notice.note, /composer has a draft, which is kept/);
+  assert.equal(view.read('composerHandoffs.size'), 0);
+  assert.equal(view.read('inboxDrafts.get("a")'), 'my reply, in full', 'kept where it can be restored');
+  assert.deepEqual(view.drafts, []);
+  // Restore puts it back in Quick reply, but never over text already there.
+  view.read('inboxNoticeCards()')[0].children.at(-2).onclick();
+  assert.deepEqual(notices(view), [], 'restored');
+});
+
+test('a refusal while the card is still shown keeps the text in Quick reply and still reports it', async () => {
+  const view = await refusedReply(() => {});
+  const [notice] = notices(view);
+  assert.equal(notice.note, 'Your text is kept in Quick reply.');
+  assert.equal(view.read('composerHandoffs.size'), 0);
+  assert.equal(view.nodes.input.value, 'my reply, in full');
+  assert.equal(view.nodes.cardError.textContent, 'Not sent: session is closed');
+});
+
+test('an unconfirmed delivery is reported but never handed back for resending', async () => {
+  const view = screen([row('a', 'needs_input', 3)]);
+  view.nodes.input.value = 'hello';
+  view.nodes.input.oninput();
+  view.answers.set('prompt:a', new Error('network lost'));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  const [notice] = notices(view);
+  assert.match(notice.status, /^Delivery unconfirmed/);
+  assert.equal(notice.text, 'hello');
+  assert.equal(view.read('composerHandoffs.size'), 0);
+  assert.equal(view.read('inboxNoticeCards()')[0].children.some(child => child.textContent === 'Restore to Quick reply'), false);
 });

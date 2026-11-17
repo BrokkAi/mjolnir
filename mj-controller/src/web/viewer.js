@@ -1012,7 +1012,7 @@ function renderLaunchFailures() {
     card.append(dismiss);
     return card;
   });
-  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards);
+  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards, ...inboxNoticeCards());
 }
 
 function renderWorkspaces() {
@@ -1330,7 +1330,7 @@ function inboxText(row, key) {
 /// Quick-reply drafts belong to the session they were typed for.
 const inboxDrafts = new Map();
 const inboxSending = new Set(); // destinations with a submission in flight
-let inboxError = null; // { key, text }: the refusal the card shows
+let inboxError = null; // { key | destination, text }: the refusal the card shows
 let inboxBusy = false;
 let inboxShown = null; // the destination the quick-reply line currently holds
 let inboxShownKey = null; // the text key last rendered, to retry a failed read
@@ -1468,6 +1468,93 @@ function inboxClearSubmitted(destination, submitted) {
   if (inboxShown === destination && inboxNodes.input.value === submitted) inboxNodes.input.value = '';
 }
 
+/// Failed Quick replies, by session and submission, shown in the notice area
+/// with their full text whatever became of the card they were typed on.
+const inboxFailureNotices = new Map();
+
+/// Report one failed submission. A refusal keeps its text: in Quick reply when
+/// the card is still there, else in the session's composer (unsent, through the
+/// in-page hand-off) when that composer is empty, else only in the notice. An
+/// unconfirmed delivery is reported but never handed back, since it may have
+/// arrived. An existing draft is never overwritten and no saved draft written.
+async function inboxReportFailure(card, submission, status, text, refused) {
+  const destination = card.destination;
+  const notice = {
+    key: `${destination}|${submission}`,
+    destination,
+    title: sessionById(destination)?.title || destination,
+    status,
+    text,
+    refused,
+    note: '',
+  };
+  inboxFailureNotices.set(notice.key, notice);
+  inboxError = { destination, text: status };
+  if (!refused) {
+    notice.note = 'It may have arrived; open the session to check before sending again.';
+  } else if (inboxEntries().some(entry => inboxKey(entry) === card.key)) {
+    notice.note = 'Your text is kept in Quick reply.';
+  } else {
+    let draft;
+    let known = true;
+    try {
+      draft = draftWriters.get(destination)?.desired
+        ?? (await request(`/api/sessions/${encodeURIComponent(destination)}/client-state`)).draft;
+    } catch {
+      known = false;
+    }
+    if (known && !draft) {
+      composerHandoffs.set(destination, {
+        text,
+        placed: () => {
+          inboxFailureNotices.delete(notice.key);
+          inboxClearSubmitted(destination, text);
+          renderRoute();
+        },
+      });
+      notice.note = "It will be placed in the session's composer, unsent, when you open it. Until then it is kept here.";
+    } else {
+      notice.note = known
+        ? "The session's composer has a draft, which is kept. Copy this text or restore it to Quick reply."
+        : 'Your text is kept here; copy it or restore it to Quick reply.';
+    }
+  }
+  renderRoute();
+}
+
+/// The failed-reply notices as cards for the notice area.
+function inboxNoticeCards() {
+  return [...inboxFailureNotices.values()].map(notice => {
+    const card = el('div', 'card');
+    card.setAttribute('role', 'status');
+    card.append(
+      el('p', '', `Quick reply to ${notice.title} was not sent: ${notice.status}`),
+      el('pre', 'inbox-message', notice.text),
+      el('p', 'dim', notice.note),
+    );
+    if (notice.refused) {
+      const restore = el('button', 'secondary', 'Restore to Quick reply');
+      restore.onclick = () => {
+        const held = inboxDrafts.get(notice.destination);
+        if (held && held !== notice.text) {
+          notice.note = 'Quick reply already has text for this session, so this was not restored; copy it from here.';
+        } else {
+          inboxDrafts.set(notice.destination, notice.text); // already there, when held
+          if (inboxShown === notice.destination) inboxNodes.input.value = notice.text;
+          composerHandoffs.delete(notice.destination);
+          inboxFailureNotices.delete(notice.key);
+        }
+        renderRoute();
+      };
+      card.append(restore);
+    }
+    const dismiss = el('button', 'secondary', 'Dismiss notice');
+    dismiss.onclick = () => { inboxFailureNotices.delete(notice.key); renderRoute(); };
+    card.append(dismiss);
+    return card;
+  });
+}
+
 async function inboxSend(card) {
   const destination = card.destination;
   const submitted = inboxDrafts.get(destination) ?? '';
@@ -1500,7 +1587,7 @@ async function inboxSend(card) {
       renderInbox();
       return;
     }
-    composerHandoff = { sessionId: destination, text: submitted, placed: () => inboxClearSubmitted(destination, submitted) };
+    composerHandoffs.set(destination, { text: submitted, placed: () => inboxClearSubmitted(destination, submitted) });
     navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
     return;
   }
@@ -1519,16 +1606,14 @@ async function inboxSend(card) {
     // acknowledgement is "Delivery unconfirmed", never a second command.
     const pending = await sendSubmission(body, [], null, submitted);
     if (pending.failed) {
-      // Refused before the daemon accepted it: nothing was sent, keep the line.
+      // Refused before the daemon accepted it: nothing was sent. The failure
+      // is reported in the notice area whatever became of the card.
       pendingSubmissions.delete(pending.id);
-      inboxError = { key: card.key, text: pending.status };
+      await inboxReportFailure(card, pending.id, pending.status, submitted, true);
     } else {
       inboxClearSubmitted(destination, submitted);
       if (pending.status.startsWith('Delivery unconfirmed')) {
-        inboxError = {
-          key: card.key,
-          text: `${pending.status}. It may have arrived; open the session to check before sending again.`,
-        };
+        await inboxReportFailure(card, pending.id, pending.status, submitted, false);
       }
     }
   } finally {
@@ -1608,7 +1693,7 @@ function renderInbox() {
     inboxShown = card.destination;
     nodes.input.value = inboxDrafts.get(card.destination) || '';
   }
-  const error = inboxError?.key === card.key ? inboxError.text : '';
+  const error = inboxError?.key === card.key || inboxError?.destination === card.destination ? inboxError.text : '';
   setInboxText(nodes.cardError, error);
   nodes.cardError.hidden = !error;
   nodes.send.disabled = inboxSending.has(card.destination);
@@ -7969,10 +8054,11 @@ function queueDraftSave(sessionId, draft) {
   return writer.task;
 }
 
-/// A slash command typed in a notification's Quick reply, waiting for its
-/// session's conversation to open: `{ sessionId, text, placed }`. Held in the
-/// page only, so Quick reply never writes the session's saved draft.
-let composerHandoff = null;
+/// Text from a notification's Quick reply (a slash command, or a reply that
+/// could not be sent), by the session whose conversation it waits for:
+/// `{ text, placed }`. Held in the page only, so Quick reply never writes the
+/// session's saved draft.
+const composerHandoffs = new Map();
 
 /// Put back what this viewer last typed here and did not send.
 async function restoreDraft(sessionId, generation) {
@@ -7988,16 +8074,17 @@ async function restoreDraft(sessionId, generation) {
       if (draft) {
         setComposerText(draft);
         updateCommandPalette();
-      } else if (composerHandoff?.sessionId === sessionId && !composerText()) {
+      } else if (composerHandoffs.has(sessionId) && !composerText()) {
         // A line handed over from a notification's Quick reply, in page only:
         // it lands in an empty composer, unsent and not saved as a draft.
-        setComposerText(composerHandoff.text);
+        const handoff = composerHandoffs.get(sessionId);
+        setComposerText(handoff.text);
         updateCommandPalette();
-        composerHandoff.placed();
+        handoff.placed();
       }
       draftComposerBaseline = composerGeneration;
     }
-    composerHandoff = null;
+    composerHandoffs.delete(sessionId);
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
     }
