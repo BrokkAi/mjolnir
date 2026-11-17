@@ -278,8 +278,8 @@ const ROUTE_PATTERNS = [
   [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})$`), ([id]) => ({ name: 'dashboard', workspaceId: id })],
   [new RegExp(`^#conversation/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id })],
-  // A conversation opened from the notifications screen carries that origin,
-  // so Back and the back button return to the screen and not the workspace.
+  // Routes opened from the notifications screen carry that origin for Back.
+  [new RegExp(`^#notifications/(${ID})/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId, from: 'notifications' })],
   [new RegExp(`^#notifications/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id, from: 'notifications' })],
   [/^#notifications$/, () => ({ name: 'notifications' })],
   [/^#targets$/, () => ({ name: 'targets' })],
@@ -334,6 +334,7 @@ function routeHash(next) {
     case 'new':
       return `#workspace/${next.workspaceId}/new`;
     case 'resume':
+      if (next.from === 'notifications') return `#notifications/${next.workspaceId}/${next.sessionId}`;
       if (next.wikiId) return `#workspace/${next.workspaceId}/resume/archive/${next.wikiId}`;
       return next.sessionId
         ? `#workspace/${next.workspaceId}/resume/${next.sessionId}`
@@ -1201,10 +1202,8 @@ function liveSessions() {
 //
 // One card at a time, as in the terminal dashboard's pane: the sessions whose
 // daemon-owned attention is `?` or `!`, `?` first and newest first within each
-// band, then launch failures (the terminal pane does not list those; the old
-// web Notifications workspace did, and nothing else reaches them across
-// workspaces). Sub-agents are left out; a parent promoted by a child's pending
-// form opens that child.
+// band, followed by launch failures and sessions with `×`. Sub-agents are left
+// out; a parent promoted by a child's pending form opens that child.
 
 /// Cards the person skipped, oldest skip first, by card identity: the session
 /// and the notification it shows. Skipping rotates a card to the back, so a key
@@ -1225,12 +1224,17 @@ function launchFailureEntries() {
     }));
 }
 
+function inboxSessionFailed(entry) {
+  return entry.attention === 'failed' || entry.attention === 'unreachable';
+}
+
 /// The session a card is about: it shows that session's message, Quick reply
 /// sends to it and Go to Session opens it. A parent promoted by a child's
 /// pending request is about the child (the form holder); a launch failure is
 /// about the session it was for, when there is one.
 function inboxDestination(entry) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
+  if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
   return holder && sessionById(holder) ? holder : entry.id;
 }
@@ -1256,6 +1260,7 @@ function inboxCard(entry) {
     destination: inboxDestination(entry),
     dismissal: entry.notification_dismissal ?? null,
     launchFailureId: entry.launchFailure?.id ?? null,
+    canReply: !entry.launchFailure && !inboxSessionFailed(entry),
     important: entry.attention === 'important',
   };
 }
@@ -1263,16 +1268,13 @@ function inboxCard(entry) {
 /// Every card, in order. The one place the list, the count and the bulk clear
 /// read from, so they cannot disagree.
 function inboxEntries() {
-  const rows = [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
-    && hasNotification(row)
-    && ['needs_input', 'important'].includes(row.attention));
-  const band = row => (row.attention === 'needs_input' ? 0 : 1);
-  rows.sort((left, right) =>
+  const rows = [...viewerState.rows.values()].filter(row => !isSubagentSession(row) && hasNotification(row));
+  const band = row => row.attention === 'needs_input' ? 0 : row.attention === 'important' ? 1 : row.launchFailure ? 2 : 3;
+  const all = [...rows, ...launchFailureEntries()].sort((left, right) =>
     band(left) - band(right)
     || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id));
-  const all = [...rows, ...launchFailureEntries().sort((left, right) => left.id.localeCompare(right.id))];
   const byKey = new Map(all.map(entry => [inboxKey(entry), entry]));
   for (let index = inboxSkipped.length - 1; index >= 0; index -= 1) {
     if (!byKey.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
@@ -1457,7 +1459,14 @@ function inboxSkip(card) {
 }
 
 function inboxOpen(card) {
-  if (card.destination) navigate({ name: 'conversation', sessionId: card.destination, from: 'notifications' });
+  const session = sessionById(card.destination);
+  if (!session) return;
+  const from = 'notifications';
+  if (!card.canReply && !canViewConversation(session) && session.workspace_id) {
+    navigate({ name: 'resume', workspaceId: session.workspace_id, sessionId: session.id, from });
+  } else {
+    navigate({ name: 'conversation', sessionId: session.id, from });
+  }
 }
 
 /// Drop what was sent, but only if the line still holds exactly that text: a
@@ -1472,11 +1481,41 @@ function inboxClearSubmitted(destination, submitted) {
 /// with their full text whatever became of the card they were typed on.
 const inboxFailureNotices = new Map();
 
+function inboxHasReplyCard(destination) {
+  return inboxEntries().some(entry => {
+    const card = inboxCard(entry);
+    return card.canReply && card.destination === destination;
+  });
+}
+
+function removeInboxNotice(notice) {
+  inboxFailureNotices.delete(notice.key);
+  if (composerHandoffs.get(notice.destination)?.notice === notice) {
+    composerHandoffs.delete(notice.destination);
+  }
+}
+
+function stageInboxNoticeHandoff(notice) {
+  composerHandoffs.set(notice.destination, {
+    notice,
+    text: notice.text,
+    placed: () => {
+      removeInboxNotice(notice);
+      inboxClearSubmitted(notice.destination, notice.text);
+      renderRoute();
+    },
+    blocked: () => {
+      notice.note = "Hand to conversation needs an empty composer. Your text is kept here.";
+      renderRoute();
+    },
+  });
+}
+
 /// Report one failed submission. A refusal keeps its text: in Quick reply when
 /// the card is still there, else in the session's composer (unsent, through the
 /// in-page hand-off) when that composer is empty, else only in the notice. An
 /// unconfirmed delivery is reported but never handed back, since it may have
-/// arrived. An existing draft is never overwritten and no saved draft written.
+/// arrived. A hand-off never overwrites an existing draft.
 async function inboxReportFailure(card, submission, status, text, refused) {
   const destination = card.destination;
   const notice = {
@@ -1491,10 +1530,11 @@ async function inboxReportFailure(card, submission, status, text, refused) {
   inboxFailureNotices.set(notice.key, notice);
   inboxError = { destination, text: status };
   if (!refused) {
-    notice.note = 'It may have arrived; open the session to check before sending again.';
-  } else if (inboxEntries().some(entry => inboxKey(entry) === card.key)) {
-    notice.note = 'Your text is kept in Quick reply.';
-  } else {
+    // The full text is shown for reference only.
+    renderRoute();
+    return;
+  }
+  if (!inboxEntries().some(entry => inboxKey(entry) === card.key)) {
     let draft;
     let known = true;
     try {
@@ -1504,19 +1544,14 @@ async function inboxReportFailure(card, submission, status, text, refused) {
       known = false;
     }
     if (known && !draft) {
-      composerHandoffs.set(destination, {
-        text,
-        placed: () => {
-          inboxFailureNotices.delete(notice.key);
-          inboxClearSubmitted(destination, text);
-          renderRoute();
-        },
-      });
-      notice.note = "It will be placed in the session's composer, unsent, when you open it. Until then it is kept here.";
+      if (inboxFailureNotices.has(notice.key) && !composerHandoffs.has(destination)) {
+        stageInboxNoticeHandoff(notice);
+        notice.note = "It will be placed in the session's composer, unsent, when you open it. Until then it is kept here.";
+      }
     } else {
       notice.note = known
-        ? "The session's composer has a draft, which is kept. Copy this text or restore it to Quick reply."
-        : 'Your text is kept here; copy it or restore it to Quick reply.';
+        ? "The session's composer has a draft, which is kept. You can copy your reply here."
+        : 'You can copy your reply here.';
     }
   }
   renderRoute();
@@ -1527,29 +1562,55 @@ function inboxNoticeCards() {
   return [...inboxFailureNotices.values()].map(notice => {
     const card = el('div', 'card');
     card.setAttribute('role', 'status');
-    card.append(
-      el('p', '', `Quick reply to ${notice.title} was not sent: ${notice.status}`),
-      el('pre', 'inbox-message', notice.text),
-      el('p', 'dim', notice.note),
-    );
-    if (notice.refused) {
+    const status = notice.refused ? notice.status : 'Delivery unconfirmed: it may already be running.';
+    card.append(el('p', '', `Quick reply to ${notice.title} · ${status}`), el('pre', 'inbox-message', notice.text));
+    const canRestore = notice.refused && inboxHasReplyCard(notice.destination);
+    const textInReply = canRestore && inboxDrafts.get(notice.destination) === notice.text;
+    const note = notice.note || (textInReply ? 'Your text is kept in Quick reply.'
+      : notice.refused ? 'You can copy your reply here.' : '');
+    if (note) card.append(el('p', 'dim', note));
+    if (canRestore) {
       const restore = el('button', 'secondary', 'Restore to Quick reply');
       restore.onclick = () => {
+        if (!inboxFailureNotices.has(notice.key) || !inboxHasReplyCard(notice.destination)) {
+          renderRoute();
+          return;
+        }
         const held = inboxDrafts.get(notice.destination);
         if (held && held !== notice.text) {
           notice.note = 'Quick reply already has text for this session, so this was not restored; copy it from here.';
         } else {
           inboxDrafts.set(notice.destination, notice.text); // already there, when held
           if (inboxShown === notice.destination) inboxNodes.input.value = notice.text;
-          composerHandoffs.delete(notice.destination);
-          inboxFailureNotices.delete(notice.key);
+          removeInboxNotice(notice);
         }
         renderRoute();
       };
       card.append(restore);
+    } else if (notice.refused) {
+      const hand = el('button', 'secondary', 'Hand to conversation');
+      hand.onclick = () => {
+        if (!inboxFailureNotices.has(notice.key)) return;
+        const destination = notice.destination;
+        const session = sessionById(destination);
+        if (!session || (session.detail !== false && !canViewConversation(session))) {
+          notice.note = 'The conversation is unavailable. You can copy your reply here.';
+          renderRoute();
+          return;
+        }
+        if (currentSession === destination && (composerText() || promptImages.length)) {
+          notice.note = "Hand to conversation needs an empty composer. Your text is kept here.";
+          renderRoute();
+          return;
+        }
+        stageInboxNoticeHandoff(notice);
+        if (currentSession === destination) void restoreDraft(destination, conversationGeneration);
+        else navigate({ name: 'conversation', sessionId: destination, from: 'notifications' });
+      };
+      card.append(hand);
     }
     const dismiss = el('button', 'secondary', 'Dismiss notice');
-    dismiss.onclick = () => { inboxFailureNotices.delete(notice.key); renderRoute(); };
+    dismiss.onclick = () => { removeInboxNotice(notice); renderRoute(); };
     card.append(dismiss);
     return card;
   });
@@ -1558,7 +1619,7 @@ function inboxNoticeCards() {
 async function inboxSend(card) {
   const destination = card.destination;
   const submitted = inboxDrafts.get(destination) ?? '';
-  if (!destination || card.launchFailureId || !submitted.trim()) {
+  if (!destination || !card.canReply || !submitted.trim()) {
     if (!submitted.trim()) inboxOpen(card);
     return;
   }
@@ -1664,17 +1725,22 @@ function renderInbox() {
   const cards = entries.filter(item => item.attention === 'important' && item.notification_dismissal).map(inboxCard);
   for (const control of [nodes.open, nodes.clear, nodes.skip, nodes.retry, nodes.send]) control._binding = card;
   nodes.clearAll._binding = cards;
-  const failure = entry.launchFailure;
+  const launchFailure = entry.launchFailure;
+  const failure = !card.canReply;
   const waiting = entry.attention === 'needs_input';
   setInboxText(nodes.glyph, failure ? '×' : waiting ? '?' : '!');
   nodes.glyph.className = `session-attention-item alert inbox-glyph ${failure ? 'failed' : waiting ? 'waiting' : 'important'}`;
-  nodes.glyph.setAttribute('aria-label', failure ? 'Launch failed' : waiting ? 'Input needed' : 'Important');
-  const age = failure ? '' : `${formatClock(serverClockMs() - sessionMessageMs(entry))} ago`;
+  const label = launchFailure ? 'Launch failed' : entry.attention === 'unreachable' ? 'Unreachable'
+    : failure ? 'Failed' : waiting ? 'Input needed' : 'Important';
+  nodes.glyph.setAttribute('aria-label', label);
+  const age = launchFailure ? '' : `${formatClock(serverClockMs() - sessionMessageMs(entry))} ago`;
   setInboxText(nodes.headerText, [entry.title || entry.id, entry.project_label, age, `${entries.length} left`]
     .filter(Boolean).join(' · '));
   let retryable = false;
   if (failure) {
-    setInboxText(nodes.body, failure.error || LAUNCH_FAILURE_TEXT);
+    inboxShownKey = null;
+    setInboxText(nodes.body, launchFailure ? launchFailure.error || LAUNCH_FAILURE_TEXT
+      : entry.launch_error || entry.storage_problem || entry.configuration_issue || entry.move_recovery?.failure_notice || label);
   } else {
     const key = inboxKey(entry);
     // Showing a card again tries a failed read again; the same card never loops.
@@ -1688,7 +1754,7 @@ function renderInbox() {
       : text.text || (waiting ? 'Waiting for your input' : 'Important update'));
   }
   nodes.retry.hidden = !retryable;
-  nodes.reply.hidden = Boolean(failure);
+  nodes.reply.hidden = failure;
   if (inboxShown !== card.destination) {
     inboxShown = card.destination;
     nodes.input.value = inboxDrafts.get(card.destination) || '';
@@ -1698,7 +1764,7 @@ function renderInbox() {
   nodes.cardError.hidden = !error;
   nodes.send.disabled = inboxSending.has(card.destination);
   nodes.open.hidden = !card.destination;
-  nodes.clear.disabled = inboxBusy || (!failure && !card.dismissal);
+  nodes.clear.disabled = inboxBusy || (!launchFailure && !card.dismissal);
   nodes.skip.disabled = inboxBusy || entries.length < 2;
   nodes.clearAll.hidden = !cards.length;
   nodes.clearAll.disabled = inboxBusy;
@@ -8056,8 +8122,8 @@ function queueDraftSave(sessionId, draft) {
 
 /// Text from a notification's Quick reply (a slash command, or a reply that
 /// could not be sent), by the session whose conversation it waits for:
-/// `{ text, placed }`. Held in the page only, so Quick reply never writes the
-/// session's saved draft.
+/// `{ text, placed, blocked? }`. Held in the page until the text is placed in
+/// the conversation, where it is an ordinary unsaved draft.
 const composerHandoffs = new Map();
 
 /// Put back what this viewer last typed here and did not send.
@@ -8070,21 +8136,24 @@ async function restoreDraft(sessionId, generation) {
     // not to the server.
     const local = draftWriters.get(sessionId);
     const draft = local ? local.desired : stored.draft;
+    const handoff = composerHandoffs.get(sessionId);
+    composerHandoffs.delete(sessionId);
+    let handedOff = false;
     if (revision === composerGeneration) {
       if (draft) {
         setComposerText(draft);
         updateCommandPalette();
-      } else if (composerHandoffs.has(sessionId) && !composerText()) {
-        // A line handed over from a notification's Quick reply, in page only:
-        // it lands in an empty composer, unsent and not saved as a draft.
-        const handoff = composerHandoffs.get(sessionId);
+        draftComposerBaseline = composerGeneration;
+      } else if (handoff && !composerText() && !promptImages.length) {
         setComposerText(handoff.text);
         updateCommandPalette();
+        // Leaving this conversation must save the hand-off just like typed text.
+        draftComposerBaseline = null;
+        handedOff = true;
         handoff.placed();
       }
-      draftComposerBaseline = composerGeneration;
     }
-    composerHandoffs.delete(sessionId);
+    if (!handedOff) handoff?.blocked?.();
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
     }
@@ -9788,6 +9857,10 @@ logout.onclick = async () => {
 };
 
 backButton.onclick = () => {
+  if (route.from === 'notifications') {
+    navigate({ name: 'notifications' });
+    return;
+  }
   if (route.name === 'settings' && route.path?.length) {
     navigate({ name: 'settings', path: route.path.slice(0, -1) });
     return;
@@ -9800,15 +9873,12 @@ backButton.onclick = () => {
     navigate(childWorkspaceRoute(route.subagentParentId, route.childKind));
     return;
   }
-  if (route.name === 'conversation' && route.from === 'notifications') {
-    navigate({ name: 'notifications' });
-    return;
-  }
   navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
 };
 
 resumeDetailBack.onclick = () => {
-  navigate({ name: 'resume', workspaceId: route.workspaceId || selectedWorkspaceId() });
+  navigate(route.from === 'notifications' ? { name: 'notifications' }
+    : { name: 'resume', workspaceId: route.workspaceId || selectedWorkspaceId() });
 };
 
 resumeSearch.oninput = () => {

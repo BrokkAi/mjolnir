@@ -67,14 +67,20 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     rendered: [],
     drafts,
     draftWriters: new Map(),
+    draftTimer: null,
     composer: '',
     composerGeneration: 0,
     conversationGeneration: 1,
     draftComposerBaseline: null,
+    currentSession: null,
+    promptImages: [],
     acknowledged: 0,
     composerText: () => context.composer,
     setComposerText: text => { context.composer = text; context.composerGeneration += 1; },
     updateCommandPalette: () => {},
+    retireConversationRequest: () => {},
+    clearConversationContents: () => {},
+    clearPromptImages: () => {},
     queueDraftSave: async (id, text) => { drafts.push([id, text]); },
     MAX_PROMPT_REQUEST_BYTES: 32 * 1024 * 1024,
     TextEncoder,
@@ -86,6 +92,7 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     isSubagentSession: row => Boolean(row.subagent_parent_id),
     childFormHolder: row => (row.form_holder && row.form_holder !== row.id ? row.form_holder : null),
     sessionById: id => context.viewerState.rows.get(id),
+    canViewConversation: row => row.capabilities?.open === true,
     sessionMessageMs: row => row.last_message_at_ms ?? 0,
     navigate: next => nav.push(next),
     refresh: async () => {},
@@ -99,7 +106,10 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
     },
   });
   vm.runInContext(sourceBetween('function el(', 'const bootStatus'), context);
+  vm.runInContext(sourceBetween('function saveDraft()', 'function queueDraftSave('), context);
   vm.runInContext(sourceBetween('/// Text from a notification', 'let historyOpen'), context);
+  vm.runInContext(sourceBetween('function leaveConversation()', "document.querySelector('#login-form')"), context);
+  vm.runInContext(sourceBetween('const ID = ', '/// Go to a route.'), context);
   vm.runInContext(sourceBetween('function newCommandId(', '/// Guard against sending twice.'), context);
   vm.runInContext(sourceBetween('function submissionBody(', 'async function submitPrompt('), context);
   vm.runInContext(sourceBetween('function hasNotification(', '/// Notifications, unread output'), context);
@@ -116,17 +126,17 @@ function screen(rows, { launchFailures = [], texts = {} } = {}) {
 }
 
 const row = (id, attention, at, extra = {}) => ({
-  id, title: id.toUpperCase(), attention, last_message_at_ms: at, project_label: 'proj',
+  id, title: id.toUpperCase(), attention, last_message_at_ms: at, project_label: 'proj', capabilities: { open: true },
   notification_dismissal: attention === 'needs_input' ? { question: { turn_id: id } } : { read_through: at },
   ...extra,
 });
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-test('cards run ? before !, newest first, one per session, without sub-agents or failures', () => {
+test('cards run ? before !, newest first, one per session, without sub-agents or ignored sessions', () => {
   const view = screen([
     row('a', 'important', 5), row('b', 'needs_input', 1), row('c', 'needs_input', 9),
-    row('d', 'important', 8), row('e', 'failed', 20), row('f', 'needs_input', 30, { subagent_parent_id: 'a' }),
+    row('d', 'important', 8), row('f', 'needs_input', 30, { subagent_parent_id: 'a' }),
     row('g', 'needs_input', 40, { notifications_ignored: true }),
   ]);
   assert.deepEqual(view.ids(), ['c', 'b', 'd', 'a']);
@@ -282,7 +292,6 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
   view.nodes.open.onclick();
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
   // Both the history entry and the viewer's own back control follow the route.
-  vm.runInContext(sourceBetween('const ID = ', '/// Go to a route.'), view.context);
   assert.equal(view.read('routeHash(nav[0])'), '#notifications/child');
   assert.deepEqual(plain(view.read('parseRoute("#notifications/child")')), { name: 'conversation', sessionId: 'child', from: 'notifications' });
 });
@@ -300,11 +309,50 @@ test('the full message loads from the daemon: loading, text, and not available',
   assert.equal(missing.nodes.body.textContent, 'message not available');
 });
 
-test('the header count is the ? and ! sessions', () => {
-  const view = screen([row('a', 'needs_input', 3), row('b', 'important', 2), row('c', 'failed', 1), row('d', 'unread', 1)]);
-  assert.equal(view.read('inboxEntries().length'), 2);
+test('the header count includes ? and ! and × sessions', () => {
+  const view = screen([row('a', 'needs_input', 3), row('b', 'important', 2),
+    row('c', 'failed', 1), row('d', 'unread', 1), row('e', 'unreachable', 1)]);
+  assert.equal(view.read('inboxEntries().length'), 4);
   const withFailure = screen([row('a', 'needs_input', 3)], { launchFailures: [{ id: 'f', workspace_id: 'w' }] });
   assert.equal(withFailure.read('inboxEntries().length'), 2, 'launch failures count too');
+});
+
+// Hard-won: 759664d52: filtering for ? and ! hid failed and unreachable sessions.
+test('session failures follow launch failures and keep their daemon-owned actions', async () => {
+  const target = { failure: { generation: 3, state: 'error', last_error: 'startup failed' } };
+  const view = screen([
+    row('a', 'needs_input', 1),
+    row('b', 'failed', 9, {
+      launch_error: 'startup failed', workspace_id: 'main', capabilities: { open: false }, notification_dismissal: target,
+    }),
+    row('c', 'unreachable', 8, { storage_problem: 'disk full', notification_dismissal: null }),
+  ], { launchFailures: [{ id: 'f' }] });
+  assert.deepEqual(view.ids(), ['a', 'launch-failure:f', 'b', 'c']);
+  view.nodes.skip.onclick();
+  view.nodes.skip.onclick();
+  assert.equal(view.nodes.glyph.textContent, '×');
+  assert.equal(view.nodes.glyph.attributes['aria-label'], 'Failed');
+  assert.equal(view.nodes.body.textContent, 'startup failed');
+  assert.equal(view.nodes.reply.hidden, true);
+  view.nodes.open.onclick();
+  const detail = { name: 'resume', workspaceId: 'main', sessionId: 'b', from: 'notifications' };
+  assert.deepEqual(plain(view.nav.at(-1)), detail);
+  assert.deepEqual(plain(view.read('parseRoute(routeHash(nav.at(-1)))')), detail);
+  view.context.backButton = {};
+  vm.runInContext(sourceBetween('backButton.onclick =', 'resumeDetailBack.onclick ='), view.context);
+  view.read('route = parseRoute(routeHash(nav.at(-1))); backButton.onclick()');
+  assert.deepEqual(plain(view.nav.at(-1)), { name: 'notifications' });
+  view.nodes.clear.onclick();
+  await settle();
+  assert.deepEqual(plain(view.requests.find(r => r.body?.action === 'dismiss-notification')?.body),
+    { action: 'dismiss-notification', session_id: 'b', target });
+  assert.equal(view.nodes.glyph.attributes['aria-label'], 'Unreachable');
+  assert.equal(view.nodes.body.textContent, 'disk full');
+  assert.equal(view.nodes.clear.disabled, true);
+  assert.equal(view.nodes.clearAll.hidden, true);
+  view.nodes.open.onclick();
+  assert.deepEqual(plain(view.nav.at(-1)), { name: 'conversation', sessionId: 'c', from: 'notifications' });
+  assert.equal(view.requests.some(r => /\/[bc]\/notification-message/.test(r.url)), false);
 });
 
 // Hard-won: skipping past the last card appended a duplicate id, which stuck the screen and doubled counts.
@@ -454,7 +502,8 @@ test('a new notification from a skipped session is not deferred', () => {
   assert.equal(view.read('inboxSkipped.length'), 0, 'the old deferral is dropped');
 });
 
-test('a slash command is handed to an empty composer in page only, and Quick reply clears once it is there', async () => {
+// Hard-won: 759664d52: Back discarded a hand-off that was marked as already saved.
+test('Back saves an untouched slash command handed to an empty composer', async () => {
   const view = screen([row('a', 'needs_input', 3)], { texts: { '/api/sessions/a/client-state': { draft: '', through_event_ordinal: 0 } } });
   view.nodes.input.value = '/model fast';
   view.nodes.input.oninput();
@@ -462,11 +511,15 @@ test('a slash command is handed to an empty composer in page only, and Quick rep
   await settle();
   assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'a', from: 'notifications' }]);
   assert.equal(view.nodes.input.value, '/model fast', 'kept until the composer holds it');
+  view.context.currentSession = 'a';
   await view.read("restoreDraft('a', 1)");
   assert.equal(view.context.composer, '/model fast');
   assert.equal(view.nodes.input.value, '', 'cleared once placed');
   assert.equal(view.read('inboxDrafts.has("a")'), false);
-  assert.deepEqual(view.drafts, [], 'Quick reply never writes the saved draft');
+  assert.deepEqual(view.drafts, [], 'placement alone does not write the saved draft');
+  view.read('leaveConversation()');
+  assert.deepEqual(view.drafts, [['a', '/model fast']]);
+  assert.equal(view.context.composer, '');
   assert.equal(view.requests.some(r => r.body?.action === 'prompt'), false);
 });
 
@@ -590,6 +643,8 @@ async function refusedReply(act, { draft = '' } = {}) {
   return view;
 }
 const notices = view => plain(view.read('[...inboxFailureNotices.values()]'));
+const noticeCard = view => view.read('inboxNoticeCards()')[0];
+const noticeButton = (view, label) => noticeCard(view)?.children.find(node => node.textContent === label);
 
 test('a refusal after Clear is reported with the full text and handed to an empty composer', async () => {
   const view = await refusedReply(v => { v.context.dismissedNotifications.set('a', JSON.stringify({ question: { turn_id: 'a' } })); });
@@ -601,14 +656,17 @@ test('a refusal after Clear is reported with the full text and handed to an empt
   assert.match(notice.note, /placed in the session's composer/);
   assert.equal(view.read('composerHandoffs.get("a").text'), 'my reply, in full');
   const cards = view.read('inboxNoticeCards()');
-  assert.match(cards[0].children[0].textContent, /^Quick reply to A was not sent: Not sent: session is closed/);
+  assert.match(cards[0].children[0].textContent, /^Quick reply to A · Not sent: session is closed/);
   assert.equal(cards[0].children[1].textContent, 'my reply, in full', 'the full unsent text is on the notice');
   // Opening the session shows it, unsent, and the notice goes.
+  view.context.currentSession = 'a';
   await view.read("restoreDraft('a', 1)");
   assert.equal(view.context.composer, 'my reply, in full');
   assert.deepEqual(notices(view), []);
   assert.equal(view.read('inboxDrafts.has("a")'), false);
-  assert.deepEqual(view.drafts, [], 'the saved draft is never written');
+  assert.deepEqual(view.drafts, []);
+  view.read('leaveConversation()');
+  assert.deepEqual(view.drafts, [['a', 'my reply, in full']]);
 });
 
 test('a refusal after the notification changed is reported, and an occupied composer is never overwritten', async () => {
@@ -621,14 +679,40 @@ test('a refusal after the notification changed is reported, and an occupied comp
   assert.equal(view.read('inboxDrafts.get("a")'), 'my reply, in full', 'kept where it can be restored');
   assert.deepEqual(view.drafts, []);
   // Restore puts it back in Quick reply, but never over text already there.
-  view.read('inboxNoticeCards()')[0].children.at(-2).onclick();
+  noticeButton(view, 'Restore to Quick reply').onclick();
   assert.deepEqual(notices(view), [], 'restored');
+});
+
+// Hard-won: 759664d52: a stale Restore control moved the only visible copy to a missing card.
+test('when a card disappears, the refusal stays copyable and can be handed to an empty conversation', async () => {
+  const view = await refusedReply(() => {}, { draft: 'already there' });
+  const restore = noticeButton(view, 'Restore to Quick reply');
+  view.context.dismissedNotifications.set('a', JSON.stringify({ question: { turn_id: 'a' } }));
+  restore.onclick();
+  assert.equal(noticeButton(view, 'Restore to Quick reply'), undefined);
+  assert.equal(noticeCard(view).children[1].textContent, 'my reply, in full');
+  assert.ok(noticeButton(view, 'Dismiss notice'));
+  noticeButton(view, 'Hand to conversation').onclick();
+  assert.deepEqual(plain(view.nav.at(-1)), { name: 'conversation', sessionId: 'a', from: 'notifications' });
+  view.context.currentSession = 'a';
+  await view.read("restoreDraft('a', 1)");
+  assert.equal(view.context.composer, 'already there');
+  assert.equal(noticeCard(view).children[1].textContent, 'my reply, in full');
+
+  noticeButton(view, 'Hand to conversation').onclick();
+  assert.equal(view.context.composer, 'already there', 'an already open, occupied composer keeps its text');
+  view.read("setComposerText(''); saveDraft()");
+  view.answers.set('/api/sessions/a/client-state', { draft: '' });
+  noticeButton(view, 'Hand to conversation').onclick();
+  await settle();
+  assert.equal(view.context.composer, 'my reply, in full');
+  assert.deepEqual(notices(view), []);
 });
 
 test('a refusal while the card is still shown keeps the text in Quick reply and still reports it', async () => {
   const view = await refusedReply(() => {});
   const [notice] = notices(view);
-  assert.equal(notice.note, 'Your text is kept in Quick reply.');
+  assert.ok(noticeCard(view).children.some(node => node.textContent === 'Your text is kept in Quick reply.'));
   assert.equal(view.read('composerHandoffs.size'), 0);
   assert.equal(view.nodes.input.value, 'my reply, in full');
   assert.equal(view.nodes.cardError.textContent, 'Not sent: session is closed');
@@ -645,5 +729,8 @@ test('an unconfirmed delivery is reported but never handed back for resending', 
   assert.match(notice.status, /^Delivery unconfirmed/);
   assert.equal(notice.text, 'hello');
   assert.equal(view.read('composerHandoffs.size'), 0);
-  assert.equal(view.read('inboxNoticeCards()')[0].children.some(child => child.textContent === 'Restore to Quick reply'), false);
+  assert.match(noticeCard(view).children[0].textContent, /Delivery unconfirmed: it may already be running/);
+  assert.equal(noticeCard(view).children[1].textContent, 'hello');
+  assert.deepEqual(plain(noticeCard(view).children.filter(node => node.tagName === 'button').map(node => node.textContent)),
+    ['Dismiss notice']);
 });

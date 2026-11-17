@@ -16,12 +16,13 @@ After this change, the header shows an "N notifications" button to the right of 
 - [x] (2026-11-17) Mapped the viewer's notifications workspace, header, routing and prompt path.
 - [x] (2026-11-17) Implemented the screen, header button, `#notifications` routes with Back, actions, quick reply and full text (new endpoint).
 - [x] (2026-11-17) Tests: `viewer.notifications.unit.test.mjs`, Playwright specs and goldens updated, one controller route test; clippy clean. Committed in this worktree.
+- [x] (2026-11-17) Addressed review findings on session failures, reply hand-off persistence, recovery actions and unconfirmed delivery wording. All 95 viewer unit tests and 95 controller tests matching `viewer` passed.
 
 
 ## Surprises & Discoveries
 
 - The viewer wire carries no message text (only `question_message`, an id), so the text gap was real. Added `GET /api/sessions/{id}/notification-message` (returns `{session_id, text|null}`): pending form request, else the question's transcript item via `load_materialized_transcript_item`, else the latest agent message, all on `spawn_blocking`. The `?`-only fallbacks the TUI has (review activity label, last message for harnesses without open-request support) are not reproduced.
-- Failed and unreachable sessions were counted by the old web list; the screen now lists only `?` and `!`, as decided. The dashboard's own band ordering still uses `hasNotification`.
+- Failed and unreachable sessions were counted by the old web list. The first version of the screen filtered them out, including from the header count.
 - Launch-failure notices used to show in the Notifications workspace; they now show on the notifications screen too.
 - Review round (2026-11-17): Skip is a rotation over unique ids; quick reply builds its action with `submissionBody` and sends with `sendSubmission`, the composer's own path (one command id, "Delivery unconfirmed" on a lost acknowledgement, never a replay), and a line starting with `/` goes to the session's composer as an unsent draft because local commands need the open conversation; only the submitted draft version is cleared; failed message reads are not cached and retry on the next showing or Retry; the cache key carries the holder and pending request ids, so summary rows gained `pending_elicitation_ids`; the selection rule lives in `mj_core::notification_message`, used by both the endpoint and the TUI's `notification_message`.
 - Launch failures are listed on the screen as cards after the `!` cards and counted in the header button, even though the TUI pane does not list them: the old web workspace was the only place they were reachable across workspaces, and a workspace dashboard shows only its own. Their dismissal is the viewer's existing local one; Go to Session appears when the failure names a session.
@@ -32,7 +33,7 @@ After this change, the header shows an "N notifications" button to the right of 
 ## Decision Log
 
 - Decision: copy the TUI pane's semantics exactly where they apply, as listed below.
-  - Content: entries are sessions whose daemon-owned attention is `?` (needs input) or `!` (Important). Sub-agents are excluded; a parent promoted by a child's pending approval shows the form holder's request and opens the form holder.
+  - Content: entries include sessions whose daemon-owned attention is `?` (needs input) or `!` (Important). Sub-agents are excluded. A parent promoted by a child's pending approval shows the form holder's request and opens the form holder.
   - Order: `?` before `!`, newest first within each band, then title, then session id. One card per session.
   - Clear & Next: dismisses through the existing daemon dismissal (Question for `?`, ReadThrough for `!`), using the identity (session plus dismissal target) captured when the action starts. The daemon refuses a stale target, and the card then shows the refusal.
   - Skip: moves the card to the back of the stack, held only in the page.
@@ -43,10 +44,15 @@ After this change, the header shows an "N notifications" button to the right of 
   Rationale: the user asked for the web screen "along the lines of the TUI", and these were the user's decisions there.
   Date/Author: 2026-11-17, parent session.
 
+- The web screen also shows `×` for failed and unreachable sessions, after launch failures, and counts them in the header. The old web Notifications workspace showed these sessions, and reviewers flagged their loss. The TUI pane continues to show `?` and `!`. Go to Session opens the conversation when available or the existing session detail page. Clear & Next uses the daemon's Failure dismissal when the daemon publishes one.
+- A Quick reply handed to a conversation becomes an unsaved composer draft. Back saves it through the ordinary draft path. A refused reply can be restored to Quick reply while its destination has a reply card. Without a reply card, the notice keeps the copyable text and offers Hand to conversation and Dismiss. An unconfirmed delivery shows the text and says it may already be running.
+
 
 ## Outcomes & Retrospective
 
 The screen, route (`#notifications`, `#notifications/<session>` for a conversation opened from it), header button, actions and per-session drafts are in. Back and the back control return to the screen. Quick reply does not dismiss the card; the daemon lowers attention when the agent resumes. The endpoint's database branches (question item, latest agent message) have no test of their own; only the form branch and the 404 are covered.
+
+Failed sessions without an open conversation can be reached at `#notifications/<workspace>/<session>` using the same session detail page as Resume, with Back returning to Notifications.
 
 
 ## Context and Orientation
