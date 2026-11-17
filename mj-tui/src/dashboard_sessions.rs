@@ -1276,7 +1276,8 @@ impl DashboardState {
                             Some(*through)
                         }
                         mj_core::attention::NotificationDismissal::Question(_)
-                        | mj_core::attention::NotificationDismissal::Failure(_) => None,
+                        | mj_core::attention::NotificationDismissal::Failure(_)
+                        | mj_core::attention::NotificationDismissal::Stack { .. } => None,
                     }),
             );
             let Some(through) = through else {

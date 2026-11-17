@@ -1483,6 +1483,9 @@ impl RuntimeState {
                 (through, Some(ordinal))
             }
             mj_core::attention::NotificationDismissal::ReadThrough(through) => (through, None),
+            mj_core::attention::NotificationDismissal::Stack { .. } => {
+                anyhow::bail!("notification stacks are not published by this daemon")
+            }
         };
         let workspace_id = runtime
             .records
