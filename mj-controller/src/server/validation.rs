@@ -292,11 +292,20 @@ pub(super) fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), A
             "leading ! is reserved for shell commands",
         ));
     }
-    if text.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must contain 1-65536 characters",
-        ));
-    }
+    // The worker refuses a relay command over its budget, so a prompt is
+    // held to that budget here, measured as the command the worker receives
+    // and with the worker's own check (#1556).
+    let command = mj_core::relay::RelayCommand::Prompt {
+        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+            agent_client_protocol::v1::schema::TextContent::new(text),
+        )],
+    };
+    mj_core::relay::ensure_serialized_budget(
+        &command,
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+        "prompt",
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if text.trim().is_empty() && !has_images {
         return Err(ApiError::bad_request(
             "prompt must contain text or an image",
@@ -830,11 +839,16 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
-            if command.trim().is_empty() || command.chars().count() > MAX_PROMPT_CHARS {
-                return Err(ApiError::bad_request(
-                    "shell command must contain 1-65536 characters",
-                ));
+            if command.trim().is_empty() {
+                return Err(ApiError::bad_request("shell command is empty"));
             }
+            // Held to the same relay command budget as a prompt.
+            mj_core::relay::ensure_serialized_budget(
+                command,
+                mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+                "shell command",
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
         }
         ControllerAction::CancelShell {
             session_id,

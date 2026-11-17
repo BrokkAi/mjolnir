@@ -84,13 +84,16 @@ const MAX_CODE_FAILURES: u32 = 5;
 const CODE_LOCKOUT_BASE: Duration = Duration::from_secs(30);
 const CODE_LOCKOUT_CAP: Duration = Duration::from_secs(60 * 60);
 const MAX_TITLE_CHARS: usize = 120;
-const MAX_PROMPT_CHARS: usize = 64 * 1024;
 /// The largest body of an API request that carries prompt or message text:
-/// the ordinary allowance plus the longest text [`validate_prompt_text`]
-/// accepts with every character JSON-escaped (`\u0001` is six bytes). Any
-/// text the validator accepts therefore reaches it, and text it refuses is
-/// refused with the validator's own reason rather than a bare 413 (#1556).
-const MAX_PROMPT_TEXT_BODY_BYTES: usize = MAX_BODY_BYTES + 6 * MAX_PROMPT_CHARS;
+/// the ordinary allowance plus the largest prompt the worker's relay accepts
+/// ([`mj_core::relay::RELAY_COMMAND_BYTE_BUDGET`], measured as serde_json
+/// writes it). A client may escape what serde_json writes raw, and the most
+/// that costs is three times (`\uD83D\uDE00`, twelve bytes, for a four-byte
+/// character), so any prompt the worker could take reaches the validator, and
+/// one it could not is refused with the validator's reason, not a bare 413
+/// (#1556).
+const MAX_PROMPT_TEXT_BODY_BYTES: usize =
+    MAX_BODY_BYTES + 3 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
 /// How many repositories one dirty-worktree acknowledgement may name. A bundle
 /// with more repositories than this than has bigger problems than the phone.
 const MAX_DIRTY_ACKNOWLEDGEMENTS: usize = 32;

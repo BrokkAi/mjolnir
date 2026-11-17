@@ -324,12 +324,14 @@ async fn authenticated_message_route_passes_sender_and_target_to_daemon_operatio
 }
 
 /// The body limit stands in front of the prompt validator, so it must admit
-/// every prompt the validator accepts, and a body it refuses must say how
-/// much would have fit. `mj message` reaches this route.
-// Hard-won: #1556: a prompt within the text limit was refused as an unexplained 413
+/// every prompt the worker's relay can take, however a client escapes it, and
+/// a body it refuses must say how much would have fit. `mj message` reaches
+/// this route.
+// Hard-won: #1556: a prompt the worker could take was refused as an unexplained 413
 #[tokio::test]
-async fn the_longest_accepted_message_reaches_the_validator_and_refusals_name_their_limits() {
-    use super::super::{MAX_BODY_BYTES, MAX_PROMPT_CHARS, MAX_PROMPT_TEXT_BODY_BYTES};
+async fn every_prompt_the_relay_takes_reaches_the_validator_and_refusals_name_their_limits() {
+    use super::super::{MAX_BODY_BYTES, MAX_PROMPT_TEXT_BODY_BYTES};
+    use mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
     let backend = Arc::new(FakeBackend {
         live_view: Some(live_view("flash", &["high"])),
         ..FakeBackend::default()
@@ -337,19 +339,37 @@ async fn the_longest_accepted_message_reaches_the_validator_and_refusals_name_th
     let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
         snapshot.sessions[0].capabilities.prompt = true;
     });
-    let send = |request_id: &str, text: String| {
-        let body = serde_json::to_vec(&serde_json::json!({"request_id": request_id, "text": text}))
-            .unwrap();
+    let send = |body: String| {
         bearer(Request::post("/api/v1/sessions/session-1/message"))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap()
     };
-    // JSON spends six bytes on a control character, the most it spends on
-    // any, so this is the largest body an acceptable prompt can produce.
-    let longest = "\u{1}".repeat(MAX_PROMPT_CHARS);
-    assert!(serde_json::to_vec(&longest).unwrap().len() > MAX_BODY_BYTES);
-    let response = app.clone().oneshot(send("longest", longest)).await.unwrap();
+    let json = |request_id: &str, text: &str| {
+        serde_json::json!({"request_id": request_id, "text": text}).to_string()
+    };
+    // What a prompt of `count` copies of `unit` costs as the worker's command.
+    let command_bytes = |unit: &str, count: usize| {
+        let command = mj_core::relay::RelayCommand::Prompt {
+            prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                agent_client_protocol::v1::schema::TextContent::new(unit.repeat(count)),
+            )],
+        };
+        serde_json::to_vec(&command).unwrap().len()
+    };
+    let largest = |unit: &str| {
+        let envelope = command_bytes(unit, 0);
+        let each = command_bytes(unit, 1) - envelope;
+        (RELAY_COMMAND_BYTE_BUDGET - envelope) / each
+    };
+
+    // A control character costs six bytes in both encodings; an emoji costs
+    // four as serde_json writes it and twelve from a client that escapes all
+    // non-ASCII, as Python's json module does by default.
+    let control = largest("\u{1}");
+    let body = json("control", &"\u{1}".repeat(control));
+    assert!(body.len() > MAX_BODY_BYTES);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
     let status = response.status();
     assert_eq!(
         status,
@@ -357,20 +377,40 @@ async fn the_longest_accepted_message_reaches_the_validator_and_refusals_name_th
         "{}",
         json_body(response).await
     );
-    assert_eq!(backend.submissions.lock().unwrap().len(), 1);
+    let emoji = largest("\u{1F600}");
+    let body = format!(
+        r#"{{"request_id":"escaped","text":"{}"}}"#,
+        "\\ud83d\\ude00".repeat(emoji)
+    );
+    assert!(body.len() > 3 * RELAY_COMMAND_BYTE_BUDGET - 1024);
+    let response = app.clone().oneshot(send(body)).await.unwrap();
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        json_body(response).await
+    );
+    assert_eq!(backend.submissions.lock().unwrap().len(), 2);
 
     let response = app
         .clone()
-        .oneshot(send("one-more", "\u{1}".repeat(MAX_PROMPT_CHARS + 1)))
+        .oneshot(send(json("one-more", &"\u{1}".repeat(control + 1))))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let refusal = json_body(response).await["error"].to_string();
-    assert!(refusal.contains("1-65536 characters"), "{refusal}");
+    assert!(
+        refusal.contains(&format!("maximum {RELAY_COMMAND_BYTE_BUDGET}")),
+        "{refusal}"
+    );
 
     let response = app
         .clone()
-        .oneshot(send("too-large", "x".repeat(MAX_PROMPT_TEXT_BODY_BYTES)))
+        .oneshot(send(json(
+            "too-large",
+            &"x".repeat(MAX_PROMPT_TEXT_BODY_BYTES),
+        )))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -381,13 +421,13 @@ async fn the_longest_accepted_message_reaches_the_validator_and_refusals_name_th
     );
 
     let response = app
-        .oneshot(send(&"c".repeat(65), "short".into()))
+        .oneshot(send(json(&"c".repeat(65), "short")))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let refusal = json_body(response).await["error"].to_string();
     assert!(refusal.contains("use 1-64 ASCII letters"), "{refusal}");
-    assert_eq!(backend.submissions.lock().unwrap().len(), 1);
+    assert_eq!(backend.submissions.lock().unwrap().len(), 2);
 }
 
 /// A message with no sender comes from the user's own shell, so it is the
