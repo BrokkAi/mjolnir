@@ -157,6 +157,79 @@ pub(super) async fn session_row(
     Ok(response)
 }
 
+/// The full message a notification card shows for one session: the pending
+/// form's request, else the question's own reply, else the latest agent
+/// message. A parent promoted by a child's pending form reads the child's
+/// request, and `session_id` names the session the card opens. `text` is
+/// `null` when the located message is no longer stored.
+pub(super) async fn notification_message(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Response<Body>, ApiError> {
+    validate_public_id(&session_id)?;
+    // Read what the snapshot holds, then release it before any database read.
+    let (holder, form, question_message) = {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        let holder = session
+            .form_holder
+            .as_deref()
+            .filter(|holder| snapshot.sessions.get(holder).is_some())
+            .unwrap_or(&session_id)
+            .to_owned();
+        let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
+        (
+            holder.clone(),
+            holder_session
+                .pending_elicitations
+                .last()
+                .map(|request| request.message.clone()),
+            (session.attention == mj_core::attention::SessionAttention::NeedsInput)
+                .then(|| holder_session.question_message.clone())
+                .flatten(),
+        )
+    };
+    let reader = holder.clone();
+    let text = if form.is_some() {
+        form
+    } else {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+            if let Some(target) = question_message {
+                let item = crate::database::load_materialized_transcript_item(&reader, &target)?;
+                return Ok(item.and_then(|item| {
+                    mj_core::transcript::materialized_agent_message_text(
+                        std::iter::once(&item),
+                        &target,
+                    )
+                }));
+            }
+            Ok(crate::database::load_materialized_session_summary(&reader)?
+                .and_then(|summary| summary.last_agent_message))
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, session_id, "notification message read did not finish");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the notification message",
+            )
+        })?
+        .map_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), session_id, "could not read the notification message");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the notification message",
+            )
+        })?
+    };
+    let mut response =
+        Json(serde_json::json!({ "session_id": holder, "text": text })).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 /// Optimize and install one browser image off the async request task. The
 /// request body is deliberately raw bytes: base64 would inflate the upload,
 /// and the response contains only the small immutable reference the prompt

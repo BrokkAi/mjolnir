@@ -120,6 +120,7 @@ const SILENCE_WORTH_REPORTING_SECONDS = 60;
 /// Every page, by the route name that shows it.
 const PAGES = {
   dashboard: document.querySelector('#dashboard'),
+  notifications: document.querySelector('#notifications-page'),
   new: document.querySelector('#new-page'),
   resume: document.querySelector('#resume-page'),
   move: document.querySelector('#move-page'),
@@ -277,6 +278,10 @@ const ROUTE_PATTERNS = [
   [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})$`), ([id]) => ({ name: 'dashboard', workspaceId: id })],
   [new RegExp(`^#conversation/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id })],
+  // A conversation opened from the notifications screen carries that origin,
+  // so Back and the back button return to the screen and not the workspace.
+  [new RegExp(`^#notifications/(${ID})$`), ([id]) => ({ name: 'conversation', sessionId: id, from: 'notifications' })],
+  [/^#notifications$/, () => ({ name: 'notifications' })],
   [/^#targets$/, () => ({ name: 'targets' })],
   [/^#quota$/, () => ({ name: 'quota' })],
   // A settings path names keys the user chose, such as an environment
@@ -336,7 +341,11 @@ function routeHash(next) {
     case 'move':
       return `#workspace/${next.workspaceId}/move/${next.sessionId}`;
     case 'conversation':
-      return `#conversation/${next.sessionId}`;
+      return next.from === 'notifications'
+        ? `#notifications/${next.sessionId}`
+        : `#conversation/${next.sessionId}`;
+    case 'notifications':
+      return '#notifications';
     case 'targets':
       return '#targets';
     case 'quota':
@@ -366,7 +375,6 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
-  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -392,7 +400,6 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
-  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -437,10 +444,11 @@ function applyRoute() {
 
   const name = PAGES[route.name] ? route.name : 'dashboard';
   for (const [key, page] of Object.entries(PAGES)) page.classList.toggle('hidden', key !== name);
-  workspaceStrip.classList.toggle('hidden', name === 'conversation' && !route.subagentParentId);
+  workspaceStrip.classList.toggle('hidden', (name === 'conversation' && !route.subagentParentId) || name === 'notifications');
   backButton.classList.toggle('hidden', name === 'dashboard');
   shellTitle.textContent =
     {
+      notifications: 'Notifications',
       new: 'New session',
       resume: 'Resume',
       move: 'Move session',
@@ -512,6 +520,9 @@ function renderRoute() {
       renderSettings();
       break;
     case 'conversation':
+      break;
+    case 'notifications':
+      renderInbox();
       break;
     default:
       renderSessions();
@@ -969,8 +980,8 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard'
-      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+    failure => (route.name === 'notifications'
+      || (route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId()))
       && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
@@ -1004,14 +1015,13 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
+  const workspaces = snapshot.workspaces || [];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
-  const notificationCount = notificationRows().length;
-  notificationsBadge.classList.toggle('hidden', Boolean(parentId) || !notificationCount);
-  notificationsBadge.textContent = String(notificationCount);
-  notificationsBadge.setAttribute('aria-label',
-    `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
+  const notificationCount = inboxEntries().length;
+  notificationsBadge.classList.toggle('hidden', !notificationCount || route.name === 'notifications');
+  notificationsBadge.textContent = `${notificationCount} notification${notificationCount === 1 ? '' : 's'}`;
+  notificationsBadge.setAttribute('aria-label', `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
   if (parentId) {
     const parent = sessionById(parentId);
     const reviewers = route.childKind === 'reviewer';
@@ -1026,7 +1036,7 @@ function renderWorkspaces() {
   // Every snapshot re-renders the route, and Firefox for Android stacks a
   // new native picker on each change to an open select until the page stops
   // responding. So nothing that changes with attention lives in the select:
-  // the notification count is the badge beside it, and the options are
+  // the notification count is the header button, and the options are
   // rebuilt only when the workspace list itself changes.
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
@@ -1183,85 +1193,258 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
-// Notifications retain cleared rows only for the current inbox visit.
-class NotificationSnapshot {
-  constructor() { this.entries = []; }
-  reset() { this.entries = []; }
-  update(rows, allRows = rows) {
-    const current = new Map(allRows.map(row => [row.id, row]));
-    const retained = new Set(this.entries.map(entry => entry.row.id));
-    this.entries = [
-      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
-      ...this.entries.map(entry => ({
-        row: current.get(entry.row.id) || {
-          ...entry.row, capabilities: {}, operation: null, transitioning: false,
-          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
-        },
-      })),
-    ];
-    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
-    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
-    return this.entries;
+// ---------------------------------------------------------------------------
+// The notifications screen
+// ---------------------------------------------------------------------------
+//
+// One card at a time, as in the terminal dashboard's pane: the sessions whose
+// daemon-owned attention is `?` or `!`, `?` first and newest first within each
+// band. Sub-agents are left out; a parent promoted by a child's pending form
+// opens that child.
+
+/// Sessions that need the person, in card order. Skipped cards go to the back
+/// in the order they were skipped; the skip is held in this page only.
+const inboxSkipped = [];
+function inboxEntries() {
+  const rows = [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
+    && hasNotification(row)
+    && ['needs_input', 'important'].includes(row.attention));
+  const band = row => (row.attention === 'needs_input' ? 0 : 1);
+  rows.sort((left, right) =>
+    band(left) - band(right)
+    || sessionMessageMs(right) - sessionMessageMs(left)
+    || String(left.title || '').localeCompare(String(right.title || ''))
+    || left.id.localeCompare(right.id));
+  const ids = new Set(rows.map(row => row.id));
+  for (let index = inboxSkipped.length - 1; index >= 0; index -= 1) {
+    if (!ids.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
+  }
+  return [
+    ...rows.filter(row => !inboxSkipped.includes(row.id)),
+    ...inboxSkipped.map(id => rows.find(row => row.id === id)),
+  ];
+}
+
+/// What a card refers to. Dismissing names the session and the target its card
+/// showed, so the daemon can refuse a card that went stale.
+function inboxIdentity(row) {
+  return { session_id: row.id, target: row.notification_dismissal ?? null };
+}
+
+/// The session a card opens: the holder of a pending form, else the session.
+function inboxOpenTarget(row) {
+  return childFormHolder(row) || row.id;
+}
+
+// The full message per card, read from the daemon because a summary row
+// carries no text. Keyed by what the card shows, so a new message refetches.
+const inboxTexts = new Map();
+function inboxTextKey(row) {
+  return `${row.id}|${row.attention}|${row.question_message || ''}|${JSON.stringify(row.notification_dismissal ?? null)}|${row.last_message_at_ms || ''}`;
+}
+function inboxText(row) {
+  const key = inboxTextKey(row);
+  const known = inboxTexts.get(key);
+  if (known) return known;
+  const entry = { state: 'loading', text: '' };
+  inboxTexts.set(key, entry);
+  request(`/api/sessions/${encodeURIComponent(row.id)}/notification-message`)
+    .then(answer => {
+      entry.state = typeof answer?.text === 'string' ? 'ready' : 'missing';
+      entry.text = answer?.text || '';
+    }, error => {
+      entry.state = 'error';
+      entry.text = error.message;
+    })
+    .then(() => { if (route.name === 'notifications') renderInbox(); });
+  return entry;
+}
+
+/// Quick-reply drafts belong to the session they were typed for.
+const inboxDrafts = new Map();
+let inboxError = null; // { id, text }: the refusal the card shows
+let inboxBusy = false;
+let inboxShown = null; // the card id the quick-reply line currently holds
+
+const inboxNodes = (() => {
+  const container = document.querySelector('#inbox');
+  const header = el('p', 'inbox-header');
+  const glyph = el('span', 'session-attention-item alert');
+  glyph.setAttribute('role', 'img');
+  const headerText = el('span', 'inbox-header-text');
+  header.append(glyph, headerText);
+  const body = el('pre', 'inbox-message');
+  const reply = el('form', 'inbox-reply');
+  const label = el('label', '', 'Quick reply');
+  const input = el('input');
+  input.type = 'text';
+  input.id = 'inbox-reply-input';
+  input.autocomplete = 'off';
+  label.htmlFor = 'inbox-reply-input';
+  const send = button('Send', '', { inboxAction: 'send' });
+  send.type = 'submit';
+  reply.append(label, input, send);
+  const actions = el('div', 'row inbox-actions');
+  const open = button('Go to Session', '', { inboxAction: 'open' });
+  const clear = button('Clear & Next', 'secondary', { inboxAction: 'clear' });
+  const skip = button('Skip', 'secondary', { inboxAction: 'skip' });
+  const clearAll = button('Clear all !', 'secondary', { inboxAction: 'clear-all' });
+  for (const control of [open, clear, skip, clearAll]) control.type = 'button';
+  actions.append(open, clear, skip, clearAll);
+  const card = el('div', 'card inbox-card');
+  card.append(header, body, reply, actions);
+  const empty = el('p', 'dim', 'No notifications.');
+  const cardError = el('p', 'error');
+  cardError.setAttribute('role', 'alert');
+  container.append(card, empty);
+  return { card, empty, glyph, headerText, body, input, send, open, clear, skip, clearAll, cardError, reply };
+})();
+inboxNodes.card.insertBefore(inboxNodes.cardError, inboxNodes.reply);
+
+function inboxCurrent() {
+  return inboxEntries()[0];
+}
+
+async function inboxDismiss(identity) {
+  const key = `dismiss-notification:${identity.session_id}`;
+  pendingActions.add(key);
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'dismiss-notification', ...identity }),
+    });
+    dismissedNotifications.set(identity.session_id, JSON.stringify(identity.target));
+  } finally {
+    pendingActions.delete(key);
   }
 }
-const notificationSnapshot = new NotificationSnapshot();
 
-function notificationRows() {
-  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
-    && hasNotification(row));
-}
-
-/// Dismiss every notification that names a target. Failures and forms carry
-/// no target and stay flagged, as does any row whose dismissal is refused.
-let clearingNotifications = false;
-async function dismissAllNotifications() {
-  if (clearingNotifications) return;
-  clearingNotifications = true;
-  renderRoute();
-  const rows = notificationRows().filter(row => row.notification_dismissal);
-  const failures = [];
-  await Promise.all(rows.map(async row => {
-    const key = `dismiss-notification:${row.id}`;
-    pendingActions.add(key);
-    try {
-      await request('/api/actions', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'dismiss-notification', session_id: row.id, target: row.notification_dismissal }),
-      });
-      dismissedNotifications.set(row.id, JSON.stringify(row.notification_dismissal));
-    } catch (error) {
-      failures.push(`${row.title || row.id}: ${error.message}`);
-    } finally {
-      pendingActions.delete(key);
-    }
-  }));
-  clearingNotifications = false;
-  actionError.textContent = failures.join('\n');
+async function inboxClearNext() {
+  const row = inboxCurrent();
+  if (!row || inboxBusy || !row.notification_dismissal) return;
+  const identity = inboxIdentity(row);
+  inboxBusy = true;
+  inboxError = null;
+  renderInbox();
+  try {
+    await inboxDismiss(identity);
+  } catch (error) {
+    inboxError = { id: identity.session_id, text: error.message };
+  }
+  inboxBusy = false;
+  renderInbox();
   await refresh();
 }
 
-function renderNotifications() {
-  const clearAll = button('Clear all', 'secondary');
-  clearAll.id = 'notifications-clear-all';
-  // Only rows naming a dismissal target can be cleared; the rest stay flagged.
-  clearAll.hidden = clearingNotifications
-    || !notificationRows().some(row => row.notification_dismissal);
-  clearAll.onclick = () => dismissAllNotifications();
-  const header = el('div', 'notifications-header');
-  header.append(el('h2', '', 'Notifications'), clearAll);
-  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
-    let card = sessionCards.get(row.id);
-    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
-    else updateSessionCard(card, row);
-    return card;
-  });
-  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+/// Dismiss every `!` card. A `?` dismissal sets the ask aside for the turn
+/// classifier, so a bulk clear leaves questions alone.
+async function inboxClearAll() {
+  if (inboxBusy) return;
+  const rows = inboxEntries().filter(row => row.attention === 'important' && row.notification_dismissal);
+  if (!rows.length) return;
+  const identities = rows.map(inboxIdentity);
+  inboxBusy = true;
+  inboxError = null;
+  renderInbox();
+  const failures = [];
+  await Promise.all(identities.map(identity => inboxDismiss(identity).catch(error => {
+    failures.push(`${sessionById(identity.session_id)?.title || identity.session_id}: ${error.message}`);
+  })));
+  inboxBusy = false;
+  document.querySelector('#inbox-error').textContent = failures.join('\n');
+  renderInbox();
+  await refresh();
+}
+
+function inboxSkip() {
+  const row = inboxCurrent();
+  if (!row || inboxEntries().length < 2) return;
+  inboxSkipped.push(row.id);
+  renderInbox();
+}
+
+function inboxOpen(row) {
+  navigate({ name: 'conversation', sessionId: inboxOpenTarget(row), from: 'notifications' });
+}
+
+async function inboxSend() {
+  const row = inboxCurrent();
+  const text = inboxNodes.input.value;
+  if (!row || inboxBusy || !text.trim()) return;
+  const sessionId = row.id;
+  inboxBusy = true;
+  inboxError = null;
+  renderInbox();
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'prompt', session_id: sessionId, text, images: [], command_id: newCommandId('prompt'),
+      }),
+    });
+    // The draft goes only once the daemon has accepted it.
+    inboxDrafts.delete(sessionId);
+    if (inboxShown === sessionId) inboxNodes.input.value = '';
+  } catch (error) {
+    inboxError = { id: sessionId, text: `Not sent: ${error.message}` };
+  }
+  inboxBusy = false;
+  renderInbox();
+  await refresh();
+}
+
+inboxNodes.reply.onsubmit = event => {
+  event.preventDefault();
+  // Enter on an empty line goes to the session instead of sending nothing.
+  if (inboxNodes.input.value.trim()) void inboxSend();
+  else { const row = inboxCurrent(); if (row) inboxOpen(row); }
+};
+inboxNodes.input.oninput = () => {
+  if (!inboxShown) return;
+  if (inboxNodes.input.value) inboxDrafts.set(inboxShown, inboxNodes.input.value);
+  else inboxDrafts.delete(inboxShown);
+};
+inboxNodes.open.onclick = () => { const row = inboxCurrent(); if (row) inboxOpen(row); };
+inboxNodes.clear.onclick = () => void inboxClearNext();
+inboxNodes.skip.onclick = () => inboxSkip();
+inboxNodes.clearAll.onclick = () => void inboxClearAll();
+
+function renderInbox() {
+  const entries = inboxEntries();
+  const row = entries[0];
+  const nodes = inboxNodes;
+  nodes.card.hidden = !row;
+  nodes.empty.hidden = Boolean(row);
+  if (!row) { inboxShown = null; return; }
+  const important = entries.filter(entry => entry.attention === 'important' && entry.notification_dismissal).length;
+  const waiting = row.attention === 'needs_input';
+  nodes.glyph.textContent = waiting ? '?' : '!';
+  nodes.glyph.className = `session-attention-item alert inbox-glyph ${waiting ? 'waiting' : 'important'}`;
+  nodes.glyph.setAttribute('aria-label', waiting ? 'Input needed' : 'Important');
+  const age = formatClock(serverClockMs() - sessionMessageMs(row));
+  nodes.headerText.textContent = [row.title || row.id, row.project_label, `${age} ago`, `${entries.length} left`]
+    .filter(Boolean).join(' · ');
+  const text = inboxText(row);
+  nodes.body.textContent = text.state === 'loading' ? 'loading…'
+    : text.state === 'missing' ? 'message not available'
+    : text.state === 'error' ? `Could not read the message: ${text.text}`
+    : text.text || (waiting ? 'Waiting for your input' : 'Important update');
+  if (inboxShown !== row.id) {
+    inboxShown = row.id;
+    nodes.input.value = inboxDrafts.get(row.id) || '';
+  }
+  const error = inboxError?.id === row.id ? inboxError.text : '';
+  nodes.cardError.textContent = error;
+  nodes.cardError.hidden = !error;
+  nodes.send.disabled = inboxBusy;
+  nodes.clear.disabled = inboxBusy || !row.notification_dismissal;
+  nodes.skip.disabled = inboxBusy || entries.length < 2;
+  nodes.clearAll.hidden = !important;
+  nodes.clearAll.disabled = inboxBusy;
+  nodes.clearAll.textContent = `Clear all ! (${important})`;
 }
 
 function renderSessions() {
-  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
-  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
-  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -2109,7 +2292,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
+        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -6395,8 +6578,9 @@ function presentSnapshot(detailChangedIds = []) {
     initialWorkspaceSelectionDone = true;
     route = parseRoute(location.hash);
     // Only workspace views; a conversation or sub-agent link opens as linked.
-    if (route.name === 'dashboard' && !route.subagentParentId && notificationRows().length > 0) {
-      const hash = routeHash({ name: 'dashboard', workspaceId: 'notifications' });
+    // An empty hash is a first visit; a link that names a workspace opens it.
+    if (route.name === 'dashboard' && !route.workspaceId && !route.subagentParentId && inboxEntries().length > 0) {
+      const hash = routeHash({ name: 'notifications' });
       history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
       route = parseRoute(hash);
     }
@@ -8116,9 +8300,13 @@ function renderPendingSubmissions() {
   if (wasAtTail) scrollToTail();
 }
 
-async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+function newCommandId(action) {
   const entropy = crypto.getRandomValues(new Uint8Array(16));
-  const id = `web-${body.action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  return `web-${action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+  const id = newCommandId(body.action);
   body.command_id = id;
   const pending = {
     id, sessionId: body.session_id, text: body.action === 'run-shell' ? `!${body.command}` : body.text,
@@ -9325,6 +9513,10 @@ backButton.onclick = () => {
     navigate(childWorkspaceRoute(route.subagentParentId, route.childKind));
     return;
   }
+  if (route.name === 'conversation' && route.from === 'notifications') {
+    navigate({ name: 'notifications' });
+    return;
+  }
   navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
 };
 
@@ -9341,7 +9533,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
-notificationsBadge.onclick = () => navigate({ name: 'dashboard', workspaceId: 'notifications' });
+notificationsBadge.onclick = () => navigate({ name: 'notifications' });
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };

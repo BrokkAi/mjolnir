@@ -1068,12 +1068,38 @@ details.mailbox-event[open] > summary::before {
   display: none;
 }
 
-/* The Notifications heading holds its Clear all at the right edge. */
-.notifications-header {
+/* One notification card at a time; the message keeps the agent's own line breaks. */
+.inbox-header {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
+  margin: 0 0 8px;
+  font-weight: 700;
+}
+
+.inbox-glyph.waiting {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.inbox-message {
+  margin: 0 0 12px;
+  padding: 0 1ch;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inbox-reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.inbox-reply input {
+  flex: 1;
+  min-width: 0;
 }
 
 .project {
