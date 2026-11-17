@@ -97,10 +97,16 @@ const MAX_PROMPT_TEXT_BODY_BYTES: usize =
 /// How many repositories one dirty-worktree acknowledgement may name. A bundle
 /// with more repositories than this than has bigger problems than the phone.
 const MAX_DIRTY_ACKNOWLEDGEMENTS: usize = 32;
-/// The largest draft a phone may store. A composer is for a prompt, and a
-/// prompt this size has other problems; the bound exists so one viewer cannot
-/// fill the daemon's database with text it never sent.
-const MAX_DRAFT_BYTES: usize = 64 * 1024;
+/// The largest draft a phone may store: as large as the largest prompt the
+/// worker's relay takes, so any prompt being composed can be saved (#1556).
+/// The bound exists so one viewer cannot fill the daemon's database with text
+/// it never sent.
+const MAX_DRAFT_BYTES: usize = mj_core::relay::RELAY_COMMAND_BYTE_BUDGET;
+/// The longest shell command a phone may run. The worker runs it as the single
+/// argument of `$SHELL -c`, and Linux refuses one argument of `MAX_ARG_STRLEN`
+/// (32 pages, 131072 bytes, counting its terminating NUL; see execve(2)) or
+/// more, so a longer command would be accepted and then fail to start.
+const MAX_SHELL_COMMAND_BYTES: usize = 128 * 1024 - 1;
 /// How many prompt-history matches one search returns. Public because the
 /// controller loop performs the search and must use the same bound the phone
 /// was promised.

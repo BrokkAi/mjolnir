@@ -164,7 +164,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         )
         .route(
             "/api/sessions/{session_id}/draft",
-            put(save_draft).layer(named_body_limit(MAX_DRAFT_BYTES)),
+            put(save_draft).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
         )
         .route("/api/sessions/{session_id}/history", get(prompt_history))
         .route(

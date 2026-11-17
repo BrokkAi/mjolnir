@@ -820,7 +820,7 @@ pub(super) async fn save_draft(
     if request.draft.len() > MAX_DRAFT_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "draft must be 65536 bytes or fewer",
+            format!("draft must be {MAX_DRAFT_BYTES} bytes or fewer"),
         ));
     }
     let Some(client_id) = viewer_client_id(&state, &headers) else {
