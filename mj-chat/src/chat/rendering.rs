@@ -704,7 +704,7 @@ pub(super) fn wrap_styled_line_with_sources(
 
 /// Wrap `line` exactly as [`wrap_styled_line`] does, and also report its cell
 /// sources and how copying each row gives back the line's text.
-pub(super) fn wrap_styled_line_for_copy(
+pub(crate) fn wrap_styled_line_for_copy(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,

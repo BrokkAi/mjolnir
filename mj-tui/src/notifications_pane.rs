@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::Line,
-    widgets::{Borders, Paragraph, Wrap},
+    widgets::{Borders, Paragraph},
 };
 
 use crate::actions::CommandId;
@@ -28,6 +28,8 @@ pub(crate) struct NotificationsPane {
     /// The card whose message the scroll offset belongs to. A new question or
     /// reply from the same session is a new card and opens at its beginning.
     scroll_card: Option<crate::NotificationCard>,
+    text_generation: u64,
+    text_rows: Option<mj_chat::selection::SelectableText>,
 }
 
 impl Default for NotificationsPane {
@@ -43,13 +45,15 @@ impl Default for NotificationsPane {
             replies: Default::default(),
             scroll: 0,
             scroll_card: None,
+            text_generation: 0,
+            text_rows: None,
         }
     }
 }
 
 struct QuickReply {
     editor: mj_chat::chat::ChatState,
-    pending: Option<ReplySubmission>,
+    pending: Vec<ReplySubmission>,
     error: Option<String>,
 }
 impl std::fmt::Debug for QuickReply {
@@ -101,9 +105,9 @@ impl DashboardState {
                     session_id,
                     &self.config,
                     Default::default(),
-                    Default::default(),
+                    self.notices.clone(),
                 ),
-                pending: None,
+                pending: Vec::new(),
                 error: None,
             })
     }
@@ -115,24 +119,36 @@ impl DashboardState {
         if self.focus != Focus::Notifications {
             return None;
         }
-        if let Some(command) = crate::actions::pane_command_for_key(key, self.focus) {
-            return Some(self.run_available_command(command));
+        if matches!(
+            key.code,
+            crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::BackTab
+        ) {
+            self.cycle_focus(
+                key.code == crossterm::event::KeyCode::BackTab
+                    || key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::SHIFT),
+            );
+            return Some(DashboardAction::None);
         }
         let session_id = self.displayed_notification_session_id()?;
-        let reply = self.quick_reply_mut(&session_id);
-        if reply.pending.is_none() {
-            match reply
-                .editor
-                .handle_single_line_prompt_key(crate::standby_prompt_key(key))
-            {
-                mj_chat::chat::ChatAction::CycleFocus { reverse } => {
-                    self.cycle_focus(reverse);
-                }
-                mj_chat::chat::ChatAction::PasteFromClipboard => {
-                    return Some(DashboardAction::PasteFromClipboard);
-                }
-                _ => {}
+        let result = self
+            .quick_reply_mut(&session_id)
+            .editor
+            .handle_single_line_prompt_key(crate::standby_prompt_key(key));
+        match result.action {
+            Some(mj_chat::chat::ChatAction::CycleFocus { reverse }) => {
+                self.cycle_focus(reverse);
             }
+            Some(mj_chat::chat::ChatAction::PasteFromClipboard) => {
+                return Some(DashboardAction::PasteFromClipboard);
+            }
+            _ => {}
+        }
+        if !result.consumed
+            && let Some(command) = crate::actions::pane_command_for_key(key, self.focus)
+        {
+            return Some(self.run_available_command(command));
         }
         self.record_event_handled();
         Some(DashboardAction::None)
@@ -141,10 +157,32 @@ impl DashboardState {
     pub(crate) fn paste_notification_reply(&mut self, text: &str) {
         if let Some(session_id) = self.displayed_notification_session_id() {
             let reply = self.quick_reply_mut(&session_id);
-            if reply.pending.is_none() {
-                reply.editor.paste_single_line_prompt(text);
-            }
+            reply.editor.paste_single_line_prompt(text);
         }
+    }
+
+    /// Pump detached editors through the same history owner as ActiveChat.
+    pub fn service_notification_history(
+        &mut self,
+        control: mj_client::session::SessionControl,
+    ) -> bool {
+        let mut changed = false;
+        for (session_id, reply) in &mut self.notifications.replies {
+            changed |= reply.editor.has_composer_updates();
+            reply.editor.drain_composer_updates();
+            reply.editor.set_prompt_history_project(
+                self.state
+                    .sessions
+                    .get(session_id)
+                    .map(|session| session.bundle_id.clone()),
+            );
+            let control = control.clone();
+            let session_id = session_id.clone();
+            reply
+                .editor
+                .dispatch_prompt_history(async move { control.session(session_id).await });
+        }
+        changed
     }
 
     fn reveal_notification_reply_error(&mut self, session_id: &str) {
@@ -166,8 +204,8 @@ impl DashboardState {
             .filter(|reply| {
                 reply
                     .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.command_id == command_id)
+                    .iter()
+                    .any(|pending| pending.command_id == command_id)
             })
         else {
             return false;
@@ -190,13 +228,14 @@ impl DashboardState {
         let Some(reply) = self.notifications.replies.get_mut(session_id) else {
             return false;
         };
-        let Some(pending) = reply
+        let Some(index) = reply
             .pending
-            .as_ref()
-            .filter(|pending| pending.command_id == command_id)
+            .iter()
+            .position(|pending| pending.command_id == command_id)
         else {
             return false;
         };
+        let pending = reply.pending.remove(index);
         let failed = result.is_err();
         match result {
             Ok(()) => {
@@ -209,7 +248,6 @@ impl DashboardState {
                 reply.error = Some(format!("Reply failed: {error}"));
             }
         }
-        reply.pending = None;
         if failed {
             self.reveal_notification_reply_error(session_id);
         }
@@ -450,7 +488,13 @@ impl DashboardState {
                 action
             }
             CommandId::NotificationSend | CommandId::NotificationDefault => {
-                if text.trim().is_empty() || self.quick_reply_mut(&session_id).pending.is_some() {
+                if text.trim().is_empty()
+                    || self
+                        .quick_reply_mut(&session_id)
+                        .pending
+                        .iter()
+                        .any(|pending| pending.text == text)
+                {
                     return DashboardAction::None;
                 }
                 let command_id = match mj_client::session::new_command_id("notification-reply") {
@@ -463,16 +507,12 @@ impl DashboardState {
                     }
                 };
                 self.quick_reply_mut(&session_id)
-                    .editor
-                    .handle_single_line_prompt_key(crossterm::event::KeyEvent::new(
-                        crossterm::event::KeyCode::Enter,
-                        crossterm::event::KeyModifiers::NONE,
-                    ));
-                self.quick_reply_mut(&session_id).pending = Some(ReplySubmission {
-                    card: card.clone(),
-                    command_id: command_id.clone(),
-                    text: text.clone(),
-                });
+                    .pending
+                    .push(ReplySubmission {
+                        card: card.clone(),
+                        command_id: command_id.clone(),
+                        text: text.clone(),
+                    });
                 self.quick_reply_mut(&session_id).error = None;
                 DashboardAction::NotificationReply {
                     card,
@@ -539,6 +579,31 @@ impl DashboardState {
             })
             .collect();
         DashboardAction::DismissNotifications { dismissals }
+    }
+
+    /// Text copying uses the exact row space registered by the last render.
+    pub fn notification_selection_text(
+        &self,
+        generation: u64,
+        range: &mj_chat::selection::SelectionRange,
+    ) -> Option<String> {
+        (self
+            .frame_surfaces
+            .surface(mj_chat::selection::SurfaceId::NotificationText(generation))
+            .is_some()
+            && self.notifications.text_generation == generation)
+            .then(|| {
+                self.notifications
+                    .text_rows
+                    .as_ref()
+                    .map(|rows| rows.selection_text(range))
+            })
+            .flatten()
+    }
+
+    /// Selection edge scrolling uses the pane's existing scroll offset.
+    pub fn autoscroll_notification_selection(&mut self, direction: i8) {
+        self.scroll_notification(i16::from(direction));
     }
 
     pub(crate) fn scroll_notification(&mut self, delta: i16) {
@@ -608,6 +673,7 @@ pub(crate) fn render(
     if dashboard.notifications.scroll_card.as_ref() != Some(&card) {
         dashboard.notifications.scroll_card = Some(card);
         dashboard.notifications.scroll = 0;
+        dashboard.notifications.text_rows = None;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -660,14 +726,31 @@ pub(crate) fn render(
         inner.width.saturating_sub(2),
         inner.height.saturating_sub(6),
     );
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let max_scroll = paragraph
-        .line_count(body.width.max(1))
+    let pane = &mut dashboard.notifications;
+    if pane
+        .text_rows
+        .as_ref()
+        .is_none_or(|rows| !rows.matches(&text, body.width))
+    {
+        pane.text_generation = pane.text_generation.wrapping_add(1);
+        pane.text_rows = Some(mj_chat::selection::SelectableText::new(text, body.width));
+    }
+    let rows = pane.text_rows.as_ref().unwrap().rows();
+    let max_scroll = rows
+        .len()
         .saturating_sub(body.height as usize)
         .min(u16::MAX as usize) as u16;
-    dashboard.notifications.scroll = dashboard.notifications.scroll.min(max_scroll);
+    pane.scroll = pane.scroll.min(max_scroll);
     if body.height > 0 {
-        frame.render_widget(paragraph.scroll((dashboard.notifications.scroll, 0)), body);
+        frame.render_widget(Paragraph::new(rows.to_vec()).scroll((pane.scroll, 0)), body);
+        dashboard
+            .frame_surfaces
+            .push(mj_chat::selection::SurfaceFrame::scrollable(
+                mj_chat::selection::SurfaceId::NotificationText(pane.text_generation),
+                body,
+                pane.scroll as usize,
+                rows.len(),
+            ));
     }
     if inner.height < 3 {
         return;
@@ -676,10 +759,15 @@ pub(crate) fn render(
         session_id: entry.session_id.clone(),
         target: entry.target.clone(),
     };
-    let pending = dashboard.quick_reply_mut(&session_id).pending.as_ref();
+    let reply = dashboard.quick_reply_mut(&session_id);
+    let pending = reply
+        .pending
+        .iter()
+        .find(|pending| pending.text == reply.editor.single_line_prompt_text());
     let send_label = match pending {
         Some(pending) if pending.card != current_card => " Sending earlier reply… ",
         Some(_) => " Sending… ",
+        None if !reply.pending.is_empty() => " Send (reply in flight) ",
         None => " Send ",
     };
     let pending = pending.is_some();
@@ -708,7 +796,7 @@ pub(crate) fn render(
         send_area.x.saturating_sub(inner.x.saturating_add(14)),
         1,
     );
-    let input_focused = focused && !pending && !dashboard.modal_open();
+    let input_focused = focused && !dashboard.modal_open();
     dashboard
         .quick_reply_mut(&session_id)
         .editor
@@ -787,6 +875,102 @@ pub(crate) mod tests {
     use crate::test_support::*;
     use crossterm::event::KeyCode;
     use mj_core::attention::SessionAttention;
+
+    use mj_client::session::{
+        BoxFuture, ManagedSessionView, PendingRelaySubmit, PendingRelaySync, ReviewerAction,
+        ReviewerOutcome, SessionControl, SessionControlBackend, SessionHandle,
+        SessionHandleBackend,
+    };
+    use mj_core::{
+        elicitation::ElicitationResponse,
+        relay::RelayCommand,
+        storage::{HistoryCursor, HistoryScope, PromptHistoryEntry, PromptHistoryPage},
+    };
+
+    #[derive(Clone)]
+    struct HistoryBackend {
+        inner: SessionHandle,
+        requests: tokio::sync::mpsc::UnboundedSender<(
+            String,
+            String,
+            tokio::sync::oneshot::Sender<PromptHistoryPage>,
+        )>,
+    }
+    impl SessionControlBackend for HistoryBackend {
+        fn session(&self, session_id: String) -> BoxFuture<'_, anyhow::Result<SessionHandle>> {
+            assert_eq!(session_id, "q1");
+            let handle = SessionHandle::new(self.clone());
+            Box::pin(async move { Ok(handle) })
+        }
+    }
+    impl SessionHandleBackend for HistoryBackend {
+        fn search_prompts(
+            &self,
+            project: String,
+            _: HistoryScope,
+            query: String,
+            _: Option<HistoryCursor>,
+            _: usize,
+        ) -> BoxFuture<'_, anyhow::Result<PromptHistoryPage>> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.requests.send((project, query, tx)).unwrap();
+            Box::pin(async move { Ok(rx.await?) })
+        }
+        fn session_prompts(&self) -> BoxFuture<'_, anyhow::Result<Vec<PromptHistoryEntry>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn config_result(
+            &self,
+            _: String,
+        ) -> BoxFuture<'_, anyhow::Result<Option<Option<String>>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
+            Box::new(self.clone())
+        }
+        fn session_id(&self) -> &str {
+            self.inner.session_id()
+        }
+        fn view(&self) -> ManagedSessionView {
+            self.inner.view()
+        }
+        fn is_stopped(&self) -> bool {
+            self.inner.is_stopped()
+        }
+        fn has_changed(&self) -> anyhow::Result<bool> {
+            self.inner.has_changed()
+        }
+        fn changed(&mut self) -> BoxFuture<'_, anyhow::Result<ManagedSessionView>> {
+            Box::pin(async { std::future::pending().await })
+        }
+        fn enqueue_submit(
+            &self,
+            _: String,
+            _: RelayCommand,
+        ) -> BoxFuture<'_, anyhow::Result<PendingRelaySubmit>> {
+            Box::pin(async { anyhow::bail!("unexpected submit") })
+        }
+        fn enqueue_sync(&self) -> BoxFuture<'_, anyhow::Result<PendingRelaySync>> {
+            Box::pin(async { anyhow::bail!("unexpected sync") })
+        }
+        fn respond_elicitation(
+            &self,
+            _: String,
+            _: ElicitationResponse,
+        ) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { anyhow::bail!("unexpected form") })
+        }
+        fn stop_background_task(&self, _: String) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { anyhow::bail!("unexpected stop") })
+        }
+        fn reviewer(
+            &self,
+            _: Option<String>,
+            _: ReviewerAction,
+        ) -> BoxFuture<'_, anyhow::Result<ReviewerOutcome>> {
+            Box::pin(async { anyhow::bail!("unexpected review") })
+        }
+    }
 
     fn alt(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
@@ -1089,7 +1273,88 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn notifications_keys_reply_open_skip_and_keep_sizes_exclusive() {
+    fn dragging_notification_text_uses_transcript_selection_and_card_identity() {
+        use mj_chat::selection::{SelectionAction, SelectionState, SurfaceId};
+        let mut dashboard = dashboard();
+        dashboard.set_pane_size(SupportPane::Notifications, PaneSize::Maximized);
+        let source = format!("{}\nSecond hard line 世界", "a word boundary ".repeat(12));
+        dashboard
+            .session_details
+            .get_mut("q1")
+            .unwrap()
+            .last_agent_message = Some(source.clone().into());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 50)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let surfaces = dashboard.frame_surfaces().clone();
+        let body = (0..50)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                surfaces
+                    .surface_at(x, y)
+                    .filter(|surface| matches!(surface.id, SurfaceId::NotificationText(_)))
+                    .copied()
+            })
+            .unwrap();
+        let mut selection = SelectionState::new();
+        selection.on_mouse_down(body.rect.x, body.rect.y, &surfaces);
+        selection.on_mouse_drag(body.rect.right() + 5, body.rect.bottom() + 2, &surfaces);
+        let SelectionAction::CopyRequested {
+            surface: SurfaceId::NotificationText(generation),
+            range,
+        } = selection.on_mouse_up(body.rect.right() + 5, body.rect.bottom() + 2, &surfaces)
+        else {
+            panic!("drag copies the notification body");
+        };
+        assert_eq!(
+            dashboard
+                .notification_selection_text(generation, &range)
+                .unwrap(),
+            source
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        terminal
+            .draw(|frame| {
+                crate::render::render(frame, &mut dashboard);
+                mj_chat::selection::highlight(frame.buffer_mut(), &body, &range);
+            })
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((body.rect.x, body.rect.y))
+                .unwrap()
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert!(
+            !matches!(
+                surfaces
+                    .surface_at(body.rect.x, body.rect.bottom() + 1)
+                    .map(|s| s.id),
+                Some(SurfaceId::NotificationText(_))
+            ),
+            "reply/buttons are not a selection surface"
+        );
+        // A new dismissal target for the same session invalidates the row space.
+        dashboard
+            .notification_dismissals
+            .insert("q1".into(), NotificationDismissal::ReadThrough(999));
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        selection.reconcile_surfaces(dashboard.frame_surfaces());
+        assert_eq!(selection.active_surface(), None);
+    }
+
+    #[tokio::test]
+    async fn notifications_keys_reply_open_skip_and_keep_sizes_exclusive() {
         let mut replies = dashboard();
         replies
             .session_details
@@ -1138,7 +1403,29 @@ pub(crate) mod tests {
         assert_eq!(card.session_id, "q1");
         assert_eq!(session_id, "q1");
         assert_eq!(prompt.payload.text, "draft /? d");
-        assert!(replies.quick_reply_mut("q1").pending.is_some());
+        assert!(!replies.quick_reply_mut("q1").pending.is_empty());
+        // Admission cannot capture focus or prevent editing another draft.
+        replies.handle_key(key(KeyCode::Tab));
+        assert_ne!(replies.focus, Focus::Notifications);
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::BackTab,
+            crossterm::event::KeyModifiers::SHIFT,
+        ));
+        assert_eq!(replies.focus, Focus::Notifications);
+        assert_eq!(
+            replies.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None,
+            "same draft is already in flight"
+        );
+        replies.handle_key(key(KeyCode::Char('x')));
+        let DashboardAction::NotificationReply { prompt: newer, .. } =
+            replies.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("a different draft can send");
+        };
+        assert_eq!(newer.payload.text, "draft /? dx");
+        assert!(replies.notification_reply_finished("q1", &newer.command_id, Ok(())));
+        replies.paste_notification_reply("draft /? d");
         drawn(&mut replies, 140, 50);
         replies.scroll_notification(5);
         drawn(&mut replies, 140, 50);
@@ -1151,7 +1438,7 @@ pub(crate) mod tests {
         let visible = drawn(&mut replies, 140, 50).join("\n");
         assert!(visible.contains("Could not confirm the reply"), "{visible}");
         assert!(
-            replies.quick_reply_mut("q1").pending.is_some(),
+            !replies.quick_reply_mut("q1").pending.is_empty(),
             "uncertain admission stays in flight"
         );
         assert!(!replies.notification_reply_finished("q2", &prompt.command_id, Ok(())));
@@ -1184,6 +1471,63 @@ pub(crate) mod tests {
         assert!(replies.notification_reply_finished(&session_id, &prompt.command_id, Ok(())));
         assert_eq!(replies.quick_reply_mut("q1").editor.draft(), "");
         assert_eq!(replies.quick_reply_mut("q2").editor.draft(), "other draft");
+
+        // The detached editor uses the real destination project and shared
+        // background search owner. Enter accepts a recalled prompt, then sends
+        // only on a separate key press.
+        let fixture = mj_client::session::replacement_session_test_fixture("q1", 1);
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let history = SessionControl::new(HistoryBackend {
+            inner: fixture.stopped,
+            requests,
+        });
+        replies.state.sessions.get_mut("q1").unwrap().bundle_id = "other-project".into();
+        replies.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        for ch in "recalled".chars() {
+            replies.handle_key(key(KeyCode::Char(ch)));
+        }
+        replies.service_notification_history(history.clone());
+        let (project, query, response) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(project, "other-project");
+        assert_eq!(query, "recalled");
+        response
+            .send(PromptHistoryPage {
+                entries: vec![PromptHistoryEntry {
+                    id: 1,
+                    session_id: "q1".into(),
+                    text: "recalled answer".into(),
+                }],
+                next: None,
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !replies.quick_reply_mut("q1").editor.has_composer_updates() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(replies.service_notification_history(history));
+        assert_eq!(
+            replies.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            replies.quick_reply_mut("q1").editor.draft(),
+            "recalled answer"
+        );
+        assert!(replies.quick_reply_mut("q1").pending.is_empty());
+        assert!(matches!(
+            replies.handle_key(key(KeyCode::Enter)),
+            DashboardAction::NotificationReply { .. }
+        ));
 
         let mut dashboard = dashboard();
         dashboard.notification_dismissals.remove("q1");

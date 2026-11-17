@@ -186,6 +186,9 @@ impl DashboardContext {
 
     pub(crate) fn collect_prepared_startup_prompts(&mut self) -> bool {
         let (mut changed, actions) = self.dashboard.drain_standby_composers();
+        changed |= self
+            .dashboard
+            .service_notification_history(self.worker_commands_tx.client());
         for action in actions {
             if let DashboardAction::QueueStartupPrompt { session_id, prompt } = action {
                 self.startup_prompts.enqueue(

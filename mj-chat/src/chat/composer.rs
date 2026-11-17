@@ -101,6 +101,7 @@ pub(super) struct ComposerRuntime {
     pub(super) preview_origins: BTreeMap<String, Option<String>>,
     pub(super) prepared_startup: VecDeque<StartupPrompt>,
     pub(super) remote_streams: Vec<RemoteResultForwarder>,
+    pub(super) history_task: Option<RemoteResultForwarder>,
 }
 impl Default for ComposerRuntime {
     fn default() -> Self {
@@ -123,6 +124,7 @@ impl Default for ComposerRuntime {
             preview_origins: BTreeMap::new(),
             prepared_startup: VecDeque::new(),
             remote_streams: Vec::new(),
+            history_task: None,
         }
     }
 }
@@ -484,10 +486,13 @@ impl ChatState {
     pub fn has_composer_updates(&self) -> bool {
         !self.composer_runtime.rx.is_empty()
     }
-    pub fn drain_composer(&mut self) -> Option<StartupPrompt> {
+    pub fn drain_composer_updates(&mut self) {
         while let Ok(update) = self.composer_runtime.rx.try_recv() {
             self.apply_composer_update(update);
         }
+    }
+    pub fn drain_composer(&mut self) -> Option<StartupPrompt> {
+        self.drain_composer_updates();
         self.pump_attachment_queue();
         self.composer_runtime
             .remote_streams

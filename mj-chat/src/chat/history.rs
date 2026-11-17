@@ -63,6 +63,49 @@ pub(super) struct HistorySearchRequest {
 }
 
 impl ChatState {
+    /// Detached Prompt editors bind history to their destination's project.
+    pub fn set_prompt_history_project(&mut self, bundle_id: Option<String>) {
+        self.bundle_id = bundle_id;
+    }
+
+    /// The live chat and detached editors share request dispatch, cancellation
+    /// and generation-checked result application. Acquiring a handle is also
+    /// background work, never part of the terminal event loop.
+    pub fn dispatch_prompt_history(
+        &mut self,
+        session: impl std::future::Future<Output = anyhow::Result<mj_client::session::SessionHandle>>
+        + Send
+        + 'static,
+    ) {
+        if self.history_search.is_none() {
+            self.composer_runtime.history_task = None;
+            self.pending_history_search = None;
+            return;
+        }
+        let Some(mut request) = self.take_history_search_request() else {
+            return;
+        };
+        request.bundle_id = self.bundle_id.clone();
+        let generation = request.generation;
+        let updates = self.composer_runtime.tx.clone();
+        self.composer_runtime.history_task = Some(super::composer::RemoteResultForwarder(Some(
+            tokio::spawn(async move {
+                let result = match session.await {
+                    Ok(session) => Self::resolve_history_search_request(request, &session).await,
+                    Err(error) => Err(format!("{error:#}")),
+                };
+                if let Err(error) =
+                    updates.send(super::composer::ComposerIoUpdate::HistorySearchResults {
+                        generation,
+                        result,
+                    })
+                {
+                    tracing::debug!(%error, "history search result dropped because the editor closed");
+                }
+            }),
+        )));
+    }
+
     /// Ask for this session's stored prompts again.
     pub(super) fn request_session_history(&mut self) {
         self.session_history_generation = self.session_history_generation.wrapping_add(1);

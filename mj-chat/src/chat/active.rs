@@ -32,6 +32,7 @@ use mj_core::relay::WorkerPhase;
 use mj_core::transcript::ChatEntry;
 
 use super::autocomplete::render_autocomplete;
+use super::composer::ComposerIoUpdate;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
 use super::input::{input_cursor_visual_position, set_input_cursor};
@@ -46,7 +47,6 @@ use super::rendering::{
     voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 
-use super::composer::ComposerIoUpdate;
 #[cfg(test)]
 use super::composer::{AttachmentResult, MAX_ATTACHMENT_TASKS};
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
@@ -147,19 +147,7 @@ fn dispatch_session_history_request(
 }
 
 fn dispatch_history_search_request(session: ManagedSessionHandle, chat: &mut ChatState) {
-    let Some(request) = chat.take_history_search_request() else {
-        return;
-    };
-    let generation = request.generation;
-    let updates = chat.composer_runtime.tx.clone();
-    tokio::spawn(async move {
-        let result = ChatState::resolve_history_search_request(request, &session).await;
-        if let Err(error) =
-            updates.send(ComposerIoUpdate::HistorySearchResults { generation, result })
-        {
-            tracing::debug!(%error, "history search result dropped because the chat closed");
-        }
-    });
+    chat.dispatch_prompt_history(std::future::ready(Ok(session)));
 }
 
 fn dispatch_diffstat_requests(

@@ -13,10 +13,14 @@ use crate::text_input::{
 impl ChatState {
     /// A single-line host uses the real Prompt editor; submission belongs to
     /// the host. Vertical transcript navigation has no meaning in this field.
-    pub fn handle_single_line_prompt_key(&mut self, key: KeyEvent) -> ChatAction {
-        if key.code == KeyCode::Enter && self.history_search.is_some() {
+    pub fn handle_single_line_prompt_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> crate::components::EventResult<ChatAction> {
+        use crate::components::EventResult;
+        if self.history_search.is_some() {
             self.handle_history_search_key(key.code, key.modifiers);
-            return ChatAction::None;
+            return EventResult::handled();
         }
         if matches!(
             key.code,
@@ -24,9 +28,13 @@ impl ChatState {
         ) || (key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('j' | 'm')))
         {
-            return ChatAction::None;
+            return EventResult::ignored();
         }
-        self.handle_key(key)
+        let action = self.handle_key(key);
+        EventResult {
+            consumed: self.event_consumed(&crossterm::event::Event::Key(key), &action),
+            action: Some(action),
+        }
     }
 
     /// Plain editor text, without the image-preserving saved-draft envelope.

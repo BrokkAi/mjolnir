@@ -2487,14 +2487,18 @@ fn dispatch_event(
 /// frame, and the highlight is all that band is good for.
 fn draw_selection(
     frame: &mut ratatui::Frame,
-    selection: &SelectionState,
+    selection: &mut SelectionState,
     surfaces: &FrameSurfaces,
 ) -> Option<String> {
+    selection.reconcile_surfaces(surfaces);
     let id = selection.active_surface()?;
     let range = selection.range()?;
     let surface = *surfaces.surface(id)?;
     mj_chat::selection::highlight(frame.buffer_mut(), &surface, &range);
-    if matches!(id, SurfaceId::Transcript | SurfaceId::ElicitationMessage) {
+    if matches!(
+        id,
+        SurfaceId::Transcript | SurfaceId::ElicitationMessage | SurfaceId::NotificationText(_)
+    ) {
         return None;
     }
     Some(mj_chat::selection::extract_rows(
@@ -2531,6 +2535,7 @@ fn route_selection_event(
     surfaces: &FrameSurfaces,
     event: Event,
 ) -> SelectionRouting {
+    selection.reconcile_surfaces(surfaces);
     match event {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {

@@ -20,9 +20,9 @@ mod history;
 mod input;
 mod pasted_paths;
 mod remote;
-mod rendering;
+pub(crate) mod rendering;
 mod submissions;
-mod transcript;
+pub(crate) mod transcript;
 mod turn_review;
 
 #[cfg(test)]
