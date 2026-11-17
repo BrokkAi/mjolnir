@@ -1162,7 +1162,9 @@ impl Controller {
                 at_host(destination_ssh.as_ref(), storage_arguments(&staging_root))
                     .purpose("check destination host staging space"),
                 "Destination host staging",
-                "destination",
+                // Its own allocation: on a shared filesystem it is a third
+                // simultaneous copy, not the container's two again.
+                "destination-host-staging",
                 1,
                 &mut assessment,
             );
@@ -1495,26 +1497,42 @@ impl Controller {
         id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) {
-        let removed = self
-            .session_export_layout(id, executor)
-            .and_then(|layout| destination_stage(&layout.backend, operation_id))
-            .and_then(|destination| {
+        let removed = self.session_export_layout(id, executor).and_then(|layout| {
+            let destination = destination_stage(&layout.backend, operation_id)?;
+            // The container's copy is a second full capture; it goes with
+            // the host's once the restored workspace is the only one.
+            if let Some(container) = &destination.container {
                 super::super::execute_checked(
                     executor,
                     targets::locator_command(
                         SshTrafficClass::Control,
-                        &destination.host,
+                        &layout.backend,
                         vec![
                             "rm".into(),
                             "-rf".into(),
                             "--".into(),
-                            destination.stage.to_string_lossy().into_owned(),
-                            destination.marker.to_string_lossy().into_owned(),
+                            container.stage.to_string_lossy().into_owned(),
                         ],
                     )
-                    .purpose("remove completed destination Move staging"),
+                    .purpose("remove completed container Move staging"),
+                )?;
+            }
+            super::super::execute_checked(
+                executor,
+                targets::locator_command(
+                    SshTrafficClass::Control,
+                    &destination.host,
+                    vec![
+                        "rm".into(),
+                        "-rf".into(),
+                        "--".into(),
+                        destination.stage.to_string_lossy().into_owned(),
+                        destination.marker.to_string_lossy().into_owned(),
+                    ],
                 )
-            });
+                .purpose("remove completed destination Move staging"),
+            )
+        });
         if let Err(error) = removed {
             tracing::warn!(session_id = id, operation_id, error = %format!("{error:#}"),
                 "could not remove the completed Move's staging on the destination host");
