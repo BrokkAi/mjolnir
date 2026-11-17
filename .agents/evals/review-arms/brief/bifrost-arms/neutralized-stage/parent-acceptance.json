@@ -1,0 +1,36 @@
+{
+  "reviewed_at": "2026-11-17T04:40:42.132863+00:00",
+  "reviewer": "parent read every unified diff",
+  "decision": "accept all4 wording-only deltas; authorize publication plus paired round1",
+  "rule": "Original StageB PLAN.md62\u201368; preserve every fact/relation/anchor and list any remaining neutral caught/partial cases.",
+  "records": [
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "decision": "accept",
+      "why": "Removes still; fixture assertion and all relations remain identical.",
+      "before_sha256": "d3d5ab41659aec2e013db20b804b6db2104ef7124e2231ce07c849f9cc4dae47",
+      "accepted_after_sha256": "9fddbbb7634ef2cbd21d2969c22ee653515274e4ae6a7867859305b92f7c7367"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "decision": "accept",
+      "why": "Separates persisted-evidence clause without changing the dataflow fact.",
+      "before_sha256": "58cbbab7c391af92b80c56994089e49bcd6f22fb2a3574fb965ed900cac82555",
+      "accepted_after_sha256": "717c2880a703a6b2016aa96d0d116a0116d3073ddbe11d8f43499b5102c5ee46"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "decision": "accept",
+      "why": "Replaces so with a semicolon; the same key-distinctness fact remains.",
+      "before_sha256": "f0a6730b61dd66e9698abc27fd487ad7a1dece75224ffb2d7f77985f4579bcc9",
+      "accepted_after_sha256": "01a936a33c239537efdd025576eb1465279d193c7e402b1a820e26d86af8a95e"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "decision": "accept",
+      "why": "Removes discharge wording and restates excluded-gap contribution; proof/result/consumer and all other relations remain intact.",
+      "before_sha256": "1a8fcf5b391b01269b2a45339f2be60ada9a20541f39b2dd85995a2863ace629",
+      "accepted_after_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c"
+    }
+  ]
+}

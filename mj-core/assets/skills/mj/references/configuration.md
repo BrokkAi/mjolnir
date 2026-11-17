@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 22
+version = 23
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `22`. |
+| `version` | integer | yes | none | Configuration schema version; use `23`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed in the resume dialog. A stopped session whose failure needs you also stays in Sessions until dismissed, resumed, or destroyed. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -527,8 +527,9 @@ for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
 straightforward choice, configured in Settings → Sub-agents or config.toml, or a
-session override. The subtle choice is optional, but cannot be configured without
-straightforward:
+session override. A YOLO target uses `[subagents.yolo.straightforward]` when
+the split is enabled. The subtle choice is optional, but cannot be configured
+without straightforward:
 
 ```toml
 [subagents]
@@ -546,6 +547,32 @@ effort = "high"
 model = "your-strongest-model"
 effort = "high"
 ```
+
+`max_concurrent` is shared by every target. By default the task choices above
+are shared too. To give SSH bare targets with `permissions = "yolo"` their own
+choices, turn off **Use the same subagents on all targets** in Settings, which
+writes `use_same_on_all_targets = false`, and set the `[subagents.yolo.*]`
+tables:
+
+```toml
+[subagents]
+use_same_on_all_targets = false
+
+[subagents.yolo.straightforward]
+model = "your-cheaper-model"
+effort = "high"
+
+[subagents.yolo.oracle]
+model = "your-strongest-model"
+```
+
+The YOLO set starts empty when the box is first unchecked. An empty YOLO set
+means Mjolnir sub-agents and the oracle are unavailable on YOLO targets; it
+does not fall back to the shared choices. While `use_same_on_all_targets` is
+true, any `[subagents.yolo.*]` values are ignored but retained, so checking
+the box again hides and disables them, and unchecking restores them. Only an
+SSH bare target with `permissions = "yolo"` uses this set; container runtimes
+are unconstrained but have no permission mode and use the shared choices.
 
 `[subagents.oracle]` is optional and independent of the other two: it can be set
 without straightforward. It names the read-only advisor behind the `ask_oracle`
@@ -1214,7 +1241,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 22
+version = 23
 
 [phone]
 enabled = true

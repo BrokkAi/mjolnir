@@ -439,6 +439,7 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         error: None,
         refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     }
 }
 
@@ -733,6 +734,34 @@ async fn a_forced_profile_probe_answers_now_and_only_once() {
     ));
     assert_eq!(next_update_report(&mut updates).await, "extra");
     assert_quiet(&mut updates).await;
+}
+
+#[test]
+fn a_short_hold_on_an_old_reading_waits_a_full_interval_from_the_refused_attempt() {
+    // The good reading is long past its interval; the provider's hold (60 s)
+    // is over a minute after the refused attempt. Scheduling on the hold
+    // would re-probe every minute for as long as the provider keeps refusing.
+    let interval = QUOTA_REFRESH_INTERVAL.as_secs();
+    let now = epoch_seconds();
+    let good = stored_report("a", interval + 3_600);
+    let (until, next_check) =
+        crate::quota::refused_check_schedule(now, Some(Duration::from_secs(30)));
+    let mut refused = stored_report("a", 0);
+    refused.windows.clear();
+    refused.error = Some("rate limited".into());
+    refused.refreshed_at_epoch_seconds = now;
+    refused.rate_limited_until_epoch_seconds = Some(until);
+    refused.next_check_at_epoch_seconds = Some(next_check);
+    // What the poller publishes: the old good reading, with the refusal's schedule.
+    let held = crate::quota::hold_report(Some(&good), refused);
+    assert_eq!(
+        held.refreshed_at_epoch_seconds,
+        good.refreshed_at_epoch_seconds
+    );
+    assert_eq!(next_probe_at(Some(&held)), now + interval);
+    // The hold stays the provider's own; a forced probe is allowed past it.
+    assert!(super::quota::on_hold(Some(&held), now));
+    assert!(!super::quota::on_hold(Some(&held), now + 61));
 }
 
 #[tokio::test]
@@ -1445,26 +1474,32 @@ struct CapacityPollerFixture {
     triggers: tokio::sync::mpsc::Sender<()>,
     updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
     started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    requested: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CapacityPollerFixture {
     fn new() -> Self {
         let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
-        let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
-            let started_tx = started_tx.clone();
-            async move {
-                let (finish, result) = tokio::sync::oneshot::channel();
-                started_tx
-                    .send(PendingCapacityProbe { target, finish })
-                    .unwrap();
-                result.await.context("test probe completion dropped")?
-            }
-        });
+        let requested = Arc::<std::sync::atomic::AtomicU64>::default();
+        let (targets, triggers, updates) = spawn_capacity_poller_with(
+            move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            },
+            requested.clone(),
+        );
         Self {
             targets,
             triggers,
             updates,
             started,
+            requested,
         }
     }
 
@@ -1488,6 +1523,32 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
         local_storage_paths: Vec::new(),
         probe_error: None,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_request_is_answered_only_by_a_probe_that_started_after_it() {
+    let mut fixture = CapacityPollerFixture::new();
+    fixture.targets.send_replace(vec![capacity_target("local")]);
+    // A scheduled probe is already running when the request arrives.
+    let running = fixture.started.recv().await.unwrap();
+    fixture
+        .requested
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    fixture.triggers.send(()).await.unwrap();
+    running.finish.send(Ok(None)).unwrap();
+    // Its result began before the request, so it does not answer it.
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 0);
+    // The poller probes again at once, and that probe answers the request.
+    fixture
+        .started
+        .recv()
+        .await
+        .unwrap()
+        .finish
+        .send(Ok(None))
+        .unwrap();
+    assert_eq!(fixture.updates.recv().await.unwrap().refresh_generation, 1);
+    fixture.assert_no_start().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1606,12 +1667,15 @@ async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_disc
 #[tokio::test]
 async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
     let first = AtomicBool::new(true);
-    let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
-        if first.swap(false, Ordering::SeqCst) {
-            panic!("test capacity probe panic");
-        }
-        async { Ok(None) }
-    });
+    let (targets, triggers, mut updates) = spawn_capacity_poller_with(
+        move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        },
+        Arc::default(),
+    );
     targets.send_replace(vec![capacity_target("local")]);
     let failure = updates.recv().await.unwrap();
     assert_eq!(failure.target_id, "local");
@@ -2466,6 +2530,29 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
     }
 
     impl CommandExecutor for AppleExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
             let stopped = line == "container system status" && !self.service_running;
@@ -2571,6 +2658,29 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
     }
 
     impl CommandExecutor for FailingPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands
                 .lock()
@@ -2687,6 +2797,29 @@ fn a_missing_image_is_pulled_once_and_not_again_when_present() {
     }
 
     impl CommandExecutor for FirstPullExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.lock().unwrap().push(command.args.clone());
             if command.args.first().map(String::as_str) == Some("pull") {
@@ -3067,40 +3200,6 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
         .wait_for_session("session-1", wait)
         .await
         .unwrap();
-}
-
-#[test]
-fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
-    let (observations, _receiver) = crate::recovery_gate::observation_channel();
-    let observer = crate::recovery_gate::RecoveryObserver {
-        observations,
-        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
-    };
-    let copy = observer.gate.try_start("session").unwrap();
-
-    let cancelled = AtomicBool::new(true);
-    let error = reserve_recovery_or_cancel(&observer, "session", &cancelled)
-        .err()
-        .expect("a cancelled operation does not reserve");
-    assert!(error.to_string().contains("operation cancelled"));
-    assert!(observer.is_busy("session"));
-    assert!(!copy.load(Ordering::Acquire));
-    // The failed call also left no reservation behind.
-    drop(copy);
-    assert!(observer.gate.try_start("session").is_some());
-
-    // An operation cancelled while it waits still preempts the copy first.
-    let copy = observer.gate.try_start("session").unwrap();
-    let cancelled = AtomicBool::new(false);
-    let reservation = std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| reserve_recovery_or_cancel(&observer, "session", &cancelled));
-        while !copy.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        drop(copy);
-        waiting.join().unwrap()
-    });
-    assert!(reservation.is_ok());
 }
 
 // Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.

@@ -94,7 +94,46 @@ impl<E> DaemonStageReportingExecutor<E> {
     }
 }
 
+impl<E: CommandExecutor> DaemonStageReportingExecutor<E> {
+    /// Hold the command's lifecycle stage while `run` executes it, and log the
+    /// outcome.
+    fn staged(
+        &self,
+        command: &CommandSpec,
+        finished: &'static str,
+        run: impl FnOnce() -> Result<CommandOutput>,
+    ) -> Result<CommandOutput> {
+        let _stage = command
+            .stage
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
+        let started = std::time::Instant::now();
+        let result = run();
+        tracing::info!(
+            session_id = %self.session_id,
+            stage = command
+                .stage
+                .as_ref()
+                .map(ProvisionStage::label)
+                .unwrap_or_else(|| "command".to_owned()),
+            purpose = %command.purpose,
+            duration_ms = started.elapsed().as_millis(),
+            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
+            "{finished}"
+        );
+        result
+    }
+}
+
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+        self.inner.pause_deadline()
+    }
+
+    fn cancellation_requested_without_deadline(&self) -> bool {
+        self.inner.cancellation_requested_without_deadline()
+    }
+
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
@@ -116,25 +155,9 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute(command);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session command stage finished"
-        );
-        result
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute(command)
+        })
     }
 
     fn execute_with_stdin(
@@ -142,25 +165,28 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         command: &CommandSpec,
         input: &mut (dyn std::io::Read + Send),
     ) -> Result<CommandOutput> {
-        let _stage = command
-            .stage
-            .as_ref()
-            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
-        let started = std::time::Instant::now();
-        let result = self.inner.execute_with_stdin(command, input);
-        tracing::info!(
-            session_id = %self.session_id,
-            stage = command
-                .stage
-                .as_ref()
-                .map(ProvisionStage::label)
-                .unwrap_or_else(|| "command".to_owned()),
-            purpose = %command.purpose,
-            duration_ms = started.elapsed().as_millis(),
-            succeeded = result.as_ref().is_ok_and(|output| output.status == 0),
-            "session streaming command stage finished"
-        );
-        result
+        self.staged(command, "session streaming command stage finished", || {
+            self.inner.execute_with_stdin(command, input)
+        })
+    }
+
+    // Staging that precedes a timeout-bound command is still session work, so
+    // it shows in the lifecycle stage and the log like any other command.
+    fn execute_without_deadline(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.staged(command, "session command stage finished", || {
+            self.inner.execute_without_deadline(command)
+        })
+    }
+
+    fn execute_with_stdin_without_deadline(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.staged(command, "session streaming command stage finished", || {
+            self.inner
+                .execute_with_stdin_without_deadline(command, input)
+        })
     }
 
     fn cancellation_requested(&self) -> bool {

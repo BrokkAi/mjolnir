@@ -2607,6 +2607,30 @@ function subagentChoiceApplies(draft = newDraft) {
   return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
 
+function draftTarget(draft) {
+  return snapshot?.targets.find(target => target.id === draft?.targetId);
+}
+
+// YOLO targets are SSH bare targets with permissions = "yolo"; containers
+// are unconstrained but have no permission mode and use the shared set.
+function targetYolo(draft) {
+  return draftTarget(draft)?.permission_mode === 'yolo';
+}
+
+function targetSubagentsConfigured(draft) {
+  return draftTarget(draft)?.subagents_configured ?? snapshot?.subagents_configured === true;
+}
+
+function targetOracleConfigured(draft) {
+  return draftTarget(draft)?.oracle_configured ?? snapshot?.oracle_configured === true;
+}
+
+function subagentSetupReason(draft) {
+  return targetYolo(draft)
+    ? "Set up YOLO target sub-agents in mj's TUI Settings -> Sub-agents (uncheck \"Use the same subagents on all targets\")"
+    : "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
+}
+
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
 function oracleChoiceApplies(draft = newDraft) {
   return snapshot?.profiles.some(profile => profile.id === draft?.profileId) === true;
@@ -2643,20 +2667,20 @@ function delegationPolicy(policy) {
 }
 
 function mjolnirAvailable(draft) {
-  return (snapshot?.subagents_configured === true || !!draft?.subagents?.straightforward || !!draft?.subagents?.subtle || !!draft?.storedSubagents?.straightforward || !!draft?.storedSubagents?.subtle) && subagentChoiceApplies(draft);
+  return (targetSubagentsConfigured(draft) || !!draft?.subagents?.straightforward || !!draft?.subagents?.subtle || !!draft?.storedSubagents?.straightforward || !!draft?.storedSubagents?.subtle) && subagentChoiceApplies(draft);
 }
 
 function subagentSelectionError(draft) {
   if (!draft || draft.subagents?.mode !== 'mjolnir' || mjolnirAvailable(draft)) return '';
   // An unchanged Move preserves the stored policy, including legacy sessions.
   if (draft.storedSubagents && !moveSubagentChange(draft)) return '';
-  return SUBAGENT_SETUP_REASON;
+  return subagentSetupReason(draft);
 }
 
 // Create and Move share the same delegation choices. A disabled Mjolnir
 // option remains visible so the setup path is discoverable.
 function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
-  if (oracleChoiceApplies(draft) && (snapshot?.oracle_configured || draft.oracleChoice || draft.storedOracleChoice)) {
+  if (oracleChoiceApplies(draft) && (targetOracleConfigured(draft) || draft.oracleChoice || draft.storedOracleChoice)) {
     const oracleField = el('label', 'field');
     oracleField.append(document.createTextNode('Oracle'));
     const oracleSelect = el('select');
@@ -2704,7 +2728,7 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   };
   field.append(select);
   body.append(field);
-  if (!available) body.append(el('p', 'dim', SUBAGENT_SETUP_REASON));
+  if (!available) body.append(el('p', 'dim', subagentSetupReason(draft)));
 }
 
 // The daemon names the unavailable configuration; clients add their remedy.
@@ -3754,7 +3778,7 @@ async function commitNew() {
     subagents: shownDelegation(draft, draft.subagents),
     no_github_events: false,
   };
-  if (oracleChoiceApplies(draft) && (snapshot?.oracle_configured || draft.oracleChoice)) body.oracle = draft.oracle;
+  if (oracleChoiceApplies(draft) && (targetOracleConfigured(draft) || draft.oracleChoice)) body.oracle = draft.oracle;
   if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
@@ -5270,9 +5294,9 @@ function quotaResetText(now, window) {
 // The provider said to wait before the next probe. The reading beside it is
 // the last good one, so this text is a note on the row, not a replacement.
 function quotaHoldText(now, quota) {
-  const until = quota?.rate_limited_until_epoch_seconds;
-  if (!Number.isSafeInteger(until) || until <= now) return '';
-  return `rate limited · retry in ${Math.ceil((until - now) / 60)} min`;
+  const next = quota?.next_check_at_epoch_seconds;
+  if (!Number.isSafeInteger(next) || next <= now) return '';
+  return `quota check refused · next in ${Math.ceil((next - now) / 60)} min`;
 }
 
 function updateQuotaClocks() {

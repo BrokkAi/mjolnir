@@ -1,0 +1,2422 @@
+{
+  "source": "one root mj usage read per carrier SID; separate from reviewer totals",
+  "sessions": 34,
+  "priced_sessions": 17,
+  "missing_price_sids": [
+    "4cb6f495095e423f10516d35a175970a",
+    "3a8acbe12b3ecb5a6224de083634ed2a",
+    "822311af2a74ce0974dddc8e187b7e82",
+    "5b2ce09caaa155d744563b1116ad0f5a",
+    "32f73a90a80fac48cc08df1fcc38367d",
+    "14a896d2710d2bed4662b434d36f3802",
+    "4b864da96d47a89be16b7642723c90b4",
+    "ffa457457887041141d3a004b065f601",
+    "4080a170ff288511c344a651bd5777b6",
+    "35cb2fb3ee9137936f229d8f0b4bee09",
+    "215c9b19d3daab9af5b22270817b8cba",
+    "a2140aa9ba69c2e2049e2e2b5e44e929",
+    "1371443c17a6231689d40ba9a469efe6",
+    "5c41deb224d6d25c0e3223c6a020e629",
+    "453d7aa89a3fbc4795445ca5343a7126",
+    "bc335459bbc38f66175a84b4ea739f32",
+    "1d939fc4d90c2bf1510e690f2123cbd0"
+  ],
+  "known_cost_usd_api_equivalent": 0.735595872,
+  "total_cost_usd_api_equivalent": null,
+  "aggregate_usage_coverage": {
+    "recorded_turns": 93,
+    "full_turn_reports": 88,
+    "last_request_reports": 0,
+    "unspecified_reports": 0,
+    "missing_reports": 5,
+    "unfinished_turns": 22,
+    "provider_cost_turns": 0,
+    "estimated_cost_turns": 88,
+    "missing_cost_turns": 0
+  },
+  "carriers": [
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "arm": "BT",
+      "sid": "4cb6f495095e423f10516d35a175970a",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/4cb6f495095e423f10516d35a175970a.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/4cb6f495095e423f10516d35a175970a.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 17408,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 24409,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 274,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 24683,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 17408,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 24409,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 274,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 24683,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 110923120,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.011092312
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "arm": "A",
+      "sid": "3a8acbe12b3ecb5a6224de083634ed2a",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/3a8acbe12b3ecb5a6224de083634ed2a.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/3a8acbe12b3ecb5a6224de083634ed2a.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 7168,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 12088,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 223,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 12311,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 7168,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 12088,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 223,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 12311,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 76928720,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.007692872
+    },
+    {
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "arm": "A",
+      "sid": "822311af2a74ce0974dddc8e187b7e82",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/822311af2a74ce0974dddc8e187b7e82.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/822311af2a74ce0974dddc8e187b7e82.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24576,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 34999,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 150,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 35149,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 24576,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 34999,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 150,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 35149,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 154337040,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.015433704
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "arm": "A",
+      "sid": "5b2ce09caaa155d744563b1116ad0f5a",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/5b2ce09caaa155d744563b1116ad0f5a.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/5b2ce09caaa155d744563b1116ad0f5a.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 12672,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 25351,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 290,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 25641,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 12672,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 25351,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 290,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 25641,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 184422480,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.018442248
+    },
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "arm": "A",
+      "sid": "32f73a90a80fac48cc08df1fcc38367d",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/32f73a90a80fac48cc08df1fcc38367d.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/32f73a90a80fac48cc08df1fcc38367d.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13696,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 19625,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 4405,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 24030,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 13696,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 19625,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 4405,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 24030,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 258727040,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.025872704
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "arm": "BT",
+      "sid": "2242d6f357d6ee4abe78fff44f45287d",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/2242d6f357d6ee4abe78fff44f45287d.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/2242d6f357d6ee4abe78fff44f45287d.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 13952,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 28438,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 152,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 28590,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 13952,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 28438,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 152,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 28590,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 203373280,
+      "cost_usd_api_equivalent": 0.020337328,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.020337328
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "arm": "A",
+      "sid": "cc85fe8c98b526dfb2bbe40ebd59086c",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/cc85fe8c98b526dfb2bbe40ebd59086c.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/cc85fe8c98b526dfb2bbe40ebd59086c.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 10752,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 21707,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 428,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 22135,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 10752,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 21707,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 428,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 22135,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 166285680,
+      "cost_usd_api_equivalent": 0.016628568,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.016628568
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "arm": "BT",
+      "sid": "14a896d2710d2bed4662b434d36f3802",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/14a896d2710d2bed4662b434d36f3802.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/14a896d2710d2bed4662b434d36f3802.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 21760,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 34811,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 644,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 35455,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 21760,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 34811,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 644,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 35455,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 207350000,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.020735
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "arm": "BT",
+      "sid": "8e21a1eb729bdb1dc2dbfbdf775b226f",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/8e21a1eb729bdb1dc2dbfbdf775b226f.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/8e21a1eb729bdb1dc2dbfbdf775b226f.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 34816,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 47405,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 882,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 48287,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 34816,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 47405,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 882,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 48287,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 216421040,
+      "cost_usd_api_equivalent": 0.021642104,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.021642104
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "arm": "BT",
+      "sid": "82e36d01e8e4c52b349ddda51e272b4a",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/82e36d01e8e4c52b349ddda51e272b4a.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/82e36d01e8e4c52b349ddda51e272b4a.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 37504,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 51286,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 271,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 51557,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 37504,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 51286,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 271,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 51557,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 209155760,
+      "cost_usd_api_equivalent": 0.020915576,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.020915576
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "arm": "BT",
+      "sid": "4b864da96d47a89be16b7642723c90b4",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/4b864da96d47a89be16b7642723c90b4.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/4b864da96d47a89be16b7642723c90b4.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 15232,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 22073,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 123,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 22196,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 15232,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 22073,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 123,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 22196,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 101874080,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.010187408
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "arm": "A",
+      "sid": "b8bb13a72f65f41c1bd5138f826df546",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/b8bb13a72f65f41c1bd5138f826df546.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/b8bb13a72f65f41c1bd5138f826df546.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 9216,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 13261,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 1051,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 14312,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 9216,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 13261,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 1051,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 14312,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 99068640,
+      "cost_usd_api_equivalent": 0.009906864,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.009906864
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "arm": "A",
+      "sid": "151e4642cb84973aa6a5c8d72ff856b2",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/151e4642cb84973aa6a5c8d72ff856b2.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/151e4642cb84973aa6a5c8d72ff856b2.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 20608,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 29166,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 293,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 29459,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 20608,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 29166,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 293,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 29459,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 133635920,
+      "cost_usd_api_equivalent": 0.013363592,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.013363592
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "arm": "A",
+      "sid": "6b69fa478d58c9e9e839316e31ccfdcf",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/6b69fa478d58c9e9e839316e31ccfdcf.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/6b69fa478d58c9e9e839316e31ccfdcf.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 9728,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 19674,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 100,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 19774,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 9728,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 19674,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 100,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 19774,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 139527520,
+      "cost_usd_api_equivalent": 0.013952752,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.013952752
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "arm": "A",
+      "sid": "ffa457457887041141d3a004b065f601",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/ffa457457887041141d3a004b065f601.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/ffa457457887041141d3a004b065f601.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 30080,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 41311,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 509,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 41820,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 30080,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 41311,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 509,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 41820,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 181640800,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.01816408
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "arm": "A",
+      "sid": "f9ee1bd25e9e710869dc9ffef9bb7d24",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/f9ee1bd25e9e710869dc9ffef9bb7d24.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/f9ee1bd25e9e710869dc9ffef9bb7d24.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 38784,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 52844,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 139,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 52983,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 38784,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 52844,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 139,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 52983,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 208161360,
+      "cost_usd_api_equivalent": 0.020816136,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.020816136
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "arm": "A",
+      "sid": "4080a170ff288511c344a651bd5777b6",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/4080a170ff288511c344a651bd5777b6.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/4080a170ff288511c344a651bd5777b6.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 29312,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 40950,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 169,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 41119,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 29312,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 40950,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 169,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 41119,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 173211280,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.017321128
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "arm": "BT",
+      "sid": "e47e096eac27b1c35268d82a650a793d",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/e47e096eac27b1c35268d82a650a793d.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/e47e096eac27b1c35268d82a650a793d.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 29056,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 39923,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 231,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 40154,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 29056,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 39923,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 231,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 40154,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 165376640,
+      "cost_usd_api_equivalent": 0.016537664,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.016537664
+    },
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "arm": "A",
+      "sid": "5c972c0870b9a276476df1625214b795",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/5c972c0870b9a276476df1625214b795.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/5c972c0870b9a276476df1625214b795.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 3712,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 7920,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 984,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 8904,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 3712,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 7920,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 984,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 8904,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 96145280,
+      "cost_usd_api_equivalent": 0.009614528,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.009614528
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "arm": "BT",
+      "sid": "8f5f8ae19772497d5eb37d7872c6b799",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/8f5f8ae19772497d5eb37d7872c6b799.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/8f5f8ae19772497d5eb37d7872c6b799.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 7296,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 15068,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 62,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 15130,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 7296,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 15068,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 62,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 15130,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 108255840,
+      "cost_usd_api_equivalent": 0.010825584,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.010825584
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "arm": "BT",
+      "sid": "35cb2fb3ee9137936f229d8f0b4bee09",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/35cb2fb3ee9137936f229d8f0b4bee09.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/35cb2fb3ee9137936f229d8f0b4bee09.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 22912,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 35880,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 221,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 36101,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 22912,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 35880,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 221,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 36101,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 190010480,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.019001048
+    },
+    {
+      "bug": "dependency-failure-drops-independent-model-evidence",
+      "arm": "BT",
+      "sid": "215c9b19d3daab9af5b22270817b8cba",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/215c9b19d3daab9af5b22270817b8cba.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/215c9b19d3daab9af5b22270817b8cba.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 18688,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 29135,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 226,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 29361,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 18688,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 29135,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 226,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 29361,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 155072720,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.015507272
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "arm": "BT",
+      "sid": "a2140aa9ba69c2e2049e2e2b5e44e929",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/a2140aa9ba69c2e2049e2e2b5e44e929.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/a2140aa9ba69c2e2049e2e2b5e44e929.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24448,
+          "reported_turns": 3
+        },
+        "input_tokens": {
+          "tokens": 34386,
+          "reported_turns": 3
+        },
+        "output_tokens": {
+          "tokens": 357,
+          "reported_turns": 3
+        },
+        "total_tokens": {
+          "tokens": 34743,
+          "reported_turns": 3
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 3,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 3,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 24448,
+              "reported_turns": 3
+            },
+            "input_tokens": {
+              "tokens": 34386,
+              "reported_turns": 3
+            },
+            "output_tokens": {
+              "tokens": 357,
+              "reported_turns": 3
+            },
+            "total_tokens": {
+              "tokens": 34743,
+              "reported_turns": 3
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 156075920,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.015607592
+    },
+    {
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "arm": "BT",
+      "sid": "1d8566943bf514a817d90163c08032ff",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/1d8566943bf514a817d90163c08032ff.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/1d8566943bf514a817d90163c08032ff.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 12661,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 314,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 12975,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 12661,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 314,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 12975,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 179559600,
+      "cost_usd_api_equivalent": 0.01795596,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.01795596
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "arm": "BT",
+      "sid": "1371443c17a6231689d40ba9a469efe6",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/1371443c17a6231689d40ba9a469efe6.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/1371443c17a6231689d40ba9a469efe6.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 4096,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 8572,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 382,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 8954,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 3,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 4096,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 8572,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 382,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 8954,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 76012640,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.007601264
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "arm": "BT",
+      "sid": "1df09c6d09041b26a995107ad507d0e3",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/1df09c6d09041b26a995107ad507d0e3.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/1df09c6d09041b26a995107ad507d0e3.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 412288,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 463675,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 22680,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 486355,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 412288,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 463675,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 22680,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 486355,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1757843120,
+      "cost_usd_api_equivalent": 0.175784312,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.175784312
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "arm": "BT",
+      "sid": "5c41deb224d6d25c0e3223c6a020e629",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/5c41deb224d6d25c0e3223c6a020e629.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/5c41deb224d6d25c0e3223c6a020e629.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 3148800,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 3211268,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 35151,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 3246419,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 3148800,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 3211268,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 35151,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 3246419,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 3602029200,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.36020292
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "arm": "A",
+      "sid": "42fda414b03c4d08a3fb146440634431",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/42fda414b03c4d08a3fb146440634431.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/42fda414b03c4d08a3fb146440634431.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 24576,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 33853,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 195,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 34048,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 24576,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 33853,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 195,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 34048,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 140991840,
+      "cost_usd_api_equivalent": 0.014099184,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.014099184
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "arm": "A",
+      "sid": "7ee6a2450ba1430f59149b57a28c37cf",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/7ee6a2450ba1430f59149b57a28c37cf.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/7ee6a2450ba1430f59149b57a28c37cf.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 29824,
+          "reported_turns": 4
+        },
+        "input_tokens": {
+          "tokens": 41326,
+          "reported_turns": 4
+        },
+        "output_tokens": {
+          "tokens": 272,
+          "reported_turns": 4
+        },
+        "total_tokens": {
+          "tokens": 41598,
+          "reported_turns": 4
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 4,
+        "full_turn_reports": 4,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 4,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 29824,
+              "reported_turns": 4
+            },
+            "input_tokens": {
+              "tokens": 41326,
+              "reported_turns": 4
+            },
+            "output_tokens": {
+              "tokens": 272,
+              "reported_turns": 4
+            },
+            "total_tokens": {
+              "tokens": 41598,
+              "reported_turns": 4
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 175720160,
+      "cost_usd_api_equivalent": 0.017572016,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.017572016
+    },
+    {
+      "bug": "python-module-mutation-repeated-scan-budget",
+      "arm": "A",
+      "sid": "495c36981ba24241bd45228fe34e661e",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/495c36981ba24241bd45228fe34e661e.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/495c36981ba24241bd45228fe34e661e.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 1929856,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 2001332,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 35530,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 2036862,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 1929856,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 2001332,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 35530,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 2036862,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 3199607840,
+      "cost_usd_api_equivalent": 0.319960784,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.319960784
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "arm": "A",
+      "sid": "453d7aa89a3fbc4795445ca5343a7126",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/453d7aa89a3fbc4795445ca5343a7126.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/453d7aa89a3fbc4795445ca5343a7126.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 12032,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 18886,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 140,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 19026,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 12032,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 18886,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 140,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 19026,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 101310880,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.010131088
+    },
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "arm": "BT",
+      "sid": "bc335459bbc38f66175a84b4ea739f32",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/bc335459bbc38f66175a84b4ea739f32.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/bc335459bbc38f66175a84b4ea739f32.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 987008,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 1037355,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 17544,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 1054899,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 1,
+        "unfinished_turns": 2,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 987008,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 1037355,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 17544,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 1054899,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 1793606320,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.179360632
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "arm": "BT",
+      "sid": "601b289c6f00eb363df69f52e19e6dcb",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/601b289c6f00eb363df69f52e19e6dcb.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/601b289c6f00eb363df69f52e19e6dcb.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 0,
+          "reported_turns": 1
+        },
+        "input_tokens": {
+          "tokens": 11302,
+          "reported_turns": 1
+        },
+        "output_tokens": {
+          "tokens": 193,
+          "reported_turns": 1
+        },
+        "total_tokens": {
+          "tokens": 11495,
+          "reported_turns": 1
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 1,
+        "full_turn_reports": 1,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 0,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 1,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 0,
+              "reported_turns": 1
+            },
+            "input_tokens": {
+              "tokens": 11302,
+              "reported_turns": 1
+            },
+            "output_tokens": {
+              "tokens": 193,
+              "reported_turns": 1
+            },
+            "total_tokens": {
+              "tokens": 11495,
+              "reported_turns": 1
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 156829200,
+      "cost_usd_api_equivalent": 0.01568292,
+      "cost_status": "estimated API-equivalent",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.01568292
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "arm": "A",
+      "sid": "1d939fc4d90c2bf1510e690f2123cbd0",
+      "lifecycle": "suspended",
+      "profile": "carrier",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "mode": "plan",
+      "web_fetch": "disabled",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-sessions/1d939fc4d90c2bf1510e690f2123cbd0.json",
+      "usage_path": "/mnt/optane/review-arms-bifrost-20261116/arms/review-driver/carrier-usage/1d939fc4d90c2bf1510e690f2123cbd0.json",
+      "usage_totals": {
+        "cached_read_tokens": {
+          "tokens": 1225216,
+          "reported_turns": 2
+        },
+        "input_tokens": {
+          "tokens": 1350118,
+          "reported_turns": 2
+        },
+        "output_tokens": {
+          "tokens": 22501,
+          "reported_turns": 2
+        },
+        "total_tokens": {
+          "tokens": 1372619,
+          "reported_turns": 2
+        }
+      },
+      "usage_coverage": {
+        "recorded_turns": 2,
+        "full_turn_reports": 2,
+        "last_request_reports": 0,
+        "unspecified_reports": 0,
+        "missing_reports": 0,
+        "unfinished_turns": 1,
+        "provider_cost_turns": 0,
+        "estimated_cost_turns": 2,
+        "missing_cost_turns": 0
+      },
+      "usage_by_model": [
+        {
+          "model": "deepseek-v4-pro",
+          "effort": null,
+          "totals": {
+            "cached_read_tokens": {
+              "tokens": 1225216,
+              "reported_turns": 2
+            },
+            "input_tokens": {
+              "tokens": 1350118,
+              "reported_turns": 2
+            },
+            "output_tokens": {
+              "tokens": 22501,
+              "reported_turns": 2
+            },
+            "total_tokens": {
+              "tokens": 1372619,
+              "reported_turns": 2
+            }
+          }
+        }
+      ],
+      "turn_cost_usd_ticks_raw": 3078841040,
+      "cost_usd_api_equivalent": null,
+      "cost_status": "missing; not zero",
+      "recorded_priced_turn_cost_usd_api_equivalent": 0.307884104
+    }
+  ],
+  "recorded_priced_turn_cost_sum_usd_api_equivalent": 1.795833248,
+  "known_cost_scope": "known_cost_usd covers fully priced sessions only; recorded_priced_turn_cost_sum covers all supported recorded priced turns including partial sessions; neither fills missing or unfinished turns",
+  "runtime_vs_usage_note": "All34 actual sessions suspended; usage unfinished_turns22 is persisted reporting coverage, not evidence of live workers. No session resumed or altered to repair accounting."
+}

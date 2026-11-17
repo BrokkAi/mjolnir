@@ -105,7 +105,7 @@ pub(crate) async fn run_server(
         .capacity_feed()
         .context("the daemon capacity service is not running")?;
     let mut capacity_targets_rx = capacity_feed.targets.clone();
-    let mut capacity_updates_rx = capacity_feed.updates.subscribe();
+    let mut capacity_states_rx = capacity_feed.states.clone();
     track_capacity_targets(
         &capacity_targets_rx.borrow_and_update(),
         &mut capacity_state,
@@ -127,7 +127,11 @@ pub(crate) async fn run_server(
             project_sources: &project_sources,
             operations: &operations,
             move_recoveries: &move_recoveries,
-            capacity: &viewer_capacity(&capacity_state, &container_capacities),
+            capacity: &viewer_capacity(
+                &capacity_state,
+                &capacity_states_rx.borrow(),
+                &container_capacities,
+            ),
             launch_failures: &launch_failures,
             reviews: &review_views(&daemon_runtime),
         },
@@ -186,10 +190,16 @@ pub(crate) async fn run_server(
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
-    options.set_worker_source_check(std::sync::Arc::new(|target_id| {
+    options.set_worker_source_check(std::sync::Arc::new(|target_id, bundle_id| {
         let controller = Controller::load().ok()?;
-        let template = controller.config.targets.get(target_id)?;
-        crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
+        let template = crate::controller::backend::session_target(
+            &controller.config,
+            bundle_id.unwrap_or_default(),
+            target_id,
+            &crate::targets::ProcessExecutor,
+        )
+        .ok()?;
+        crate::controller::worker_source_problem(&template, &crate::targets::ProcessExecutor)
     }));
     startup.finished("configure API and source checks");
     let renewal_cancellation = termination.child_token();
@@ -242,6 +252,7 @@ pub(crate) async fn run_server(
         local_address: None,
     };
 
+    let image_builds = options.image_builds.clone();
     let mut serve = ViewerServer::spawn({
         let daemon_runtime = daemon_runtime.clone();
         async move {
@@ -381,7 +392,11 @@ pub(crate) async fn run_server(
                         project_sources: &project_sources,
                         operations: &operations,
                         move_recoveries: &move_recoveries,
-                        capacity: &viewer_capacity(&capacity_state, &container_capacities),
+                        capacity: &viewer_capacity(
+                            &capacity_state,
+                            &capacity_states_rx.borrow(),
+                            &container_capacities,
+                        ),
                         launch_failures: &launch_failures,
                         reviews: &review_views(&daemon_runtime),
                     },
@@ -499,38 +514,12 @@ pub(crate) async fn run_server(
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
-                update = capacity_updates_rx.recv() => {
-                    let update = match update {
-                        Ok(update) => update,
-                        // Readings are latest-wins; a skipped one is replaced
-                        // by the next poll.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::debug!(skipped, "phone server skipped capacity readings");
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
-                            break;
-                        }
-                    };
-                    if let Some(entry) = capacity_state.get_mut(&update.target_id) {
-                        entry.refreshing = false;
-                        entry.sampled_at_epoch_seconds = Some(update.sampled_at_epoch_seconds);
-                        match update.result {
-                            Ok(usage) => {
-                                // A fleet with nothing running reports no
-                                // figures, and that is an answer rather than a
-                                // failure.
-                                entry.on_demand = usage.is_none();
-                                entry.usage = usage;
-                                entry.failed = false;
-                            }
-                            // The last good reading stays on screen beside the
-                            // failure: one failed probe is not a reason to
-                            // forget what the machine was doing.
-                            Err(_) => entry.failed = true,
-                        }
+                changed = capacity_states_rx.changed() => {
+                    if changed.is_err() {
+                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
+                        break;
                     }
+                    capacity_states_rx.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
@@ -1163,16 +1152,17 @@ pub(crate) async fn run_server(
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
                             // block the consumer while readings wait for it.
-                            let accepted = known && capacity_feed.request_refresh();
+                            let generation = known.then(|| capacity_feed.request_refresh()).flatten();
+                            let accepted = generation.is_some();
                             if known && !accepted {
                                 tracing::warn!("phone capacity refresh rejected: poller stopped");
                             }
                             if known {
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refreshing = accepted;
-                                    if !accepted {
-                                        entry.failed = true;
-                                    }
+                                    entry.refresh = match generation {
+                                        Some(generation) => PhoneRefresh::Waiting { generation },
+                                        None => PhoneRefresh::Rejected,
+                                    };
                                 }
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!('control, revision);
@@ -1260,7 +1250,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1585,7 +1575,7 @@ pub(crate) async fn run_server(
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
-            control.request_cancel("server shutdown");
+            control.stop_for_server_shutdown();
         }
         match failure {
             Some(failure) => Err(failure),
@@ -1609,6 +1599,9 @@ pub(crate) async fn run_server(
     {
         tracing::warn!(%error, "native API activity recorder panicked");
     }
+    // Image builds are reproducible work, so shutdown cancels and reaps them
+    // before aborting the HTTP task that accepted them.
+    image_builds.finish().await;
     // Dropping the handle aborts the server task, which is what dropping the
     // server future used to do when this `select!` owned it directly.
     drop(serve);

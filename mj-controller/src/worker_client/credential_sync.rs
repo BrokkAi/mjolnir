@@ -181,7 +181,7 @@ impl Drop for QueuedJob {
 }
 
 /// One holder at a time per session. Within a pass, a session's login step and
-/// its AWS install both need the session's single background admission slot
+/// its AWS install both need the session's credential-sync admission
 /// (`RecoveryGate::try_start`), which turns a second taker away; taking turns
 /// here first means the two never contend for it, so neither is skipped
 /// because the other held it. A step waits only for the same session's other
@@ -326,7 +326,7 @@ impl CredentialSyncCoordinator {
         )
     }
 
-    fn spawn_inner(
+    pub(super) fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
@@ -370,8 +370,25 @@ impl CredentialSyncCoordinator {
             let steps = renewals_env.steps.clone();
             let mut renewals = RenewalTasks::default();
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
+            let mut lease_returns = gate.as_ref().map(|gate| gate.credential_wakes());
             loop {
                 tokio::select! {
+                    () = async {
+                        match lease_returns.as_mut() {
+                            Some(wakes) => { let _ = wakes.changed().await; }
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(gate) = &gate {
+                            let sessions = gate.take_credential_wakes();
+                            let profiles: BTreeSet<_> = targets_rx.borrow().iter()
+                                .filter(|target| sessions.contains(&target.session_id))
+                                .map(|target| target.profile_id.clone()).collect();
+                            for profile_id in profiles {
+                                enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
+                            }
+                        }
+                    }
                     _ = tick.tick() => {
                         // Whether or not any session is left to sync, the
                         // cache of issued credentials drops what has expired.
@@ -1085,18 +1102,22 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
 ) -> Result<Option<T>> {
     match gate {
         Some(gate) => gate
-            .run_background_owned(&target.session_id, |admission| async move {
-                if !target_is_current(runtime, target).await? {
-                    return Ok(None);
-                }
-                work(JobHold::new(
-                    Some(admission),
-                    Some(turn),
-                    installing,
-                    runtime.cloned(),
-                ))
-                .await
-            })
+            .run_background_owned(
+                &target.session_id,
+                crate::recovery_gate::BackgroundWork::CredentialSync,
+                |admission| async move {
+                    if !target_is_current(runtime, target).await? {
+                        return Ok(None);
+                    }
+                    work(JobHold::new(
+                        Some(admission),
+                        Some(turn),
+                        installing,
+                        runtime.cloned(),
+                    ))
+                    .await
+                },
+            )
             .await
             .unwrap_or_else(|| Ok(None)),
         None => work(JobHold::new(None, Some(turn), installing, runtime.cloned())).await,
@@ -2243,7 +2264,7 @@ pub(super) async fn run_on_session(
                     tracing::debug!(
                         session_id = %target.session_id,
                         reason = %error,
-                        "credential sync deferred to the next cycle"
+                        "credential sync deferred until the relay is available"
                     );
                     Ok(None)
                 }
@@ -2570,6 +2591,10 @@ impl CredentialSyncJob {
 }
 
 impl RelayConnectionJob for CredentialSyncJob {
+    fn deferred_by_lease(&self, lease: &crate::recovery_gate::RelayLeaseAdmission) {
+        lease.defer_credentials();
+    }
+
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             let Self {

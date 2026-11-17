@@ -20,7 +20,8 @@ use tokio::task::JoinSet;
 use crate::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
 use crate::recovery::{backoff_delay, elapsed_at_least};
 use crate::recovery_gate::{
-    ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver, observation_channel,
+    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver,
+    observation_channel,
 };
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
@@ -128,7 +129,7 @@ impl WorkerUpgradeCoordinator {
                         if !policy.due(&observation, Utc::now()) {
                             continue;
                         }
-                        let Some(upgrade_cancelled) = coordinator_gate.try_start(&session_id)
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
                         else {
                             continue;
                         };
@@ -147,9 +148,10 @@ impl WorkerUpgradeCoordinator {
                                     config: observation.config,
                                     state,
                                 };
-                                let executor = CancellableProcessExecutor::new(cancelled)
+                                let executor = CancellableProcessExecutor::new(cancelled.cancellation())
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
                                 let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &crate::recovery_gate::SessionAdmission::Background(cancelled.clone()),
                                     &task_session_id,
                                     &executor,
                                     &session_manager,
@@ -648,12 +650,20 @@ mod tests {
     #[test]
     fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
         let gate = Arc::new(RecoveryGate::default());
-        let recovery_copy = gate.try_start("session-1").expect("the slot starts free");
+        let recovery_copy = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .expect("the slot starts free");
 
-        assert!(gate.try_start("session-1").is_none());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
 
         drop(recovery_copy);
-        assert!(gate.try_start("session-1").is_some());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_ok()
+        );
     }
 
     /// Observing must hand off and return: the daemon reports from its event
@@ -716,7 +726,9 @@ mod tests {
         // exercises durable write ownership rather than a fake persistence call.
         let lock = rusqlite::Connection::open(crate::database::database_path()).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let admission = gate.try_start(&session.id).unwrap();
+        let admission = gate
+            .try_start(&session.id, BackgroundWork::WorkerReplacement)
+            .unwrap();
         let id = session.id.clone();
         let revision = session.updated_at.clone();
         let settling = tokio::spawn(admission.run_blocking(move |cancelled| {
@@ -734,8 +746,13 @@ mod tests {
         .unwrap();
         assert!(gate.is_busy(&session.id));
         assert!(!settling.is_finished());
-        assert!(gate.try_start(&session.id).is_none());
-        let independent = gate.try_start("other-session").unwrap();
+        assert!(
+            gate.try_start(&session.id, BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
+        let independent = gate
+            .try_start("other-session", BackgroundWork::WorkerReplacement)
+            .unwrap();
         let (completed, independent) = independent.run_blocking(|_| 42).await;
         assert_eq!(
             completed.unwrap(),

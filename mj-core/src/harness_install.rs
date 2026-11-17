@@ -1297,6 +1297,49 @@ fn artifact_redirect_policy() -> reqwest::redirect::Policy {
 /// Mjolnir's shared cache and prepended to PATH for this launch. `Ok(None)`
 /// means the system runtime was retained; `Ok(Some(path))` names the managed
 /// installation.
+/// Use the image's mise or atomically publish the verified static Linux pin.
+/// The install lock serializes workers sharing the same image cache.
+pub async fn ensure_mise_runtime(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    if let Some(command) = find_command_path(Path::new("mise"), environment)? {
+        return Ok(command);
+    }
+    ensure!(
+        std::env::consts::OS == "linux",
+        "mise has no managed runtime for {}",
+        std::env::consts::OS
+    );
+    let artifact = crate::session_image::pinned_mise(std::env::consts::ARCH)?;
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?
+    .parent()
+    .context("managed cache has no parent")?
+    .join("mise");
+    std::fs::create_dir_all(&root)?;
+    let _lock = lock_file(
+        open_lock(&root.join(INSTALL_LOCK_FILE))?,
+        false,
+        "managed mise installer",
+    )
+    .await?;
+    let install = root.join(crate::harness_runtime::MISE_VERSION);
+    let executable = install.join("mise");
+    if entrypoint_is_executable(&executable) {
+        return Ok(executable);
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(&root)?;
+    let downloaded = staging.path().join("mise");
+    download_verified_async(&artifact.url, &downloaded, &artifact.sha256, environment).await?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&downloaded, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(&install)?;
+    std::fs::rename(downloaded, &executable).context("publish managed mise executable")?;
+    Ok(executable)
+}
+
 pub async fn ensure_node_runtime(
     environment: &mut BTreeMap<String, String>,
 ) -> Result<Option<ManagedNodeRuntime>> {

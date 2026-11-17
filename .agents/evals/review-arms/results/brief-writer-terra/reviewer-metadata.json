@@ -1,0 +1,953 @@
+{
+  "jobs": [
+    {
+      "bug": "archive-resume-hint-without-prompt",
+      "arm": "TT",
+      "carrier": "3fffe657e5305ad71273add219df981a",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "340f1ebb5063fc09008b5dd5051d9fa0",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "d21f5ac6a61e242ce36f1210365bf31b",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "348f7bf80dfea07fb37cad0889108e24",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "080531b87c42029b9181f344671d432cf3ed8b55a36fad54ff7efb3180beb4fb",
+      "job_wall_s": 423.393,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "catalog-cache-key-collision",
+      "arm": "TT",
+      "carrier": "c79faffe4384d9cb4abe075ea4130402",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "c66e5cafaf1285eb9f96d8cc51966950",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b890ad2bfa7a6ff753991abff7c7a11b",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "5121f207c20e3c5d87aa858687685e78",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "bd7f386fc603d83b9635c54ceaa101900c40708deee750982c45e1d822fe6359",
+      "job_wall_s": 102.946,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "child-model-wrong-efforts",
+      "arm": "TT",
+      "carrier": "03bb445f602ba74af379117210d8cf63",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "4276a14c68125fcadeb62d1788c9f98d",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "4860dca4b7a89824710e0c419b6ea87a",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "09add0f4f08fcbe6620b986c843586f6",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "fffe35233da028bd118a4d3883f84b559cf8a2358840cc4f02230a66ae2dd1d5",
+      "job_wall_s": 274.216,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "codex-effort-alias-lost",
+      "arm": "TT",
+      "carrier": "db1cda5415a5321bbf4770b65ba4d08f",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "2be86b66acb78856ec27a21b31fe740d",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "08a509f779ba5218aac12bd32a7cb527",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b23079f41037e4c7b398bcd6034e5428",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "ea840ad8823cbf7e9473c8c54e5489f9fc357b44685414a2c778501b3ccba2eb",
+      "job_wall_s": 190.399,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "export-relative-read-root",
+      "arm": "TT",
+      "carrier": "1acba08060cdc469721f8e01663beb2b",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "7c54722596ed53e187c16eed4449dc16",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "acb455fe388b88684d3fec79f898cd16",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "1e75eb62ddbf987379090ca84dbda3c5",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "f9ea3745b24a71485cd72c253cc0d2476f7c631909a9827b5fd396fa43aa9508",
+      "job_wall_s": 603.587,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "github-token-in-container-argv",
+      "arm": "TT",
+      "carrier": "c27a02f0bcd6d0887863e40b97696d6f",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "0ea4429abba1f1fe9d65da2fecd0db10",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "f26a39e4725de79ca950440e6d8ae016",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "9eb2d43c9ee451077a86e15d6e37cd4f",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "62190b595e1e3f7d7d16d3ffe99f134135ac1df72e84175f645e61fb95b194fc",
+      "job_wall_s": 190.315,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "held-prompt-ignores-interrupt",
+      "arm": "TT",
+      "carrier": "5a579f5e242781c5d244ee18e8d1baf4",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "14d5a583406cc852165be305c8ca3662",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "d46b1b2cd08956c60915f3e5c768aa84",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "377d49af8ee29e4df85997dd72c84a43",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "e3ff8cef6014d6903d9d63e96137b0876974e07a87f0ccb6ebccf30801ca4b2f",
+      "job_wall_s": 260.915,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "journal-valid-json-corruption",
+      "arm": "TT",
+      "carrier": "01c5cdc96e85323f9891a8f6d4ca8586",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "fdd51aa21ddada0fc78cb632b25b871e",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "f69920259231b4a264df4790e6eb6e57",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "9e2011c6bcb942ede9282cf9078297e6",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "a0d0b4c3386d0d583c7898a94179c84170c3172965f6afa4cc1d855522ee93b7",
+      "job_wall_s": 187.965,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "path-completion-lost-on-step-redraw",
+      "arm": "TT",
+      "carrier": "9dd02427fd80489fba1a7fe25751a236",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "8b60838197bfbd6d86379f09fb3c057c",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "96532131bee93fd9a50cb025ad5b5c38",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "8f4f130bf9ed3b66e425dedfa86f1fea",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "14102e590b549c89ae7132d5c5889bcdca98b4e764b0d5ab86c21f1a02f748be",
+      "job_wall_s": 103.136,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "pending-assessment-hidden-when-idle",
+      "arm": "TT",
+      "carrier": "d0cb71d82e2b777dad81675125ca338b",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "81fcd4cdfd0527e03cd0bbcaf7ca5aa7",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "2cc56cded9471bb31ebcb1bb94c3c8d4",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "88c567020ce9f19e4a17fe1ef5e37a89",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": [
+          "refs/mj/push-base/9969e2d75b752f113de39cb476b90f761d4f9a8baa77f1cb427443d534413119 b72adcc6f7c8697e329bdf880780bbd3cc70a1b7",
+          "refs/mj/reviewed/a3c7b310af37590edcb3421acd8a1a5e5ad8a691 b72adcc6f7c8697e329bdf880780bbd3cc70a1b7"
+        ]
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "f39c9e7a3275f73223d3b0a894f43745e0db1636286bcf83e4d5f755f8f7d226",
+      "job_wall_s": 139.268,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "projection-mixed-sqlite-snapshots",
+      "arm": "TT",
+      "carrier": "24c38e08c9576cd231c756e500ad36ad",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "e211e98d35f815b677abd44eae46a510",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "da66c7d1efa5b1130f579cc029da80a5",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "4b68c412387fe54f558e589abd9e3e18",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "ea7bb485bc1a2603ddc37ef578986e2e363aa8583bd43270212686dd9b16721f",
+      "job_wall_s": 420.417,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "reserved-workspace-internal-error",
+      "arm": "TT",
+      "carrier": "6403041299066536cf9e338fee0db01b",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "5cb5b169705b3b727666a2e80d9bb4ae",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "ee9fb973a8a50e357171b3c2d18e8e20",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "6887f648e2f068a6bb12da5c46803684",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "3e8e65ed9233c74d496cc9550ed7fb202cecd5d9980963db300fceb05ba29119",
+      "job_wall_s": 114.285,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "restore-through-profile-symlink",
+      "arm": "TT",
+      "carrier": "d54aca73cef11240f34b53868cf684b8",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "856ce8e25c816ee2a6cbfa9076cdc62b",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "0361d40ec2ffdb00230324e4a18dabed",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "fa979d86568e037eeece2b37906eefb8",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "2d0e6af179af8a7164092be757d1873b0f607580394d50ad8dbfcb8605de8246",
+      "job_wall_s": 384.58,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "stale-model-launch-spec",
+      "arm": "TT",
+      "carrier": "181fae9218bd4437171137924209391c",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "9d7d3c86160679b7cc3b921c6997f725",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "67626db8ffa34e0178ee6af4f9521e65",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "0bbfbff85255d3a679da062d879cf800",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "3506bf67979ba8203cc81ae3bc1fb8c137bf82d8f62447d10b133d6d1e0b6fd7",
+      "job_wall_s": 408.982,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "symbol-change-keeps-cached-transcript",
+      "arm": "TT",
+      "carrier": "e52634267607c63f135888d67b79e7bb",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "4896a4e8a09150be0fcf595d6fd4bb57",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "cd7ecfcfc5782649e32d5331acadbb02",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "29d8ae80fffe7bf0e39abc6d4cf3562b",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "3ee4b54867b96b52cf4c4be5e1b1953430853075d267b8c3e3741012556c6584",
+      "job_wall_s": 121.072,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "terminal-id-reused",
+      "arm": "TT",
+      "carrier": "0210a4f1b820909fe816c6c5f6d7509a",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "4ac3c8c5ab22ce7251d7696fdba7fbbe",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b3195f7a2622a47f81289d9745ccf60e",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "3c4cc9ac3c3ab22ab88287888694889b",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "688e0ffd36196dac7d2d5f199be1f0c9f5cd0b8f2c29782969495fcbca0c9f2c",
+      "job_wall_s": 265.117,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "unused-thread-above-archive-floor",
+      "arm": "TT",
+      "carrier": "6028f80edd4588f3997f8ac3578d6ec4",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "ed2ef80c154327fe9e476911a115bd52",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b9100b242840e281e551aeb11a8e1137",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "a5ddf0324b8b6a63884f883603eac643",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "a9dba8cc28dd9f77532eb9922d428eb645f2de77dbb051e0e819efa65ec5686b",
+      "job_wall_s": 250.348,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "web-feed-self-deadlock",
+      "arm": "TT",
+      "carrier": "5fcc29b6a3b7251a7b9814a7608db4eb",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "c0dd33090d6e999dac1ab353a6f44e20",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "df5a3c59116bba59bf487108c5078ce3",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "e924be14675be7adb9a7a7c463650f7c",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "6ed09223d4d32cb02823cf63ad837db16012fbd4368e58dbfef509e3a18fd3bb",
+      "job_wall_s": 108.598,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "activity-recorder-kills-api",
+      "arm": "TT",
+      "carrier": "d67c025a7d9e5c80fd12c0840148487e",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "b3f798be3a3cea411aabebf5ca80902f",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "f33fb6db220611a2e3f5f57c948bbadf",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "ec4c955ad234db994c9a55fc41d5c9d2",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "225f0ce41d9faae83444bf5b0f716952a99d318ef6fa72f5dc618bc53c19032c",
+      "job_wall_s": 150.857,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "dropdown-click-hits-covered-field",
+      "arm": "TT",
+      "carrier": "56a3eae91310268fce0a432635244245",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "ad13be59cc1fe6f21f967281b7544cad",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "51e7068a0c3bc495488628d52b6b9483",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "5f2541eab78f3a6f806fab09ad3390b6",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "3eb83269511f6d0747f889d9222a574cc6f71f17c273a4da4169a19624c5684e",
+      "job_wall_s": 89.308,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "metadata-checkpoint-overwrites-checkout",
+      "arm": "TT",
+      "carrier": "f94967efbe3c9716f1be03f4a2adb96c",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "4bc549cf8fdb9bd09d7d39cef9bce15c",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "3cc50e8fcd239f7e5317d68714477371",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "561adf0f5b56975dd20dee862cf62027",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "8f3c50d385d8a3a2f923a5c1945807cc65e00fea742c340aa578d01125ca60b8",
+      "job_wall_s": 108.469,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    },
+    {
+      "bug": "shortcut-escape-opens-unvisited-manager",
+      "arm": "TT",
+      "carrier": "361623ca4e6a68daeceb3f0e79201d6b",
+      "image": "8819974fc5ff6f78806688b24e8724590ee51ff46478e8489cc28381eea0d87c",
+      "reviewers": [
+        {
+          "child": "e89656a88322e7fc26b3734e846e215b",
+          "slot": 0,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "b3c69a40551c7122b3d8d4c2ddf54434",
+          "slot": 1,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        },
+        {
+          "child": "ffa377780cb52e99db4ba00cef87df0d",
+          "slot": 2,
+          "profile": "codex4",
+          "model": "gpt-6.1-terra",
+          "effort": "high",
+          "has_output": true,
+          "handback": true
+        }
+      ],
+      "inventory": {
+        "problems": [],
+        "new_refs": []
+      },
+      "published_brief_in_context": true,
+      "context_sha256": "a1cd17d2161cf4dfba5cc4647c7d28939b17471c41c0e37b95cc0cf638d3f23e",
+      "job_wall_s": 158.349,
+      "job_wall_definition": "launch intent before carrier provisioning through job collection; not individual reviewer latency"
+    }
+  ]
+}

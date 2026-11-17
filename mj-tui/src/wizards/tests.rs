@@ -1801,6 +1801,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
             error: None,
             refreshed_at_epoch_seconds: 0,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         },
     )]);
     dashboard.begin_new();
@@ -5998,7 +5999,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     });
     let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None);
     let profile = config.profiles.keys().next().unwrap().clone();
-    draft.update_choices(&profile, &config, &Default::default());
+    draft.update_choices(&profile, &config, &Default::default(), false);
     assert!(draft.oracle_available());
     assert_eq!(
         draft.apply(&Interaction::ComboBoxCommit(WizardControl::Oracle, 1)),
@@ -6009,7 +6010,7 @@ fn oracle_choice_stays_available_when_delegation_is_none() {
     let override_choice = config.subagents.oracle.take();
     let mut override_draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::None)
         .with_oracle(true, override_choice);
-    override_draft.update_choices(&profile, &config, &Default::default());
+    override_draft.update_choices(&profile, &config, &Default::default(), false);
     assert!(override_draft.oracle_available());
     config.subagents.oracle = override_draft.oracle_choice.clone();
     let mut state = State::default();
@@ -6236,15 +6237,41 @@ fn move_unconfigured_delegation_retains_none_until_changed() {
 }
 
 #[test]
+fn yolo_target_uses_its_own_configured_choices() {
+    let choice = |model: &str| mj_core::config::SubagentChoice {
+        model: model.into(),
+        effort: None,
+    };
+    let mut config = config();
+    config.subagents.straightforward = Some(choice("shared"));
+    config.subagents.yolo.straightforward = Some(choice("yolo"));
+    config.subagents.use_same_on_all_targets = false;
+    let mut draft = subagents::SubagentDraft::new(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    draft.update_choices("claude-1", &config, &Default::default(), true);
+    assert!(draft.unavailable_reason().is_none());
+
+    config.subagents.yolo.straightforward = None;
+    draft.update_choices("claude-1", &config, &Default::default(), true);
+    let reason = draft.unavailable_reason().unwrap();
+    assert!(reason.contains("YOLO"), "{reason}");
+    // The shared set still serves ordinary targets.
+    draft.update_choices("claude-1", &config, &Default::default(), false);
+    assert!(draft.unavailable_reason().is_none());
+}
+
+#[test]
 fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     use mj_core::subagent::SubagentPolicy;
     let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
     let mut config = config();
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert!(!draft.select_policy(1));
     assert!(draft.unavailable_reason().unwrap().contains("Settings"));
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert!(!draft.select_policy(1));
     assert!(
         draft
@@ -6254,7 +6281,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;
-    draft.update_choices("claude-1", &config, &Default::default());
+    draft.update_choices("claude-1", &config, &Default::default(), false);
     assert_eq!(draft.policies(), ["Mjolnir", "None"]);
     assert_eq!(draft.enabled_policies(), [false, true]);
     assert_eq!(draft.selected(), SubagentPolicy::None);

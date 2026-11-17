@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 132;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 137;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2540,6 +2540,114 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
         transaction.commit()?;
     }
+    // Compatible: adds a table that records unfinished session creations.
+    // Older daemons never read or write it and leave its rows intact when they
+    // rewrite session rows; an older daemon that meets a provisioning session
+    // fails it exactly as before, and the new daemon discards a leftover row
+    // whose session is no longer creating. The compatibility floor stays.
+    if version < 134 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS session_create_intents (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL,
+                 remember_launch_choices INTEGER NOT NULL CHECK(remember_launch_choices IN (0, 1)),
+                 created_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (134, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 134;
+             COMMIT;",
+        )?;
+    }
+    // Compatible: old writers name columns; triggers retain their launch kinds too.
+    // Leave kinds unknown when the authoritative launch record is gone.
+    if version < 135 {
+        let transaction =
+            Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        if !legacy_schema::table_has_column(&transaction, "subagent_accounting", "kind")? {
+            transaction.execute_batch("ALTER TABLE subagent_accounting ADD COLUMN kind TEXT;")?;
+        }
+        transaction.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_insert
+             AFTER INSERT ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS subagent_accounting_kind_update
+             AFTER UPDATE OF record_json ON subagent_sessions BEGIN
+                 UPDATE subagent_accounting
+                 SET kind=COALESCE(json_extract(NEW.record_json, '$.kind'), 'worker')
+                 WHERE child_session_id=NEW.child_session_id;
+             END;
+             UPDATE subagent_accounting SET kind=(
+                 SELECT COALESCE(json_extract(s.record_json, '$.kind'), 'worker')
+                 FROM subagent_sessions s
+                 WHERE s.child_session_id=subagent_accounting.child_session_id)
+             WHERE kind IS NULL;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (135, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=135;",
+        )?;
+        transaction.commit()?;
+    }
+    // Breaking: older daemons cannot decode the writing_brief review phase, a seed's
+    // brief, or a brief-writer registration in a stored active review group.
+    // Refuse their reads and writes before any can be stored.
+    if version < 136 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 136 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (136, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 136;
+             COMMIT;",
+        )?;
+    }
+    // Breaking: finished review output is durable data that an older daemon
+    // cannot preserve. It settles reviewers, clears the active group and
+    // prunes their handbacks without writing `review_reports`, which would
+    // lose a review's output irrecoverably. Refuse its reads and writes before
+    // such a review can be lost; a store written by a newer daemon raises this
+    // floor further still. The table itself is standalone; the floor is raised
+    // for this preservation reason only. The trigger removes a session's
+    // reports with the session itself, so a destroyed session cannot leave
+    // unreachable handbacks behind. A later migration that recreates `sessions`
+    // drops this trigger and must create it again.
+    if version < 137 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS review_reports (
+                 parent_session_id TEXT NOT NULL,
+                 review_id TEXT NOT NULL,
+                 role TEXT NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 command_id TEXT NOT NULL,
+                 child_session_id TEXT,
+                 profile TEXT NOT NULL DEFAULT '',
+                 model TEXT,
+                 effort TEXT,
+                 handback TEXT,
+                 verdict TEXT,
+                 finished_at_ms INTEGER,
+                 resolution TEXT,
+                 updated_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY(parent_session_id, review_id, role)
+             );
+             CREATE INDEX IF NOT EXISTS review_reports_finished
+                 ON review_reports(parent_session_id, finished_at_ms DESC);
+             CREATE TRIGGER IF NOT EXISTS review_reports_session_destroyed
+                 AFTER DELETE ON sessions BEGIN
+                     DELETE FROM review_reports WHERE parent_session_id = OLD.session_id;
+                 END;
+             UPDATE schema_compatibility SET minimum_compatible_version = 137 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (137, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 137;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3286,7 +3394,9 @@ pub(super) fn drop_session_row_triggers(connection: &Connection) {
     drop_environment_schema(connection);
     connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS session_rows_deleted;
+            "DROP TRIGGER IF EXISTS subagent_accounting_kind_insert;
+             DROP TRIGGER IF EXISTS subagent_accounting_kind_update;
+             DROP TRIGGER IF EXISTS session_rows_deleted;
              DROP TRIGGER IF EXISTS session_rows_destroyed;
              DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
              DROP TRIGGER IF EXISTS github_watch_items_live_creator;
@@ -4091,7 +4201,16 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
-        assert!(state.ensure_supported_by(132).is_ok());
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+                .is_ok()
+        );
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(upgraded.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id='source'", [], |row| row.get::<_, Option<String>>(0)).unwrap(), None);
         let preserved: String = upgraded
             .query_row(
@@ -4740,6 +4859,28 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 137 {
+            connection
+                .execute_batch(
+                    "DROP TRIGGER IF EXISTS review_reports_session_destroyed;
+                     DROP TABLE IF EXISTS review_reports;",
+                )
+                .unwrap();
+        }
+        if version < 135 {
+            connection.execute_batch("DROP TRIGGER IF EXISTS subagent_accounting_kind_insert; DROP TRIGGER IF EXISTS subagent_accounting_kind_update;").unwrap();
+            if legacy_schema::table_has_column(&connection, "subagent_accounting", "kind").unwrap()
+            {
+                connection
+                    .execute_batch("ALTER TABLE subagent_accounting DROP COLUMN kind;")
+                    .unwrap();
+            }
+        }
+        if version < 134 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS session_create_intents;")
+                .unwrap();
+        }
         if version < 133
             && legacy_schema::table_has_column(
                 &connection,
@@ -4902,6 +5043,11 @@ mod reader_tests {
             .unwrap();
         if version >= COMPATIBILITY_METADATA_VERSION {
             connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=min(minimum_compatible_version, ?1)", [version]).unwrap();
+        }
+        // Rewinding before the brief-writer fence restores the historical
+        // floor, including compatible revisions 133 through 135.
+        if (132..136).contains(&version) {
+            connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1", []).unwrap();
         }
         if version == 30 {
             connection
@@ -5342,8 +5488,8 @@ mod reader_tests {
     }
 
     #[test]
-    fn move_close_intent_migration_preserves_revision_132_writers() {
-        const NAME: &str = "move_close_intent_migration_preserves_revision_132_writers";
+    fn move_close_intent_migration_preserves_older_column_writes() {
+        const NAME: &str = "move_close_intent_migration_preserves_older_column_writes";
         const CHILD: &str = "MJ_TEST_MOVE_CLOSE_MIGRATION";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
@@ -5360,8 +5506,9 @@ mod reader_tests {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
         stamp_schema_version(&path, 132);
-        // Exact explicit-column UPSERT used by revision-132 writers. It must
-        // preserve future columns on updates and default them to NULL on insert.
+        // Exact explicit-column UPSERT a revision-132 writer issues. It still
+        // preserves the later column mechanically; revision 134 refuses such
+        // a writer outright because it cannot record finished review output.
         let older_write = |connection: &Connection, session: &str, operation: &str| {
             connection.execute("INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
                 VALUES (?1,?2,?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
@@ -5389,9 +5536,16 @@ mod reader_tests {
         drop(old);
         let writer = open_writer(&path).unwrap();
         let schema = read_schema_state(&writer).unwrap();
-        assert_eq!(schema.revision, 133);
-        assert_eq!(schema.minimum_compatible, Some(132));
-        assert!(schema.ensure_supported_by(132).is_ok());
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        // The later fences refuse older daemons; the column preservation
+        // checks below still exercise revision-132 SQL.
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(schema.ensure_supported_by(132).is_err());
+        assert!(
+            schema
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+                .is_ok()
+        );
         let intent = |session: &str| {
             writer
                 .query_row(
@@ -5417,6 +5571,76 @@ mod reader_tests {
         // cancellation invalidates the previous request in the same transaction.
         writer.execute("UPDATE session_moves SET operation_json=json_set(operation_json,'$.cancellation_requested',json('false')) WHERE session_id='source'", []).unwrap();
         assert_eq!(intent("source"), None);
+    }
+
+    #[test]
+    fn create_intent_migration_keeps_older_writers_working_and_settles_with_the_session() {
+        const NAME: &str =
+            "create_intent_migration_keeps_older_writers_working_and_settles_with_the_session";
+        const CHILD: &str = "MJ_TEST_CREATE_INTENT_MIGRATION";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+            return;
+        }
+        use mj_core::state::SessionState;
+        let path = mj_core::config::data_dir().join("create-intent-compat.sqlite3");
+        let mut existing = super::super::tests::session("existing", "project");
+        existing.state = SessionState::Provisioning;
+        save_session_to(&path, &existing).unwrap();
+        stamp_schema_version(&path, 133);
+        // A revision-133 daemon fails the provisioning session and rewrites the row.
+        let old = Connection::open(&path).unwrap();
+        old.execute(
+            "UPDATE sessions SET state='error' WHERE session_id='existing'",
+            [],
+        )
+        .unwrap();
+        drop(old);
+        let writer = open_writer(&path).unwrap();
+        assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_state(&writer).unwrap().minimum_compatible,
+            Some(MINIMUM_COMPATIBLE_VERSION)
+        );
+        drop(writer);
+        let intents = |path: &Path| -> Vec<String> {
+            let connection = Connection::open(path).unwrap();
+            let mut statement = connection
+                .prepare("SELECT session_id FROM session_create_intents ORDER BY session_id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert!(intents(&path).is_empty());
+        let mut created = super::super::tests::session("created", "project");
+        created.state = SessionState::Provisioning;
+        super::super::save_new_session_to(&path, &created, None, true, false).unwrap();
+        assert_eq!(intents(&path), ["created"]);
+        // Provisioning writes keep it, including the move to Disconnected.
+        created.state = SessionState::Disconnected;
+        save_session_to(&path, &created).unwrap();
+        super::super::sessions::save_lifecycle_session_to(&path, &created).unwrap();
+        assert_eq!(intents(&path), ["created"]);
+        // Committing or failing for good settles it with the same write.
+        created.state = SessionState::Running;
+        super::super::sessions::mark_session_worker_connected_to(&path, "created", None, "now")
+            .unwrap();
+        assert!(intents(&path).is_empty());
+        let mut failed = super::super::tests::session("failed", "project");
+        failed.state = SessionState::Provisioning;
+        super::super::save_new_session_to(&path, &failed, None, false, false).unwrap();
+        failed.state = SessionState::Error;
+        super::super::sessions::save_lifecycle_session_to(&path, &failed).unwrap();
+        assert!(intents(&path).is_empty());
     }
 
     #[test]

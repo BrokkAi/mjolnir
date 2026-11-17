@@ -56,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
     dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
-    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
+    spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -94,6 +94,8 @@ pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
     cancel_cause: Arc<Mutex<Option<&'static str>>>,
+    /// Woken when shutdown stops the operation, for waiters that must end then.
+    shutdown_stop: Arc<tokio::sync::Notify>,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -107,7 +109,7 @@ impl LifecycleControl {
         self.cancel_as(LIFECYCLE_CANCELLED, cause)
     }
 
-    fn cancel_for_shutdown(&self) -> bool {
+    pub(crate) fn cancel_for_shutdown(&self) -> bool {
         self.cancel_as(LIFECYCLE_CANCELLED_FOR_SHUTDOWN, "server shutdown")
     }
 
@@ -130,8 +132,24 @@ impl LifecycleControl {
         if accepted {
             *cancel_cause = Some(cause);
             self.cancelled.store(true, Ordering::Release);
+            if cancelled == LIFECYCLE_CANCELLED_FOR_SHUTDOWN {
+                self.shutdown_stop.notify_waiters();
+            }
         }
         accepted
+    }
+
+    /// Completes once shutdown has stopped the operation.
+    pub(crate) async fn shutdown_stopped(&self) {
+        loop {
+            let notified = self.shutdown_stop.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stopped_for_shutdown() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Commit the operation, unless a cancel was accepted first. Only the
@@ -354,7 +372,7 @@ impl RuntimeRevisions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifecycleKind {
+pub(crate) enum LifecycleKind {
     Create,
     Suspend,
     Resume,
@@ -568,6 +586,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    origin: lifecycle::LifecycleOrigin,
     move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
     restart_intent: Option<String>,
@@ -710,7 +729,9 @@ impl ActiveLifecycle {
     /// Stop this operation for daemon shutdown. An operation that can still be
     /// cancelled is cancelled. A committed one is interrupted, because the
     /// next daemon finishes it from its record, except a committed create,
-    /// whose caller now owns the new session and which no daemon resumes.
+    /// which is a moment from `Running` and finishes. An uncommitted create
+    /// is stopped without rolling back (see `stopped_for_shutdown`): its
+    /// create intent makes the next daemon finish it.
     fn interrupt_for_shutdown(&mut self) -> bool {
         if self.kind == LifecycleKind::UpgradeContainer
             && matches!(self.phase, LifecyclePhase::RetiringContainer)
@@ -855,7 +876,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 
 mod close;
 mod close_workspace;
-mod create;
+pub(crate) mod create;
 mod lifecycle;
 mod resume;
 mod snapshot;

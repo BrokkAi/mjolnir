@@ -754,6 +754,7 @@ pub(super) fn insert_session_with_parent(
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
     Ok(())
 }
 
@@ -878,6 +879,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         bail!("unknown session {id}");
     }
     super::events::record_session_fault_transition(tx, session, previous_error)?;
+    super::session_create::settle_create_intent(tx, session)?;
     replace_targets(tx, session)
 }
 

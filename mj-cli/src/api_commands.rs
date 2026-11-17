@@ -1142,7 +1142,7 @@ pub(crate) fn subagent_policy(
     retired_effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    const REMEDY: &str = "Configure [subagents.straightforward], and optionally [subagents.subtle], in config.toml or TUI Settings -> Sub-agents";
+    const REMEDY: &str = "Configure [subagents.straightforward] and optionally [subagents.subtle], or their [subagents.yolo.*] counterparts for a YOLO target, in config.toml or TUI Settings -> Sub-agents";
     if retired_model.is_some() || retired_effort.is_some() {
         bail!(
             "--subagent-model and --subagent-effort are retired; use --subagent-straightforward, --subagent-straightforward-effort, --subagent-subtle, and --subagent-subtle-effort"
@@ -2337,6 +2337,20 @@ enum ReviewCommand {
     /// Show the review the session has open: what it is doing, each reviewing
     /// role, and its verdict once it has one.
     Status(SessionArgs),
+    /// Show a finished review's per-reviewer output: each reviewer's model,
+    /// effort and profile, its full handback, its verdict, and its usage.
+    /// Works after the reviewer sessions have been destroyed.
+    Show(ReviewShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ReviewShowArgs {
+    #[command(flatten)]
+    session: SessionArgs,
+    /// Review id, as a verdict message names it. Defaults to the newest
+    /// finished review for the session.
+    #[arg(long)]
+    review: Option<String>,
 }
 
 pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
@@ -2363,6 +2377,16 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
             print_lines(review_lines(status.review.as_ref()));
             Ok(())
         }
+        ReviewCommand::Show(args) => {
+            let response = client
+                .finished_review(&args.session.session, args.review.as_deref())
+                .await?;
+            if args.session.json {
+                return print_json(&response);
+            }
+            print_lines(finished_review_lines(&response));
+            Ok(())
+        }
     }
 }
 
@@ -2381,6 +2405,105 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
         if !verdict.text.is_empty() {
             lines.push(String::new());
             lines.push(verdict.text.clone());
+        }
+    }
+    lines
+}
+
+/// A finished review as plain lines, including each reviewer's full handback
+/// and the usage its deleted child session still accounts for.
+fn finished_review_lines(
+    response: &mj_controller::server::api::FinishedReviewResponse,
+) -> Vec<String> {
+    let Some(review) = &response.review else {
+        return vec![format!(
+            "no finished review is recorded for {}",
+            response.session_id
+        )];
+    };
+    let resolution = match review.resolution {
+        mj_controller::database::FinishedReviewResolution::Completed => "completed",
+        mj_controller::database::FinishedReviewResolution::Failed => "failed",
+        mj_controller::database::FinishedReviewResolution::Cancelled => "cancelled",
+    };
+    let finished = chrono::DateTime::from_timestamp_millis(review.finished_at_ms)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| format!("{} ms", review.finished_at_ms));
+    let mut lines = vec![format!(
+        "review {}: {resolution}, finished {finished}",
+        review.review_id
+    )];
+    for role in &review.roles {
+        lines.push(format!(
+            "  {} ({}) profile {}; model {}; effort {}",
+            role.label,
+            role.role,
+            if role.profile.is_empty() {
+                "unknown"
+            } else {
+                &role.profile
+            },
+            role.model.as_deref().unwrap_or("harness default"),
+            role.effort.as_deref().unwrap_or("default effort"),
+        ));
+        match role.verdict.as_ref() {
+            Some(mj_core::review::verdict::ReviewVerdict::Clean) => {
+                lines.push("    verdict: clean".to_owned());
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Findings { synthesis, .. }) => {
+                lines.push("    verdict: findings".to_owned());
+                for line in synthesis.lines() {
+                    lines.push(format!("      {line}"));
+                }
+            }
+            Some(mj_core::review::verdict::ReviewVerdict::Failed { reason }) => {
+                lines.push(format!("    verdict: failed: {reason}"));
+            }
+            None => lines.push("    verdict: none (the reviewer did not settle)".to_owned()),
+        }
+        if let Some(turn) = &role.turn {
+            let result = turn.result();
+            let kind = match result.kind {
+                mj_core::event_outcome::TurnResultKind::Completed => "completed",
+                mj_core::event_outcome::TurnResultKind::InputRequired => "input required",
+                mj_core::event_outcome::TurnResultKind::Cancelled => "cancelled",
+                mj_core::event_outcome::TurnResultKind::Rejected => "rejected",
+                mj_core::event_outcome::TurnResultKind::Interrupted => "interrupted",
+                mj_core::event_outcome::TurnResultKind::Failed => "failed",
+            };
+            let detail = result
+                .message
+                .as_deref()
+                .or(result.stop_reason.as_deref())
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            lines.push(format!("    turn: {kind}{detail}"));
+            if let Some(usage) = &turn.usage {
+                let mut counters = vec![
+                    format!("total {}", usage.total_tokens),
+                    format!("input {}", usage.input_tokens),
+                    format!("output {}", usage.output_tokens),
+                ];
+                for (name, value) in [
+                    ("thought", usage.thought_tokens),
+                    ("cached read", usage.cached_read_tokens),
+                    ("cached write", usage.cached_write_tokens),
+                ] {
+                    if let Some(value) = value {
+                        counters.push(format!("{name} {value}"));
+                    }
+                }
+                lines.push(format!("    usage: {}", counters.join(", ")));
+            }
+        }
+        if let Some(handback) = &role.handback {
+            lines.push("    handback:".to_owned());
+            if handback.is_empty() {
+                lines.push("      (empty)".to_owned());
+            }
+            for line in handback.lines() {
+                lines.push(format!("      {line}"));
+            }
         }
     }
     lines
@@ -3027,6 +3150,78 @@ fn render_quota_at(
         .collect::<Vec<_>>()
         .join("\n"))
 }
+#[derive(Debug, Args)]
+pub(crate) struct HostsArgs {
+    /// Show only this host or fleet, named by its host or by a target it
+    /// contains; default lists every host.
+    #[arg(long)]
+    host: Option<String>,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Read the daemon capacity service's latest readings; this never samples a
+/// host itself. The TUI dashboard still samples hosts with its own poller, so
+/// its numbers come from separate samples and can differ by up to one round.
+pub(crate) async fn hosts(args: HostsArgs) -> Result<()> {
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let rows = daemon.host_capacity().await?;
+    println!(
+        "{}",
+        render_hosts(
+            &rows,
+            args.host.as_deref(),
+            args.json,
+            mj_core::clock::epoch_seconds()
+        )?
+    );
+    Ok(())
+}
+
+fn render_hosts(
+    rows: &[mj_core::targets::HostCapacityRow],
+    only: Option<&str>,
+    json: bool,
+    now: u64,
+) -> Result<String> {
+    let selected: Vec<_> = match only {
+        None => rows.to_vec(),
+        Some(name) => {
+            let found: Vec<_> = rows
+                .iter()
+                .filter(|row| row.matches(name))
+                .cloned()
+                .collect();
+            if found.is_empty() {
+                let known: std::collections::BTreeSet<&str> = rows
+                    .iter()
+                    .flat_map(|row| {
+                        std::iter::once(row.host.as_str())
+                            .chain(row.target_ids.iter().map(String::as_str))
+                    })
+                    .collect();
+                if known.is_empty() {
+                    bail!("no host or target {name:?}: the daemon has no hosts");
+                }
+                bail!(
+                    "no host or target {name:?}; known names: {}",
+                    known.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            found
+        }
+    };
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "now_epoch_seconds": now,
+            "hosts": selected,
+        }))
+        .context("serialize host capacity");
+    }
+    Ok(mj_core::targets::render_host_capacity(&selected, now))
+}
+
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let session = match (args.key, args.value) {
@@ -3193,10 +3388,40 @@ mod tests {
             };
             let session = match args.command {
                 ReviewCommand::Start(session) | ReviewCommand::Status(session) => session,
+                ReviewCommand::Show(_) => panic!("expected start or status"),
             };
             assert_eq!(session.session, "s1");
             assert_eq!(session.json, json);
         }
+        let cli = Cli::try_parse_from([
+            "mj",
+            "review",
+            "show",
+            "--session",
+            "s1",
+            "--review",
+            "r1",
+            "--json",
+        ])
+        .expect("review show parses");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert_eq!(args.session.session, "s1");
+        assert_eq!(args.review.as_deref(), Some("r1"));
+        assert!(args.session.json);
+        let cli = Cli::try_parse_from(["mj", "review", "show", "--session", "s1"])
+            .expect("review show defaults to the latest finished review");
+        let Some(Command::Review(args)) = cli.command else {
+            panic!("expected the review command");
+        };
+        let ReviewCommand::Show(args) = args.command else {
+            panic!("expected review show");
+        };
+        assert!(args.review.is_none());
         for verb in ["forward", "dismiss", "cancel"] {
             assert!(Cli::try_parse_from(["mj", "review", verb, "--session", "s1"]).is_err());
         }
@@ -4803,6 +5028,7 @@ mod tests {
             error: error.map(str::to_owned),
             refreshed_at_epoch_seconds: now - age,
             rate_limited_until_epoch_seconds: None,
+            next_check_at_epoch_seconds: None,
         };
         let mut config = mj_core::config::Config::default();
         for (id, kind, enabled) in [
@@ -4899,5 +5125,114 @@ mod tests {
                 .to_string(),
         );
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-quota", &output);
+    }
+    #[test]
+    fn api_hosts_matches_cli_golden() {
+        use mj_core::targets::storage::StorageCondition;
+        use mj_core::targets::{DeploymentCapacityKind, HostCapacityRow, HostFilesystemRow};
+        const GIB: u64 = 1 << 30;
+        let now = 1_700_000_000;
+        let filesystem =
+            |host: &str, mount: &str, available: u64, total: u64, condition| HostFilesystemRow {
+                host: host.into(),
+                mount: mount.into(),
+                available_bytes: available,
+                total_bytes: total,
+                condition,
+            };
+        let row = |id: &str, kind, targets: &[&str]| HostCapacityRow {
+            id: id.into(),
+            host: id.into(),
+            target_ids: targets.iter().map(|id| (*id).to_owned()).collect(),
+            kind,
+            fleet_instances: None,
+            has_reading: true,
+            cpu_percent: Some(12),
+            memory_used_bytes: 14 * GIB,
+            memory_total_bytes: 31 * GIB,
+            logical_cores: 16,
+            filesystems: Vec::new(),
+            sampled_at_epoch_seconds: Some(now - 20),
+            probe_error: None,
+            on_demand: false,
+        };
+        let mut local = row("local", DeploymentCapacityKind::Host, &["local", "podman"]);
+        local.filesystems = vec![
+            filesystem("local", "/", 300 * GIB, 900 * GIB, StorageCondition::Ok),
+            filesystem(
+                "local",
+                "/mnt/optane",
+                3 * GIB,
+                400 * GIB,
+                StorageCondition::Low,
+            ),
+        ];
+        let mut build = row("build.example", DeploymentCapacityKind::Host, &["build"]);
+        build.cpu_percent = None;
+        build.sampled_at_epoch_seconds = Some(now - 600);
+        build.probe_error = Some("ssh: connection timed out".into());
+        build.filesystems = vec![filesystem(
+            "build.example",
+            "/srv",
+            GIB / 2,
+            200 * GIB,
+            StorageCondition::Full,
+        )];
+        let mut fleet = row("ec2-fleet", DeploymentCapacityKind::AwsFleet, &["ec2"]);
+        fleet.fleet_instances = Some(2);
+        fleet.cpu_percent = None;
+        fleet.logical_cores = 96;
+        fleet.memory_total_bytes = 384 * GIB;
+        fleet.filesystems = vec![
+            filesystem(
+                "i-0a1",
+                "/mnt/ebs",
+                80 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+            filesystem(
+                "i-0b2",
+                "/mnt/ebs",
+                60 * GIB,
+                100 * GIB,
+                StorageCondition::Ok,
+            ),
+        ];
+        let mut idle = row("ec2-idle", DeploymentCapacityKind::AwsFleet, &["ec2-spare"]);
+        idle.fleet_instances = Some(0);
+        idle.has_reading = false;
+        idle.on_demand = true;
+        // The fleet last answered empty, then its probe failed: the size is
+        // unknown, so the row must not claim "0 VMs".
+        let mut failed_idle = row(
+            "ec2-failed",
+            DeploymentCapacityKind::AwsFleet,
+            &["ec2-broken"],
+        );
+        failed_idle.fleet_instances = Some(0);
+        failed_idle.has_reading = false;
+        failed_idle.probe_error = Some("describe-instances: access denied".into());
+        let mut fresh = row("new.example", DeploymentCapacityKind::Host, &["new"]);
+        fresh.has_reading = false;
+        fresh.sampled_at_epoch_seconds = None;
+        // The rows travel from the daemon as JSON.
+        let rows: Vec<HostCapacityRow> = serde_json::from_value(
+            serde_json::to_value(vec![local, build, fleet, idle, failed_idle, fresh]).unwrap(),
+        )
+        .unwrap();
+        let mut output = String::from("=== mj hosts ===\n");
+        output.push_str(&render_hosts(&rows, None, false, now).unwrap());
+        output.push_str("\n=== mj hosts --host podman ===\n");
+        output.push_str(&render_hosts(&rows, Some("podman"), false, now).unwrap());
+        output.push_str("\n=== mj hosts --host ec2-fleet --json ===\n");
+        output.push_str(&render_hosts(&rows, Some("ec2-fleet"), true, now).unwrap());
+        output.push_str("\n=== mj hosts --host missing ===\n");
+        output.push_str(
+            &render_hosts(&rows, Some("missing"), false, now)
+                .unwrap_err()
+                .to_string(),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-hosts", &output);
     }
 }

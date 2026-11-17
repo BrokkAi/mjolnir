@@ -2904,6 +2904,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
             subtle: None,
         },
         mj_core::subagent::SubagentTaskType::Straightforward,
+        false,
     )
     .await
     .unwrap();
@@ -6109,6 +6110,9 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
             snapshot.targets.push(crate::server::ViewerTarget {
                 id: "docker".into(),
                 kind: "local-docker".into(),
+                permission_mode: None,
+                subagents_configured: false,
+                oracle_configured: false,
                 resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
                 requires_project_directory: false,
                 remembered_container_size: None,
@@ -6178,6 +6182,9 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
         snapshot.targets.push(crate::server::ViewerTarget {
             id: "docker".into(),
             kind: "local-docker".into(),
+            permission_mode: None,
+            subagents_configured: false,
+            oracle_configured: false,
             resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
             requires_project_directory: false,
             remembered_container_size: None,
@@ -6233,7 +6240,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
 // Hard-won: a95e5e66: launch admission accepted targets that could not supply a worker.
 #[tokio::test]
 async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
-    let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
+    let check: crate::server::WorkerSourceCheck = Arc::new(|target, _bundle| {
         (target == "podman").then(|| {
             "worker source for aarch64 (Darwin) was unavailable when the daemon started: not built"
                 .to_owned()
@@ -7218,6 +7225,147 @@ async fn the_subagent_list_api_excludes_reviewer_children() {
         json_body(response).await["subagents"],
         serde_json::json!([])
     );
+}
+
+#[tokio::test]
+async fn finished_review_api_returns_reviewer_output_after_the_child_is_gone() {
+    const MARKER: &str = "MJ_TEST_FINISHED_REVIEW_API";
+    if std::env::var_os(MARKER).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "finished_review_api_returns_reviewer_output_after_the_child_is_gone",
+            ),
+        )
+        .env(MARKER, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = crate::controller::test_support::checkpoint_test_session("session-1");
+    let child = crate::controller::test_support::checkpoint_test_session("review-child-1");
+    crate::database::save_session(&parent).unwrap();
+    crate::database::save_session(&child).unwrap();
+    let database = crate::database::database_path();
+    crate::database::record_subagent_handback(
+        &child.id,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "review-prompt".into(),
+            message: "The parser drops queued input.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "api-review".into(),
+        std::num::NonZeroUsize::new(1).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, &child.id, "The parser drops queued input.");
+    let state = mj_core::storage::TurnReviewState {
+        active: Some("api-review".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![mj_core::review::settings::ResolvedReviewSettings {
+                profile: "codex".into(),
+                main: mj_core::review::settings::ReviewModelSettings {
+                    model: Some("gpt-6-terra".into()),
+                    effort: Some("xhigh".into()),
+                    fast_mode: false,
+                },
+                autoconfigured: false,
+            }],
+            registrations: vec![mj_core::storage::ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.id.clone()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    crate::database::save_reviewer_outcome(
+        &parent.id,
+        &state,
+        vec![crate::database::AcceptedReport {
+            role: "reviewer-1".into(),
+            text: "The parser drops queued input.".into(),
+        }],
+    )
+    .unwrap();
+    crate::database::close_turn_review_state(
+        &parent.id,
+        &mj_core::storage::TurnReviewState {
+            active: None,
+            active_group: None,
+            ..state
+        },
+        mj_core::storage::FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    crate::database::delete_session(&child.id).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute("DELETE FROM subagent_sessions", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM subagent_handbacks", [])
+        .unwrap();
+    drop(connection);
+
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1/reviews"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["review"]["review_id"], "api-review");
+    assert_eq!(body["review"]["resolution"], "completed");
+    assert_eq!(body["review"]["roles"][0]["role"], "reviewer-1");
+    assert_eq!(body["review"]["roles"][0]["profile"], "codex");
+    assert_eq!(body["review"]["roles"][0]["model"], "gpt-6-terra");
+    assert_eq!(body["review"]["roles"][0]["effort"], "xhigh");
+    assert_eq!(
+        body["review"]["roles"][0]["handback"],
+        "The parser drops queued input."
+    );
+    assert_eq!(body["review"]["roles"][0]["verdict"]["verdict"], "findings");
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/reviews?review=missing",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

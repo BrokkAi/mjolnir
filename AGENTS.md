@@ -301,6 +301,11 @@ Always test new code in a separate named instance using `--instance <test-name>`
 Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
 the new build. Never point a test build at the host's default instance or live
 session data: protocol and store changes must not disrupt ongoing session work.
+Separate instances are for short-lived testing. Stop a test instance's daemon
+(`mj --instance <test-name> daemon stop`) when the test is done. Each running
+daemon refreshes quotas on its own, so leftover daemons add load on shared
+logins. Run long-running work, such as campaigns, experiments and judges, on
+the main instance.
 A binary run from a Cargo target directory, test binaries included, enforces
 this: it refuses to start, replace, stop, or migrate the default instance's
 daemon and store. When it refuses, add `--instance` (or, in a unit test, give
@@ -374,27 +379,30 @@ follow the existing descriptive naming style, e.g.
 event transition or input handling directly rather than relying only on manual
 TUI checks.
 
-For Rust code or Cargo dependency changes, run `cargo test` and
-`cargo clippy --all-targets -- -D warnings` before submitting changes. For
-documentation or agent-configuration-only changes, review the diff and run
-applicable format or configuration checks; Cargo checks are not required.
-Release work must still pass all validations in `RELEASING.md`.
+Local validation catches failures sooner than CI; it does not need to repeat
+CI. Pick the cheapest check that would catch the failures your change can
+plausibly cause. For docs or comment changes, review the diff; no test run is
+needed. For agent-configuration changes, run applicable format or configuration
+checks. For a compile fix or rename, `cargo check -p <crate>` on the edited
+crates is enough. For a behavior change, run the tests that exercise it and
+`cargo clippy -p <crate> --all-targets -- -D warnings` on the affected crates.
+Reserve broad runs for changes to shared APIs, schemas, relay protocols, or
+persisted formats, and run the suites at that boundary, including affected
+consumers. Release work must still pass all validations in `RELEASING.md`.
 
 Run those checks on the dev profile, which is where `debug_assert!` and
 overflow checks run; this workspace sets no `[profile.release]` overrides, so a
 release test run silently drops both. The build scripts defaulting to release is
 not a reason to validate there.
 
-Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
-
 When work takes several rounds, such as review fixes or follow-up changes, run
 only the tests for what changed in each round: the affected modules or test
-names, with `cargo test -p <crate> <filter>`. Run the full validation, meaning
-workspace `cargo clippy --all-targets -- -D warnings` and the full suites of
-every touched crate, once, after the last round. When a test fails, fix it and
+names, with `cargo test -p <crate> <filter>`. When a test fails, fix it and
 rerun only the failing tests; do not rerun a whole suite to confirm one fix.
-Agents that delegate work to other agents should ask for this pattern
-explicitly instead of asking for full validation in every round.
+Broaden or repeat testing only when new changes, failures, or unresolved
+concerns justify it. Agents that delegate work to other agents should ask
+for this pattern explicitly instead of asking for full validation in every
+round.
 
 ## GitHub Authentication
 

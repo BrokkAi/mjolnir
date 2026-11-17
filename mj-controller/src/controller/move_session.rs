@@ -585,6 +585,7 @@ pub async fn refresh_move_source(
 pub(in crate::controller) struct MoveSourceRelay(
     Option<super::checkpoint::ControllerRelayLease>,
     Option<crate::worker_lifecycle::WorkerPermit>,
+    Option<crate::recovery_gate::SessionAdmission>,
 );
 
 impl MoveSourceRelay {
@@ -597,6 +598,7 @@ impl MoveSourceRelay {
     /// be reached; the Move then recovers it without its harness. Leasing
     /// preserves typed transport failures, unlike the UI's string-valued sync.
     pub(in crate::controller) async fn lease(
+        admission: &crate::recovery_gate::SessionAdmission,
         manager: &SessionManagerControl,
         id: &str,
     ) -> Result<Self> {
@@ -609,23 +611,25 @@ impl MoveSourceRelay {
         let handle = manager
             .wait_for_session(id, std::time::Duration::from_secs(5))
             .await?;
-        match handle.lease_connection().await {
+        match handle.lease_connection(admission).await {
             Ok(lease) => Ok(Self(
                 Some(super::checkpoint::ControllerRelayLease::Managed {
                     handle,
                     lease: Some(lease),
                 }),
                 Some(owner),
+                Some(admission.clone()),
             )),
             Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
                 tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
-                Ok(Self(None, Some(owner)))
+                Ok(Self(None, Some(owner), Some(admission.clone())))
             }
             Err(error) => Err(error),
         }
     }
 
     async fn set_subagent_admission_via_manager(
+        admission: &crate::recovery_gate::SessionAdmission,
         manager: &SessionManagerControl,
         id: &str,
         open: bool,
@@ -633,7 +637,7 @@ impl MoveSourceRelay {
         let handle = manager
             .wait_for_session(id, std::time::Duration::from_secs(5))
             .await?;
-        let mut lease = handle.lease_connection().await?;
+        let mut lease = handle.lease_connection(admission).await?;
         if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open })
             .supported_at(lease.connection_mut().protocol_version())
         {
@@ -717,6 +721,11 @@ impl MoveSourceRelay {
             return Err(error);
         }
         self.release_managed_connection();
+        let delivery_drain = self
+            .2
+            .as_ref()
+            .context("Move source admission missing")?
+            .drain_delegation()?;
 
         let drain = async {
             loop {
@@ -724,9 +733,23 @@ impl MoveSourceRelay {
                     !executor.cancellation_requested(),
                     "Move cancelled while waiting for sub-agent requests"
                 );
-                let snapshot = self.sync(id).await?.context(
-                    "source worker became unavailable while draining sub-agent requests",
-                )?;
+                let snapshot = match self.sync(id).await {
+                    Err(error) if crate::session_manager::RelayJobDeferred::marks(&error) => {
+                        executor.notify_notice("Waiting for subagent requests to finish");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    result => result?.context(
+                        "source worker became unavailable while draining sub-agent requests",
+                    )?,
+                };
+                if let Some(error) = &snapshot.subagent_queue_error {
+                    executor.notify_notice(&format!(
+                        "Waiting for subagent requests to synchronize: {error}"
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
                 let parent = id.to_owned();
                 let effects_pending = tokio::task::spawn_blocking(move || {
                     crate::database::has_pending_mutating_delegations(&parent)
@@ -742,6 +765,7 @@ impl MoveSourceRelay {
         }
         .await;
 
+        drop(delivery_drain);
         if let Err(error) = drain {
             if let Err(reopen) = self.reopen_subagent_mutations_with_retry(id).await {
                 return Err(error.context(format!(
@@ -813,7 +837,11 @@ impl MoveSourceRelay {
             self.0.as_mut()
             && lease.is_none()
         {
-            *lease = Some(handle.lease_connection().await?);
+            *lease = Some(
+                handle
+                    .lease_connection(self.2.as_ref().context("Move source admission missing")?)
+                    .await?,
+            );
         }
         Ok(())
     }
@@ -1332,6 +1360,25 @@ impl Controller {
             if retained.in_place {
                 selection.workspace = retained.selection.workspace.clone();
             }
+            // A field the request omits means the one the Move was sealed
+            // with, so a surface that cannot express it (the CLI has no flag
+            // for attached directories) can still retry a Move another
+            // surface sealed. An explicit value that differs still refuses.
+            let sealed = &retained.selection;
+            if selection.additional_mounts.is_none() {
+                selection.additional_mounts = sealed.additional_mounts.clone();
+            }
+            if selection.resource_allocation.is_none() && !selection.clear_resource_allocation {
+                selection.resource_allocation = sealed.resource_allocation.clone();
+                selection.clear_resource_allocation = sealed.clear_resource_allocation;
+            }
+            if selection.subagents.is_none() {
+                selection.subagents = sealed.subagents.clone();
+            }
+            if selection.oracle.is_none() && selection.oracle_choice.is_none() {
+                selection.oracle = sealed.oracle;
+                selection.oracle_choice = sealed.oracle_choice.clone();
+            }
             ensure!(
                 retained.selection == selection,
                 "{}",
@@ -1346,6 +1393,11 @@ impl Controller {
         }
         let profile_id = selection.profile_id.as_deref().unwrap();
         let target_id = selection.target_template_id.as_deref().unwrap();
+        let yolo_target = self
+            .config
+            .targets
+            .get(target_id)
+            .is_some_and(mj_core::config::TargetTemplate::is_yolo);
         let profile = self.config.named_profile(profile_id)?;
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
@@ -1355,7 +1407,11 @@ impl Controller {
                 .oracle_choice
                 .as_ref()
                 .or(source.oracle_choice.as_deref())
-                .or(self.config.subagents.oracle.as_ref())
+                .or_else(|| {
+                    self.config
+                        .subagents
+                        .choice_for(mj_core::subagent::SubagentTaskType::Oracle, yolo_target)
+                })
                 .is_none_or(|choice| choice.model.trim().is_empty())
         {
             selection.oracle = Some(false);
@@ -1363,16 +1419,21 @@ impl Controller {
             executor.notify_notice(mj_core::state::ORACLE_UNAVAILABLE_NOTICE);
         }
         let policy = move_subagent_policy(source, &selection);
-        // An unchanged delegation policy has already been admitted. Changing
-        // credentials for the same harness does not change its eligible models.
+        // An unchanged delegation policy on the same target mode has already
+        // been admitted. Changing credentials for the same harness does not
+        // change its eligible models, but a YOLO destination reads a different
+        // set of choices and must be checked.
+        let source_yolo = source.is_yolo_target(&self.config);
         if profile.kind != source.harness_kind
             || policy != source.subagents.clone().unwrap_or_default()
+            || yolo_target != source_yolo
         {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
                 &self.config,
                 profile_id,
                 &policy,
+                target_id,
             )
             .await?;
         }
@@ -1453,7 +1514,13 @@ impl Controller {
         // A compatible in-place Move already has its worker, mounts and
         // runtime. Only reconstruction needs provisioning prerequisites.
         if !in_place || cross_harness || retry {
-            super::worker_binary::preflight_worker_binary(target, executor)?;
+            let worker_target = super::backend::session_target(
+                &self.config,
+                &source_record.bundle_id,
+                target_id,
+                executor,
+            )?;
+            super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
             super::backend::preflight_target(
                 target,
                 executor,
@@ -1532,8 +1599,10 @@ impl Controller {
     }
 
     /// Publish acceptance only after the existing Move intent is committed.
+    #[allow(clippy::too_many_arguments)] // Session ownership is an explicit capability.
     pub(crate) async fn move_session_managed_controlled_with_admission(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
         request: MoveSessionRequest,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
@@ -1566,7 +1635,7 @@ impl Controller {
                 let source_harness = self.state.sessions[&id].harness_kind;
                 source_relay = {
                     let _timing = MovePhaseTimer::new(&id, "preflight source lease");
-                    MoveSourceRelay::lease(manager, &id).await?
+                    MoveSourceRelay::lease(admission, manager, &id).await?
                 };
                 let snapshot = source_relay.snapshot();
                 let (active, queue, fingerprint) =
@@ -1749,7 +1818,7 @@ impl Controller {
         );
         // Move nests checkpoint and restore state machines. Heap-own their
         // futures so dev builds fit the runtime's ordinary thread stacks.
-        let result = Box::pin(self.execute_move(
+        let result = Box::pin(self.execute_move(admission,
             &mut operation,
             Some(&checked),
             executor,
@@ -1757,7 +1826,7 @@ impl Controller {
             source_relay,
         ))
         .await;
-        self.finish_move_result_with_subagent_recovery(
+        self.finish_move_result_with_subagent_recovery(admission,
             &mut operation,
             result,
             executor,
@@ -1944,6 +2013,7 @@ impl Controller {
 
     async fn finish_move_result_with_subagent_recovery(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
         result: Result<()>,
         executor: &(impl CommandExecutor + Sync),
@@ -1978,8 +2048,10 @@ impl Controller {
         // `open=true`. Retry through a fresh actor lease once so the retry uses
         // the next relay connection if the first one was abandoned.
         for attempt in 1..=2 {
-            match MoveSourceRelay::set_subagent_admission_via_manager(manager, session_id, true)
-                .await
+            match MoveSourceRelay::set_subagent_admission_via_manager(
+                admission, manager, session_id, true,
+            )
+            .await
             {
                 Ok(true) => {
                     if attempt > 1 {
@@ -2009,6 +2081,7 @@ impl Controller {
 
     pub async fn recover_move_managed_controlled(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         mut operation: MoveOperation,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -2045,7 +2118,7 @@ impl Controller {
                 if session.state == SessionState::Provisioning || session.target.as_deref() != operation.source_target.as_ref() {
                     self.rollback_move_destination(&operation, anyhow::anyhow!("resume interrupted Move transfer"), executor)?;
                 }
-                return Box::pin(self.execute_move(&mut operation, None, executor, manager, MoveSourceRelay::default())).await;
+                return Box::pin(self.execute_move(admission, &mut operation, None, executor, manager, MoveSourceRelay::default())).await;
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
@@ -2056,7 +2129,7 @@ impl Controller {
                 // `Closing` (suspending) with nothing to finish it.
                 let sealed = operation.in_place && operation.recovery_session.is_some() && session.state == SessionState::Closing;
                 if !sealed {
-                    Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
+                    Box::pin(self.recover_move_source_stop(admission, &mut operation, &cleanup, manager)).await?;
                 }
                 // A Move that keeps the environment restores only from the
                 // handoff its seal recorded. Taking the source's older full
@@ -2071,7 +2144,7 @@ impl Controller {
                     // or cancelled) when its source is still `Closing`; only
                     // an active Move restores again.
                     if operation.in_place && operation.is_active() && !operation.cancellation_requested {
-                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                        return self.retry_interrupted_in_place_move(admission, &mut operation, &previous, executor, manager).await;
                     }
                     let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
                     return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
@@ -2106,8 +2179,8 @@ impl Controller {
                     // The phase is durable before the worker admission gate
                     // closes. If the daemon died before the session reached
                     // Closing, resume the gate/drain/stop sequence on startup.
-                    let relay = MoveSourceRelay::lease(manager, &id).await?;
-                    return Box::pin(self.execute_move(
+                    let relay = MoveSourceRelay::lease(admission, manager, &id).await?;
+                    return Box::pin(self.execute_move(admission,
                         &mut operation,
                         None,
                         executor,
@@ -2126,7 +2199,7 @@ impl Controller {
                 {
                     ensure!(self.state.sessions.contains_key(&id), "move source is missing");
                     if self.source_has_request_queue(&id) {
-                        MoveSourceRelay::set_subagent_admission_via_manager(
+                        MoveSourceRelay::set_subagent_admission_via_manager(admission,
                             manager, &id, true,
                         )
                         .await?;
@@ -2155,7 +2228,7 @@ impl Controller {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
                     if operation.in_place && !operation.cancellation_requested {
                         let previous = previous.clone();
-                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                        return self.retry_interrupted_in_place_move(admission, &mut operation, &previous, executor, manager).await;
                     }
                     // The retained environment belongs to this Move, even
                     // when only part of its worker installation completed.
@@ -2171,7 +2244,7 @@ impl Controller {
                 }
                 MovePhase::ClosingSource => {
                     if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
-                        Box::pin(self.recover_move_source_stop(&mut operation, executor, manager)).await?;
+                        Box::pin(self.recover_move_source_stop(admission, &mut operation, executor, manager)).await?;
                     }
                     operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
                     if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
@@ -2185,7 +2258,7 @@ impl Controller {
                 _ => bail!("Move requires an explicit retry after the daemon restarted"),
             }
         }.await;
-        self.finish_move_result_with_subagent_recovery(
+        self.finish_move_result_with_subagent_recovery(admission,
             &mut operation,
             result,
             executor,
@@ -2206,6 +2279,7 @@ impl Controller {
     /// automatic attempt.
     async fn retry_interrupted_in_place_move(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
         previous: &mj_core::state::SessionRecord,
         executor: &(impl CommandExecutor + Sync),
@@ -2231,6 +2305,7 @@ impl Controller {
             "retrying an in-place Move the daemon stopped after sealing its source"
         );
         Box::pin(self.execute_move(
+            admission,
             operation,
             None,
             executor,
@@ -2242,6 +2317,7 @@ impl Controller {
 
     async fn recover_move_source_stop(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -2249,6 +2325,7 @@ impl Controller {
         let id = operation.selection.session_id.clone();
         if self.state.sessions[&id].state == SessionState::Closing {
             self.prepare_move_source_checkpoint(
+                admission,
                 &id,
                 executor,
                 manager,
@@ -2259,7 +2336,7 @@ impl Controller {
             let handle = manager
                 .wait_for_session(&id, std::time::Duration::from_secs(5))
                 .await?;
-            let mut lease = handle.lease_connection().await?;
+            let mut lease = handle.lease_connection(admission).await?;
             let execution = lease.connection_mut().sync().await?.operational.execution;
             if operation.retains_source_environment()
                 && matches!(
@@ -2293,6 +2370,7 @@ impl Controller {
                 } else {
                     // Fresh-environment moves finish their admitted source stop.
                     Box::pin(self.suspend_session_for_move(
+                        admission,
                         &id,
                         executor,
                         manager,
@@ -2311,8 +2389,10 @@ impl Controller {
             "retained Move source cannot be proven; refusing target teardown"
         );
         // A move's source stop was admitted by the move itself.
-        self.recover_interrupted_close_managed(&id, executor, manager, true, false, None)
-            .await?;
+        self.recover_interrupted_close_managed(
+            admission, &id, executor, manager, true, false, None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -2320,6 +2400,7 @@ impl Controller {
     /// held until the checkpoint that seals the source takes it over.
     async fn execute_move(
         &mut self,
+        admission: &crate::recovery_gate::SessionAdmission,
         operation: &mut MoveOperation,
         preparation: Option<&MovePreparation>,
         executor: &(impl CommandExecutor + Sync),
@@ -2383,7 +2464,7 @@ impl Controller {
             if matches!(state, SessionState::Closing | SessionState::Destroying)
                 && !(operation.retains_source_environment() && operation.recovery_session.is_some())
             {
-                Box::pin(self.recover_move_source_stop(operation, executor, manager)).await?;
+                Box::pin(self.recover_move_source_stop(admission, operation, executor, manager)).await?;
                 operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
             }
             if matches!(
@@ -2416,7 +2497,7 @@ impl Controller {
                     let mut stopped_subagents_for_legacy_worker = false;
                     if source_has_request_queue {
                         if !source_relay.is_held() {
-                            source_relay = MoveSourceRelay::lease(manager, &id).await?;
+                            source_relay = MoveSourceRelay::lease(admission, manager, &id).await?;
                         }
                         match source_relay.drain_subagent_mutations(&id, executor).await? {
                             SubagentMutationDrain::Drained => {}
@@ -2499,7 +2580,7 @@ impl Controller {
                 } else {
                     SourceTargetDisposition::Destroy
                 };
-                let suspended = Box::pin(self.suspend_session_for_move(
+                let suspended = Box::pin(self.suspend_session_for_move(admission,
                     &id,
                     executor,
                     manager,
@@ -2516,7 +2597,7 @@ impl Controller {
                             self.state.sessions[&id].state,
                             SessionState::Running | SessionState::Disconnected
                         )
-                        && let Err(reopen) = MoveSourceRelay::set_subagent_admission_via_manager(
+                        && let Err(reopen) = MoveSourceRelay::set_subagent_admission_via_manager(admission,
                             manager,
                             &id,
                             true,

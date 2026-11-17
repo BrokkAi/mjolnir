@@ -1,0 +1,28 @@
+{
+  "id": "rust-item-macro-evades-plain-struct-drop-proof",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "311f928ee162819f457e54d5c3ac362cd69fdeefba4920ecbf5b69fa9da66623",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces non-dropping local classification into scope-exit cleanup, but never identifies item macros generating an unseen impl Drop or the consequent unsound plain-struct classification and omitted cleanup uncertainty.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output traces non-dropping local classification into cleanup analysis, but never identifies item macros generating impl Drop or the resulting unsound plain_structs proof. A normal data-flow description does not identify the missing cleanup uncertainty.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

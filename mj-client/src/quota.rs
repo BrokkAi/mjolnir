@@ -133,6 +133,11 @@ pub struct ProfileQuota {
     /// when it was taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+    /// With a hold: when the daemon next asks the provider, one regular
+    /// interval after the refused attempt or the end of the hold, whichever is
+    /// later. Readers that predate it fall back to the hold's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_epoch_seconds: Option<u64>,
 }
 
 /// Provider-native paid funds usable after included subscription quota ends.
@@ -197,15 +202,30 @@ impl ProfileQuota {
         }
     }
 
-    /// `rate limited · retry in N min` while the provider's hold lasts.
+    /// After a refused check: when the daemon checks again. A daemon that
+    /// predates `next_check_at_epoch_seconds` checks again when the hold ends.
+    pub fn next_check_at(&self) -> Option<u64> {
+        let until = self.rate_limited_until_epoch_seconds?;
+        Some(self.next_check_at_epoch_seconds.unwrap_or(until).max(until))
+    }
+
+    /// `quota check refused · next in N min` from a refused check until the
+    /// next one runs. The provider refused the check, not the account; the
+    /// windows beside it are the last good reading.
     pub fn rate_limit_label(&self, now: u64) -> Option<String> {
-        let until = self
-            .rate_limited_until_epoch_seconds
-            .filter(|until| *until > now)?;
+        let next = self.next_check_at().filter(|next| *next > now)?;
         Some(format!(
-            "rate limited · retry in {} min",
-            (until - now).div_ceil(60)
+            "quota check refused · next in {} min",
+            (next - now).div_ceil(60)
         ))
+    }
+
+    /// The refused-check label when there is no good reading behind it, so the
+    /// label stands in for the reading. With a good reading, the reading is
+    /// shown and the label is a note beside it.
+    pub fn refused_check_without_reading(&self, now: u64) -> Option<String> {
+        self.error.as_ref()?;
+        self.rate_limit_label(now)
     }
 
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
@@ -569,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold() {
+    fn a_refused_check_reads_as_minutes_until_the_next_check_and_ends_with_it() {
         let mut quota: ProfileQuota = serde_json::from_value(serde_json::json!({
             "profile_id": "claude", "harness": "claude", "windows": [],
             "extra": null, "error": null, "refreshed_at_epoch_seconds": 0,
@@ -578,14 +598,24 @@ mod tests {
         .unwrap();
         assert_eq!(
             quota.rate_limit_label(1000).as_deref(),
-            Some("rate limited · retry in 15 min")
+            Some("quota check refused · next in 15 min")
         );
         assert_eq!(
             quota.rate_limit_label(1000 + 15 * 60 - 1).as_deref(),
-            Some("rate limited · retry in 1 min")
+            Some("quota check refused · next in 1 min")
         );
         assert_eq!(quota.rate_limit_label(1000 + 15 * 60), None);
+        // A short hold inside the regular interval: the label lasts until the
+        // next check, not until the hold ends.
+        quota.rate_limited_until_epoch_seconds = Some(1000 + 60);
+        quota.next_check_at_epoch_seconds = Some(1000 + 10 * 60);
+        assert_eq!(
+            quota.rate_limit_label(1000 + 61).as_deref(),
+            Some("quota check refused · next in 9 min")
+        );
+        assert_eq!(quota.rate_limit_label(1000 + 10 * 60), None);
         quota.rate_limited_until_epoch_seconds = None;
+        assert_eq!(quota.next_check_at(), None);
         assert!(
             serde_json::to_value(&quota)
                 .unwrap()

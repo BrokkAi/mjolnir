@@ -8,6 +8,7 @@
 //! A host is a machine, not a runtime: local Podman and local Docker are the
 //! same computer, so they share one identity here and one inspection of it.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
@@ -209,7 +210,7 @@ impl CacheHost {
     pub(super) fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
         let command = match self {
             Self::Local => CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned()),
-            Self::Ssh(ssh) => targets::ssh_command_owned(ssh, remote),
+            Self::Ssh(ssh) => targets::ssh_command_owned(SshTrafficClass::Control, ssh, remote),
         };
         command.purpose(purpose)
     }

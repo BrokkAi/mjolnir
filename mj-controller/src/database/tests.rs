@@ -5189,6 +5189,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
             task: "inspect the parser".into(),
             user_messages: Vec::new(),
             declined: Vec::new(),
+            brief: None,
         },
         "async-review".into(),
         std::num::NonZeroUsize::new(3).unwrap(),
@@ -5210,6 +5211,7 @@ fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
     let mut state = TurnReviewState {
         active: Some("async-review".into()),
         active_group: Some(ActiveReviewGroup {
+            brief_writer: None,
             driver: driver.snapshot(),
             reviewers: vec![Default::default(); 3],
             registrations: (1..=3)
@@ -5304,6 +5306,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         task: "inspect the parser".into(),
         user_messages: Vec::new(),
         declined: Vec::new(),
+        brief: None,
     };
     let (driver, _) = mj_review::driver::TurnReviewDriver::start(
         seed,
@@ -5311,6 +5314,7 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
         std::num::NonZeroUsize::new(2).unwrap(),
     );
     let group = mj_core::storage::ActiveReviewGroup {
+        brief_writer: None,
         driver: driver.snapshot(),
         reviewers: vec![Default::default(); 2],
         registrations: vec![
@@ -5352,6 +5356,404 @@ fn active_review_group_survives_interrupted_sweep_with_registered_children() {
     assert_eq!(
         turn_review_state_in(&database, "session-group").unwrap(),
         state
+    );
+}
+
+// Hard-won: ee65b804b: a follow-up for a never-reviewed session had no row to mark and was never durable.
+
+/// A finished review keeps each reviewer's model, effort, profile, handback and
+/// verdict after its child session is destroyed and its report pruned.
+#[test]
+fn a_finished_review_keeps_each_reviewers_output_after_its_session_is_destroyed() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("review-reports.sqlite3");
+    let owner = "review-owner";
+    save_session_to(&database, &session(owner, "project-1")).unwrap();
+    let children = ["review-child-1", "review-child-2"];
+    for child in children {
+        save_session_to(&database, &session(child, "project-1")).unwrap();
+    }
+    let seed = mj_core::review::driver::TurnReviewSeed {
+        task: "inspect the parser".into(),
+        user_messages: Vec::new(),
+        declined: Vec::new(),
+        brief: None,
+    };
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        seed,
+        "finished-review".into(),
+        std::num::NonZeroUsize::new(2).unwrap(),
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let commands = driver
+        .snapshot()
+        .roles
+        .iter()
+        .map(|slot| slot.command_id.clone())
+        .collect::<Vec<_>>();
+    for (index, (child, message)) in children
+        .iter()
+        .zip(["The parser drops queued input.", "No findings."])
+        .enumerate()
+    {
+        record_subagent_handback_to(
+            &database,
+            child,
+            &mj_core::subagent::SubagentHandback {
+                command_id: format!("prompt-{index}"),
+                message: message.into(),
+                recorded_at_ms: 100 + index as i64,
+            },
+        )
+        .unwrap();
+    }
+    driver.role_turn_completed(&commands[0], children[0], "The parser drops queued input.");
+    driver.role_turn_completed(&commands[1], children[1], "No findings.");
+    let reviewers = vec![
+        mj_core::review::settings::ResolvedReviewSettings {
+            profile: "codex".into(),
+            main: mj_core::review::settings::ReviewModelSettings {
+                model: Some("gpt-6-terra".into()),
+                effort: Some("high".into()),
+                fast_mode: false,
+            },
+            autoconfigured: false,
+        },
+        mj_core::review::settings::ResolvedReviewSettings {
+            profile: "claude".into(),
+            main: mj_core::review::settings::ReviewModelSettings {
+                model: Some("claude-sonnet".into()),
+                effort: Some("medium".into()),
+                fast_mode: false,
+            },
+            autoconfigured: true,
+        },
+    ];
+    let state = TurnReviewState {
+        active: Some("finished-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers,
+            registrations: children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| ReviewerRegistration {
+                    role: format!("reviewer-{}", index + 1),
+                    request_key: format!("review-key-{index}"),
+                    child_session_id: Some((*child).to_owned()),
+                })
+                .collect(),
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    save_reviewer_outcome_in(
+        &database,
+        owner,
+        &state,
+        vec![
+            super::AcceptedReport {
+                role: "reviewer-1".into(),
+                text: "The parser drops queued input.".into(),
+            },
+            super::AcceptedReport {
+                role: "reviewer-2".into(),
+                text: "No findings.".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let turn = MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
+        diagnostic: None,
+        usage: Some(mj_core::usage::TokenUsage {
+            provider_details: None,
+            scope: mj_core::usage::UsageScope::Turn,
+            total_tokens: 120,
+            input_tokens: 100,
+            output_tokens: 20,
+            thought_tokens: None,
+            cached_read_tokens: None,
+            cached_write_tokens: None,
+        }),
+        command_id: "prompt-0".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 1,
+        completed_at_ms: 200,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+    };
+    open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO session_turn_usage(
+                 session_id, command_id, completed_ordinal, turn_start_position, body
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                children[0],
+                turn.command_id,
+                turn.completed_ordinal,
+                turn.turn_start_position,
+                super::serialize_turn_outcome(&turn).unwrap()
+            ],
+        )
+        .unwrap();
+    let closed = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    // A reviewer's child can record another command's handback afterwards. The
+    // text the review settled from is the authority and must not be replaced.
+    record_subagent_handback_to(
+        &database,
+        children[0],
+        &mj_core::subagent::SubagentHandback {
+            command_id: "a-later-command".into(),
+            message: "Findings from a later task.".into(),
+            recorded_at_ms: 300,
+        },
+    )
+    .unwrap();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    save_reviewer_outcome_in(&database, owner, &state, Vec::new()).unwrap();
+    close_turn_review_state_in(
+        &database,
+        owner,
+        &closed,
+        FinishedReviewResolution::Completed,
+    )
+    .unwrap();
+    // The reviewer sessions and their reports are gone, as they are after the
+    // review host's destroy path.
+    for child in children {
+        delete_session_from(&database, child).unwrap();
+    }
+    let connection = open(&database).unwrap();
+    connection
+        .execute("DELETE FROM subagent_sessions", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM subagent_handbacks", [])
+        .unwrap();
+
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the finished review survives its reviewer sessions");
+    assert_eq!(finished.review_id, "finished-review");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Completed);
+    assert_eq!(finished.roles.len(), 2);
+    let first = &finished.roles[0];
+    assert_eq!(first.role, "reviewer-1");
+    assert_eq!(first.label, "Reviewer 1");
+    assert_eq!(first.child_session_id.as_deref(), Some(children[0]));
+    assert_eq!(first.profile, "codex");
+    assert_eq!(first.model.as_deref(), Some("gpt-6-terra"));
+    assert_eq!(first.effort.as_deref(), Some("high"));
+    assert_eq!(
+        first.handback.as_deref(),
+        Some("The parser drops queued input."),
+        "a later handback for another command never replaces the accepted one"
+    );
+    assert!(matches!(
+        first.verdict.as_ref(),
+        Some(mj_core::review::verdict::ReviewVerdict::Findings { .. })
+    ));
+    assert_eq!(
+        first
+            .turn
+            .as_ref()
+            .and_then(|turn| turn.usage.as_ref())
+            .map(|usage| usage.total_tokens),
+        Some(120)
+    );
+    let second = &finished.roles[1];
+    assert_eq!(second.profile, "claude");
+    assert_eq!(second.model.as_deref(), Some("claude-sonnet"));
+    assert_eq!(second.handback.as_deref(), Some("No findings."));
+    assert_eq!(
+        second.verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Clean)
+    );
+    assert!(second.turn.is_none());
+    assert!(
+        finished_review_in(&database, owner, Some("finished-review"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        finished_review_in(&database, owner, Some("missing"))
+            .unwrap()
+            .is_none()
+    );
+    // Destroying the requesting session removes its reports with it, so a
+    // destroyed session cannot leave unreachable handbacks behind.
+    delete_session_from(&database, owner).unwrap();
+    let remaining: i64 = open(&database)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM review_reports", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+/// A reviewer that ended without handing back fails its role. Its child may
+/// still hold a handback from an earlier command, which the review host
+/// rejected as this role's outcome; the finished report must not present that
+/// text as this review's findings.
+#[test]
+fn a_failed_reviewer_keeps_no_handback_from_another_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("failed-reviewer.sqlite3");
+    let owner = "failed-review-owner";
+    let child = "failed-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    record_subagent_handback_to(
+        &database,
+        child,
+        &mj_core::subagent::SubagentHandback {
+            command_id: "another-command".into(),
+            message: "Findings from an earlier task.".into(),
+            recorded_at_ms: 100,
+        },
+    )
+    .unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "failed-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    driver.role_failed(
+        "reviewer-1",
+        Some(child),
+        "the reviewer's session ended before it handed back",
+    );
+    let state = TurnReviewState {
+        active: Some("failed-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    close_turn_review_state_in(&database, owner, &state, FinishedReviewResolution::Failed).unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the failed review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Failed);
+    assert_eq!(finished.roles.len(), 1);
+    assert!(matches!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Failed { .. })
+    ));
+    assert!(
+        finished.roles[0].handback.is_none(),
+        "a rejected handback is not this review's output"
+    );
+}
+
+/// A review cancelled after its reviewer reached a verdict must be reported as
+/// cancelled. The host clears the active group and passes its own decision,
+/// while the stored group still carries the verdict it never delivered.
+#[test]
+fn a_cancelled_review_keeps_the_host_decision_over_its_stored_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("cancelled-review.sqlite3");
+    let owner = "cancelled-review-owner";
+    let child = "cancelled-review-child";
+    for id in [owner, child] {
+        save_session_to(&database, &session(id, "project-1")).unwrap();
+    }
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+            brief: None,
+        },
+        "cancelled-review".into(),
+        std::num::NonZeroUsize::MIN,
+    );
+    driver.delta_captured(vec![mj_core::relay::RepoDelta {
+        root: "/workspace/app".into(),
+        base_commit: Some("basecommit".into()),
+        head_commit: Some("headcommit".into()),
+        baseline_tree: Some("before".into()),
+        current_tree: "after".into(),
+        patch: "+one".into(),
+        ..Default::default()
+    }]);
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, child, "No findings.");
+    let state = TurnReviewState {
+        active: Some("cancelled-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default()],
+            registrations: vec![ReviewerRegistration {
+                role: "reviewer-1".into(),
+                request_key: "review-key".into(),
+                child_session_id: Some(child.into()),
+            }],
+            brief_writer: None,
+        }),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    // The verdict is in the stored driver; the host decides to cancel it.
+    let cleared = TurnReviewState {
+        active: None,
+        active_group: None,
+        ..state.clone()
+    };
+    close_turn_review_state_in(
+        &database,
+        owner,
+        &cleared,
+        FinishedReviewResolution::Cancelled,
+    )
+    .unwrap();
+    let finished = finished_review_in(&database, owner, None)
+        .unwrap()
+        .expect("the cancelled review is recorded");
+    assert_eq!(finished.resolution, FinishedReviewResolution::Cancelled);
+    assert_eq!(finished.roles.len(), 1);
+    assert_eq!(
+        finished.roles[0].verdict,
+        Some(mj_core::review::verdict::ReviewVerdict::Clean),
+        "the reviewer's own outcome is still recorded"
     );
 }
 
@@ -6167,6 +6569,7 @@ fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
     launch.kind = mj_core::subagent::SubagentKind::Reviewer;
     launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
     launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        role: mj_core::worker_launch::ReviewChildRole::Reviewer,
         profile_id: "reviewer".into(),
         harness: mj_core::config::HarnessKind::Codex,
         bridge_command: "review-bridge".into(),

@@ -1,0 +1,28 @@
+{
+  "id": "mcp-timed-out-progress-survives-response",
+  "group": "S",
+  "rounds": [
+    {
+      "round": 0,
+      "label": "missed",
+      "brief_sha256": "f174b8fb3a7e320a2874d21350336c249de05b7c15347c951dcbc83399c78aa1",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-nonrelation-leak-0",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes progress reporting and request execution, but never identifies a timed-out notification remaining queued and being delivered after the response. It does not connect notification cancellation to request lifetime.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output describes progress reporting and request execution but does not discuss notify_progress timing out after enqueue or notifications surviving the response boundary.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

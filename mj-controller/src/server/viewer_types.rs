@@ -450,6 +450,9 @@ impl ViewerSnapshot {
             .map(|(id, target)| ViewerTarget {
                 id: id.to_owned(),
                 kind: target.kind_name().into(),
+                permission_mode: target.permission_mode(),
+                subagents_configured: config.subagents.is_configured_for(target.is_yolo()),
+                oracle_configured: config.subagents.oracle_configured_for(target.is_yolo()),
                 resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
@@ -513,10 +516,10 @@ impl ViewerSnapshot {
             profile_capabilities: Default::default(),
             last_subagent_policies: state.last_subagent_policies.clone(),
             last_oracle_choices: state.last_oracle_choices.clone(),
-            oracle_configured: config.subagents.oracle_configured(),
+            oracle_configured: config.subagents.oracle_configured_for(false),
             operator_away: state.operator_presence.away,
             auto_afk_minutes: config.advanced.auto_afk_minutes,
-            subagents_configured: config.subagents.is_configured(),
+            subagents_configured: config.subagents.is_configured_for(false),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
@@ -1164,6 +1167,10 @@ pub struct ViewerQuota {
     /// the last good reading, taken at `refreshed_at_epoch_seconds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limited_until_epoch_seconds: Option<u64>,
+    /// When the next check runs after a refused one, from
+    /// `ProfileQuota::next_check_at`; the viewer only formats it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check_at_epoch_seconds: Option<u64>,
     /// Error state only. Raw vendor errors may contain paths or account data
     /// and remain on the controller.
     pub has_error: bool,
@@ -1258,6 +1265,16 @@ fn unknown_availability() -> crate::server::api::LaunchAvailability {
 pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
+    /// The approval mode of a bare target; `None` for an isolated runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<mj_core::config::PermissionMode>,
+    /// Whether the Mjolnir sub-agent choices this target would use are
+    /// configured. A YOLO target reads its own set.
+    #[serde(default)]
+    pub subagents_configured: bool,
+    /// Whether the oracle this target would use is configured.
+    #[serde(default)]
+    pub oracle_configured: bool,
     /// Target sizing class, used for create validation and the size picker.
     #[serde(default)]
     pub resource_allocation_kind: ResourceAllocationKind,

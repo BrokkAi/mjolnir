@@ -8,6 +8,24 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Separate TCP connections keep file transfers from queuing ahead of relay
+/// and liveness traffic. The command builder owns this choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshTrafficClass {
+    Control,
+    Bulk,
+}
+
+/// A command's target and traffic class travel together through wrappers and
+/// serialization, so a copied session request cannot lose its classification.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SshSessionRequest {
+    #[serde(flatten)]
+    pub target: SshTarget,
+    pub class: SshTrafficClass,
+}
+
 /// The connectivity probe `mj doctor` runs against an SSH target.
 ///
 /// It reuses the provisioning argument order so the probe fails exactly where
@@ -40,10 +58,12 @@ pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
 }
 
 pub fn ssh_command(
+    class: SshTrafficClass,
     ssh: &SshTarget,
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> CommandSpec {
     ssh_command_owned(
+        class,
         ssh,
         args.into_iter()
             .map(|arg| arg.as_ref().to_owned())
@@ -54,11 +74,15 @@ pub fn ssh_command(
 /// Build an `ssh` command that runs as one session on a shared connection.
 /// The executor leases the session and adds its options just before the
 /// command is spawned; see [`CommandSpec::ssh_session`].
-pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
+pub fn ssh_command_owned(
+    class: SshTrafficClass,
+    ssh: &SshTarget,
+    remote_args: Vec<String>,
+) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
     args.push(ssh.destination.clone());
     args.push(remote_command_line(&remote_args));
-    CommandSpec::new("ssh", args).ssh_session(ssh)
+    CommandSpec::new("ssh", args).ssh_session(ssh, class)
 }
 
 /// Home-relative directory on an SSH host where files bound for a remote
@@ -121,7 +145,7 @@ fn scp_args(ssh: &SshTarget) -> Vec<String> {
 fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
     // `scp` runs `ssh` underneath, so it takes a session on a shared
     // connection and is retried the same way.
-    CommandSpec::new("scp", args).ssh_session(ssh)
+    CommandSpec::new("scp", args).ssh_session(ssh, SshTrafficClass::Bulk)
 }
 
 /// How long a shared master connection stays alive after its last channel
@@ -304,8 +328,8 @@ fn prepare_control_dir(dir: PathBuf) -> Option<PathBuf> {
 /// user's own `ssh` arguments, which can change the port, user, or route.
 /// Two targets that differ in either get separate masters.
 #[cfg(unix)]
-fn connection_key(ssh: &SshTarget) -> String {
-    let mut key = ssh.destination.clone();
+fn connection_key(ssh: &SshTarget, class: SshTrafficClass) -> String {
+    let mut key = format!("{class:?}\0{}", ssh.destination);
     for argument in &ssh.ssh_args {
         key.push('\0');
         key.push_str(argument);
@@ -313,15 +337,18 @@ fn connection_key(ssh: &SshTarget) -> String {
     key
 }
 
-/// The socket file name for one shard of a connection: `<hash>-<shard>`.
+/// The socket file name for one shard of a traffic class: `<hash>-<shard>`.
+/// The hash includes the class, so each class has independent masters and
+/// ledger entries. The grammar and path-length reserve are unchanged from
+/// older daemons; stale lock discovery accepts both old and new hashes.
 ///
 /// Mjolnir names sockets itself rather than using `ssh`'s `%C` so that the
 /// name follows exactly the key the daemon counts sessions under, and so the
 /// daemon knows the concrete path when it must remove a stale socket.
 #[cfg(unix)]
-fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
+fn control_socket_name(ssh: &SshTarget, class: SshTrafficClass, shard: usize) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(connection_key(ssh).as_bytes());
+    let digest = Sha256::digest(connection_key(ssh, class).as_bytes());
     let mut name = String::with_capacity(CONNECTION_HASH_HEX + 5);
     for byte in digest.iter().take(CONNECTION_HASH_HEX / 2) {
         name.push_str(&format!("{byte:02x}"));
@@ -399,7 +426,7 @@ pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
     if !user_configures_sharing(&ssh.ssh_args)
         && let Some(dir) = control_socket_dir()
     {
-        let socket = dir.join(control_socket_name(ssh, 0));
+        let socket = dir.join(control_socket_name(ssh, SshTrafficClass::Control, 0));
         args.extend([
             "-o".to_owned(),
             "ControlMaster=no".to_owned(),
@@ -1763,16 +1790,17 @@ impl SessionLedger {
     fn lease(
         self: &Arc<Self>,
         ssh: &SshTarget,
+        class: SshTrafficClass,
         dir: &Path,
         executor: &dyn CommandExecutor,
         walk: &mut SshWalk,
     ) -> Result<SshSessionLease> {
-        let key = connection_key(ssh);
+        let key = connection_key(ssh, class);
         let reservation = self.reserve(&key, walk);
         let slot = self.slot(
             key,
             &reservation,
-            dir.join(control_socket_name(ssh, reservation.shard)),
+            dir.join(control_socket_name(ssh, class, reservation.shard)),
         );
         if slot.needs_check() {
             let _opening = {
@@ -1834,9 +1862,13 @@ impl SessionLedger {
         dir: &Path,
         walk: &mut SshWalk,
     ) -> SshSessionLease {
-        let key = connection_key(ssh);
+        let key = connection_key(ssh, SshTrafficClass::Control);
         let reservation = self.reserve(&key, walk);
-        let socket = dir.join(control_socket_name(ssh, reservation.shard));
+        let socket = dir.join(control_socket_name(
+            ssh,
+            SshTrafficClass::Control,
+            reservation.shard,
+        ));
         SshSessionLease::new(Some(self.slot(key, &reservation, socket)), true)
     }
 }
@@ -1971,12 +2003,13 @@ fn lock_master_opening_unless(
     }
 }
 
-/// Remove the master lock files in `dir` whose master is gone.
+/// Remove dead master sockets and lock files in `dir`, including old hashes.
 ///
 /// A lock outlives the master it guarded: ssh removes its socket when the
 /// master exits, but nothing removed `<socket>.lock` (launch finding R3-11).
-/// A lock is removed only while its socket is absent and no other process
-/// holds it, and only if the file locked is still the one at its path.
+/// A socket is removed only after `ssh -O check` finds no master. A lock
+/// is removed only while its socket is absent and no other process holds it,
+/// and only if the file locked is still the one at its path.
 /// [`lock_master_opening`] checks the same after it locks, so an opener that
 /// opened the file just before it was removed takes a fresh one instead.
 #[cfg(unix)]
@@ -1988,20 +2021,32 @@ fn remove_stale_master_locks_in(dir: &Path) {
             return;
         }
     };
-    for entry in entries.flatten() {
-        let lock = entry.path();
-        let Some(socket) = lock
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .and_then(|name| name.strip_suffix(".lock"))
-            .map(|name| dir.join(name))
+    // Both generations use <16 hex digits>-<shard>. The class is in the
+    // hash, so discovery does not need a target configuration or a class.
+    let sockets: std::collections::BTreeSet<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let name = name.strip_suffix(".lock").unwrap_or(name);
+            let (hash, shard) = name.split_once('-')?;
+            (hash.len() == CONNECTION_HASH_HEX
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !shard.is_empty()
+                && shard.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| dir.join(name))
+        })
+        .collect();
+    for socket in sockets {
+        let mut lock = socket.as_os_str().to_owned();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
         else {
-            continue;
-        };
-        if fs::symlink_metadata(&socket).is_ok() {
-            continue;
-        }
-        let Ok(file) = fs::OpenOptions::new().write(true).open(&lock) else {
             continue;
         };
         // Held: another process is checking or opening this master now.
@@ -2009,8 +2054,29 @@ fn remove_stale_master_locks_in(dir: &Path) {
             continue;
         }
         let file = crate::file_lock::FileLock::new(file);
-        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(file.file(), &lock) {
+        if !is_file_at(file.file(), &lock) {
             continue;
+        }
+        if fs::symlink_metadata(&socket).is_ok() {
+            // -O check only contacts the local socket; it never connects to
+            // this placeholder destination. This also finds old-hash masters
+            // still serving workers during daemon handoff.
+            let ssh = SshTarget {
+                destination: "mj-stale-master-check".into(),
+                ssh_args: vec!["-F".into(), "/dev/null".into()],
+            };
+            match master_running(&ssh, &socket, &ProcessExecutor) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(socket = %socket.display(), %error, "cannot check stale SSH master");
+                    continue;
+                }
+            }
+            if let Err(error) = fs::remove_file(&socket) {
+                tracing::debug!(socket = %socket.display(), %error, "cannot remove stale SSH master socket");
+                continue;
+            }
         }
         match fs::remove_file(&lock) {
             Ok(()) => tracing::debug!(lock = %lock.display(), "removed a stale SSH master lock"),
@@ -2279,6 +2345,7 @@ impl SshSessions {
     /// when a master could not be opened or verified.
     pub fn lease(
         ssh: &SshTarget,
+        class: SshTrafficClass,
         executor: &dyn CommandExecutor,
         walk: &mut SshWalk,
     ) -> Result<SshSessionLease> {
@@ -2290,16 +2357,16 @@ impl SshSessions {
             let Some(dir) = control_socket_dir() else {
                 return Ok(SshSessionLease::unshared());
             };
-            SessionLedger::global().lease(ssh, &dir, executor, walk)
+            SessionLedger::global().lease(ssh, class, &dir, executor, walk)
         }
         #[cfg(not(unix))]
         {
-            let _ = (ssh, executor, walk);
+            let _ = (ssh, class, executor, walk);
             Ok(SshSessionLease::unshared())
         }
     }
 
-    /// Remove this instance's master lock files whose master has exited.
+    /// Remove this instance's sockets and lock files whose master has exited.
     /// The daemon calls this when it starts; failures are only logged.
     pub fn remove_stale_master_locks() {
         #[cfg(unix)]
@@ -2471,6 +2538,7 @@ mod tests {
     #[test]
     fn remote_podman_exec_keeps_the_container_configured_user() {
         let command = ssh_command_owned(
+            SshTrafficClass::Control,
             &plain_target("podman-root-test"),
             vec![
                 "podman".into(),
@@ -2533,19 +2601,15 @@ mod tests {
     #[cfg(unix)]
     // Hard-won: 761279ef: an exited master left lock files that blocked later opens.
     #[test]
-    fn stale_master_locks_are_removed_but_live_or_held_ones_stay() {
+    fn stale_master_locks_are_removed_but_held_ones_stay() {
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("aaaaaaaaaaaaaaaa-0.lock");
         fs::write(&stale, b"").unwrap();
-        fs::write(dir.path().join("bbbbbbbbbbbbbbbb-0"), b"").unwrap();
-        let live = dir.path().join("bbbbbbbbbbbbbbbb-0.lock");
-        fs::write(&live, b"").unwrap();
         let held = dir.path().join("cccccccccccccccc-0.lock");
         let holder = lock_master_opening(&dir.path().join("cccccccccccccccc-0")).unwrap();
 
         remove_stale_master_locks_in(dir.path());
         assert!(!stale.exists(), "a lock whose master is gone is removed");
-        assert!(live.exists(), "a lock beside a live socket stays");
         assert!(held.exists(), "a lock another opener holds stays");
 
         drop(holder);
@@ -2626,6 +2690,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RecordingExecutor {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.seen.borrow_mut().push(command.clone());
             Ok(CommandOutput {
@@ -2679,7 +2766,7 @@ mod tests {
                 "ProxyCommand=nc %h %p".to_owned(),
             ],
         };
-        let command = ssh_command(&ssh, ["true"]);
+        let command = ssh_command(SshTrafficClass::Control, &ssh, ["true"]);
         let remote = remote_command_line(&["true".to_owned()]);
         assert_eq!(
             command.args,
@@ -2693,7 +2780,10 @@ mod tests {
             ],
             "stored arguments never contain sharing options"
         );
-        assert_eq!(command.ssh_session.as_ref(), Some(&ssh));
+        assert_eq!(
+            command.ssh_session.as_ref().map(|request| &request.target),
+            Some(&ssh)
+        );
         assert_eq!(
             command.ssh_destination.as_deref(),
             Some("session-options-host")
@@ -2701,7 +2791,9 @@ mod tests {
 
         let masters = FakeMasters::default();
         let args = spawned_args(&command, Some(socket_dir.path()), &masters);
-        let socket = socket_dir.path().join(control_socket_name(&ssh, 0));
+        let socket = socket_dir
+            .path()
+            .join(control_socket_name(&ssh, SshTrafficClass::Control, 0));
         assert_eq!(
             args,
             [
@@ -2767,7 +2859,8 @@ mod tests {
         );
         let expected = format!(
             "controlpath {}",
-            dir.join(control_socket_name(&ssh, 0)).display()
+            dir.join(control_socket_name(&ssh, SshTrafficClass::Control, 0))
+                .display()
         );
         let stdout = String::from_utf8_lossy(&resolved.stdout);
         assert!(
@@ -2838,14 +2931,14 @@ mod tests {
             destination: "host".to_owned(),
             ssh_args: vec!["-p".to_owned(), "2222".to_owned()],
         };
-        let first = control_socket_name(&plain, 0);
-        let second = control_socket_name(&plain, 1);
+        let first = control_socket_name(&plain, SshTrafficClass::Control, 0);
+        let second = control_socket_name(&plain, SshTrafficClass::Control, 1);
         assert_eq!(first.len(), CONNECTION_HASH_HEX + 2, "{first}");
         assert!(first.ends_with("-0") && second.ends_with("-1"));
         assert_eq!(first[..CONNECTION_HASH_HEX], second[..CONNECTION_HASH_HEX]);
         assert_ne!(
             first[..CONNECTION_HASH_HEX],
-            control_socket_name(&other_port, 0)[..CONNECTION_HASH_HEX]
+            control_socket_name(&other_port, SshTrafficClass::Control, 0)[..CONNECTION_HASH_HEX]
         );
     }
 
@@ -2895,7 +2988,7 @@ mod tests {
         let control_path = format!(
             "ControlPath={}/{}",
             socket_dir.path().display(),
-            control_socket_name(&ssh, 0)
+            control_socket_name(&ssh, SshTrafficClass::Control, 0)
         );
         for args in [&validation, &completion] {
             assert!(args.contains(&"ControlMaster=no".to_owned()), "{args:?}");
@@ -2954,7 +3047,7 @@ mod tests {
             args.contains(&format!(
                 "ControlPath={}/{}",
                 socket_dir.path().display(),
-                control_socket_name(&ssh, 0)
+                control_socket_name(&ssh, SshTrafficClass::Control, 0)
             )),
             "the probe must still join an existing master: {args:?}"
         );
@@ -2986,7 +3079,11 @@ mod tests {
             ssh_args: Vec::new(),
         };
         let masters = FakeMasters::default();
-        let args = spawned_args(&ssh_command(&ssh, ["true"]), Some(&long), &masters);
+        let args = spawned_args(
+            &ssh_command(SshTrafficClass::Control, &ssh, ["true"]),
+            Some(&long),
+            &masters,
+        );
         assert_eq!(
             args,
             [
@@ -3019,9 +3116,12 @@ mod tests {
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
         )));
-        let output = ProcessExecutor.execute(&ssh_command(&ssh, ["true"]));
+        let output =
+            ProcessExecutor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
-        let socket = socket_dir.path().join(control_socket_name(&ssh, 0));
+        let socket = socket_dir
+            .path()
+            .join(control_socket_name(&ssh, SshTrafficClass::Control, 0));
         let check = ProcessExecutor
             .execute(&master_check_command(&ssh, &socket))
             .expect("ssh -O check must run");
@@ -3152,11 +3252,11 @@ mod tests {
         fn drop(&mut self) {
             // Masters persist for a minute after their last session unless told
             // to exit; they carry no sessions the test still needs.
-            for shard in 0..32 {
-                let socket = self.sockets.join(control_socket_name(&self.ssh, shard));
-                if socket.exists() {
+            use std::os::unix::fs::FileTypeExt;
+            for entry in fs::read_dir(&self.sockets).unwrap().flatten() {
+                if entry.file_type().unwrap().is_socket() {
                     let _ = std::process::Command::new("ssh")
-                        .args(["-O", "exit", "-o", &control_path_option(&socket)])
+                        .args(["-O", "exit", "-o", &control_path_option(&entry.path())])
                         .args(&self.ssh.ssh_args)
                         .arg(&self.ssh.destination)
                         .output();
@@ -3209,6 +3309,119 @@ mod tests {
         }
     }
 
+    // Hard-won: #1558: bulk bytes queued relay exchanges behind the same TCP send queue.
+    #[test]
+    #[cfg(unix)]
+    fn bulk_and_control_use_independent_real_masters_and_preserve_legacy_cleanup() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sockets = sharing_socket_dir();
+        let Some(server) = LocalSshd::start(1, sockets.path()) else {
+            eprintln!("skipped: this machine has no sshd");
+            return;
+        };
+        let ledger = SessionLedger::new();
+        let lease = |class| {
+            ledger
+                .lease(
+                    &server.ssh,
+                    class,
+                    sockets.path(),
+                    &ProcessExecutor,
+                    &mut SshWalk::default(),
+                )
+                .unwrap()
+        };
+        let bulk = lease(SshTrafficClass::Bulk);
+        let control = lease(SshTrafficClass::Control);
+        let bulk_socket = bulk.control_path().unwrap();
+        let control_socket = control.control_path().unwrap();
+        assert_ne!(bulk_socket, control_socket);
+        let bulk_master = ProcessExecutor
+            .execute(&master_check_command(&server.ssh, bulk_socket))
+            .unwrap();
+        let control_master = ProcessExecutor
+            .execute(&master_check_command(&server.ssh, control_socket))
+            .unwrap();
+        assert_eq!(bulk_master.status, 0);
+        assert_eq!(control_master.status, 0);
+        assert_ne!(
+            bulk_master.stderr, control_master.stderr,
+            "different master processes"
+        );
+        let command = ssh_command(SshTrafficClass::Bulk, &server.ssh, ["cat"]);
+        let raw = CommandSpec::new(
+            "ssh",
+            session_command_args("ssh", &command.args, &server.ssh, &bulk),
+        );
+        let payload = vec![b'x'; 256 * 1024 + 17];
+        let output = ProcessExecutor
+            .execute_with_stdin(&raw, &mut std::io::Cursor::new(&payload))
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout, payload);
+
+        // A pre-class daemon leaves this same socket grammar, with a hash
+        // computed without the class. Live old masters must survive the sweep.
+        let legacy = sockets.path().join("0123456789abcdef-7");
+        ensure_master(&server.ssh, &legacy, &ProcessExecutor).unwrap();
+        remove_stale_master_locks_in(sockets.path());
+        for socket in [bulk_socket, control_socket, legacy.as_path()] {
+            assert!(
+                socket.exists(),
+                "live master {} was swept",
+                socket.display()
+            );
+        }
+        let stop = |socket: &Path| {
+            let mut args = vec![
+                "-O".into(),
+                "exit".into(),
+                "-o".into(),
+                control_path_option(socket),
+            ];
+            args.extend(server.ssh.ssh_args.clone());
+            args.push(server.ssh.destination.clone());
+            assert_eq!(
+                ProcessExecutor
+                    .execute(&CommandSpec::new("ssh", args))
+                    .unwrap()
+                    .status,
+                0
+            );
+        };
+        stop(&legacy);
+        // A crashed old master can leave a socket inode with no listener.
+        drop(std::os::unix::net::UnixListener::bind(&legacy).unwrap());
+        remove_stale_master_locks_in(sockets.path());
+        assert!(!legacy.exists());
+        assert!(!legacy.with_extension("lock").exists());
+
+        // A lost bulk master must fail; neither the control master nor a
+        // direct connection may be substituted for its prepared command.
+        stop(bulk_socket);
+        assert_ne!(
+            ProcessExecutor
+                .execute_with_stdin(&raw, &mut std::io::Cursor::new(&payload))
+                .unwrap()
+                .status,
+            0
+        );
+        let command = ssh_command(
+            SshTrafficClass::Control,
+            &server.ssh,
+            ["printf", "control alive"],
+        );
+        let raw = CommandSpec::new(
+            "ssh",
+            session_command_args("ssh", &command.args, &server.ssh, &control),
+        );
+        let output = ProcessExecutor.execute(&raw).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout, b"control alive");
+    }
+
     /// master full: more concurrent commands than one connection can carry
     /// all succeed, because a command the server refuses never started and
     /// walks to the next master. That includes commands that stream more than
@@ -3240,6 +3453,7 @@ mod tests {
                 let lease = other
                     .lease(
                         &ssh,
+                        SshTrafficClass::Control,
                         socket_dir.path(),
                         &ProcessExecutor,
                         &mut SshWalk::default(),
@@ -3247,6 +3461,7 @@ mod tests {
                     .expect("the other process leases a session");
                 let marker = started.path().join(format!("held-{index}"));
                 let command = ssh_command(
+                    SshTrafficClass::Control,
                     &ssh,
                     [
                         "sh".to_owned(),
@@ -3269,8 +3484,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let sleeper = ssh_command(&ssh, ["sleep", "3"]);
-        let counter = ssh_command(&ssh, ["wc", "-c"]);
+        let sleeper = ssh_command(SshTrafficClass::Control, &ssh, ["sleep", "3"]);
+        let counter = ssh_command(SshTrafficClass::Control, &ssh, ["wc", "-c"]);
         let payload = vec![b'x'; 192 * 1024];
         let outputs: Vec<Result<CommandOutput>> = std::thread::scope(|scope| {
             let mut handles: Vec<_> = (0..3)
@@ -3289,7 +3504,7 @@ mod tests {
         });
         let shards = SessionLedger::global()
             .connections()
-            .get(&connection_key(&ssh))
+            .get(&connection_key(&ssh, SshTrafficClass::Control))
             .map_or(0, |connection| connection.shards.len());
         let ledger = SessionLedger::new();
         let orphan_reservation = Reservation {
@@ -3297,11 +3512,15 @@ mod tests {
             opening: Arc::new(OpeningLock::default()),
         };
         let orphan_lease = SshSessionLease::new(
-            Some(ledger.slot(
-                connection_key(&ssh),
-                &orphan_reservation,
-                socket_dir.path().join(control_socket_name(&ssh, 99)),
-            )),
+            Some(
+                ledger.slot(
+                    connection_key(&ssh, SshTrafficClass::Control),
+                    &orphan_reservation,
+                    socket_dir
+                        .path()
+                        .join(control_socket_name(&ssh, SshTrafficClass::Control, 99)),
+                ),
+            ),
             false,
         );
         let orphan = ProcessExecutor.execute(
@@ -3374,7 +3593,8 @@ mod tests {
         )));
         set_ssh_persistent_refusal_for_test(Some(Duration::from_millis(1500)));
         let started = Instant::now();
-        let outcome = ProcessExecutor.execute(&ssh_command(&ssh, ["true"]));
+        let outcome =
+            ProcessExecutor.execute(&ssh_command(SshTrafficClass::Control, &ssh, ["true"]));
         let elapsed = started.elapsed();
         set_ssh_connection_sharing_for_test(None);
 
@@ -3389,7 +3609,7 @@ mod tests {
         assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
         let shards = SessionLedger::global()
             .connections()
-            .get(&connection_key(&ssh))
+            .get(&connection_key(&ssh, SshTrafficClass::Control))
             .map_or(0, |connection| connection.shards.len());
         assert_eq!(shards, 1, "the command did not walk to another master");
         drop(server);
@@ -3415,6 +3635,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for JoinsNewMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let output = ProcessExecutor.execute(command)?;
             if command.args.contains(&"ControlMaster=yes".to_owned())
@@ -3427,13 +3670,18 @@ mod tests {
                 };
                 let lease = SshSessionLease::new(
                     Some(ledger.slot(
-                        connection_key(&self.ssh),
+                        connection_key(&self.ssh, SshTrafficClass::Control),
                         &reservation,
-                        self.sockets.join(control_socket_name(&self.ssh, 0)),
+                        self.sockets.join(control_socket_name(
+                            &self.ssh,
+                            SshTrafficClass::Control,
+                            0,
+                        )),
                     )),
                     false,
                 );
                 let held = ssh_command(
+                    SshTrafficClass::Control,
                     &self.ssh,
                     [
                         "sh".to_owned(),
@@ -3458,7 +3706,7 @@ mod tests {
                 if self.adds_shard {
                     SessionLedger::global()
                         .connections()
-                        .entry(connection_key(&self.ssh))
+                        .entry(connection_key(&self.ssh, SshTrafficClass::Control))
                         .or_default()
                         .shards
                         .push(Shard::new());
@@ -3501,7 +3749,7 @@ mod tests {
             adds_shard: false,
             holder: std::cell::RefCell::new(None),
         };
-        let command = ssh_command(&ssh, ["true"]);
+        let command = ssh_command(SshTrafficClass::Control, &ssh, ["true"]);
         let started = Instant::now();
         let outcome =
             crate::targets::with_ssh_refusal_retry(&command, &executor, None, |command, gate| {
@@ -3564,7 +3812,7 @@ mod tests {
             adds_shard: true,
             holder: std::cell::RefCell::new(None),
         };
-        let command = ssh_command(&ssh, ["true"]);
+        let command = ssh_command(SshTrafficClass::Control, &ssh, ["true"]);
         let started = Instant::now();
         let outcome =
             crate::targets::with_ssh_refusal_retry(&command, &executor, None, |command, gate| {
@@ -3582,7 +3830,7 @@ mod tests {
         let _ = holder.wait();
         let shards = SessionLedger::global()
             .connections()
-            .get(&connection_key(&ssh))
+            .get(&connection_key(&ssh, SshTrafficClass::Control))
             .map_or(0, |connection| connection.shards.len());
 
         let output = outcome.expect("the command ran on the other shard");
@@ -3645,6 +3893,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FakeMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.seen.borrow_mut().push(command.clone());
             assert_eq!(command.program, "ssh");
@@ -3789,7 +4060,9 @@ mod tests {
         masters: &FakeMasters,
         walk: &mut SshWalk,
     ) -> SshSessionLease {
-        ledger.lease(ssh, dir, masters, walk).expect("lease")
+        ledger
+            .lease(ssh, SshTrafficClass::Control, dir, masters, walk)
+            .expect("lease")
     }
 
     /// A command's walk tries each shard once, in order from where the last
@@ -3973,6 +4246,7 @@ mod tests {
         let first = ledger
             .lease(
                 &plain_target("one"),
+                SshTrafficClass::Control,
                 dir.path(),
                 &masters,
                 &mut SshWalk::default(),
@@ -3981,6 +4255,7 @@ mod tests {
         let second = ledger
             .lease(
                 &plain_target("two"),
+                SshTrafficClass::Control,
                 dir.path(),
                 &masters,
                 &mut SshWalk::default(),
@@ -4001,7 +4276,13 @@ mod tests {
         let ssh = plain_target("host");
         let masters = FakeMasters::default();
         let first = ledger
-            .lease(&ssh, dir.path(), &masters, &mut SshWalk::default())
+            .lease(
+                &ssh,
+                SshTrafficClass::Control,
+                dir.path(),
+                &masters,
+                &mut SshWalk::default(),
+            )
             .expect("first");
         masters.kill(first.control_path().unwrap());
 
@@ -4033,7 +4314,13 @@ mod tests {
             .set(Some("Permission denied (publickey)."));
 
         let error = ledger
-            .lease(&ssh, dir.path(), &masters, &mut SshWalk::default())
+            .lease(
+                &ssh,
+                SshTrafficClass::Control,
+                dir.path(),
+                &masters,
+                &mut SshWalk::default(),
+            )
             .expect_err("no master means no session");
         let message = format!("{error:#}");
         assert!(message.contains("build@10.0.0.1"), "{message}");
@@ -4064,6 +4351,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for RacingMasters {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let socket = FakeMasters::socket(command);
             let status = if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
@@ -4108,7 +4418,13 @@ mod tests {
                     // Each process has its own ledger.
                     let ledger = SessionLedger::new();
                     ledger
-                        .lease(&ssh, dir.path(), &fake, &mut SshWalk::default())
+                        .lease(
+                            &ssh,
+                            SshTrafficClass::Control,
+                            dir.path(),
+                            &fake,
+                            &mut SshWalk::default(),
+                        )
                         .expect("lease");
                 });
             }
@@ -4123,12 +4439,20 @@ mod tests {
         let dir = sharing_socket_dir();
         let ledger = SessionLedger::new();
         let ssh = plain_target("host");
-        let socket = dir.path().join(control_socket_name(&ssh, 0));
+        let socket = dir
+            .path()
+            .join(control_socket_name(&ssh, SshTrafficClass::Control, 0));
         fs::write(&socket, b"").expect("stale socket stand-in");
         let masters = FakeMasters::default();
 
         ledger
-            .lease(&ssh, dir.path(), &masters, &mut SshWalk::default())
+            .lease(
+                &ssh,
+                SshTrafficClass::Control,
+                dir.path(),
+                &masters,
+                &mut SshWalk::default(),
+            )
             .expect("opens");
 
         assert_eq!(*masters.socket_existed_at_open.borrow(), [false]);
@@ -4202,6 +4526,7 @@ mod tests {
         let lease = ledger
             .lease(
                 &plain_target("host"),
+                SshTrafficClass::Control,
                 dir.path(),
                 &masters,
                 &mut SshWalk::default(),
@@ -4312,12 +4637,21 @@ mod tests {
 
         let ledger = SessionLedger::new();
         let ssh = plain_target("cancelled-master-host");
-        let reservation = ledger.reserve(&connection_key(&ssh), &mut SshWalk::default());
+        let reservation = ledger.reserve(
+            &connection_key(&ssh, SshTrafficClass::Control),
+            &mut SshWalk::default(),
+        );
         let _opening = reservation.opening.try_lock().unwrap();
         let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
         assert!(
             ledger
-                .lease(&ssh, dir.path(), &executor, &mut SshWalk::default())
+                .lease(
+                    &ssh,
+                    SshTrafficClass::Control,
+                    dir.path(),
+                    &executor,
+                    &mut SshWalk::default()
+                )
                 .is_err()
         );
     }
@@ -4326,6 +4660,29 @@ mod tests {
     struct NoMaster;
 
     impl CommandExecutor for NoMaster {
+        fn pause_deadline(&self) -> crate::targets::DeadlinePause {
+            crate::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &crate::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             panic!(
                 "an unshared lease ran {} {:?}",
@@ -4350,7 +4707,7 @@ mod tests {
             ssh_args: vec!["-p".to_owned(), "2238".to_owned()],
         };
         let commands = [
-            ssh_command(&ssh, ["git", "status"]),
+            ssh_command(SshTrafficClass::Control, &ssh, ["git", "status"]),
             ssh_validation_command(&ssh, vec!["true".to_owned()], "validate"),
             ssh_connectivity_probe(&ssh),
             scp_upload(&ssh, Path::new("archive.zip"), "remote/archive.zip", false),

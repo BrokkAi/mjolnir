@@ -1,0 +1,77 @@
+{
+  "requests": 11,
+  "all_requests_reviewed": true,
+  "records": [
+    {
+      "seq": 169,
+      "kind": "driver-required initial checkout",
+      "accepted": true,
+      "source_sha256": "c4692cc36a2a2457ba5a94f5ab43960a7912292d72a1792109ef3603606c71c2"
+    },
+    {
+      "seq": 172,
+      "kind": "uploaded instructions only",
+      "accepted": true,
+      "source_sha256": "dee8ec8dca7274c605dc9ee9a5a0b4f5dde1d821a224243264ff3b246502377d"
+    },
+    {
+      "seq": 175,
+      "kind": "unchanged rule and uploaded item names",
+      "accepted": true,
+      "source_sha256": "b224a17da0663f5aca71d35c60bbd5698cb1d9243a36bbb0a54850bba56a49ac"
+    },
+    {
+      "seq": 178,
+      "kind": "uploaded item batch reads only",
+      "accepted": true,
+      "source_sha256": "272923dd5dbe1f59b2a126bb1fdca7aa67970211f89867843f1da7b2d1e6bb61"
+    },
+    {
+      "seq": 183,
+      "kind": "uploaded item batch reads only",
+      "accepted": true,
+      "source_sha256": "bff870674b6ae812b8f464d17142b6a7e7a97b524bfb7c9dcef2659685c08b23"
+    },
+    {
+      "seq": 186,
+      "kind": "uploaded item batch reads only",
+      "accepted": true,
+      "source_sha256": "a37161d6cf24d909a57826eafa27f869f013945ceb5deeffde71301557bcdb64"
+    },
+    {
+      "seq": 189,
+      "kind": "uploaded item batch reads only",
+      "accepted": true,
+      "source_sha256": "5e13fef02ca0ca287eff8caf7aad5ff404881c3433d85581522cec5a37892763"
+    },
+    {
+      "seq": 230,
+      "kind": "permitted input-intro source excerpt",
+      "accepted": true,
+      "source_sha256": "b9949d39340e9ba04e858a46ed74e65a9a9f85be313796b46957679261acd94b"
+    },
+    {
+      "seq": 232,
+      "kind": "permitted input-intro source excerpt",
+      "accepted": true,
+      "source_sha256": "0564ade7596b2fdea20f35db39f3b1146ee730d110bb6d8bfe9ca02b7ef46458"
+    },
+    {
+      "seq": 234,
+      "kind": "permitted input-intro source excerpt",
+      "accepted": true,
+      "source_sha256": "ccf166586556e5d9cdd098c5f9e81bccafa587ab2e714f5f1f1f368d640c5424"
+    },
+    {
+      "seq": 241,
+      "kind": "literal judgments; reads uploaded items; exact-quote self-checks; output write only",
+      "accepted": true,
+      "source_sha256": "f88cf7c0d78d9c8a4ec7d0adcc2ef146f24ee6377a0b7f032b60263526f9fba0"
+    }
+  ],
+  "input_hashes_rechecked": true,
+  "unchanged_stageA_V1_rule": true,
+  "raw_labels_preserved": true,
+  "quote_checks": 7,
+  "scope": "Manual review of every represented request source, plus mechanical checks. No network/build/other model/private experiment reads observed. Structured bridge fields omit some payloads; full represented source is preserved in titles/presentation. This is a transcript audit, not OS isolation."
+}

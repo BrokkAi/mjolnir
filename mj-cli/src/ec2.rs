@@ -1083,7 +1083,7 @@ fn create_attempt(
         eprintln!("Installing mj's pinned mbx on the new host.");
         mj_controller::controller::install_mbx(&machine, &mj_controller::targets::ProcessExecutor)?;
     }
-    let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
+    let image = mj_core::config::DEFAULT_SESSION_IMAGE;
     Config::update(|config| {
         ensure!(
             !config.machines.contains_key(&record.target)
@@ -1946,7 +1946,7 @@ else:
         let uname = remote_bin.join("uname");
         fs::write(
             &uname,
-            "#!/bin/sh\ncase \"$1\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -r) printf '6.18.56-126.188.amzn2023\\n' ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  -sm) printf 'Linux x86_64\\n' ;;\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\n  -r) printf '6.18.56-126.188.amzn2023\\n' ;;\n  *) exec /usr/bin/uname \"$@\" ;;\nesac\n",
         )
         .unwrap();
         fs::set_permissions(&uname, fs::Permissions::from_mode(0o700)).unwrap();
@@ -2479,7 +2479,7 @@ else:
             [
                 "pull",
                 "--platform=linux/amd64",
-                mj_core::config::DEFAULT_CONTAINER_IMAGE
+                mj_core::config::DEFAULT_SESSION_IMAGE
             ]
         );
 
@@ -2775,6 +2775,9 @@ else:
         }
     }
 
+    // Runs the host's setup script with the local Bash. The script uses
+    // `mapfile`, which the Bash 3.2 that macOS ships does not have.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ebs_setup_selects_non_root_ebs_across_nvme_reordering_and_guards_signatures() {
         use std::os::unix::fs::PermissionsExt;

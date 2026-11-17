@@ -1,0 +1,23 @@
+# Install as <home>/review_arms_oz.config.toml in each Codex home that a profile with
+# codex_profile = "review_arms_oz" names. mj layers it over <home>/config.toml in each
+# reviewer's private CODEX_HOME (mj-core/src/codex_provider.rs:316-350). Codex itself never reads
+# this file. Wizard-of-Oz `site_context` stand-in: the server runs on ec2-m8id16-c behind a
+# forced command; the reviewer only learns the answers by asking (brief/PLAN-oz.md).
+# MJ_SESSION_ID is the reviewer's own session id, set by the controller (launch.rs:1176).
+[mcp_servers.bifrost]
+command = "sh"
+args = ["-c", '''
+set -eu
+intro=$(git rev-parse --verify HEAD)
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT HUP INT TERM
+umask 077
+printf '%s' "$SITE_CONTEXT_SSH_KEY_B64" | base64 -d > "$d/key"
+printf '%s\n' "$SITE_CONTEXT_SSH_KNOWN_HOSTS" > "$d/known_hosts"
+ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$d/known_hosts" -i "$d/key" \
+  "$SITE_CONTEXT_SSH_TARGET" "$intro ${MJ_SESSION_ID:-unknown}"
+''']
+env_vars = ["SITE_CONTEXT_SSH_KEY_B64", "SITE_CONTEXT_SSH_TARGET", "SITE_CONTEXT_SSH_KNOWN_HOSTS", "MJ_SESSION_ID"]
+startup_timeout_sec = 60
+default_tools_approval_mode = "approve"

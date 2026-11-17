@@ -1085,6 +1085,9 @@ pub enum DaemonAction {
         workspace_id: String,
         last_session_id: Option<String>,
     },
+    /// Every host and fleet with the capacity service's latest CPU, RAM and
+    /// filesystem readings. Added in protocol 101.
+    HostCapacity,
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
@@ -1258,6 +1261,32 @@ impl std::fmt::Display for DaemonRefusal {
 
 impl std::error::Error for DaemonRefusal {}
 
+/// The connection to the daemon dropped after the request was sent and before
+/// an answer arrived. The daemon may or may not have acted on it, so only a
+/// read-only request may be repeated on that evidence. Failing to connect, a
+/// protocol mismatch and a refusal are different errors and never carry this.
+#[derive(Debug)]
+pub struct DaemonTransportLost;
+
+impl std::fmt::Display for DaemonTransportLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lost the daemon connection before it answered")
+    }
+}
+
+impl std::error::Error for DaemonTransportLost {}
+
+/// Mark a failure of the established stream as a lost transport. An error that
+/// did not come from the socket (an oversized frame, an undecodable reply)
+/// stays as it is.
+fn transport_lost(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+        error.context(DaemonTransportLost)
+    } else {
+        error
+    }
+}
+
 /// An existing startup ID belongs to another immutable request. Its original
 /// work may already be accepted, so this never proves that work was refused.
 #[derive(Debug)]
@@ -1344,6 +1373,7 @@ pub enum DaemonReply {
     Workspace(WorkspaceRecord),
     /// Every workspace's detached drafts, without their text.
     WorkspaceDrafts(Vec<WorkspaceDrafts>),
+    HostCapacity(Vec<mj_core::targets::HostCapacityRow>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
@@ -2120,8 +2150,11 @@ impl DaemonClient {
                 action,
             },
         )
-        .await?;
-        let response = read_response(&mut self.stream).await?;
+        .await
+        .map_err(transport_lost)?;
+        let response = read_response(&mut self.stream)
+            .await
+            .map_err(transport_lost)?;
         ensure!(
             response.protocol_version == protocol_version,
             "daemon changed protocol"
@@ -2291,6 +2324,15 @@ impl DaemonClient {
         match self.request(DaemonAction::ListWorkspaceDrafts).await? {
             DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
             reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
+        }
+    }
+
+    /// The capacity service's latest reading of every host and fleet. This
+    /// reads what the daemon holds and never probes.
+    pub async fn host_capacity(&mut self) -> Result<Vec<mj_core::targets::HostCapacityRow>> {
+        match self.request(DaemonAction::HostCapacity).await? {
+            DaemonReply::HostCapacity(rows) => Ok(rows),
+            reply => bail!("unexpected host-capacity reply {reply:?}"),
         }
     }
 
@@ -3343,9 +3385,14 @@ impl DaemonClient {
         }
     }
 
+    /// Wait for a session's creation to end. Answered from durable state, so
+    /// any daemon gives the same answer; the wait is read-only and repeatable.
+    /// One attempt with no internal reconnect: a daemon that stops drops the
+    /// connection, which carries [`DaemonTransportLost`], and the caller
+    /// starts the next daemon and asks again.
     pub async fn wait_create_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::WaitCreateSession { session_id })
+            .request_once(DaemonAction::WaitCreateSession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -3577,7 +3624,12 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 99: one-shot quota probes for profiles outside the enabled set.
 // Version 100: a one-shot quota probe can be forced off the profile's
 // schedule; the daemon answers one all-workspaces draft listing.
-pub const PROTOCOL_VERSION: u32 = 100;
+// Version 101: the daemon answers the capacity service's per-host readings.
+// Version 102: review views carry the writing_brief phase and brief-writer role.
+// Version 103: configuration carries the top-level `[images]` section (project
+// images built by `mj image build`), which older clients' strict config reader
+// rejects.
+pub const PROTOCOL_VERSION: u32 = 103;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3820,6 +3872,53 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
+    }
+
+    /// Only a connection that dropped after the request was sent is marked as
+    /// a lost transport; a daemon's answer, even an error, is not.
+    #[tokio::test]
+    async fn only_a_connection_dropped_after_the_request_is_marked_as_lost() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "transport-lost-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            write_frame(
+                &mut stream,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Err("create failed: clone refused".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+            // The second request is read and then the connection is dropped.
+            let _: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let refused = client
+            .wait_create_session("session-1".into())
+            .await
+            .unwrap_err();
+        assert!(refused.downcast_ref::<DaemonRefusal>().is_some());
+        assert!(refused.downcast_ref::<DaemonTransportLost>().is_none());
+        let dropped = client
+            .wait_create_session("session-1".into())
+            .await
+            .unwrap_err();
+        assert!(dropped.downcast_ref::<DaemonTransportLost>().is_some());
+        assert!(dropped.downcast_ref::<DaemonRefusal>().is_none());
+        server.await.unwrap();
     }
 
     #[tokio::test]

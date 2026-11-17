@@ -151,7 +151,11 @@ async fn run_review_off(
     let protocol = control
         .session(session_id.clone())
         .await
-        .map_err(|error| StartRefusal(format!("{error:#}")))?
+        .map_err(|error| {
+            StartRefusal(format!(
+                "{error:#}; resume the session before requesting review"
+            ))
+        })?
         .view()
         .snapshot
         .and_then(|snapshot| snapshot.operational.relay_protocol_version)

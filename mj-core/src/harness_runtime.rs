@@ -23,6 +23,10 @@ const MANAGED_NODE_DIR: &str = "node";
 /// compatible runtime. Keep this in lockstep with `assets/node/runtime.json`.
 pub const NODE_VERSION: &str = "24.22.1";
 
+/// Keep in lockstep with `assets/mise/runtime.json`. Static musl binary hashes:
+/// https://github.com/jdx/mise/releases/download/v2026.11.9/SHASUMS256.txt
+pub const MISE_VERSION: &str = "2026.11.9";
+
 /// The install receipt written by the worker and checked by managed clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,8 +120,8 @@ pub fn managed_harness_manifest_matches(
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.15.0";
 pub const CODEX_CLI_VERSION: &str = "0.168.0";
-pub const CLAUDE_ACP_VERSION: &str = "0.106.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.323";
+pub const CLAUDE_ACP_VERSION: &str = "0.107.3";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.325";
 pub const KIMI_VERSION: &str = "2.6.1";
 pub const GROK_VERSION: &str = "1.0.77";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
@@ -482,8 +486,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
             // Installs made before that change kept the package's native-binary
             // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.106.0_claude-2.1.323_pkg2",
-            display_version: "claude-agent-acp 0.106.0 + Claude Code 2.1.323",
+            install_id: "claude-agent-acp-0.107.3_claude-2.1.325_pkg2",
+            display_version: "claude-agent-acp 0.107.3 + Claude Code 2.1.325",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",
         },

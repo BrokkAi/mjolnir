@@ -341,6 +341,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for IsolatedAws {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut command = command.clone();
             command.clear_env = true;
@@ -541,6 +564,29 @@ mod tests {
     fn failed_aws_export_diagnostics_never_include_helper_output() {
         struct FailedExport;
         impl CommandExecutor for FailedExport {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 Ok(CommandOutput {
                     status: 1,
@@ -563,6 +609,29 @@ mod tests {
             // failure. AWS helper output must bypass that observer too.
             struct FailedProcess;
             impl CommandExecutor for FailedProcess {
+                fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                    mj_core::targets::DeadlinePause::none()
+                }
+
+                fn cancellation_requested_without_deadline(&self) -> bool {
+                    self.cancellation_requested()
+                }
+
+                fn execute_without_deadline(
+                    &self,
+                    command: &mj_core::targets::CommandSpec,
+                ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                    self.execute(command)
+                }
+
+                fn execute_with_stdin_without_deadline(
+                    &self,
+                    command: &mj_core::targets::CommandSpec,
+                    input: &mut (dyn std::io::Read + Send),
+                ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                    self.execute_with_stdin(command, input)
+                }
+
                 fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                     let mut command = command.clone();
                     command.program = "sh".into();

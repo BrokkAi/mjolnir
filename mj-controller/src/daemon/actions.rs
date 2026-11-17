@@ -785,6 +785,12 @@ pub(super) async fn handle_action(
                 .go_startup_session(&workspace_id, last_session_id.as_deref())
                 .map(Box::new),
         )),
+        DaemonAction::HostCapacity => Ok(DaemonReply::HostCapacity(
+            state
+                .capacity_feed()
+                .context("the daemon capacity service is not running")?
+                .host_rows(),
+        )),
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)
@@ -1057,9 +1063,21 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::StartSessionLifecycle(request) => Ok(DaemonReply::LifecycleAccepted(
-            state.start_session_lifecycle(request).await?,
-        )),
+        DaemonAction::StartSessionLifecycle(request) => {
+            match state.start_session_lifecycle(request).await {
+                Ok(receipt) => Ok(DaemonReply::LifecycleAccepted(receipt)),
+                Err(error)
+                    if Refusal::of(&error).is_some_and(|refusal| {
+                        refusal.code() == Some(crate::upgrade::HANDOFF_REFUSAL_CODE)
+                    }) =>
+                {
+                    // Only unaccepted lifecycle admission carries this code.
+                    // The client retries its original request and selections.
+                    Ok(DaemonReply::UpgradePending)
+                }
+                Err(error) => Err(error),
+            }
+        }
         DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
         DaemonAction::SuspendSession {
             session_id,
@@ -1098,8 +1116,10 @@ pub(super) async fn handle_action(
             state.start_create_session(request).await?,
         ))),
         DaemonAction::WaitCreateSession { session_id } => {
-            state.wait_create_session(&session_id).await?;
-            Ok(DaemonReply::Done)
+            match state.wait_create_outcome(&session_id).await {
+                crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
+                crate::daemon::create::CreateWait::Failed(error) => Err(error),
+            }
         }
         DaemonAction::ResumeSession(request) => {
             state.resume_session(request).await?;
@@ -1175,6 +1195,10 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
+            if cancellation.is_cancelled() {
+                return Ok(DaemonReply::Done);
+            }
+            crate::upgrade::gate().begin_draining();
             // A destroy in flight was acknowledged as accepted and nothing
             // about it is durable, so the stop waits for it, up to a bound
             // (#1191). The reply does not wait.
@@ -1231,6 +1255,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Identity
             | DaemonAction::Configuration
             | DaemonAction::WaitSessionLifecycle(_)
+            // Answered from durable state, so it holds no daemon work and a
+            // handoff does not wait for it; the client asks again.
+            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

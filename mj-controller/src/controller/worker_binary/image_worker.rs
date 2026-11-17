@@ -2,6 +2,7 @@
 //! host binary.
 
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 /// Where an agent-dev image keeps the worker built from its own commit.
 pub(in crate::controller) const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
@@ -81,6 +82,7 @@ pub(in crate::controller) fn image_worker_build(
     executor: &impl CommandExecutor,
 ) -> Result<Option<String>> {
     let command = targets::locator_command(
+        SshTrafficClass::Control,
         locator,
         vec!["sh".into(), "-c".into(), IMAGE_WORKER_BUILD_SCRIPT.into()],
     )

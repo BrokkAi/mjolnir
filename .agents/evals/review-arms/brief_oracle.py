@@ -33,6 +33,7 @@ the final brief and a person has recorded that it carries the census fact.
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 
@@ -72,6 +73,18 @@ def frozen(name):
 
 
 def sets():
+    manifest = os.environ.get("REVIEW_ARMS_SETS")
+    if manifest:
+        s = json.loads(pathlib.Path(manifest).read_text())
+        if not isinstance(s, dict) or set(s) != set("PSC") or any(
+                not isinstance(s[g], list) or any(not isinstance(b, str) for b in s[g]) for g in "PSC"):
+            raise SystemExit("REVIEW_ARMS_SETS must contain exactly P/S/C arrays of IDs")
+        ids = [b for g in "PSC" for b in s[g]]
+        known = {json.loads(line)["id"] for line in driver.CORPUS_PATH.read_text().splitlines() if line.strip()}
+        if not ids or len(ids) != len(set(ids)) or set(ids) - known:
+            raise SystemExit("REVIEW_ARMS_SETS has empty, duplicate/overlapping or unknown IDs: "
+                             f"{sorted(set(ids) - known)}")
+        return s
     s = {"P": frozen("Primary (P, 18):"), "S": frozen("Secondary (S, 4):"), "C": frozen("Control (C, 8):")}
     assert [len(s[k]) for k in "PSC"] == [18, 4, 8], {k: len(v) for k, v in s.items()}
     return s
@@ -81,7 +94,7 @@ def build():
     s = sets()
     first = {json.loads(l)["id"]: json.loads(l) for l in open(SCRIPTS / "results/missing-facts.jsonl")}
     second = {json.loads(l)["id"]: json.loads(l) for l in open(SCRIPTS / "results/missing-facts-pass2.jsonl")}
-    corpus = {json.loads(l)["id"]: json.loads(l) for l in open(SCRIPTS / "corpus/corpus.jsonl")}
+    corpus = driver.CORPUS
     W = ROOT / "briefs/oracle-work"
     W.mkdir(parents=True, exist_ok=True)
     (W / "ORACLE.md").write_text((SCRIPTS / "brief/ORACLE.md").read_text())

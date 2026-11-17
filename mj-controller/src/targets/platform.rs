@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::targets::SshTrafficClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetOs {
@@ -40,7 +41,12 @@ pub fn normalize_architecture(architecture: &str) -> Result<&'static str> {
 }
 
 pub fn platform_probe(locator: &TargetLocator) -> CommandSpec {
-    locator_command(locator, vec!["uname".into(), "-sm".into()]).purpose("detect target platform")
+    locator_command(
+        SshTrafficClass::Control,
+        locator,
+        vec!["uname".into(), "-sm".into()],
+    )
+    .purpose("detect target platform")
 }
 
 #[cfg(test)]

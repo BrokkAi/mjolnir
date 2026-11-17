@@ -34,6 +34,8 @@ pub struct ReviewJob {
     pub changed_lines: usize,
     /// Findings the author declined to fix, which reviewers must not repeat.
     pub declined: Vec<ReviewOverride>,
+    /// Relations a brief writer computed from the repository, if one ran.
+    pub brief: Option<String>,
 }
 
 // Adapted from Codex commit 1b1835f751, codex-rs/prompts/templates/review/rubric.md;
@@ -61,6 +63,18 @@ pub fn declined_findings_context(job: &ReviewJob) -> Option<String> {
     Some(format!(
         "The author declined to fix the findings below, with these reasons. Do not report them again, or findings that restate them.\n<declined_findings>\n{entries}\n</declined_findings>"
     ))
+}
+
+/// The writer's relations, labelled so reviewers treat them as unverified
+/// facts to check rather than findings. None when no writer ran or it wrote
+/// nothing.
+fn brief_section(job: &ReviewJob) -> Option<String> {
+    let brief = job.brief.as_deref()?.trim();
+    (!brief.is_empty()).then(|| {
+        format!(
+            "## Relations computed from the repository\n\nThese are relations computed from the repository at this commit, not findings. They may be incomplete.\n\n{brief}"
+        )
+    })
 }
 
 /// Keeps a multi-line entry inside its list item.
@@ -101,10 +115,9 @@ pub fn user_messages_packet(messages: &[UserMessage], current_task: &str) -> Str
     bound_review_section(&rendered, USER_MESSAGES_LIMIT, "older user messages")
 }
 
-/// Build the common plain-text rubric prompt without embedding a diff.
-#[must_use]
-pub fn review_prompt(job: &ReviewJob) -> String {
-    let repositories = job
+/// Each repository's root and the exact command that prints its captured change.
+fn repositories_section(job: &ReviewJob) -> String {
+    job
         .repositories
         .iter()
         .map(|repository| {
@@ -135,7 +148,16 @@ pub fn review_prompt(job: &ReviewJob) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n");
+        .join("\n\n")
+}
+
+/// Build the common plain-text rubric prompt without embedding a diff.
+#[must_use]
+pub fn review_prompt(job: &ReviewJob) -> String {
+    let repositories = repositories_section(job);
+    let brief = brief_section(job)
+        .map(|section| format!("\n\n{section}"))
+        .unwrap_or_default();
     let declined = declined_findings_context(job)
         .map(|context| format!("\n\n{context}"))
         .unwrap_or_default();
@@ -145,7 +167,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
          Review the code changes made since the last review and provide prioritized findings.\n\n\
          For each repository, inspect the captured tree-to-tree diff using the command below.\n\
          Inspect the code with git and read-only commands. Do not build, run tests, or modify files.\n\
-         {repositories}\n\n\
+         {repositories}{brief}\n\n\
          Per-file diffstat for the captured changes ({} changed lines):\n\
          {}\n\n\
          The chronological user messages below are the authoritative intent. The primary agent's own account of its work is not provided.\n\
@@ -155,6 +177,20 @@ pub fn review_prompt(job: &ReviewJob) -> String {
         changed_files_section(job),
         user_messages_packet(&job.user_messages, &job.task)
     )
+}
+
+const BRIEF_WRITER_TEMPLATE: &str = include_str!("../templates/brief_writer.md");
+
+/// The prompt of the session that writes the relation brief. It sees the same
+/// diff commands and the same user request as the reviewers, and no findings.
+#[must_use]
+pub fn brief_writer_prompt(job: &ReviewJob) -> String {
+    BRIEF_WRITER_TEMPLATE
+        .replace("{diff_commands}", &repositories_section(job))
+        .replace(
+            "{task}",
+            &bound_review_section(&job.task, USER_MESSAGES_LIMIT, "task"),
+        )
 }
 
 /// Quote a path for the shell only when it needs it, so the common case
@@ -202,6 +238,7 @@ mod tests {
                 .into(),
             changed_lines: 2,
             declined: Vec::new(),
+            brief: None,
         }
     }
 
@@ -268,5 +305,35 @@ mod tests {
              - Finding: [P2] src/lib.rs:7 -- retry loses the request\n  Reason: The queue replays it\n    on reconnect\n\
              - Finding: [P3] src/main.rs:1 -- missing doc\n  Reason: Internal binary\n</declined_findings>\n\nRepository contents"
         ));
+    }
+
+    // The whole prompt, as a reviewer receives it. Without a brief it is what
+    // reviewers received before briefs existed.
+    #[test]
+    fn golden_review_prompt_without_and_with_a_brief() {
+        let mut job = job();
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "review-prompt",
+            &review_prompt(&job),
+        );
+        job.brief = Some(
+            "## Affected callers\n- `src/queue.rs:40` calls `retry` (src/lib.rs:12) and awaits the result\n\n## Paths\n- none\n\n## Value flow\n- none"
+                .into(),
+        );
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "review-prompt-with-brief",
+            &review_prompt(&job),
+        );
+        job.brief = Some("  \n".into());
+        assert_eq!(
+            review_prompt(&job),
+            review_prompt(&ReviewJob {
+                brief: None,
+                ..job.clone()
+            }),
+            "a blank brief renders nothing"
+        );
     }
 }

@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 use crate::controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
 use crate::database::record_recovery_failure_if_current;
 use crate::recovery_gate::{
-    ObservationReceiver, RecoveryGate, RecoveryObserver, observation_channel,
+    BackgroundWork, ObservationReceiver, RecoveryGate, RecoveryObserver, observation_channel,
 };
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
@@ -96,7 +96,7 @@ impl RecoveryCoordinator {
                         policy.observe_wait(pending.observed_wait);
                         if checkpoint_due(policy, &observation, Utc::now())
                             && let Some(expected_target) = observation.session.target.clone()
-                            && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id)
+                            && let Ok(copy_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::RecoveryCopyCapturing).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "recovery copy deferred"))
                         {
                             policy.start_attempt();
                             let session_manager = session_manager.clone();
@@ -117,11 +117,12 @@ impl RecoveryCoordinator {
                                         config: observation.config,
                                         state,
                                     };
-                                    let executor = CancellableProcessExecutor::new(task_cancelled)
+                                    let executor = CancellableProcessExecutor::new(task_cancelled.cancellation())
                                         .with_deadline(RECOVERY_CHECKPOINT_TIMEOUT);
                                     mj_core::runtime::block_on(
                                         controller
                                             .create_recovery_checkpoint_managed_controlled(
+                                                &crate::recovery_gate::SessionAdmission::Background(task_cancelled.clone()),
                                                 &task_session_id,
                                                 &session_manager,
                                                 &executor,
@@ -613,12 +614,20 @@ mod tests {
         let gate = Arc::new(RecoveryGate::default());
         let reservation = gate.reserve("session-1");
 
-        assert!(gate.try_start("session-1").is_none());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+                .is_err()
+        );
 
         drop(reservation);
-        let attempt = gate.try_start("session-1").unwrap();
+        let attempt = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         assert!(gate.is_busy("session-1"));
-        assert!(gate.try_start("session-1").is_none());
+        assert!(
+            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+                .is_err()
+        );
         drop(attempt);
         assert!(!gate.is_busy("session-1"));
     }
@@ -629,7 +638,9 @@ mod tests {
     #[test]
     fn cancelling_a_busy_session_stops_the_copy_in_flight() {
         let gate = Arc::new(RecoveryGate::default());
-        let copy_cancelled = gate.try_start("session-1").unwrap();
+        let copy_cancelled = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         assert!(!copy_cancelled.load(Ordering::Acquire));
 
         gate.cancel_busy("session-1");
@@ -640,7 +651,9 @@ mod tests {
         // The finished copy's flag is gone, so a later cancellation cannot
         // reach it and the next copy starts with a fresh flag.
         gate.cancel_busy("session-1");
-        let next = gate.try_start("session-1").unwrap();
+        let next = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
         assert!(!next.load(Ordering::Acquire));
     }
 
@@ -658,8 +671,12 @@ mod tests {
     #[test]
     fn coordinator_shutdown_cancels_every_copy_in_flight() {
         let gate = Arc::new(RecoveryGate::default());
-        let first = gate.try_start("session-1").unwrap();
-        let second = gate.try_start("session-2").unwrap();
+        let first = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
+        let second = gate
+            .try_start("session-2", BackgroundWork::RecoveryCopyCapturing)
+            .unwrap();
 
         gate.close();
 
@@ -766,12 +783,20 @@ mod tests {
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let coordinator = RecoveryCoordinator::spawn(channels.control);
         let gate = coordinator.observer.gate.clone();
-        let attempt = gate.try_start("dropping-coordinator").unwrap();
+        let attempt = gate
+            .try_start(
+                "dropping-coordinator",
+                BackgroundWork::RecoveryCopyCapturing,
+            )
+            .unwrap();
 
         drop(coordinator);
 
         assert!(attempt.load(Ordering::Acquire));
-        assert!(gate.try_start("after-drop").is_none());
+        assert!(
+            gate.try_start("after-drop", BackgroundWork::RecoveryCopyCapturing)
+                .is_err()
+        );
         drop(attempt);
         assert!(gate.busy_sessions().is_empty());
     }

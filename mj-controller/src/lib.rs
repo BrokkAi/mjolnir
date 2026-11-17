@@ -74,3 +74,5 @@ mod upgrade;
 pub(crate) mod web_push;
 
 pub mod github_student;
+
+mod session_images;

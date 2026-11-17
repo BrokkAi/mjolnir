@@ -19,7 +19,7 @@ use mj_client::daemon::{
     DaemonAction, DaemonClient, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
     metadata_path,
 };
-use mj_core::config::{DEFAULT_CONTAINER_IMAGE, DaemonConfig, DaemonRuntime, data_dir};
+use mj_core::config::{DaemonConfig, DaemonRuntime, RELEASE_CONTAINER_IMAGE, data_dir};
 use sha2::Digest;
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -319,7 +319,7 @@ async fn resolve_image(
     let candidate = config
         .image
         .clone()
-        .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.to_owned());
+        .unwrap_or_else(|| RELEASE_CONTAINER_IMAGE.to_owned());
     let mut found = inspect_image(program, &candidate).await?;
     if found
         .as_ref()

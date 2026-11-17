@@ -61,6 +61,10 @@ unverified = sorted(set(expected) - complete)  # batched but not yet verified; l
 
 def latency(session_dir):
     """Seconds from the reviewer's prompt to the end of its turn, or None."""
+    # Completed review roles are normally destroyed (#1554/#1559). Missing
+    # capture is unavailable timing, never a zero-duration observation.
+    if not all((session_dir / name).exists() for name in ("session.json", "transcript.json")):
+        return None
     row = json.loads((session_dir / "session.json").read_text())
     done = (row.get("last_turn_outcome") or {}).get("completed_at_ms")
     items = [i for p in json.loads((session_dir / "transcript.json").read_text()) for i in p["items"]]

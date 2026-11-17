@@ -1,0 +1,788 @@
+{
+  "input_hashes_sha256": {
+    "jobs": {
+      "path": "/mnt/optane/review-arms-20261113/writer-terra-jobs.json",
+      "sha256": "ac4f91f00c29279f08c166d6e36822968b9b898b539bda9f6bb5628c16e7b582"
+    },
+    "j_key": {
+      "path": "/mnt/optane/review-arms-20261113/private/key-brief-judge-j.json",
+      "sha256": "ef204b3cae3d620b6d2b742879595c495a1e5d79544194c1a450c04e7e11a795"
+    },
+    "j_merged": {
+      "path": "/mnt/optane/review-arms-20261113/brief-judge-j/merged.jsonl",
+      "sha256": "10e9c9b4b25c5d4a1c39f279553b41d55370e9a48fe410609362c0c1328f9b2a"
+    },
+    "j_decisions": {
+      "path": "/mnt/optane/review-arms-20261113/brief-judge-j/handcheck-decisions.json",
+      "sha256": "589a6cdf616fbbd8457f9b8ec65772c638895292adffabdec466d09b7d5e36c6"
+    },
+    "g_key": {
+      "path": "/mnt/optane/review-arms-20261113/private/key-brief-judge-g.json",
+      "sha256": "374285f00f27e76a620f55cd8d68b6b76f8dd077e4da5d8f2bf0f8a410229260"
+    },
+    "g_merged": {
+      "path": "/mnt/optane/review-arms-20261113/brief-judge-g/merged.jsonl",
+      "sha256": "51a8f18fa7f6916d1e75848d15a34537055a25b7763ad0eb01cbe72a213ad769"
+    },
+    "g_decisions": {
+      "path": "/mnt/optane/review-arms-20261113/brief-judge-g/handcheck-decisions.json",
+      "sha256": "d77755937f5f50b8a7c18a8cc8f8bd4e081263e1d162eb9b2548148bc7f5f5d6"
+    },
+    "plan": {
+      "path": ".agents/evals/review-arms/brief/PLAN.md",
+      "sha256": "9b703488e96de98b628513f1729d546460de10d87dafe57458cb630614807b29"
+    }
+  },
+  "sets": {
+    "P": [
+      "archive-resume-hint-without-prompt",
+      "catalog-cache-key-collision",
+      "child-model-wrong-efforts",
+      "codex-effort-alias-lost",
+      "export-relative-read-root",
+      "github-token-in-container-argv",
+      "held-prompt-ignores-interrupt",
+      "journal-valid-json-corruption",
+      "path-completion-lost-on-step-redraw",
+      "pending-assessment-hidden-when-idle",
+      "projection-mixed-sqlite-snapshots",
+      "reserved-workspace-internal-error",
+      "restore-through-profile-symlink",
+      "stale-model-launch-spec",
+      "symbol-change-keeps-cached-transcript",
+      "terminal-id-reused",
+      "unused-thread-above-archive-floor",
+      "web-feed-self-deadlock"
+    ],
+    "S": [
+      "activity-recorder-kills-api",
+      "dropdown-click-hits-covered-field",
+      "metadata-checkpoint-overwrites-checkout",
+      "shortcut-escape-opens-unvisited-manager"
+    ]
+  },
+  "primary": {
+    "TT": {
+      "diffs": 18,
+      "sessions": 54,
+      "caught_sessions": 16,
+      "partial_sessions": 0,
+      "mean_share": 0.2962962962962963,
+      "per_diff": {
+        "archive-resume-hint-without-prompt": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "catalog-cache-key-collision": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "child-model-wrong-efforts": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "export-relative-read-root": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "github-token-in-container-argv": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "journal-valid-json-corruption": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "path-completion-lost-on-step-redraw": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "pending-assessment-hidden-when-idle": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "reserved-workspace-internal-error": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "restore-through-profile-symlink": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "stale-model-launch-spec": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "caught": 1,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.3333333333333333
+        },
+        "terminal-id-reused": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "unused-thread-above-archive-floor": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "web-feed-self-deadlock": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        }
+      }
+    },
+    "BT": {
+      "diffs": 18,
+      "sessions": 54,
+      "caught_sessions": 30,
+      "partial_sessions": 0,
+      "mean_share": 0.5555555555555556,
+      "per_diff": {
+        "archive-resume-hint-without-prompt": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "catalog-cache-key-collision": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "child-model-wrong-efforts": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "export-relative-read-root": {
+          "caught": 2,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.6666666666666666
+        },
+        "github-token-in-container-argv": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "journal-valid-json-corruption": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "path-completion-lost-on-step-redraw": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "pending-assessment-hidden-when-idle": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "caught": 1,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.3333333333333333
+        },
+        "reserved-workspace-internal-error": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "restore-through-profile-symlink": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "stale-model-launch-spec": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "terminal-id-reused": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "unused-thread-above-archive-floor": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "web-feed-self-deadlock": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        }
+      }
+    },
+    "noBrief": {
+      "diffs": 18,
+      "sessions": 60,
+      "caught_sessions": 11,
+      "partial_sessions": 1,
+      "mean_share": 0.2037037037037037,
+      "per_diff": {
+        "archive-resume-hint-without-prompt": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        },
+        "catalog-cache-key-collision": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "child-model-wrong-efforts": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "caught": 2,
+          "partial": 1,
+          "n": 3,
+          "rate": 0.6666666666666666
+        },
+        "export-relative-read-root": {
+          "caught": 2,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.6666666666666666
+        },
+        "github-token-in-container-argv": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        },
+        "journal-valid-json-corruption": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "path-completion-lost-on-step-redraw": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "pending-assessment-hidden-when-idle": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "reserved-workspace-internal-error": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "restore-through-profile-symlink": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "stale-model-launch-spec": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "caught": 1,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.3333333333333333
+        },
+        "terminal-id-reused": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        },
+        "unused-thread-above-archive-floor": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "web-feed-self-deadlock": {
+          "caught": 0,
+          "partial": 0,
+          "n": 4,
+          "rate": 0.0
+        }
+      }
+    }
+  },
+  "secondary": {
+    "TT": {
+      "diffs": 4,
+      "sessions": 12,
+      "caught_sessions": 5,
+      "partial_sessions": 0,
+      "mean_share": 0.41666666666666663,
+      "per_diff": {
+        "activity-recorder-kills-api": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "dropdown-click-hits-covered-field": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "caught": 2,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.6666666666666666
+        },
+        "shortcut-escape-opens-unvisited-manager": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        }
+      }
+    },
+    "BT": {
+      "diffs": 4,
+      "sessions": 12,
+      "caught_sessions": 5,
+      "partial_sessions": 0,
+      "mean_share": 0.41666666666666663,
+      "per_diff": {
+        "activity-recorder-kills-api": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "dropdown-click-hits-covered-field": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "caught": 2,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.6666666666666666
+        },
+        "shortcut-escape-opens-unvisited-manager": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        }
+      }
+    },
+    "noBrief": {
+      "diffs": 4,
+      "sessions": 12,
+      "caught_sessions": 4,
+      "partial_sessions": 0,
+      "mean_share": 0.3333333333333333,
+      "per_diff": {
+        "activity-recorder-kills-api": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        },
+        "dropdown-click-hits-covered-field": {
+          "caught": 3,
+          "partial": 0,
+          "n": 3,
+          "rate": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "caught": 1,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.3333333333333333
+        },
+        "shortcut-escape-opens-unvisited-manager": {
+          "caught": 0,
+          "partial": 0,
+          "n": 3,
+          "rate": 0.0
+        }
+      }
+    }
+  },
+  "paired_primary_effects": {
+    "TT-BT": {
+      "mean": -0.2592592592592593,
+      "per_diff": {
+        "archive-resume-hint-without-prompt": 0.0,
+        "catalog-cache-key-collision": -1.0,
+        "child-model-wrong-efforts": 0.0,
+        "codex-effort-alias-lost": 0.0,
+        "export-relative-read-root": -0.6666666666666666,
+        "github-token-in-container-argv": 0.0,
+        "held-prompt-ignores-interrupt": -1.0,
+        "journal-valid-json-corruption": 0.0,
+        "path-completion-lost-on-step-redraw": 0.0,
+        "pending-assessment-hidden-when-idle": 0.0,
+        "projection-mixed-sqlite-snapshots": -0.3333333333333333,
+        "reserved-workspace-internal-error": 0.0,
+        "restore-through-profile-symlink": 0.0,
+        "stale-model-launch-spec": -1.0,
+        "symbol-change-keeps-cached-transcript": -0.6666666666666667,
+        "terminal-id-reused": 0.0,
+        "unused-thread-above-archive-floor": 0.0,
+        "web-feed-self-deadlock": 0.0
+      },
+      "ci95_seed20261116_10000": [
+        -0.4444444444444444,
+        -0.09259259259259259
+      ]
+    },
+    "TT-noBrief": {
+      "mean": 0.0925925925925926,
+      "per_diff": {
+        "archive-resume-hint-without-prompt": 0.0,
+        "catalog-cache-key-collision": 0.0,
+        "child-model-wrong-efforts": 0.0,
+        "codex-effort-alias-lost": 0.33333333333333337,
+        "export-relative-read-root": -0.6666666666666666,
+        "github-token-in-container-argv": 0.0,
+        "held-prompt-ignores-interrupt": 0.0,
+        "journal-valid-json-corruption": 0.0,
+        "path-completion-lost-on-step-redraw": 0.0,
+        "pending-assessment-hidden-when-idle": 0.0,
+        "projection-mixed-sqlite-snapshots": 0.0,
+        "reserved-workspace-internal-error": 0.0,
+        "restore-through-profile-symlink": 0.0,
+        "stale-model-launch-spec": 0.0,
+        "symbol-change-keeps-cached-transcript": 0.0,
+        "terminal-id-reused": 1.0,
+        "unused-thread-above-archive-floor": 0.0,
+        "web-feed-self-deadlock": 1.0
+      },
+      "ci95_seed20261116_10000": [
+        -0.05555555555555555,
+        0.2777777777777778
+      ]
+    }
+  },
+  "criterion_check": {
+    "threshold_TT_ge_BT_minus_10": false,
+    "threshold_value": 0.4555555555555556,
+    "TT_minus_noBrief_CI_lower_gt_zero": false,
+    "decision": "Terra-writes criterion fails; default remains Sol/high"
+  },
+  "round_G_exact_session_check": {
+    "BT": {
+      "shared_sessions": 30,
+      "diff_count": 10,
+      "diffs": [
+        "catalog-cache-key-collision",
+        "child-model-wrong-efforts",
+        "codex-effort-alias-lost",
+        "held-prompt-ignores-interrupt",
+        "metadata-checkpoint-overwrites-checkout",
+        "projection-mixed-sqlite-snapshots",
+        "stale-model-launch-spec",
+        "symbol-change-keeps-cached-transcript",
+        "terminal-id-reused",
+        "web-feed-self-deadlock"
+      ],
+      "J_mean_catch_share": 0.9,
+      "G_mean_catch_share": 0.9,
+      "difference_pp": 0.0,
+      "different_exact_session_labels": 0,
+      "mismatches": [],
+      "per_diff": {
+        "catalog-cache-key-collision": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "child-model-wrong-efforts": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "held-prompt-ignores-interrupt": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "shared_sessions": 3,
+          "J_caught": 2,
+          "G_caught": 2,
+          "J_share": 0.6666666666666666,
+          "G_share": 0.6666666666666666
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "shared_sessions": 3,
+          "J_caught": 1,
+          "G_caught": 1,
+          "J_share": 0.3333333333333333,
+          "G_share": 0.3333333333333333
+        },
+        "stale-model-launch-spec": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "terminal-id-reused": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "web-feed-self-deadlock": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        }
+      },
+      "over_10pp": false
+    },
+    "noBrief": {
+      "shared_sessions": 34,
+      "diff_count": 10,
+      "diffs": [
+        "catalog-cache-key-collision",
+        "child-model-wrong-efforts",
+        "codex-effort-alias-lost",
+        "held-prompt-ignores-interrupt",
+        "metadata-checkpoint-overwrites-checkout",
+        "projection-mixed-sqlite-snapshots",
+        "stale-model-launch-spec",
+        "symbol-change-keeps-cached-transcript",
+        "terminal-id-reused",
+        "web-feed-self-deadlock"
+      ],
+      "J_mean_catch_share": 0.2333333333333333,
+      "G_mean_catch_share": 0.2,
+      "difference_pp": 3.33333333333333,
+      "different_exact_session_labels": 2,
+      "mismatches": [
+        {
+          "bug": "codex-effort-alias-lost",
+          "session": "09f56ee0261f4faf6f297abe33c358b2",
+          "J": "caught",
+          "G": "partial"
+        },
+        {
+          "bug": "codex-effort-alias-lost",
+          "session": "f251acbd3b1a1b27b0a6f9dc6a9c29bf",
+          "J": "partial",
+          "G": "missed"
+        }
+      ],
+      "per_diff": {
+        "catalog-cache-key-collision": {
+          "shared_sessions": 3,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        },
+        "child-model-wrong-efforts": {
+          "shared_sessions": 3,
+          "J_caught": 3,
+          "G_caught": 3,
+          "J_share": 1.0,
+          "G_share": 1.0
+        },
+        "codex-effort-alias-lost": {
+          "shared_sessions": 3,
+          "J_caught": 2,
+          "G_caught": 1,
+          "J_share": 0.6666666666666666,
+          "G_share": 0.3333333333333333
+        },
+        "held-prompt-ignores-interrupt": {
+          "shared_sessions": 4,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        },
+        "metadata-checkpoint-overwrites-checkout": {
+          "shared_sessions": 3,
+          "J_caught": 1,
+          "G_caught": 1,
+          "J_share": 0.3333333333333333,
+          "G_share": 0.3333333333333333
+        },
+        "projection-mixed-sqlite-snapshots": {
+          "shared_sessions": 3,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        },
+        "stale-model-launch-spec": {
+          "shared_sessions": 4,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        },
+        "symbol-change-keeps-cached-transcript": {
+          "shared_sessions": 3,
+          "J_caught": 1,
+          "G_caught": 1,
+          "J_share": 0.3333333333333333,
+          "G_share": 0.3333333333333333
+        },
+        "terminal-id-reused": {
+          "shared_sessions": 4,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        },
+        "web-feed-self-deadlock": {
+          "shared_sessions": 4,
+          "J_caught": 0,
+          "G_caught": 0,
+          "J_share": 0.0,
+          "G_share": 0.0
+        }
+      },
+      "over_10pp": false
+    }
+  },
+  "bootstrap_method": {
+    "n": 10000,
+    "seed": 20261116,
+    "resampling": "paired per-diff catch-rate differences; mean over diffs"
+  }
+}

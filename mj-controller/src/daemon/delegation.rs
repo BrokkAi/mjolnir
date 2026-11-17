@@ -262,14 +262,14 @@ async fn run(
                             let result = backend.execute_subagent_tool_durable(parent.clone(), request).await?;
                             // Durable results can wait for the replacement daemon.
                             drop(_admission);
-                            let delivered = deliver(&runtime, &parent, result.clone()).await;
+                            let delivered = deliver_background(&runtime, &parent, result.clone()).await;
                             if let Err(error) = &delivered {
                                 tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
                             }
                             Ok(Completed::Executed(result, delivered.is_ok()))
                         }
                         Job::Deliver(result) => {
-                            deliver(&runtime, &parent, result).await?;
+                            deliver_background(&runtime, &parent, result).await?;
                             Ok(Completed::Delivered)
                         }
                     }
@@ -665,45 +665,72 @@ async fn settle_child(
     }
 }
 
-async fn deliver(
-    runtime: &RuntimeState,
-    parent: &str,
-    result: StoredDelegationResult,
-) -> Result<()> {
-    let _work = crate::upgrade::activity_unless_draining("delegation result delivery")?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        deliver_result(runtime, parent, result),
-    )
-    .await
-    .context("delegation result delivery timed out; durable result retained")?
-}
-
-async fn deliver_result(
+// Results are durable and request-ID keyed. The dispatch phase owns one attempt
+// until it settles, with backoff on failure. Handoff must not wait for actor
+// queues or relay traffic: coordinator cancellation aborts these jobs and the
+// next daemon rebuilds them from the worker queue and stored results.
+async fn deliver_background(
     runtime: &RuntimeState,
     parent: &str,
     stored_result: StoredDelegationResult,
 ) -> Result<()> {
+    let admission = runtime
+        .recovery_observer
+        .gate
+        .try_start(
+            parent,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
+        )
+        .map_err(|refusal| {
+            anyhow::anyhow!(
+                "delegation delivery deferred by {}",
+                refusal.holders.join(" and ")
+            )
+        })?;
     let handle = runtime.workspace_session_handle(parent).await?;
-    let mut lease = handle.lease_connection().await?;
+    deliver(&handle, &admission, stored_result, async {
+        if let Err(error) = runtime.reconcile_parent_reports(parent).await {
+            tracing::warn!(
+                parent_session_id = parent,
+                error = format!("{error:#}"),
+                "could not enqueue the parent's finished child reports after result delivery"
+            );
+        }
+    })
+    .await
+}
+
+/// Dispatch keeps per-request ownership while foreground Move yields to the
+/// delivery it needs. Check the durable completion under that admission so
+/// a cached retry after acknowledgement sends no duplicate completion RPC.
+pub(crate) async fn deliver(
+    handle: &crate::session_manager::ManagedSessionHandle,
+    admission: &crate::recovery_gate::RecoveryAttempt,
+    stored_result: StoredDelegationResult,
+    reconcile_reports: impl std::future::Future<Output = ()> + Send,
+) -> Result<()> {
+    let parent = handle.session_id().to_owned();
     let request_id = stored_result.result.request_id.clone();
-    let delivered = lease
-        .connection_mut()
-        .complete_subagent_request(stored_result.result.clone())
-        .await;
+    let current = tokio::task::spawn_blocking({
+        let parent = parent.clone();
+        let request_id = request_id.clone();
+        move || crate::database::load_delegation(&parent, &request_id)
+    })
+    .await??;
+    let Some((_, result)) = current else {
+        return Ok(());
+    };
+    let result = result.context("delegation delivery has no durable result")?;
+    let mut lease = handle.lease_connection(admission).await?;
+    let delivered = tokio::select! {
+        result = lease.connection_mut().complete_subagent_request(result.result) => result,
+        () = crate::recovery_gate::wait_until_cancelled(admission) => return Err(anyhow::anyhow!("delegation delivery preempted")),
+    };
     lease.release();
     delivered?;
-    if let Err(error) = runtime.reconcile_parent_reports(parent).await {
-        tracing::warn!(
-            parent_session_id = parent,
-            error = format!("{error:#}"),
-            "could not enqueue the parent's finished child reports after result delivery"
-        );
-    }
-    let parent = parent.to_owned();
-    let acknowledged_parent = parent.clone();
+    reconcile_reports.await;
     tokio::task::spawn_blocking(move || {
-        crate::database::acknowledge_delegation(acknowledged_parent, request_id)
+        crate::database::acknowledge_delegation(parent, request_id)
     })
     .await??;
     Ok(())

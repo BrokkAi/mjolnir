@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-/// The registry repository every session image name is built from. Keep it
+/// The registry repository for release images. Keep it
 /// equal to `mj_core::config::CONTAINER_IMAGE_REPOSITORY`, which
-/// `the_baked_default_image_agrees_with_the_channel_rule` checks.
+/// `the_baked_release_image_agrees_with_the_channel_rule` checks.
 const AGENT_DEV_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
 
 fn tracked_read(path: &Path) -> Option<String> {
@@ -195,8 +195,7 @@ fn main() {
         let fixture = root.join("tests/fixtures/fake-command.sh");
         let script = tracked_read(&fixture).expect("fake command fixture");
         let stamped = format!(
-            "{script}\n#\0MJ-WORKER-BUILD:{}+{}\0\n",
-            version, worker_inputs_id
+            "{script}\n#MJ-BUILD-ID:{version}+{worker_inputs_id}\n#\0MJ-WORKER-BUILD:{version}+{worker_inputs_id}\0\n",
         );
         let destination =
             PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");

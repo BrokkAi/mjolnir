@@ -214,18 +214,16 @@ workspace cleanup.
 
 All container targets use an image and accept optional `pull_policy`,
 `platform`, `cpus`, `memory`, and target `environment`. If `image` is omitted,
-they use Mjolnir's published multi-architecture agent-dev image. An installed
-release names the immutable image published for its own version, such as
-`ghcr.io/brokkai/mjolnir/agent-dev:2.36.0`; a development build names
-`ghcr.io/brokkai/mjolnir/agent-dev:latest` from master. Both keep the default
-`pull_policy = "auto"`, which for an immutable version tag pulls only when the
-host has no copy.
+they use `docker.io/library/buildpack-deps:noble`, Ubuntu 24.04 with Git,
+compilers and common development headers. Mjolnir installs the worker, harness
+and any required Node.js runtime in each session. After cloning, the
+**Install project tools** step uses mise to install the repository's declared
+tools, including versions in `rust-toolchain.toml` and `.nvmrc`.
 
-It carries the supported bridges and common development tools. A plain image
-can work, but every new session may need to install Git, GitHub CLI, or a
-harness bridge; a missing Node.js is installed into the session user's cache
-when a Node-based harness needs it. See [Container targets](/containers/) and
-[Custom images](/custom-images/).
+Use [Project environments](/project-environments/) to declare tools and
+`mj image build` to publish an image with those tools already installed. A
+project image assignment overrides the target image for its platform. See
+[Container targets](/containers/) and [Custom images](/custom-images/).
 
 ### Podman
 

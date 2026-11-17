@@ -389,6 +389,7 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
 mj interrupt-turn --session <id> [--json]
 mj review start --session <id> [--json]
 mj review status --session <id> [--json]
+mj review show --session <id> [--review <id>] [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
 mj api-token
@@ -448,8 +449,9 @@ mj new --workspace eval --bundle product --target builder \
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
   refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
   profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
-  choice in `[subagents.straightforward]` or a session override. The subtle
-  choice in `[subagents.subtle]` is optional. Configure global defaults in
+  choice in `[subagents.straightforward]`, or `[subagents.yolo.straightforward]`
+  on an SSH bare target with `permissions = "yolo"`, or a session override. The subtle
+  choice in the same set is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
   `--subagent-straightforward M` and `--subagent-subtle M` override only their
   named task type; an unspecified type uses its global choice. Either implies
@@ -703,7 +705,12 @@ which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
 review's status, reviewer role, and verdict, or `no review is open`.
-The conversation prompt stays available while the review runs. See [Code review](/turn-review/).
+`mj review show` prints a finished review's per-reviewer output, including each
+reviewer's profile, model, effort, full handback, verdict, and usage. It keeps
+working after the reviewer sessions are destroyed, which happens when their role
+ends. Without `--review` it shows the newest finished review; pass the review id
+a verdict message names to read an earlier one. The conversation prompt stays
+available while the review runs. See [Code review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:

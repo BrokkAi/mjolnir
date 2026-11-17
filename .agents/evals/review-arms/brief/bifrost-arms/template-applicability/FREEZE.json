@@ -1,0 +1,22 @@
+{
+  "frozen_at": "2026-11-17T05:30:46.711575+00:00",
+  "metric": "template applicability (reach unmeasured)",
+  "reach_measured": false,
+  "session_id": "1d0c72a0ee4c1144529fd8ac8db62b26",
+  "source_census_sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+  "template_source_sha256": "706ef2a2d77704b0f204f04141b32c14c91862f15754c14e7e230f2e4ad7b439",
+  "files": {
+    "INSTRUCTIONS.md": "17f792bbbe9da3b9d01b53962441ce4d37d80364fc9fffba5dcbd9fa267d1431",
+    "allowed-template-ids.json": "f8cb1a7cd64eb1c9521bd9f5a3cf556ae8ae30a3cd37b31a7dbc6cb3ebe40548",
+    "applicability-raw.json": "1ab5ef30b7549e48dc6d2693d408f1090ace480e49172f19ccb8559e1f5c581d",
+    "assignments.jsonl": "cc0afe7064a2555123ab474da2f2b27769331a1055601b7ce12738dbf9524701",
+    "audit.json": "e4cfb3c2498242999f17ab3c28dc28857188c11f0079aefdb1718e37aeb21e82",
+    "completion.json": "e094073f60a95a2d525b01bf00f0b4a902c7bc4e92a6cf49642f7a06eac0947b",
+    "definition-source.md": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa",
+    "definition-source.metadata.json": "156a5a6ee418adbbca7cae2f846df8597b5c07caff4c0ea5c33f6470ea88b9a1",
+    "facts.json": "ae777f507e37feef1148984f614975443590895027d28c4a6db7102a50c20add",
+    "registration.json": "970134e11f15bd4896c0827aebb37c29b4a889c17ac8383c6c7f1c51bd4e13cb",
+    "summary.json": "49fd9514594d6c799439217a713f0a376d3b28d48f76d27079b86d38292ca3ad",
+    "templates.md": "6e746a4f594b44488911015ca97751a2f677468a03e0abac32687167b9dc6ffa"
+  }
+}

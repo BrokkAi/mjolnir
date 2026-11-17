@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SiteContextView",
+  "description": "The wire form of a [`SiteContext`].",
+  "type": "object",
+  "properties": {
+    "role": {
+      "$ref": "#/$defs/SiteRoleView"
+    },
+    "site": {
+      "$ref": "#/$defs/SiteLocationView"
+    },
+    "value": {
+      "$ref": "#/$defs/SiteValueView"
+    }
+  },
+  "required": [
+    "site",
+    "role",
+    "value"
+  ],
+  "$defs": {
+    "KnownValueView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "str"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "The normalized decimal value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "int"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "NotAnalyzedCauseView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "capability": {
+              "description": "The `SemanticCapability` label.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unsupported"
+            }
+          },
+          "required": [
+            "kind",
+            "capability"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempted": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "exceeded_budget"
+            },
+            "lane": {
+              "description": "The public budget lane label: source, rows, retained_bytes, files.",
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "lane",
+            "limit",
+            "attempted"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ProviderErrorKind"
+            },
+            "kind": {
+              "type": "string",
+              "const": "provider_failed"
+            },
+            "message": {
+              "description": "The provider error's display text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "error",
+            "message"
+          ]
+        }
+      ]
+    },
+    "ProviderErrorKind": {
+      "type": "string",
+      "enum": [
+        "candidate_locator_refusal",
+        "source_access",
+        "source_admission_refused",
+        "invalid_identity",
+        "invalid_artifact",
+        "internal"
+      ]
+    },
+    "SiteLocationView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "end_byte": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "end_column": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "end_line": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "source"
+            },
+            "path": {
+              "description": "Workspace-relative, slash-separated.",
+              "type": "string"
+            },
+            "start_byte": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "start_column": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "start_line": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "start_byte",
+            "end_byte",
+            "start_line",
+            "start_column",
+            "end_line",
+            "end_column",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "declaration": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "external"
+            }
+          },
+          "required": [
+            "kind",
+            "declaration"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "summary"
+            },
+            "procedure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "procedure"
+          ]
+        }
+      ]
+    },
+    "SiteRoleView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "value"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "call"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "binding"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "argument"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "receiver"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "return"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "field_write"
+            },
+            "member": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "member"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "field_read"
+            },
+            "member": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "member"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "statement"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "SiteValueView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "known"
+            },
+            "value": {
+              "$ref": "#/$defs/KnownValueView"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "$ref": "#/$defs/UnknownValueCauseView"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ]
+        }
+      ]
+    },
+    "UnknownValueCauseView": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "not_constant"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "constant_payload_unavailable"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_source_node"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "$ref": "#/$defs/NotAnalyzedCauseView"
+            },
+            "kind": {
+              "type": "string",
+              "const": "not_analyzed"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ]
+        }
+      ]
+    }
+  }
+}

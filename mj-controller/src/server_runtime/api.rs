@@ -8,6 +8,7 @@
 //! on the async runtime, and a synchronous SQLite read on that thread would
 //! stall unrelated requests.
 
+use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,14 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn workspace_admission(
+        &self,
+        _session_id: String,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async { bail!("workspace admission is unavailable") })
+    }
+
     fn request_review(
         &self,
         _session_id: String,
@@ -124,6 +133,12 @@ pub trait ExportRuntime: Send + Sync {
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
+
+    /// Whether this session's recorded target runs with
+    /// `permissions = "yolo"`. Backends without a daemon have none.
+    fn session_is_yolo_target(&self, _session_id: &str) -> bool {
+        false
+    }
 
     /// Whether a close the daemon admitted is still running for this session.
     ///
@@ -248,6 +263,24 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn workspace_admission(
+        &self,
+        session_id: String,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<crate::recovery_gate::SessionAdmission>> {
+        Box::pin(async move {
+            self.session_gate()
+                .enter_foreground(
+                    &session_id,
+                    "workspace file upload",
+                    &cancelled,
+                    &crate::targets::ProcessExecutor,
+                )
+                .await
+                .map(crate::recovery_gate::SessionAdmission::Foreground)
+        })
+    }
+
     fn request_review(
         &self,
         session_id: String,
@@ -345,6 +378,11 @@ impl ExportRuntime for RuntimeState {
 
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn session_is_yolo_target(&self, session_id: &str) -> bool {
+        self.session_record(session_id)
+            .is_some_and(|record| record.is_yolo_target(&self.with_config(Clone::clone)))
     }
 
     fn close_is_requested(&self, session_id: &str) -> bool {
@@ -781,26 +819,19 @@ impl ApiBackend {
         })
         .await?;
         let prepared = if let Some((prepared, result)) = stored {
-            if let Some(mut result) = result {
+            if let Some(result) = result {
                 if matches!(
                     prepared.request.action,
                     mj_core::subagent::SubagentToolAction::LegacyWaitAgents
                         | mj_core::subagent::SubagentToolAction::LegacyAwaitChildren
                 ) {
-                    blocking("retire legacy wait", {
+                    return blocking("retire legacy wait", {
                         let parent = parent.clone();
                         let id = request.request_id.clone();
                         move || crate::database::retire_legacy_wait(parent, id)
                     })
-                    .await?;
-                    // Retain the compatibility answer for every delivery retry.
-                    result.result.is_error = false;
-                    result.result.message = serde_json::json!({
-                        "status": "reports_arrive_as_messages",
-                        "next_action": mj_core::subagent::REPORT_NOTIFICATION_NEXT_ACTION
-                    })
-                    .to_string();
-                    result.reported_finishes.clear();
+                    .await?
+                    .context("legacy wait result disappeared before conversion");
                 }
                 return Ok(result);
             }
@@ -1087,12 +1118,14 @@ impl ApiBackend {
                         .exports
                         .session_record(parent_session_id)
                         .context("parent session disappeared")?;
+                    let yolo = self.exports.session_is_yolo_target(parent_session_id);
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         *task_type,
+                        yolo,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -3402,6 +3435,10 @@ async fn write_workspace_file(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), ExportError> {
     use std::sync::atomic::Ordering;
+    let session_admission = exports
+        .workspace_admission(session_id.clone(), cancelled.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let record = exports
         .session_record(&session_id)
         .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
@@ -3416,9 +3453,13 @@ async fn write_workspace_file(
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
-    let mut lease = crate::controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
-        .await
-        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let mut lease = crate::controller::IdleWorkspaceLease::acquire(
+        &session_admission,
+        &handle,
+        record.harness_kind,
+    )
+    .await
+    .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -3442,9 +3483,14 @@ async fn write_workspace_file(
         if overwrite {
             argv.push("--overwrite".into());
         }
-        let command =
-            targets::command_on_locator(&layout.backend, &session_id, argv, "session file write")?
-                .with_sensitive_stdin(bytes);
+        let command = targets::command_on_locator(
+            SshTrafficClass::Bulk,
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
         CancellableProcessExecutor::new(worker_cancelled)
             .with_deadline(EXPORT_TIMEOUT)
             .execute(&command)
@@ -3513,7 +3559,13 @@ fn worker_command_spec(
     let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
     let mut argv = vec![binary, "worker".into()];
     argv.extend(arguments);
-    targets::command_on_locator(&layout.backend, session, argv, purpose)
+    targets::command_on_locator(
+        SshTrafficClass::Bulk,
+        &layout.backend,
+        session,
+        argv,
+        purpose,
+    )
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
@@ -3585,6 +3637,10 @@ impl SubagentBackend for ApiBackend {
 
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
+    }
+
+    fn session_is_yolo_target(&self, session_id: String) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(async move { Ok(self.exports.session_is_yolo_target(&session_id)) })
     }
 
     fn quota_preferences(&self) -> BoxFuture<'_, Result<Vec<String>>> {

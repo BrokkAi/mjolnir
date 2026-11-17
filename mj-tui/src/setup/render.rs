@@ -8,13 +8,9 @@ pub(super) fn preferred_size(draft: &Value) -> SetupSize {
             return;
         };
         let paths = visible_paths(path, value);
-        let keys = paths
-            .iter()
-            .filter_map(|p| p.last().cloned())
-            .collect::<Vec<_>>();
         *max_width = (*max_width).max(Line::raw(breadcrumb(path, draft)).width());
         *max_height = (*max_height).max(
-            u16::try_from(page_plan(path, &keys).len())
+            u16::try_from(page_plan(path, &paths).len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(10),
         );
@@ -297,12 +293,12 @@ fn render_controls(
     // Layout entries refer to descriptors; no separate interactive row identity exists.
     let mut blocks = Vec::new();
     let mut at = 0u16;
-    let keys = dialog
+    let paths = dialog
         .descriptors
         .iter()
-        .map(|c| c.path.last().unwrap().clone())
+        .map(|control| control.path.clone())
         .collect::<Vec<_>>();
-    for row in page_plan(&dialog.path, &keys) {
+    for row in page_plan(&dialog.path, &paths) {
         match row {
             PageRow::Gap => {
                 blocks.push((at, None, vec![Line::raw("")]));

@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in crate::controller) async fn connect_checkpoint_relay(
+    admission: &crate::recovery_gate::SessionAdmission,
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     reconnect: &targets::CommandSpec,
@@ -10,7 +11,7 @@ pub(in crate::controller) async fn connect_checkpoint_relay(
         let handle = manager
             .wait_for_session(session_id, Duration::from_secs(5))
             .await?;
-        let mut lease = handle.lease_connection().await?;
+        let mut lease = handle.lease_connection(admission).await?;
         lease
             .connection_mut()
             .set_project_memory_target(project_memory);
@@ -32,6 +33,7 @@ pub(in crate::controller) async fn connect_checkpoint_relay(
 }
 
 pub(in crate::controller) async fn adopt_restarted_checkpoint_relay(
+    admission: &crate::recovery_gate::SessionAdmission,
     session_id: &str,
     manager: Option<&SessionManagerControl>,
     connection: StandaloneSession,
@@ -42,7 +44,7 @@ pub(in crate::controller) async fn adopt_restarted_checkpoint_relay(
     let handle = manager
         .wait_for_session(session_id, Duration::from_secs(5))
         .await?;
-    match handle.lease_connection().await {
+    match handle.lease_connection(admission).await {
         Ok(mut lease) => {
             lease.replace_connection(connection);
             Ok(ControllerRelayLease::Managed {

@@ -1565,6 +1565,49 @@ mod settled_task_tests {
         assert!(claude_relay(dir.path()).snapshot.open_request().is_none());
     }
 
+    fn reply(relay: &mut DurableRelay, text: &str) {
+        reply_with_id(relay, None, text);
+    }
+
+    fn reply_with_id(relay: &mut DurableRelay, id: Option<&str>, text: &str) {
+        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, SessionUpdate};
+        relay
+            .record_session_update(SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::from(text))
+                    .message_id(id.map(agent_client_protocol::v1::schema::MessageId::new)),
+            ))
+            .unwrap();
+    }
+
+    fn answer_elicitation(relay: &mut DurableRelay) {
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: "form".into(),
+                action: "accept".into(),
+                reply: Some("Yes".into()),
+            })
+            .unwrap();
+    }
+
+    fn visible_replies(relay: &DurableRelay) -> Vec<String> {
+        relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.text.chars().take(24).collect())
+            .collect()
+    }
+
+    fn reopen(dir: &std::path::Path, relay: DurableRelay) -> DurableRelay {
+        drop(relay);
+        std::fs::remove_file(dir.join(RELAY_STATE_FILE)).unwrap();
+        let mut relay = claude_relay(dir);
+        relay.set_acp_ready(true);
+        relay
+    }
+
     #[test]
     fn dismissed_questions_survive_journal_replay_and_reject_stale_requests() {
         use crate::relay::test_support::glide_answer;
@@ -1580,6 +1623,7 @@ mod settled_task_tests {
             .unwrap();
         submit_relay(&mut relay, "first-turn", prompt("Choose a target."));
         relay.claim_pending_commands(true).unwrap();
+        reply(&mut relay, "Which target: A or B?");
         finish_prompt(&mut relay, "first-turn");
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
@@ -1593,7 +1637,22 @@ mod settled_task_tests {
             .unwrap()
             .inferred_question()
             .unwrap();
-        let context = serde_json::to_value(&relay.snapshot.assessment_context).unwrap();
+        let messages = relay
+            .snapshot
+            .assessment_context
+            .as_ref()
+            .unwrap()
+            .messages
+            .clone();
+        assert_eq!(
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
         let command = RelayCommand::DismissQuestion {
             question: question.clone(),
         };
@@ -1608,10 +1667,21 @@ mod settled_task_tests {
             "dismissal never reaches the harness"
         );
         assert_eq!(
-            serde_json::to_value(&relay.snapshot.assessment_context).unwrap(),
-            context,
-            "dismissal grants no new authorization"
+            relay.snapshot.assessment_context.as_ref().unwrap().messages,
+            messages,
+            "dismissal grants no new authorization and the stored history stays as written"
         );
+        let set_aside = |relay: &DurableRelay| -> Vec<String> {
+            relay
+                .snapshot
+                .authorization_context()
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|m| m.text)
+                .collect()
+        };
+        assert_eq!(set_aside(&relay), ["Choose a target."]);
         // Late classification can finish without reopening the answered request.
         relay
             .apply_glide_assessment(revision, glide_answer("await_input", None))
@@ -1630,6 +1700,19 @@ mod settled_task_tests {
         assert_eq!(
             submit_relay(&mut relay, "dismiss-first", command.clone()),
             accepted
+        );
+        // Replay rebuilt the fence.
+        assert_eq!(set_aside(&relay), ["Choose a target."]);
+
+        // A generated prompt (a mailbox wake) is not the person's message:
+        // it leaves the fence in force, and the reply it produces is new.
+        submit_relay(&mut relay, "mailbox-wake-1", prompt("[mailbox] wake"));
+        relay.claim_pending_commands(true).unwrap();
+        reply(&mut relay, "Background work finished.");
+        finish_prompt(&mut relay, "mailbox-wake-1");
+        assert_eq!(
+            set_aside(&relay),
+            ["Choose a target.", "Background work finished."]
         );
 
         submit_relay(
@@ -1652,6 +1735,16 @@ mod settled_task_tests {
             .inferred_question()
             .unwrap();
         assert_ne!(question, next);
+        assert_eq!(
+            set_aside(&relay),
+            [
+                "Choose a target.",
+                "Which target: A or B?",
+                "Background work finished.",
+                "What about the other target?"
+            ],
+            "a person message ends the fence's effect: older replies are history again"
+        );
         let response = relay.handle(relay_request(
             "stale-dismissal",
             RelayRequest::Submit {
@@ -1696,6 +1789,142 @@ mod settled_task_tests {
             "{response:?}"
         );
         assert!(relay.snapshot.assessment_questions.contains("permission"));
+    }
+
+    #[test]
+    fn an_answered_elicitation_sets_aside_earlier_replies_across_replay() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "deploy-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        // The answer arrives mid-turn, and the chunks carry no message id.
+        reply(&mut relay, "Should I deploy?");
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: "form".into(),
+                action: "accept".into(),
+                reply: Some("Yes".into()),
+            })
+            .unwrap();
+        reply(&mut relay, "Deployed.");
+        finish_prompt(&mut relay, "deploy-turn");
+        drop(relay);
+        std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
+        let relay = claude_relay(dir.path());
+        let texts: Vec<_> = relay
+            .snapshot
+            .authorization_context()
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, ["Deploy it.", "Deployed."]);
+
+        // A turn that ends with no text after the answer still names its
+        // reply as the question message.
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "silent-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        reply_with_id(&mut relay, Some("m-ask"), "Should I deploy?");
+        answer_elicitation(&mut relay);
+        finish_prompt(&mut relay, "silent-turn");
+        assert_eq!(visible_replies(&relay), ["Deploy it."]);
+        assert_eq!(
+            relay.snapshot.completed_reply_message.as_deref(),
+            Some("agent:m-ask")
+        );
+
+        // A harness that reuses one message id before and after the answer:
+        // the later entry shares the id, and a dismissal sets both aside.
+        use crate::relay::test_support::glide_answer;
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        submit_relay(&mut relay, "reuse-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        reply_with_id(&mut relay, Some("m1"), "Should I deploy?");
+        answer_elicitation(&mut relay);
+        reply_with_id(&mut relay, Some("m1"), "Deployed. Want me to also tag it?");
+        assert_eq!(
+            visible_replies(&relay),
+            ["Deploy it.", "Deployed. Want me to als"],
+            "the answer set aside only the question"
+        );
+        finish_prompt(&mut relay, "reuse-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("await_input", None))
+            .unwrap();
+        let question = relay
+            .snapshot
+            .assessment
+            .as_ref()
+            .unwrap()
+            .inferred_question()
+            .unwrap();
+        submit_relay(
+            &mut relay,
+            "dismiss-reuse",
+            RelayCommand::DismissQuestion { question },
+        );
+        assert_eq!(visible_replies(&relay), ["Deploy it."]);
+        reply_with_id(&mut relay, Some("m1"), "Later news.");
+        let relay = reopen(dir.path(), relay);
+        assert_eq!(visible_replies(&relay), ["Deploy it.", "Later news."]);
+        drop(relay);
+
+        // Eviction after the fence is set keeps it on the same entries.
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "evict-turn", prompt("Deploy it."));
+        relay.claim_pending_commands(true).unwrap();
+        let block = |c: char| c.to_string().repeat(5000);
+        reply_with_id(&mut relay, Some("a"), &block('A'));
+        reply_with_id(&mut relay, Some("b"), &block('B'));
+        answer_elicitation(&mut relay);
+        reply_with_id(&mut relay, Some("c"), &block('C'));
+        reply_with_id(&mut relay, Some("d"), &block('D'));
+        // 20,000 bytes exceed the 16 KiB budget: A was evicted, B stays stored.
+        let stored = |relay: &DurableRelay| -> String {
+            relay
+                .snapshot
+                .assessment_context
+                .as_ref()
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.text.chars().next())
+                .collect()
+        };
+        assert_eq!(stored(&relay), "BCD");
+        let letters = |relay: &DurableRelay| -> String {
+            visible_replies(relay)
+                .iter()
+                .filter(|t| !t.starts_with("Deploy"))
+                .filter_map(|t| t.chars().next())
+                .collect()
+        };
+        assert_eq!(letters(&relay), "CD");
+        reply_with_id(&mut relay, Some("e"), &block('E'));
+        // E's arrival evicts B, the last set-aside entry; the fence reaches 0.
+        assert_eq!(stored(&relay), "CDE");
+        assert_eq!(letters(&relay), "CDE");
+        let relay = reopen(dir.path(), relay);
+        assert_eq!(stored(&relay), "CDE");
+        assert_eq!(letters(&relay), "CDE");
     }
 
     fn task(id: &str) -> crate::relay::AirTaskFixture {

@@ -27,10 +27,7 @@ pub use startup::{
     SetupReport, actionable_errors, add_detected_profiles, run_setup, run_setup_command,
 };
 
-// Published from containers/Containerfile.agent-dev by
-// .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
-// Git, gh, and the pinned ACP bridges, so a first session does not have to
-// install them.
+// Session tools and harnesses are installed after cloning the project.
 pub use mj_client::target::DEFAULT_IMAGE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -48,6 +48,7 @@ impl Controller {
             environment.insert("IS_SANDBOX".into(), "1".into());
         }
         Ok(ReviewerLaunchConfig {
+            role: mj_core::worker_launch::ReviewChildRole::Reviewer,
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             bridge_command: bridge_command.into(),

@@ -1473,6 +1473,7 @@ fn golden_phone_session_snapshot() {
         error: None,
         refreshed_at_epoch_seconds: 0,
         rate_limited_until_epoch_seconds: None,
+        next_check_at_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
         (
@@ -1585,6 +1586,7 @@ fn golden_phone_session_snapshot() {
 fn controller_with_profiles(ids: &[&str]) -> Controller {
     Controller {
         config: Config {
+            images: Default::default(),
             keys: Default::default(),
             jev: Default::default(),
             quota: Default::default(),
@@ -2269,6 +2271,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                 error: None,
                 refreshed_at_epoch_seconds: now - age.as_secs(),
                 rate_limited_until_epoch_seconds: Some(now + 600),
+                next_check_at_epoch_seconds: Some(now + 600),
             },
         )]);
         let projected = viewer_snapshot(
@@ -2453,10 +2456,12 @@ fn phone_cancel_targets_the_matching_background_action() {
     let first = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
         lifecycle: None,
+        kind: None,
     };
     let second = PhoneActionControl {
         cancelled: Arc::new(AtomicBool::new(false)),
         lifecycle: None,
+        kind: None,
     };
     let action_sessions =
         std::collections::BTreeMap::from([(1, "session-1".into()), (2, "session-2".into())]);
@@ -2483,6 +2488,7 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let control = PhoneActionControl {
             cancelled: create.cancelled.clone(),
             lifecycle: Some(create),
+            kind: None,
         };
         let cancelling = control.clone();
         let committing = control.clone();

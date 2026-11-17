@@ -99,6 +99,8 @@ struct Cli {
 // argument types do.
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    /// Build and inspect project session images from mise recipes.
+    Image(image_commands::ImageArgs),
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
     /// Open a minimal local session with direct Ctrl-key commands.
@@ -218,6 +220,8 @@ enum Command {
     Models(api_commands::ModelsArgs),
     /// Show each profile's remaining quota as the daemon last read it.
     Quota(api_commands::QuotaArgs),
+    /// Show each host's CPU, RAM and disk space as the daemon last read it.
+    Hosts(api_commands::HostsArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
     /// Removed; kept so the old name says what replaced it.
@@ -861,6 +865,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
 fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
+        Some(Command::Image(_)) => "image",
         Some(Command::Go(_)) => "go",
         Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
@@ -907,6 +912,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
         Some(Command::Quota(_)) => "quota",
+        Some(Command::Hosts(_)) => "hosts",
         Some(Command::SetConfig(_)) => "set-config",
         Some(Command::Close(_)) => "close",
         Some(Command::CancelTurn(_)) => "cancel-turn",
@@ -1161,6 +1167,9 @@ async fn run_command(
             }
             login(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Image(args)) => image_commands::run(args)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
             api_commands::new_session(args, workspace)
@@ -1247,6 +1256,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Quota(args)) => api_commands::quota(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Hosts(args)) => api_commands::hosts(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::SetConfig(args)) => api_commands::set_config(args)
@@ -3092,3 +3104,5 @@ mod tests {
         assert!(controller.state.sessions.contains_key(session_id));
     }
 }
+
+mod image_commands;

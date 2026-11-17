@@ -6,6 +6,7 @@
 //! and reconnect, so the sequence lives here once and each caller supplies
 //! only what it tells the operator.
 
+use mj_core::targets::SshTrafficClass;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -237,6 +238,7 @@ impl Controller {
     /// working between an observation and this call.
     pub async fn upgrade_session_worker(
         &self,
+        admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
@@ -310,7 +312,7 @@ impl Controller {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
                 let Some(mut lease) =
-                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                    super::IdleWorkspaceLease::acquire_for_upgrade(admission, &handle, harness).await?
                 else {
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 };
@@ -422,11 +424,12 @@ impl Controller {
                 if let Some(target) = target {
                     owner.verify_target(target)?;
                     if crate::database::load_worker_restart(session_id)?.is_some() {
-                        let output =
-                            executor.execute(&super::worker_binary::worker_liveness_command(
-                                restart.backend,
-                                restart.worker_root,
-                            ))?;
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            restart.backend,
+                            session_id,
+                            restart.worker_root,
+                        )?;
                         anyhow::ensure!(
                             output.status == 0
                                 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
@@ -497,8 +500,11 @@ impl Controller {
                         || crate::database::worker_restart_phase(session_id)?
                             == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
                     {
-                        let output = executor.execute(
-                            &super::worker_binary::worker_liveness_command(backend, worker_root),
+                        let output = super::worker_binary::probe_worker_liveness(
+                            executor,
+                            backend,
+                            session_id,
+                            worker_root,
                         )?;
                         anyhow::ensure!(
                             output.status == 0
@@ -546,6 +552,7 @@ impl Controller {
                     super::execute_checked(
                         executor,
                         targets::command_on_locator(
+                            SshTrafficClass::Control,
                             backend,
                             session_id,
                             vec![
@@ -760,6 +767,29 @@ mod tests {
             yielded: AtomicBool,
         }
         impl CommandExecutor for LaunchThenHandoff {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 if !self.yielded.load(Ordering::SeqCst) {
                     assert!(
@@ -862,7 +892,7 @@ mod tests {
         );
     }
 
-    /// Fails every command after the first, so a restart gets past its stop and
+    /// Fails every command after the first two (the control-worker check and the stop), so a restart gets past its stop and
     /// then loses the worker it was replacing.
     #[cfg(unix)]
     struct StopSucceedsThenFails {
@@ -871,10 +901,34 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
             executed.push(command.program.clone());
-            if executed.len() == 1 {
+            // The first two commands are the control-worker check and the stop.
+            if executed.len() <= 2 {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: Vec::new(),
@@ -894,6 +948,29 @@ mod tests {
 
     #[cfg(unix)]
     impl CommandExecutor for FailingStop {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: 1,
@@ -980,6 +1057,29 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct FailingCommands(AtomicUsize);
         impl CommandExecutor for FailingCommands {
+            fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+                mj_core::targets::DeadlinePause::none()
+            }
+
+            fn cancellation_requested_without_deadline(&self) -> bool {
+                self.cancellation_requested()
+            }
+
+            fn execute_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute(command)
+            }
+
+            fn execute_with_stdin_without_deadline(
+                &self,
+                command: &mj_core::targets::CommandSpec,
+                input: &mut (dyn std::io::Read + Send),
+            ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+                self.execute_with_stdin(command, input)
+            }
+
             fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandOutput {
@@ -1008,13 +1108,14 @@ mod tests {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()).into(),
             binary_refresh: None,
             launch_refresh: None,
             restart: targets::CommandPlan {
                 description: "restart".into(),
                 commands: vec![],
-            },
+            }
+            .into(),
         };
         assert_eq!(
             crate::session_manager::recover_worker_controlled(recovery, true, Some(id), &executor)

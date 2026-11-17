@@ -167,7 +167,7 @@ pub(super) enum StandingRead {
 pub(super) enum PersistenceCompletion {
     Open,
     Captured,
-    Close,
+    Close(crate::database::FinishedReviewResolution),
     LaunchChild { role: String },
 }
 
@@ -187,6 +187,9 @@ pub(super) enum PersistenceRequest {
         session_id: String,
         epoch: u64,
         state: Box<TurnReviewState>,
+        /// The text the host settled this save's roles from, which the store
+        /// writes verbatim instead of reading the child's mutable handback.
+        reports: Vec<crate::database::AcceptedReport>,
         requests: Vec<ReviewRequest>,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -221,6 +224,10 @@ pub(super) struct Prepared {
     pub seed: TurnReviewSeed,
     pub(super) state: TurnReviewState,
     pub(super) reviewers: Vec<ReviewerIdentity>,
+    /// The brief writer, when the settings enable one and it resolved.
+    pub(super) brief_writer: Option<ReviewerIdentity>,
+    /// Why a configured brief writer will not run, for the requester.
+    pub(super) brief_skipped: Option<String>,
     /// Committed work captured before choosing reviewers.
     pub(super) captured: Vec<mj_core::relay::RepoDelta>,
     /// Keeps recovery copies and worker upgrades off the session from
@@ -449,15 +456,18 @@ pub(super) async fn persistence_loop(
                 session_id,
                 epoch,
                 state,
+                reports,
                 requests,
                 reply,
             } => {
                 let save = environment.clone();
                 let owner = session_id.clone();
-                let result = tokio::task::spawn_blocking(move || save.save_state(&owner, &state))
-                    .await
-                    .map_err(|error| format!("review outcome save stopped: {error}"))
-                    .and_then(|result| result);
+                let result = tokio::task::spawn_blocking(move || {
+                    save.save_reviewer_outcome(&owner, &state, &reports)
+                })
+                .await
+                .map_err(|error| format!("review outcome save stopped: {error}"))
+                .and_then(|result| result);
                 let _ = reply.send(result.clone());
                 if let Err(error) = events.send(HostEvent::ReviewerOutcomeSaved {
                     session_id,
@@ -566,11 +576,17 @@ pub(super) async fn persistence_loop(
             } => {
                 let environment = environment.clone();
                 let owner = session_id.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || environment.save_state(&owner, &state))
-                        .await
-                        .map_err(|error| format!("review state persistence task stopped: {error}"))
-                        .and_then(|result| result);
+                let close = match &completion {
+                    Some(PersistenceCompletion::Close(resolution)) => Some(*resolution),
+                    _ => None,
+                };
+                let result = tokio::task::spawn_blocking(move || match close {
+                    Some(resolution) => environment.close_review(&owner, &state, resolution),
+                    None => environment.save_state(&owner, &state),
+                })
+                .await
+                .map_err(|error| format!("review state persistence task stopped: {error}"))
+                .and_then(|result| result);
                 if let Some(completion) = completion {
                     let _ = events.send(HostEvent::StateSaved {
                         session_id,

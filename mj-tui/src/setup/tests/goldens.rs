@@ -1045,12 +1045,136 @@ fn golden_global_subagent_discovery_and_save() {
         select_choice(&mut dashboard, "high");
         append_setup_state(&mut output, task, &mut dashboard, 140, 40);
     }
+    // The shared set is active, so the YOLO values are hidden and no-op.
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            dialog
+                .paths()
+                .contains(&vec!["subagents".into(), "use_same_on_all_targets".into()])
+        );
+        assert!(
+            !dialog
+                .paths()
+                .iter()
+                .any(|path| path.get(1).is_some_and(|key| key == "yolo"))
+        );
+    }
+    choose(&mut dashboard, "use_same_on_all_targets");
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.draft["subagents"]["use_same_on_all_targets"], false);
+        assert!(
+            dialog
+                .paths()
+                .iter()
+                .any(|path| path.get(1).is_some_and(|key| key == "yolo"))
+        );
+        for task in ["straightforward", "subtle", "oracle"] {
+            assert!(dialog.draft["subagents"]["yolo"][task]["model"].is_null());
+        }
+    }
+    append_setup_state(
+        &mut output,
+        "yolo choices start empty",
+        &mut dashboard,
+        140,
+        40,
+    );
+    let yolo_model = vec![
+        "subagents".into(),
+        "yolo".into(),
+        "straightforward".into(),
+        "model".into(),
+    ];
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.prepare();
+        dialog.focus_path(&yolo_model);
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "shared");
+    dashboard.take_setup_subagent_choices();
+    let yolo_effort = vec![
+        "subagents".into(),
+        "yolo".into(),
+        "straightforward".into(),
+        "effort".into(),
+    ];
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .focus_path(&yolo_effort);
+    dashboard.handle_key(key(KeyCode::Enter));
+    select_choice(&mut dashboard, "high");
+    append_setup_state(&mut output, "yolo straightforward", &mut dashboard, 140, 40);
+
+    // Checking the box hides the YOLO rows and makes them no-op, but keeps
+    // the values for the next uncheck.
+    choose(&mut dashboard, "use_same_on_all_targets");
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            !dialog
+                .paths()
+                .iter()
+                .any(|path| path.get(1).is_some_and(|key| key == "yolo"))
+        );
+        let config = config_from_draft(dialog.draft.clone()).unwrap();
+        assert!(config.subagents.use_same_on_all_targets);
+        assert_eq!(
+            config
+                .subagents
+                .yolo
+                .straightforward
+                .as_ref()
+                .unwrap()
+                .model,
+            "shared"
+        );
+        assert_eq!(
+            config
+                .subagents
+                .choice_for(mj_core::subagent::SubagentTaskType::Straightforward, true)
+                .unwrap()
+                .model,
+            "shared"
+        );
+    }
+    append_setup_state(
+        &mut output,
+        "shared choices hide yolo settings",
+        &mut dashboard,
+        140,
+        40,
+    );
+    choose(&mut dashboard, "use_same_on_all_targets");
+    {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(
+            dialog.draft["subagents"]["yolo"]["straightforward"]["model"],
+            "shared"
+        );
+        assert!(
+            dialog
+                .paths()
+                .iter()
+                .any(|path| path.get(1).is_some_and(|key| key == "yolo"))
+        );
+    }
+    append_setup_state(
+        &mut output,
+        "yolo choices restored",
+        &mut dashboard,
+        140,
+        40,
+    );
+
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let DashboardAction::SaveSetup { updated, .. } = dialog.save(&Default::default()) else {
         panic!("save");
     };
     let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert!(saved.subagents.is_configured());
+    assert!(saved.subagents.is_configured_for(false));
     assert_eq!(saved.subagents.subtle.unwrap().model, "smarter");
     assert_eq!(saved.subagents.oracle.unwrap().model, "smarter");
     dialog.saving = false;
@@ -1088,7 +1212,7 @@ fn golden_global_subagent_discovery_and_save() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     let config = config_from_draft(dialog.draft.clone()).unwrap();
     assert!(config.subagents.straightforward.is_none());
-    assert!(!config.subagents.is_configured());
+    assert!(!config.subagents.is_configured_for(false));
     assert!(dialog.draft["subagents"]["straightforward"]["effort"].is_null());
     let before_rejected_save = dialog.draft.clone();
     let _ = dialog;

@@ -299,9 +299,9 @@ impl RuntimeState {
     ) -> Result<()> {
         let session_id = request.preparation.selection.session_id.clone();
         let operation_id = request.preparation.operation_id.clone();
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        let result =
-            self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
+        let result = self
+            .admit_move_session(request, None, Some((reason, continuation)))
+            .await?;
         let state = self.clone();
         tokio::spawn(async move {
             let channel = result.result.clone();
@@ -325,14 +325,12 @@ impl RuntimeState {
         request: MoveSessionRequest,
         control: LifecycleControl,
     ) -> Result<StartedLifecycle> {
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        self.admit_move_session(request, capacity, Some(control), None)
+        self.admit_move_session(request, Some(control), None).await
     }
 
-    fn admit_move_session(
+    async fn admit_move_session(
         self: &Arc<Self>,
         request: MoveSessionRequest,
-        capacity_lease: Option<capacity::ContainerCapacityLease>,
         control: Option<LifecycleControl>,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
     ) -> Result<StartedLifecycle> {
@@ -358,25 +356,28 @@ impl RuntimeState {
             session_id.clone(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
+                origin: if quota_move.is_some() { super::lifecycle::LifecycleOrigin::Automatic } else { super::lifecycle::LifecycleOrigin::Person },
                 resume_workspace_id: None,
                 request_key: Some(key),
                 control,
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             Some(acceptance),
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, session_admission| async move {
+                let result = async {
+                    let _capacity_lease = state.reserve_container_capacity_for_move(&request).await?;
                 let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
-                let _capacity_lease = capacity_lease;
-                let result = state
+                state
                     .clone()
                     .run_move_controller_work(
                         session_id.clone(),
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled_with_admission(
+                                .move_session_managed_controlled_with_admission(&session_admission,
                                     &catalog,
                                     request, quota_move, &executor, &manager,
                                     move || { accepted.send_replace(Some(Ok(()))); },
@@ -384,7 +385,8 @@ impl RuntimeState {
                                 .await
                         },
                     )
-                    .await;
+                    .await
+                }.await;
                 // Report before completing the admitted lifecycle, including
                 // refusals that happen before any Move record can be saved.
                 if let Some((operation, destination)) = quota_failure
@@ -405,7 +407,7 @@ impl RuntimeState {
                 }
                 result.map(DaemonLifecycleResult::Move)
             },
-        )?;
+        ).await?;
         self.set_lifecycle_resume_destination(
             &session_id,
             selection.profile_id.clone().unwrap_or_default(),
@@ -421,9 +423,14 @@ impl RuntimeState {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         let session_id = selection.session_id.clone();
-        let capacity = self.reserve_container_capacity_for_move(&request).await?;
-        let result = self.admit_move_session(request, capacity, None, None)?;
+        let mut result = self.admit_move_session(request, None, None).await?;
         let channel = result.result.clone();
+        // Resource/preparation refusals still precede acceptance on the
+        // legacy wait-for-outcome surface, just as on the receipt API.
+        if let Err(error) = result.confirm_acceptance().await {
+            self.remove_completed_lifecycle(&channel);
+            return Err(error);
+        }
         let result = Self::wait_lifecycle_result(result.result).await;
         self.remove_completed_lifecycle(&channel);
         match result {
@@ -437,7 +444,7 @@ impl RuntimeState {
         }
     }
 
-    pub(super) fn recover_moves(
+    pub(super) async fn recover_moves(
         self: &Arc<Self>,
         operations: Vec<MoveOperation>,
         close_operations: &BTreeSet<String>,
@@ -479,32 +486,41 @@ impl RuntimeState {
             } else {
                 LifecyclePhase::Executing
             };
-            let result = self.admit_lifecycle(
-                id.clone(),
-                LifecycleKind::Move,
-                super::lifecycle::LifecycleStart {
-                    resume_workspace_id: None,
-                    request_key: Some(key),
-                    control: None,
-                    phase,
-                    move_operation_id: Some(operation.operation_id.clone()),
-                    deferrable_admission: None,
-                },
-                move |state, session_id, cancelled| async move {
-                    state
-                        .run_move_controller_work(
-                            session_id,
-                            cancelled,
-                            |mut controller, executor, manager| async move {
-                                controller
-                                    .recover_move_managed_controlled(operation, &executor, &manager)
-                                    .await
-                            },
-                        )
-                        .await
-                        .map(DaemonLifecycleResult::Move)
-                },
-            )?;
+            let result = self
+                .admit_lifecycle(
+                    id.clone(),
+                    LifecycleKind::Move,
+                    super::lifecycle::LifecycleStart {
+                        origin: super::lifecycle::LifecycleOrigin::Automatic,
+                        resume_workspace_id: None,
+                        request_key: Some(key),
+                        control: None,
+                        phase,
+                        move_operation_id: Some(operation.operation_id.clone()),
+                        deferrable_admission: None,
+                        holds_through_drain: false,
+                    },
+                    move |state, session_id, cancelled, session_admission| async move {
+                        state
+                            .run_move_controller_work(
+                                session_id,
+                                cancelled,
+                                |mut controller, executor, manager| async move {
+                                    controller
+                                        .recover_move_managed_controlled(
+                                            &session_admission,
+                                            operation,
+                                            &executor,
+                                            &manager,
+                                        )
+                                        .await
+                                },
+                            )
+                            .await
+                            .map(DaemonLifecycleResult::Move)
+                    },
+                )
+                .await?;
             owned.insert(id.clone());
             let state = self.clone();
             tokio::spawn(async move {
@@ -534,7 +550,7 @@ impl RuntimeState {
         })
     }
 
-    pub(super) fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {
+    pub(super) async fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {
         let ids = {
             let owner = self.owner();
             owner
@@ -568,11 +584,12 @@ impl RuntimeState {
                 .collect::<Vec<_>>()
         };
         for id in ids {
-            let result = self.start_or_join_lifecycle(
-                id.clone(),
-                LifecycleKind::Cleanup,
-                |state, id, cancelled| async move {
-                    state
+            let result = self
+                .start_automatic_lifecycle(
+                    id.clone(),
+                    LifecycleKind::Cleanup,
+                    |state, id, cancelled, _session_admission| async move {
+                        state
                         .run_move_controller_work(
                             id.clone(),
                             cancelled,
@@ -609,8 +626,9 @@ impl RuntimeState {
                         )
                         .await
                         .map(DaemonLifecycleResult::Move)
-                },
-            );
+                    },
+                )
+                .await;
             match result {
                 Ok(result) => {
                     let state = self.clone();
@@ -665,15 +683,6 @@ impl RuntimeState {
         Fut: std::future::Future<Output = Result<MoveOutcome>>,
     {
         tokio::task::spawn_blocking(move || {
-            let reserving = std::time::Instant::now();
-            let _reservation =
-                reserve_recovery_or_cancel(&self.recovery_observer, &session_id, &cancelled)?;
-            tracing::info!(
-                %session_id,
-                phase = "recovery reservation",
-                elapsed_ms = reserving.elapsed().as_millis() as u64,
-                "move phase finished"
-            );
             let loading = std::time::Instant::now();
             let controller = (self.controller_loader)()?;
             tracing::info!(
@@ -814,10 +823,10 @@ mod admission_tests {
         let copy = held_command(directory.path(), "copy Move workspace");
         let state = super::super::tests::test_runtime_state();
         let result = state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
@@ -841,6 +850,7 @@ mod admission_tests {
                         .map(DaemonLifecycleResult::Move)
                 },
             )
+            .await
             .unwrap();
         wait_for_file(&directory.path().join("pid")).await;
         let pid: i32 = std::fs::read_to_string(directory.path().join("pid"))
@@ -909,10 +919,10 @@ mod admission_tests {
         let swap = held_command(directory.path(), "swap the harness in place");
         let state = super::super::tests::test_runtime_state();
         let result = state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 "moving-session".into(),
                 LifecycleKind::Move,
-                move |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled, _session_admission| async move {
                     state
                         .run_move_controller_work(
                             session_id,
@@ -926,6 +936,7 @@ mod admission_tests {
                         .map(DaemonLifecycleResult::Move)
                 },
             )
+            .await
             .unwrap();
         wait_for_file(&directory.path().join("pid")).await;
         assert!(

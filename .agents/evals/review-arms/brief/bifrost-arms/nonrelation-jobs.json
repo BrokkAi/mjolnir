@@ -1,0 +1,106 @@
+[
+  {
+    "bug": "rust-enum-variant-named-fields-omitted",
+    "arm": "BT"
+  },
+  {
+    "bug": "model-overload-unknown-competitor-discarded",
+    "arm": "BT"
+  },
+  {
+    "bug": "model-overload-unknown-competitor-discarded",
+    "arm": "A"
+  },
+  {
+    "bug": "rust-enum-variant-named-fields-omitted",
+    "arm": "A"
+  },
+  {
+    "bug": "rust-bare-value-admits-associated-constant",
+    "arm": "A"
+  },
+  {
+    "bug": "maintainability-file-cap-missing-truncated",
+    "arm": "A"
+  },
+  {
+    "bug": "ruby-constant-navigation-climbs-to-terminal",
+    "arm": "A"
+  },
+  {
+    "bug": "rust-option-return-implicitly-unwrapped",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-bare-value-admits-associated-constant",
+    "arm": "BT"
+  },
+  {
+    "bug": "javascript-object-method-indexed-as-field",
+    "arm": "BT"
+  },
+  {
+    "bug": "matching-analyzer-epoch-needs-writer-slot",
+    "arm": "BT"
+  },
+  {
+    "bug": "mcp-timed-out-progress-survives-response",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-while-let-binder-body-field",
+    "arm": "A"
+  },
+  {
+    "bug": "ruby-constant-navigation-climbs-to-terminal",
+    "arm": "BT"
+  },
+  {
+    "bug": "csharp-single-file-namespace-prunes-usages",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-option-return-implicitly-unwrapped",
+    "arm": "A"
+  },
+  {
+    "bug": "rust-while-let-binder-body-field",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-importer-planning-widens-to-code-mentions",
+    "arm": "BT"
+  },
+  {
+    "bug": "javascript-object-method-indexed-as-field",
+    "arm": "A"
+  },
+  {
+    "bug": "matching-analyzer-epoch-needs-writer-slot",
+    "arm": "A"
+  },
+  {
+    "bug": "maintainability-file-cap-missing-truncated",
+    "arm": "BT"
+  },
+  {
+    "bug": "rust-importer-planning-widens-to-code-mentions",
+    "arm": "A"
+  },
+  {
+    "bug": "mcp-timed-out-progress-survives-response",
+    "arm": "A"
+  },
+  {
+    "bug": "csharp-single-file-namespace-prunes-usages",
+    "arm": "A"
+  },
+  {
+    "bug": "rust-item-macro-evades-plain-struct-drop-proof",
+    "arm": "A"
+  }
+]

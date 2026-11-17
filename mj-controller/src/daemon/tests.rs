@@ -158,6 +158,29 @@ fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
 async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
     struct StatusExecutor(i32);
     impl CommandExecutor for StatusExecutor {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
                 status: self.0,
@@ -243,11 +266,12 @@ async fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
         let result = state
             .start_or_join_lifecycle("session-1".into(), kind, {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             })
+            .await
             .unwrap();
         let cancellable = state.active_lifecycles()[0].cancellable;
         let refused = state.cancel_lifecycle_if_active("session-1").await.is_err();
@@ -488,7 +512,12 @@ async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
     assert!(stored.target.is_some());
     assert!(stored.checkpoint.is_some());
     wait_until_the_actor_serves_again(&handle).await;
-    let mut lease = handle.lease_connection().await.unwrap();
+    let mut lease = handle
+        .lease_connection(&crate::controller::test_support::session_admission(
+            handle.session_id(),
+        ))
+        .await
+        .unwrap();
     let snapshot = lease.connection_mut().sync().await.unwrap();
     lease.release();
     assert_eq!(snapshot.operational.checkpoint_barrier, None);
@@ -1023,6 +1052,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            origin: super::lifecycle::LifecycleOrigin::Person,
             acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
@@ -1053,6 +1083,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            origin: super::lifecycle::LifecycleOrigin::Person,
             acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
@@ -1200,22 +1231,37 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
         "released work is still named: {released:?}"
     );
 
-    // Four lifecycles hold the handoff; the notice names the oldest three.
+    // Four lifecycles hold the handoff; the notice names the oldest three. A
+    // running Create holds nothing: the handoff stops it and the next daemon
+    // finishes it from its create intent.
+    let create_release = Arc::new(tokio::sync::Notify::new());
+    let create = state
+        .start_or_join_lifecycle("e5dfbd99-create".into(), LifecycleKind::Create, {
+            let create_release = create_release.clone();
+            move |_, _, _, _session_admission| async move {
+                create_release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .await
+        .unwrap();
     let sessions = ["e5dfbd99-a", "e5dfbd99-b", "e5dfbd99-c", "e5dfbd99-d"];
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let operations = sessions
-        .map(|session| {
-            let release = release.clone();
+    let mut operations = Vec::new();
+    for session in sessions {
+        let release = release.clone();
+        operations.push(
             state
-                .start_or_join_lifecycle(session.into(), LifecycleKind::Create, {
-                    move |_, _, _| async move {
+                .start_or_join_lifecycle(session.into(), LifecycleKind::Resume, {
+                    move |_, _, _, _session_admission| async move {
                         drop(release.acquire().await.unwrap());
                         Ok(DaemonLifecycleResult::Done)
                     }
                 })
-                .unwrap()
-        })
-        .to_vec();
+                .await
+                .unwrap(),
+        );
+    }
     let lifecycle_blocker = || async {
         let named = blockers().await;
         let [blocker] = named.as_slice() else {
@@ -1225,8 +1271,8 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     };
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (")
-            && blocker.matches("create e5dfbd99 (").count() == 3
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (")
+            && blocker.matches("resume e5dfbd99 (").count() == 3
             && blocker.ends_with("; and 1 more"),
         "{blocker}"
     );
@@ -1244,12 +1290,14 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
     executor.stage_started(ProvisionStage::Syncing);
     let blocker = lifecycle_blocker().await;
     assert!(
-        blocker.starts_with("session lifecycle x4: create e5dfbd99 (Clone + Sync, "),
+        blocker.starts_with("session lifecycle x4: resume e5dfbd99 (Clone + Sync, "),
         "{blocker}"
     );
     executor.stage_finished(ProvisionStage::Cloning);
     executor.stage_finished(ProvisionStage::Syncing);
     release.add_permits(sessions.len());
+    create_release.notify_one();
+    RuntimeState::wait_lifecycle_result(create).await.unwrap();
     for operation in operations {
         RuntimeState::wait_lifecycle_result(operation)
             .await
@@ -1285,9 +1333,9 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     let shutdown = CancellationToken::new();
     let release = Arc::new(tokio::sync::Notify::new());
     let operation = state
-        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Create, {
+        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_, _, cancelled| async move {
+            move |_, _, cancelled, _session_admission| async move {
                 release.notified().await;
                 ensure!(
                     !cancelled.load(Ordering::Acquire),
@@ -1296,6 +1344,7 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::time::pause();
     for _ in 0..4 {
@@ -2552,38 +2601,76 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     let state = test_runtime_state();
     let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let release = Arc::new(tokio::sync::Notify::new());
+    let (started, ready) = tokio::sync::oneshot::channel();
     let first = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let starts = starts.clone();
             let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
+            move |_state, _session_id, _cancelled, _session_admission| async move {
                 starts.fetch_add(1, Ordering::AcqRel);
+                started.send(()).unwrap();
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
-    tokio::task::yield_now().await;
+    ready.await.unwrap();
     let second = state
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::Suspend,
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 panic!("joined lifecycle request started duplicate work")
             },
         )
+        .await
         .unwrap();
     assert_eq!(starts.load(Ordering::Acquire), 1);
     assert!(
         state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 "session-1".into(),
                 LifecycleKind::Resume,
-                |_state, _session_id, _cancelled| async move { Ok(DaemonLifecycleResult::Done) },
+                |_state, _session_id, _cancelled, _session_admission| async move {
+                    Ok(DaemonLifecycleResult::Done)
+                },
             )
+            .await
             .is_err()
     );
 
+    let mut waiting = Box::pin(state.start_or_join_lifecycle(
+        "session-1".into(),
+        LifecycleKind::Resume,
+        |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+    ));
+    assert!(futures::poll!(&mut waiting).is_pending());
+    assert!(
+        state.owner().lifecycle["session-1"]
+            .control
+            .cancel_cause()
+            .is_none()
+    );
+    let mut waiting_second = Box::pin(state.start_or_join_lifecycle(
+        "session-1".into(),
+        LifecycleKind::Restart,
+        |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+    ));
+    assert!(futures::poll!(&mut waiting_second).is_pending());
+    let cancel = LifecycleControl::default();
+    let mut cancelled_wait = Box::pin(state.start_or_join_lifecycle_controlled(
+        "session-1".into(),
+        LifecycleKind::ForceStop,
+        None,
+        None,
+        Some(cancel.clone()),
+        |_, _, _, _session_admission| async { panic!("cancelled queued work ran") },
+    ));
+    assert!(futures::poll!(&mut cancelled_wait).is_pending());
+    assert!(cancel.request_cancel("test cancels queued request"));
+    assert!(cancelled_wait.await.is_err());
+    assert_eq!(state.owner().lifecycle_intents["session-1"].len(), 2);
     // The daemon task is independent of either client waiter.
     drop(first);
     release.notify_one();
@@ -2591,6 +2678,52 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
         RuntimeState::wait_lifecycle_result(second).await.unwrap(),
         DaemonLifecycleResult::Done
     ));
+    RuntimeState::wait_lifecycle_result(waiting.await.unwrap())
+        .await
+        .unwrap();
+
+    RuntimeState::wait_lifecycle_result(waiting_second.await.unwrap())
+        .await
+        .unwrap();
+    // A person preempts an automatic Move only before its commit. The same
+    // registry waits for a committed Move without setting its cancel flag.
+    for committed in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let automatic = state
+            .start_automatic_lifecycle("automatic-move".into(), LifecycleKind::Move, {
+                let release = release.clone();
+                move |_, _, cancelled, _session_admission| async move {
+                    tokio::select! {
+                        () = release.notified() => {}
+                        () = crate::recovery_gate::wait_until_cancelled(&cancelled) => {}
+                    }
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .await
+            .unwrap();
+        let control = state.owner().lifecycle["automatic-move"].control.clone();
+        if committed {
+            assert!(control.grant_commit());
+        }
+        let mut manual = Box::pin(state.start_or_join_lifecycle(
+            "automatic-move".into(),
+            LifecycleKind::Resume,
+            |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+        ));
+        assert!(futures::poll!(&mut manual).is_pending());
+        assert_eq!(control.cancelled.load(Ordering::Acquire), !committed);
+        if committed {
+            release.notify_one();
+        }
+        RuntimeState::wait_lifecycle_result(manual.await.unwrap())
+            .await
+            .unwrap();
+        let outcome = RuntimeState::wait_lifecycle_result(automatic).await;
+        if committed {
+            outcome.unwrap();
+        }
+    }
     assert_eq!(starts.load(Ordering::Acquire), 1);
 }
 
@@ -2602,11 +2735,12 @@ async fn close_keeps_worker_target_available_for_checkpoint_lease() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
+            move |_state, _session_id, _cancelled, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
 
     assert!(state.worker_poll_exclusion_session_ids().is_empty());
@@ -2627,12 +2761,13 @@ async fn move_joins_only_matching_selections_and_runs_other_sessions_concurrentl
             Some("profile-a/target-a/discard".into()),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     assert!(crate::controller::move_session::move_owns_session(
         "move-join-one"
@@ -2643,28 +2778,29 @@ async fn move_joins_only_matching_selections_and_runs_other_sessions_concurrentl
             LifecycleKind::Move,
             None,
             Some("profile-a/target-a/discard".into()),
-            |_, _, _| async move { panic!("duplicate move launched a second writer") },
+            |_, _, _, _session_admission| async move {
+                panic!("duplicate move launched a second writer")
+            },
         )
+        .await
         .unwrap();
-    assert!(
-        state
-            .start_or_join_lifecycle_with_key(
-                "move-join-one".into(),
-                LifecycleKind::Move,
-                None,
-                Some("profile-b/target-a/discard".into()),
-                |_, _, _| async move { Ok(DaemonLifecycleResult::Done) },
-            )
-            .is_err()
-    );
+    let mut differing = Box::pin(state.start_or_join_lifecycle_with_key(
+        "move-join-one".into(),
+        LifecycleKind::Move,
+        None,
+        Some("profile-b/target-a/discard".into()),
+        |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+    ));
+    assert!(futures::poll!(&mut differing).is_pending());
     let unrelated = state
         .start_or_join_lifecycle_with_key(
             "move-join-two".into(),
             LifecycleKind::Move,
             None,
             Some("profile-b/target-b/start".into()),
-            |_, _, _| async move { Ok(DaemonLifecycleResult::Done) },
+            |_, _, _, _session_admission| async move { Ok(DaemonLifecycleResult::Done) },
         )
+        .await
         .unwrap();
     let unrelated_channel = unrelated.clone();
     tokio::time::timeout(
@@ -2685,6 +2821,12 @@ async fn move_joins_only_matching_selections_and_runs_other_sessions_concurrentl
         .await
         .unwrap();
     state.remove_completed_lifecycle(&channel);
+    let differing = differing.await.unwrap();
+    let channel = differing.clone();
+    RuntimeState::wait_lifecycle_result(differing)
+        .await
+        .unwrap();
+    state.remove_completed_lifecycle(&channel);
     assert!(!crate::controller::move_session::move_owns_session(
         "move-join-one"
     ));
@@ -2699,8 +2841,9 @@ async fn move_task_panic_reports_failure_and_releases_mutation_hold() {
             LifecycleKind::Move,
             None,
             Some("destination".into()),
-            |_, _, _| async move { panic!("injected move task panic") },
+            |_, _, _, _session_admission| async move { panic!("injected move task panic") },
         )
+        .await
         .unwrap();
     let channel = result.clone();
     let error = tokio::time::timeout(
@@ -2724,11 +2867,12 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
+            move |_state, _session_id, _cancelled, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     assert_eq!(
         state.worker_poll_exclusion_session_ids(),
@@ -2775,7 +2919,7 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Cleanup, {
             let saw_early_cancellation = saw_early_cancellation.clone();
-            move |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled, _session_admission| async move {
                 let executor = DaemonStageReportingExecutor::new(
                     crate::targets::ProcessExecutor,
                     state,
@@ -2788,6 +2932,7 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
 
@@ -2855,6 +3000,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
+            origin: super::lifecycle::LifecycleOrigin::Person,
             acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
@@ -2908,6 +3054,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            origin: super::lifecycle::LifecycleOrigin::Person,
             acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
@@ -2943,11 +3090,12 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     let cleanup = state
         .start_or_join_lifecycle("cleanup-gap".into(), LifecycleKind::Cleanup, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     state.remove_completed_lifecycle(&result);
     let view = state.active_lifecycles();
@@ -2970,11 +3118,12 @@ async fn session_projection_reads_lifecycles_without_relocking_the_controller() 
     let running = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let projecting = state.clone();
@@ -2997,17 +3146,21 @@ async fn lifecycle_identity_survives_join_but_changes_for_next_operation() {
     let first = state
         .start_or_join_lifecycle("identity".into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let first_id = state.active_lifecycles()[0].operation_id.clone();
     let joined = state
-        .start_or_join_lifecycle("identity".into(), LifecycleKind::Resume, |_, _, _| async {
-            panic!("joined operation must not run twice")
-        })
+        .start_or_join_lifecycle(
+            "identity".into(),
+            LifecycleKind::Resume,
+            |_, _, _, _session_admission| async { panic!("joined operation must not run twice") },
+        )
+        .await
         .unwrap();
     assert_eq!(state.active_lifecycles()[0].operation_id, first_id);
     release.notify_one();
@@ -3019,11 +3172,12 @@ async fn lifecycle_identity_survives_join_but_changes_for_next_operation() {
     let second = state
         .start_or_join_lifecycle("identity".into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let second_id = state.active_lifecycles()[0].operation_id.clone();
     assert_ne!(second_id, first_id);
@@ -3053,28 +3207,31 @@ async fn completed_close_allows_a_fresh_request_after_its_caller_disconnects() {
             Some("first-request".into()),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     bail!("injected close failure")
                 }
             },
         )
+        .await
         .unwrap();
     let first_result = first.clone();
     drop(first);
-    let fresh_request = || {
-        state.start_or_join_lifecycle_with_key(
-            "child-close".into(),
-            LifecycleKind::Suspend,
-            None,
-            Some("fresh-request".into()),
-            |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
-        )
+    let fresh_request = || async {
+        state
+            .start_or_join_lifecycle_with_key(
+                "child-close".into(),
+                LifecycleKind::Suspend,
+                None,
+                Some("fresh-request".into()),
+                |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+            )
+            .await
     };
-    assert!(
-        fresh_request().is_err(),
-        "a running close still owns the child"
-    );
+    let mut waiting = Box::pin(fresh_request());
+    assert!(futures::poll!(&mut waiting).is_pending());
+    drop(waiting);
+    assert!(state.owner().lifecycle_intents.is_empty());
     release.notify_one();
     let error = RuntimeState::wait_lifecycle_result(first_result.clone())
         .await
@@ -3088,15 +3245,20 @@ async fn completed_close_allows_a_fresh_request_after_its_caller_disconnects() {
             LifecycleKind::Suspend,
             None,
             Some("first-request".into()),
-            |_, _, _| async { panic!("replaying a request must not run it twice") },
+            |_, _, _, _session_admission| async {
+                panic!("replaying a request must not run it twice")
+            },
         )
+        .await
         .unwrap();
     let error = RuntimeState::wait_lifecycle_result(replay)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("injected close failure"));
     // No caller removes the first operation's retained result.
-    let second = fresh_request().expect("a completed close must not reserve the child");
+    let second = fresh_request()
+        .await
+        .expect("a completed close must not reserve the child");
     state.remove_completed_lifecycle(&first_result);
     RuntimeState::wait_lifecycle_result(second).await.unwrap();
 }
@@ -3116,13 +3278,20 @@ async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownershi
                 Some(control.clone()),
                 {
                     let release = release.clone();
-                    move |_, _, _| async move {
+                    move |_, _, _, _session_admission| async move {
                         release.notified().await;
                         Ok(DaemonLifecycleResult::Done)
                     }
                 },
             )
+            .await
             .unwrap();
+        state
+            .owner()
+            .lifecycle
+            .get_mut("close-race")
+            .unwrap()
+            .origin = super::lifecycle::LifecycleOrigin::Automatic;
         if committed {
             assert!(control.grant_commit());
         }
@@ -3165,12 +3334,13 @@ async fn committed_creation_cannot_be_cancelled_by_another_surface() {
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     assert!(state.active_lifecycles()[0].cancellable);
     assert!(control.grant_commit());
@@ -3199,11 +3369,12 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
     let operation = state
         .start_or_join_lifecycle("restart-guard".into(), LifecycleKind::Restart, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
 
     assert!(state.active_lifecycles()[0].cancellable);
@@ -3264,11 +3435,12 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
     let operation = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Restart, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     state
         .begin_restart_container_teardown("session-1", &intent.operation_id)
@@ -3314,8 +3486,9 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::Restart,
-            |_, _, _| async { Err(anyhow!("retained restart failed")) },
+            |_, _, _, _session_admission| async { Err(anyhow!("retained restart failed")) },
         )
+        .await
         .unwrap();
     state
         .bind_restart_intent("session-1", &intent.operation_id)
@@ -3345,8 +3518,9 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::Restart,
-            |_, _, _| async { Err(anyhow!("retained restart failed")) },
+            |_, _, _, _session_admission| async { Err(anyhow!("retained restart failed")) },
         )
+        .await
         .unwrap();
     state
         .bind_restart_intent("session-1", &intent.operation_id)
@@ -3358,10 +3532,15 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
     );
     state.remove_completed_lifecycle(&failed);
     let resumed = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Resume, |_, _, _| async {
-            assert!(crate::database::load_session_restarts()?.is_empty());
-            Ok(DaemonLifecycleResult::Done)
-        })
+        .start_or_join_lifecycle(
+            "session-1".into(),
+            LifecycleKind::Resume,
+            |_, _, _, _session_admission| async {
+                assert!(crate::database::load_session_restarts()?.is_empty());
+                Ok(DaemonLifecycleResult::Done)
+            },
+        )
+        .await
         .unwrap();
     RuntimeState::wait_lifecycle_result(resumed).await.unwrap();
 }
@@ -3390,12 +3569,13 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |_state, _session_id, _cancelled| async move {
+                move |_state, _session_id, _cancelled, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
 
     // Before the checkpoint gate the stop is still cancellable.
@@ -3432,44 +3612,74 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     RuntimeState::wait_lifecycle_result(result).await.unwrap();
 }
 
+// Hard-won: 6c9e3f638: a queued personal lifecycle could take ownership between destroy preemption and admission.
 #[tokio::test]
 async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
     let state = test_runtime_state();
     let release = Arc::new(tokio::sync::Notify::new());
-    state
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let first = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
+            move |_, _, _, _session_admission| async move {
+                started.send(()).unwrap();
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
-        .unwrap();
-    tokio::task::yield_now().await;
-
-    let preempt_state = state.clone();
-    let preempted =
-        tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
-    tokio::task::yield_now().await;
-    {
-        let lifecycle_owner = state.owner();
-        let lifecycle = &lifecycle_owner.lifecycle;
-        assert!(
-            lifecycle
-                .get("session-1")
-                .expect("lifecycle entry")
-                .control
-                .cancelled
-                .load(Ordering::Acquire),
-            "preemption must cancel the running operation"
-        );
-    }
-
-    release.notify_one();
-    preempted
         .await
-        .expect("preempt task")
-        .expect("a cancelled-and-finished lifecycle lets force destruction proceed");
+        .unwrap();
+    ready.await.unwrap();
+    let resumed = Arc::new(AtomicBool::new(false));
+    let mut queued_resume =
+        Box::pin(
+            state.start_or_join_lifecycle("session-1".into(), LifecycleKind::Resume, {
+                let resumed = resumed.clone();
+                move |_, _, _, _session_admission| async move {
+                    resumed.store(true, Ordering::Release);
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            }),
+        );
+    assert!(futures::poll!(&mut queued_resume).is_pending());
+    let destroy_release = Arc::new(tokio::sync::Notify::new());
+    let mut destroy =
+        Box::pin(
+            state.start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
+                let release = destroy_release.clone();
+                move |_, _, _, _session_admission| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            }),
+        );
+    assert!(futures::poll!(&mut destroy).is_pending());
+    assert!(
+        state.owner().lifecycle["session-1"]
+            .control
+            .cancelled
+            .load(Ordering::Acquire)
+    );
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(first).await.unwrap();
+    // Even when the older waiter is polled first after completion, destroy
+    // owns the next admission. It cannot slip behind a new personal operation.
+    assert!(futures::poll!(&mut queued_resume).is_pending());
+    let destroyed = destroy.await.unwrap();
+    assert_eq!(
+        state.owner().lifecycle["session-1"].kind,
+        LifecycleKind::ForceDestroy
+    );
+    assert!(!resumed.load(Ordering::Acquire));
+    assert!(futures::poll!(&mut queued_resume).is_pending());
+    destroy_release.notify_one();
+    RuntimeState::wait_lifecycle_result(destroyed)
+        .await
+        .unwrap();
+    let result = queued_resume.await.unwrap();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    assert!(resumed.load(Ordering::Acquire));
+    assert!(state.owner().lifecycle_intents.is_empty());
 }
 
 /// A second destroy of a session that is already being destroyed (a person's
@@ -3483,7 +3693,7 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
             let release = release.clone();
-            move |_state, _session_id, cancelled| async move {
+            move |_state, _session_id, cancelled, _session_admission| async move {
                 release.notified().await;
                 assert!(
                     !cancelled.load(Ordering::Acquire),
@@ -3492,6 +3702,7 @@ async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cance
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
 
@@ -3522,13 +3733,14 @@ async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
-            |_state, _session_id, cancelled| async move {
+            |_state, _session_id, cancelled, _session_admission| async move {
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
 
@@ -3552,12 +3764,13 @@ async fn force_destruction_waits_for_a_committed_close_and_never_cancels_it() {
             None,
             None,
             Some(control.clone()),
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok(DaemonLifecycleResult::Done)
             },
         )
+        .await
         .unwrap();
     assert!(control.grant_commit());
     tokio::task::yield_now().await;
@@ -3573,23 +3786,33 @@ async fn force_destruction_waits_for_a_committed_close_and_never_cancels_it() {
     assert!(!control.cancelled.load(Ordering::Acquire));
 }
 
+// Hard-won: 6c9e3f638: registry admission must preserve the bounded destroy escape hatch.
 #[tokio::test(start_paused = true)]
 async fn force_destruction_preemption_times_out_without_destroying() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 // A lifecycle that ignores cancellation forever.
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
 
     let error = state
-        .preempt_active_lifecycle("session-1")
+        .start_or_join_lifecycle(
+            "session-1".into(),
+            LifecycleKind::ForceDestroy,
+            |_, _, _, _session_admission| async {
+                panic!("destroy must not run beneath a lifecycle that ignores cancellation");
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            },
+        )
         .await
         .unwrap_err();
     assert!(
@@ -3598,6 +3821,7 @@ async fn force_destruction_preemption_times_out_without_destroying() {
             .contains("did not stop after cancellation"),
         "{error:#}"
     );
+    assert!(state.owner().lifecycle_intents.is_empty());
 }
 
 /// A running Create whose stages keep starting and finishing is progressing,
@@ -3607,12 +3831,13 @@ async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
@@ -3643,15 +3868,16 @@ fn check_progress(state: &Arc<RuntimeState>, bound: Duration) -> Result<()> {
 }
 
 /// A running Create with no work of its own, for the stall tests.
-fn start_idle_create(state: &Arc<RuntimeState>) {
+async fn start_idle_create(state: &Arc<RuntimeState>) {
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
 }
 
@@ -3661,7 +3887,7 @@ fn start_idle_create(state: &Arc<RuntimeState>) {
 #[tokio::test(start_paused = true)]
 async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     let state = test_runtime_state();
-    start_idle_create(&state);
+    start_idle_create(&state).await;
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
         RefusingExecutor("a stage notification"),
@@ -3697,7 +3923,7 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
 #[tokio::test(start_paused = true)]
 async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
     let state = test_runtime_state();
-    start_idle_create(&state);
+    start_idle_create(&state).await;
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
         RefusingExecutor("a stage notification"),
@@ -3729,7 +3955,7 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let cancel_seen = cancel_seen.clone();
-            |_state, _session_id, cancelled| async move {
+            |_state, _session_id, cancelled, _session_admission| async move {
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
@@ -3737,6 +3963,7 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
                 anyhow::bail!("create cancelled")
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
@@ -3780,11 +4007,12 @@ async fn a_readiness_wait_with_no_create_running_fails_at_the_startup_timeout() 
     let watch = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             let finish = finish.clone();
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 finish.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(timeout * 4).await;
@@ -3818,12 +4046,13 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
     let state = test_runtime_state();
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
-            |_state, _session_id, _cancelled| async move {
+            |_state, _session_id, _cancelled, _session_admission| async move {
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
@@ -4323,6 +4552,23 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     runtime.container_settings = Some(applied);
     session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
+    // A historical default marker survives persistence and follows the
+    // current release image, not the new session default.
+    let recorded = crate::database::load_session_record("session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mj_core::state::ContainerSettings::requested(&recorded).default_image,
+        Some(Some(mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned()))
+    );
+    // Hard-won: review of a13f351: upgrading an agent-dev session onto buildpack-deps lost its hel account, home and control directory.
+    assert_eq!(
+        mj_core::state::ContainerSettings::upgrade_image(
+            &recorded,
+            mj_core::config::DEFAULT_SESSION_IMAGE
+        ),
+        mj_core::config::RELEASE_CONTAINER_IMAGE
+    );
     let state = test_runtime_state();
     let controller = Controller {
         config: Config::default(),
@@ -4330,6 +4576,7 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     };
     let outcome = controller
         .upgrade_session_worker(
+            &crate::controller::test_support::session_admission("session-1"),
             "session-1",
             &crate::targets::ProcessExecutor,
             &state.session_manager,
@@ -4380,6 +4627,7 @@ async fn an_unstarted_automatic_recreation_is_cancelled_on_daemon_recovery() {
     let state = test_runtime_state();
     let owned = state
         .recover_restarts(crate::database::load_session_restarts().unwrap())
+        .await
         .unwrap();
     assert!(owned.is_empty());
     assert!(crate::database::load_session_restarts().unwrap().is_empty());
@@ -4410,7 +4658,7 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
         .start_or_join_lifecycle(
             "session-1".into(),
             LifecycleKind::UpgradeContainer,
-            |state, id, cancelled| async move {
+            |state, id, cancelled, _session_admission| async move {
                 let intent = crate::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -4421,6 +4669,7 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
                 anyhow::bail!("fixture image preparation failure before stopping the worker")
             },
         )
+        .await
         .unwrap();
     assert!(
         RuntimeState::wait_lifecycle_result(result.clone())
@@ -4457,11 +4706,12 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     assert!(state.cancel_container_upgrade("session-1").await.is_err());
     assert!(
@@ -4490,7 +4740,7 @@ async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure
     let result = state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::UpgradeContainer, {
             let ready = ready.clone();
-            move |state, id, cancelled| async move {
+            move |state, id, cancelled, _session_admission| async move {
                 crate::database::begin_container_upgrade(
                     &id,
                     "upgrade-test",
@@ -4505,6 +4755,7 @@ async fn a_pending_container_upgrade_cancels_without_recording_a_session_failure
                 anyhow::bail!("pending container upgrade cancelled; environment retained")
             }
         })
+        .await
         .unwrap();
     ready.notified().await;
     state.cancel_container_upgrade("session-1").await.unwrap();
@@ -4556,18 +4807,21 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
             "session-1".into(),
             LifecycleKind::UpgradeContainer,
             super::lifecycle::LifecycleStart {
+                origin: super::lifecycle::LifecycleOrigin::Automatic,
                 resume_workspace_id: None,
                 request_key: Some("recovered".into()),
                 control: None,
                 phase: LifecyclePhase::RetiringContainer,
                 move_operation_id: None,
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
-            |state, id, _| async move {
+            |state, id, _, _session_admission| async move {
                 state.bind_restart_intent(&id, "upgrade-test")?;
                 anyhow::bail!("fixture engine unavailable before committed recovery")
             },
         )
+        .await
         .unwrap();
     assert!(
         RuntimeState::wait_lifecycle_result(result.clone())
@@ -4586,8 +4840,9 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
             .start_or_join_lifecycle(
                 "session-1".into(),
                 LifecycleKind::Suspend,
-                |_, _, _| async { Ok(DaemonLifecycleResult::Done) }
+                |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) }
             )
+            .await
             .is_err()
     );
     assert_eq!(
@@ -4631,6 +4886,29 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
     struct NoEnvironmentMutation;
     impl crate::targets::CommandExecutor for NoEnvironmentMutation {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(
             &self,
             _: &crate::targets::CommandSpec,
@@ -4645,14 +4923,16 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         liveness_probe: crate::targets::CommandSpec::new(
             "must-not-run",
             std::iter::empty::<String>(),
-        ),
+        )
+        .into(),
         exit_record: None,
         binary_refresh: None,
         launch_refresh: None,
         restart: crate::targets::CommandPlan {
             description: "background recovery must stay suppressed".into(),
             commands: Vec::new(),
-        },
+        }
+        .into(),
     };
     assert_eq!(
         crate::session_manager::recover_worker_controlled(
@@ -4671,6 +4951,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     assert!(matches!(
         controller
             .upgrade_session_worker(
+                &crate::controller::test_support::session_admission("session-1"),
                 "session-1",
                 &NoEnvironmentMutation,
                 &state.session_manager,
@@ -4818,7 +5099,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
     let applied = mj_core::state::ContainerSettings::applied(
         &session,
-        mj_core::config::DEFAULT_CONTAINER_IMAGE,
+        mj_core::config::DEFAULT_SESSION_IMAGE,
     );
     runtime.container_settings = Some(applied.clone());
     session.target_runtime = Some(runtime.into());
@@ -4890,12 +5171,13 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     let cancelled = control.cancelled.clone();
     let intent = tokio::task::spawn_blocking({
@@ -4993,12 +5275,13 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
             Some(control.clone()),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     tokio::task::spawn_blocking({
         let cancelled = control.cancelled.clone();
@@ -5007,6 +5290,8 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     .await
     .unwrap()
     .unwrap();
+    state.owner().lifecycle.get_mut("session-2").unwrap().origin =
+        super::lifecycle::LifecycleOrigin::Automatic;
     state
         .bind_restart_intent("session-2", "restart-preempted")
         .unwrap();
@@ -5051,6 +5336,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     assert!(
         state
             .recover_restarts(crate::database::load_session_restarts().unwrap())
+            .await
             .unwrap()
             .is_empty()
     );
@@ -6119,8 +6405,7 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
-#[cfg(unix)]
-fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -6195,6 +6480,147 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     child.state = SessionState::Provisioning;
     crate::database::save_session(&child).unwrap();
     assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
+}
+
+/// A create stopped by shutdown before the phone was told it exists is rolled
+/// back and leaves no intent, so the next daemon provisions nothing for it. One
+/// stopped after publication keeps its intent (see the restart end-to-end test).
+#[tokio::test]
+async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume() {
+    const NAME: &str = "a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resume";
+    const CHILD: &str = "MJ_TEST_CREATE_STOPPED_UNPUBLISHED";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Unpublished").unwrap();
+    let session = runtime_test_session(
+        "unpublished-create",
+        &workspace.id,
+        SessionState::Provisioning,
+    );
+    crate::database::save_new_session(&session, None, false, false).unwrap();
+    assert_eq!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .len(),
+        1
+    );
+    let state = test_runtime_state_loading_the_store();
+    let control = LifecycleControl::default();
+    // The phone never publishes: the sender stays alive and silent.
+    let (_publisher, publication) = tokio::sync::oneshot::channel();
+    state
+        .start_create_lifecycle(
+            session.id.clone(),
+            control.clone(),
+            create::CreateInputs::TopLevel {
+                publication: Some(publication),
+                remember_launch_choices: false,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    control.cancel_for_shutdown();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        state.wait_create_outcome(&session.id),
+    )
+    .await
+    .expect("the stopped create ends");
+    drop(outcome);
+    assert!(
+        crate::database::load_session_create_intents()
+            .unwrap()
+            .is_empty(),
+        "an unpublished create must not be left for the next daemon"
+    );
+    let record = crate::database::load_session_record(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, SessionState::Error);
+}
+
+/// A create wait reads durable state alone: with an intent row and no
+/// lifecycle entry (what a new daemon sees before it has re-admitted the
+/// create, and what a waiter on the old daemon sees), it keeps waiting; it
+/// ends when the record leaves the creating states and the intent settles,
+/// with the real failure for `Error`.
+#[tokio::test]
+async fn a_create_wait_is_answered_from_the_intent_row_and_the_record() {
+    const NAME: &str = "a_create_wait_is_answered_from_the_intent_row_and_the_record";
+    const CHILD: &str = "MJ_TEST_WAIT_CREATE_FROM_RECORD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Wait create").unwrap();
+    for id in ["wait-finishes", "wait-fails"] {
+        let creating = runtime_test_session(id, &workspace.id, SessionState::Provisioning);
+        crate::database::save_new_session(&creating, None, false, false).unwrap();
+    }
+    // A finished session whose worker dropped holds no create intent.
+    let dropped = runtime_test_session("wait-dropped", &workspace.id, SessionState::Disconnected);
+    crate::database::save_session(&dropped).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    use create::CreateWait;
+    assert!(matches!(
+        state.wait_create_outcome("wait-dropped").await,
+        CreateWait::Finished
+    ));
+    assert!(matches!(
+        state.wait_create_outcome("no-such-session").await,
+        CreateWait::Failed(_)
+    ));
+    let waiting = |id: &'static str| {
+        let state = state.clone();
+        tokio::spawn(async move { state.wait_create_outcome(id).await })
+    };
+    let finishes = waiting("wait-finishes");
+    let fails = waiting("wait-fails");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !finishes.is_finished() && !fails.is_finished(),
+        "an unfinished create keeps its waiters waiting"
+    );
+    let mut record = runtime_test_session("wait-finishes", &workspace.id, SessionState::Running);
+    crate::database::save_session(&record).unwrap();
+    record = runtime_test_session("wait-fails", &workspace.id, SessionState::Error);
+    record.last_error = Some("clone refused".to_owned());
+    crate::database::save_session(&record).unwrap();
+    state.publish_revision();
+    let finished = tokio::time::timeout(Duration::from_secs(10), finishes)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap();
+    assert!(matches!(finished, CreateWait::Finished));
+    let CreateWait::Failed(failed) = tokio::time::timeout(Duration::from_secs(10), fails)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap()
+    else {
+        panic!("a failed create answers with its reason");
+    };
+    assert!(
+        format!("{failed:#}").contains("clone refused"),
+        "{failed:#}"
+    );
 }
 
 #[cfg(unix)]
@@ -6832,11 +7258,12 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
     for id in ["close-first", "close-second"] {
         let barrier = barrier.clone();
         let finish = finish.clone();
+        // A close supersedes automatic work; it waits for a person's own.
         state
-            .start_or_join_lifecycle(
+            .start_automatic_lifecycle(
                 id.into(),
                 LifecycleKind::Create,
-                move |_, _, cancelled| async move {
+                move |_, _, cancelled, _session_admission| async move {
                     while !cancelled.load(Ordering::Acquire) {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
@@ -6845,6 +7272,7 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
                     Ok(DaemonLifecycleResult::Done)
                 },
             )
+            .await
             .unwrap();
     }
     let closing = tokio::spawn({
@@ -6945,12 +7373,13 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             Some(committed_watch),
             {
                 let finish_teardown = finish_teardown.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     finish_teardown.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     drop(started);
     let committed_baseline = committed_acceptance.receiver_count();
@@ -6962,13 +7391,14 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             LifecycleKind::Suspend,
             super::lifecycle::LifecycleStart::request(key, None, None),
             Some(cancellable_watch),
-            move |_, _, cancelled| async move {
+            move |_, _, cancelled, _session_admission| async move {
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 bail!("operation cancelled before the session began to stop")
             },
         )
+        .await
         .unwrap();
     drop(started);
     let cancellable_baseline = cancellable_acceptance.receiver_count();
@@ -7535,6 +7965,7 @@ esac
             let (teardown_moves, close_operations) = crate::database::load_move_recovery().unwrap();
             let owners = teardown
                 .recover_moves(teardown_moves, &close_operations)
+                .await
                 .unwrap();
             assert!(!owners.moves.contains(id));
             assert!(owners.closes.contains(id));
@@ -7621,6 +8052,7 @@ esac
             // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
             let owners = cancelled
                 .recover_moves(operations, &close_operations)
+                .await
                 .unwrap();
             assert!(owners.moves.contains(id));
             assert!(!owners.closes.contains(id));
@@ -7671,7 +8103,10 @@ esac
             );
             crate::database::save_move_operation(&before_gc).unwrap();
             let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
-            let owned = state.recover_moves(operations, &close_operations).unwrap();
+            let owned = state
+                .recover_moves(operations, &close_operations)
+                .await
+                .unwrap();
             assert!(
                 !owned.moves.contains(id),
                 "startup must leave superseded Move to close"
@@ -7684,10 +8119,12 @@ esac
             None
         } else {
             Some(
+                // A close supersedes an automatic Move, such as quota
+                // recovery's; it waits for a Move a person asked for.
                 state
-                    .start_or_join_lifecycle(id.into(), LifecycleKind::Move, {
+                    .start_automatic_lifecycle(id.into(), LifecycleKind::Move, {
                         let cloning = cloning.clone();
-                        move |_, _, cancelled| async move {
+                        move |_, _, cancelled, _session_admission| async move {
                             // Hold the destination-cloning cut before any worker is installed.
                             cloning.notify_one();
                             while !cancelled.load(Ordering::Acquire) {
@@ -7699,6 +8136,7 @@ esac
                             bail!("clone cancelled by Suspend")
                         }
                     })
+                    .await
                     .unwrap(),
             )
         };
@@ -7871,6 +8309,7 @@ esac
                 };
                 let owners = recovering
                     .recover_moves(vec![completed.clone()], &close_ids)
+                    .await
                     .unwrap();
                 assert!(!owners.moves.contains(&id));
                 assert!(!owners.closes.contains(&id));
@@ -7997,11 +8436,12 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
     state
         .start_or_join_lifecycle(parent_id.into(), LifecycleKind::Resume, {
             let release = release.clone();
-            move |_state, _session_id, _cancelled| async move {
+            move |_state, _session_id, _cancelled, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let destroy = tokio::spawn({
         let state = state.clone();
@@ -9049,11 +9489,12 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
         .state
         .start_or_join_lifecycle(WORKING_CHILD.into(), LifecycleKind::StopSubagent, {
             let release = release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let receipt = tokio::time::timeout(
         Duration::from_secs(30),
@@ -9146,12 +9587,13 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
             Some(watch),
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     bail!("held child teardown diagnostic")
                 }
             },
         )
+        .await
         .unwrap();
     let child_result = child.result.clone();
     drop(child);
@@ -9415,7 +9857,10 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     let recovery_attempt = state
         .recovery_observer
         .gate
-        .try_start(WORKING_CHILD)
+        .try_start(
+            WORKING_CHILD,
+            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+        )
         .unwrap();
     let suspend = tokio::spawn({
         let state = state.clone();
@@ -9496,8 +9941,22 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let mut state = test_runtime_state_loading_the_store();
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
     Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
-    let attempt_a = state.recovery_observer.gate.try_start(child_a).unwrap();
-    let attempt_b = state.recovery_observer.gate.try_start(child_b).unwrap();
+    let attempt_a = state
+        .recovery_observer
+        .gate
+        .try_start(
+            child_a,
+            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+        )
+        .unwrap();
+    let attempt_b = state
+        .recovery_observer
+        .gate
+        .try_start(
+            child_b,
+            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+        )
+        .unwrap();
 
     let mut suspend = tokio::spawn({
         let state = state.clone();
@@ -10067,6 +10526,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
                 declined: Vec::new(),
+                brief: None,
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -10083,6 +10543,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             parent_id,
             &crate::database::TurnReviewState {
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
+                    brief_writer: None,
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
                     registrations: vec![mj_core::storage::ReviewerRegistration {
@@ -10241,10 +10702,34 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
+        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
+            mj_core::targets::DeadlinePause::none()
+        }
+
+        fn cancellation_requested_without_deadline(&self) -> bool {
+            self.cancellation_requested()
+        }
+
+        fn execute_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute(command)
+        }
+
+        fn execute_with_stdin_without_deadline(
+            &self,
+            command: &mj_core::targets::CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
+            self.execute_with_stdin(command, input)
+        }
+
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             // The root exists (its journal is there); only the worker is unreachable.
             let stdout = match command.purpose.as_str() {
                 "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
+                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 other => panic!("unexpected command: {other}"),
             };
@@ -10294,7 +10779,13 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
 
     let mut controller = Controller::load().unwrap();
     let error = controller
-        .suspend_subagent_controlled(LATCH_RELAY_SESSION, &AliveWorker, None, None)
+        .suspend_subagent_controlled(
+            &crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
+            LATCH_RELAY_SESSION,
+            &AliveWorker,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -10512,11 +11003,12 @@ async fn late_stage_callbacks_cannot_change_a_replacement_lifecycle() {
     let first = state
         .start_or_join_lifecycle("same-session".into(), LifecycleKind::Create, {
             let release = first_release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let old = DaemonStageReportingExecutor::new(
         RefusingExecutor("stage-only test"),
@@ -10529,11 +11021,12 @@ async fn late_stage_callbacks_cannot_change_a_replacement_lifecycle() {
     let second = state
         .start_or_join_lifecycle("same-session".into(), LifecycleKind::Resume, {
             let release = second_release.clone();
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 release.notified().await;
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     let current = DaemonStageReportingExecutor::new(
         RefusingExecutor("stage-only test"),
@@ -10638,8 +11131,9 @@ async fn completed_lifecycle_retention_does_not_grow_with_history() {
             .start_or_join_lifecycle(
                 format!("session-{index}"),
                 LifecycleKind::Create,
-                |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
+                |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
             )
+            .await
             .unwrap();
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
     }
@@ -10662,6 +11156,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            origin: super::lifecycle::LifecycleOrigin::Person,
             acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
@@ -10875,9 +11370,12 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     crate::controller::move_session::restore_move_queue_hold(&operation);
     assert!(
         state
-            .start_or_join_lifecycle(session.id.clone(), LifecycleKind::Resume, |_, _, _| async {
-                Ok(DaemonLifecycleResult::Done)
-            })
+            .start_or_join_lifecycle(
+                session.id.clone(),
+                LifecycleKind::Resume,
+                |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) }
+            )
+            .await
             .is_err()
     );
     for (id, owned) in [("retained-move", true), ("different-move", false)] {
@@ -10888,18 +11386,21 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
                 session.id.clone(),
                 LifecycleKind::Move,
                 super::lifecycle::LifecycleStart {
+                    origin: super::lifecycle::LifecycleOrigin::Automatic,
                     resume_workspace_id: None,
                     request_key: Some(id.into()),
                     control: None,
                     phase: LifecyclePhase::Executing,
                     move_operation_id: Some(id.into()),
                     deferrable_admission: None,
+                    holds_through_drain: false,
                 },
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     released.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 },
             )
+            .await
             .unwrap();
         assert_eq!(state.owner().worker_is_owned(&session.id), owned);
         release.notify_one();
@@ -11351,6 +11852,7 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
 }
 
 #[cfg(unix)]
+// Hard-won: 352a87453: a review hold blocked foreground work and daemon handoff.
 #[tokio::test]
 async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
     const CHILD: &str = "MJ_TEST_RESUMABLE_ADMISSION_CHILD";
@@ -11385,24 +11887,27 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         ),
     ] {
         let state = test_runtime_state();
+        let review = state.recovery_observer.gate.reserve_when_idle(id).await;
         let release = Arc::new(tokio::sync::Notify::new());
         let started = Arc::new(tokio::sync::Notify::new());
         let result = state
             .start_or_join_lifecycle(id.into(), kind, {
                 let release = release.clone();
                 let started = started.clone();
-                move |state, session_id, _| async move {
+                move |state, session_id, _, _session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
                         crate::targets::ProcessExecutor,
                         state.clone(),
                         session_id.clone(),
                     );
-                    assert!(
+                    assert_eq!(
                         state.owner().lifecycle[&session_id]
                             .upgrade_work
                             .lock()
                             .unwrap()
-                            .is_some()
+                            .is_some(),
+                        kind != LifecycleKind::Unpark,
+                        "Unpark releases handoff admission before waiting for foreground ownership",
                     );
                     executor.begin_resumable_work()?;
                     assert!(
@@ -11425,14 +11930,29 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
                     Ok(DaemonLifecycleResult::Done)
                 }
             })
+            .await
             .unwrap();
-        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("a worker-owned review must not hold up foreground lifecycle admission");
         assert!(
             state.owner().lifecycle[id].is_running(),
             "resumable work must keep lifecycle ownership while yielding upgrade admission"
         );
         release.notify_one();
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
+        assert!(
+            state
+                .recovery_observer
+                .gate
+                .try_start(
+                    id,
+                    crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing
+                )
+                .is_err(),
+            "the review continues across foreground work"
+        );
+        drop(review);
     }
 }
 
@@ -11583,17 +12103,23 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     }
     let _writer = crate::database::install_isolated_test_writer();
     let state = test_runtime_state();
+    let (started, stopping) = tokio::sync::oneshot::channel();
     let result = state
         .start_or_join_lifecycle(
             "failed-startup".into(),
             LifecycleKind::StartupCleanup,
-            |_state, _id, _cancelled| async {
+            |_state, _id, _cancelled, _session_admission| async move {
+                started.send(()).unwrap();
                 // A process-tree stop exceeds the former one-second join window.
                 tokio::time::sleep(Duration::from_millis(1100)).await;
                 Ok(DaemonLifecycleResult::Done)
             },
         )
+        .await
         .unwrap();
+    // Shutdown interrupts a teardown that still waits for its session, and
+    // the next daemon runs it. This one is already stopping the process tree.
+    stopping.await.unwrap();
     state.cancel_and_wait_lifecycles().await.unwrap();
     assert!(matches!(
         RuntimeState::wait_lifecycle_result(result).await.unwrap(),
@@ -11979,7 +12505,7 @@ async fn startup_delivery_and_move_source_sealing_are_serialized() {
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Move, {
             let source_started = source_started.clone();
             let destination_ready = destination_ready.clone();
-            move |state, id, _| async move {
+            move |state, id, _, _session_admission| async move {
                 source_started.notify_one();
                 destination_ready.notified().await;
                 // The Move owns archive disposition while holding the reservation.
@@ -11995,6 +12521,7 @@ async fn startup_delivery_and_move_source_sealing_are_serialized() {
                 Ok(DaemonLifecycleResult::Done)
             }
         })
+        .await
         .unwrap();
     handle_action(
         queued_prompt_action("during move"),
@@ -12563,21 +13090,24 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
             session_id.into(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
+                origin: super::lifecycle::LifecycleOrigin::Automatic,
                 resume_workspace_id: None,
                 request_key: None,
                 control: Some(control.clone()),
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some("pre-reservation-origin".into()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
             {
                 let entered_source = entered_source.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     entered_source.store(true, Ordering::Release);
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     assert_eq!(
         state.active_lifecycles()[0].move_operation_id.as_deref(),
@@ -12681,8 +13211,11 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
             None,
             None,
             Some(control.clone()),
-            |_, _, _| async { panic!("handoff interrupted before source work") },
+            |_, _, _, _session_admission| async {
+                panic!("handoff interrupted before source work")
+            },
         )
+        .await
         .unwrap();
     assert!(control.cancel_for_shutdown());
     RuntimeState::wait_lifecycle_result(watch).await.unwrap();
@@ -12935,19 +13468,22 @@ async fn startup_without_move_origin_ignores_historical_failed_move_after_resume
             "session-1".into(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
+                origin: super::lifecycle::LifecycleOrigin::Automatic,
                 resume_workspace_id: None,
                 request_key: None,
                 control: Some(control.clone()),
                 phase: LifecyclePhase::Executing,
                 move_operation_id: Some(historical.operation_id.clone()),
                 deferrable_admission: None,
+                holds_through_drain: false,
             },
-            move |_, _, _| async move {
+            move |_, _, _, _session_admission| async move {
                 entered.notify_one();
                 released.notified().await;
                 Err(anyhow!("matching Move retry cancelled"))
             },
         )
+        .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
@@ -13146,8 +13682,9 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
             LifecycleKind::ForceStop,
             super::lifecycle::LifecycleStart::request(key.clone(), None, None),
             None,
-            |_, _, _| async { bail!("injected operation failure") },
+            |_, _, _, _session_admission| async { bail!("injected operation failure") },
         )
+        .await
         .unwrap();
     let old = first.receipt.clone();
     assert!(
@@ -13161,8 +13698,9 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
             LifecycleKind::ForceStop,
             None,
             Some(key.clone()),
-            |_, _, _| async { panic!("replay started duplicate work") },
+            |_, _, _, _session_admission| async { panic!("replay started duplicate work") },
         )
+        .await
         .unwrap();
     assert!(RuntimeState::wait_lifecycle_result(replay).await.is_err());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -13174,12 +13712,13 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
             None,
             {
                 let release = release.clone();
-                move |_, _, _| async move {
+                move |_, _, _, _session_admission| async move {
                     release.notified().await;
                     Ok(DaemonLifecycleResult::Done)
                 }
             },
         )
+        .await
         .unwrap();
     assert_ne!(next.receipt.operation_id, old.operation_id);
     assert!(
@@ -13187,14 +13726,20 @@ async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them
             .admit_prepared_lifecycle(
                 old.session_id.clone(),
                 LifecycleKind::ForceStop,
-                super::lifecycle::LifecycleStart::request(
-                    "different-checkpoint".into(),
-                    None,
-                    None
-                ),
+                super::lifecycle::LifecycleStart {
+                    origin: super::lifecycle::LifecycleOrigin::Automatic,
+                    ..super::lifecycle::LifecycleStart::request(
+                        "different-checkpoint".into(),
+                        None,
+                        None
+                    )
+                },
                 None,
-                |_, _, _| async { panic!("changed selections were admitted concurrently") },
+                |_, _, _, _session_admission| async {
+                    panic!("changed selections were admitted concurrently")
+                },
             )
+            .await
             .is_err()
     );
     assert!(matches!(
@@ -14407,4 +14952,394 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .notification_dismissals
             .contains_key(&failed.id)
     );
+}
+
+// Hard-won: 352a87453: queued Resume reused the Running state from before Suspend.
+// Hard-won: f9e68d823: queued Resume skipped the deferred Podman cleanup produced by Suspend.
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_resume_rechecks_state_after_suspend_before_reserving_capacity() {
+    const NAME: &str = "queued_resume_rechecks_state_after_suspend_before_reserving_capacity";
+    const CHILD: &str = "MJ_TEST_QUEUED_RESUME_CLEANUP";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "podman",
+            r#"
+printf '%s\n' "$*" >> "$MJ_TEST_QUEUED_RESUME_PODMAN_LOG"
+case "$*" in
+    *".State.Running"*) printf 'false\n' ;;
+    "container inspect --format "*|"volume inspect --format "*) printf 'true|queued-resume\n' ;;
+    "container inspect "*|"container exists "*) [ ! -f "$MJ_TEST_QUEUED_RESUME_REMOVED" ] ;;
+    "rm "*) : > "$MJ_TEST_QUEUED_RESUME_REMOVED" ;;
+    "stop "*|"volume rm "*|"info"|"exec "*) exit 0 ;;
+    *) printf 'unexpected podman arguments: %s\n' "$*" >&2; exit 92 ;;
+esac
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .env("PATH", path)
+        .env(
+            "MJ_TEST_QUEUED_RESUME_PODMAN_LOG",
+            directory.path().join("podman-calls"),
+        )
+        .env(
+            "MJ_TEST_QUEUED_RESUME_REMOVED",
+            directory.path().join("removed"),
+        )
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = Config::default();
+    config.targets.insert(
+        "podman".into(),
+        mj_core::config::TargetTemplate::LocalPodman {
+            container: serde_json::from_value(serde_json::json!({"image": "unused-test-image"}))
+                .unwrap(),
+        },
+    );
+    config.save().unwrap();
+    let mut session = runtime_test_session(
+        "queued-resume",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    session.target_template_id = "podman".into();
+    let container = mj_core::targets::resource_name(&session.id).unwrap();
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: container.clone(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::ContainerLayer,
+    }));
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let close = state
+        .start_or_join_lifecycle(session.id.clone(), LifecycleKind::Suspend, {
+            let release = release.clone();
+            move |_, id, _, _session_admission| async move {
+                release.notified().await;
+                blocking(move || {
+                    let mut session = crate::database::read_durable_session_record(&id)?.unwrap();
+                    session.state = SessionState::Stopped;
+                    crate::database::save_lifecycle_session(&session)
+                })
+                .await?;
+                Ok(DaemonLifecycleResult::DeferredCleanup)
+            }
+        })
+        .await
+        .unwrap();
+    let mut revisions = state.revisions.subscribe();
+    let pending = tokio::spawn({
+        let state = state.clone();
+        let id = session.id.clone();
+        async move {
+            state
+                .start_resume_session(ResumeSessionRequest {
+                    session_id: id,
+                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
+                    profile_id: "unconfigured-profile".into(),
+                    target_template_id: "unconfigured-target".into(),
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                    repository_preflight: None,
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state.owner().lifecycle_intents.contains_key(&session.id) {
+                break;
+            }
+            revisions.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("Resume queues before Suspend changes the running record");
+    assert_eq!(
+        crate::database::read_durable_session_record(&session.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        SessionState::Running
+    );
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(close).await.unwrap();
+    let started = pending.await.unwrap().unwrap();
+    let error = RuntimeState::wait_lifecycle_result(started.result)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unknown target"),
+        "queued Resume must attempt fresh capacity admission rather than report an already-running success: {error:#}"
+    );
+    let stored = crate::database::read_durable_session_record(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, SessionState::Stopped);
+    assert!(
+        stored.target.is_none(),
+        "Resume must finish Suspend's deferred cleanup before its capacity/provisioning decision"
+    );
+    let calls =
+        std::fs::read_to_string(std::env::var_os("MJ_TEST_QUEUED_RESUME_PODMAN_LOG").unwrap())
+            .unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call == format!("rm --force --ignore {container}")),
+        "{calls}"
+    );
+}
+
+// Hard-won: 8481d8a51: an identical join could lose the owner lock to a queued differing request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_lifecycle_requests_do_not_conflict_during_fifo_turnover() {
+    let state = test_runtime_state();
+    for ordinal in 0..32 {
+        let session = format!("fifo-turnover-{ordinal}");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = state
+            .start_or_join_lifecycle(session.clone(), LifecycleKind::Suspend, {
+                let release = release.clone();
+                move |_, _, _, _session_admission| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .await
+            .unwrap();
+        let queued = tokio::spawn({
+            let state = state.clone();
+            let session = session.clone();
+            async move {
+                state
+                    .start_or_join_lifecycle(
+                        session,
+                        LifecycleKind::Resume,
+                        |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.owner().lifecycle_intents.contains_key(&session) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("differing request queues behind the first operation");
+        let identical = tokio::spawn({
+            let state = state.clone();
+            let session = session.clone();
+            async move {
+                state
+                    .start_or_join_lifecycle(
+                        session,
+                        LifecycleKind::Suspend,
+                        |_, _, _, _session_admission| async { Ok(DaemonLifecycleResult::Done) },
+                    )
+                    .await
+            }
+        });
+        release.notify_one();
+        RuntimeState::wait_lifecycle_result(first).await.unwrap();
+        RuntimeState::wait_lifecycle_result(queued.await.unwrap().unwrap())
+            .await
+            .unwrap();
+        RuntimeState::wait_lifecycle_result(identical.await.unwrap().unwrap())
+            .await
+            .unwrap();
+    }
+}
+
+// Hard-won: 5b46f3845: queued client work held daemon handoff through a resumable image pull.
+// Hard-won: 0e8fdc505: bounded destroy preemption bypassed daemon draining.
+#[tokio::test]
+async fn queued_lifecycle_requests_release_client_admission_for_handoff_and_stop() {
+    const NAME: &str = "queued_lifecycle_requests_release_client_admission_for_handoff_and_stop";
+    const PHASE: &str = "MJ_TEST_QUEUED_LIFECYCLE_HANDOFF_PHASE";
+    let Ok(phase) = std::env::var(PHASE) else {
+        for phase in ["handoff", "stop", "destroy-handoff", "destroy-stop"] {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), NAME),
+            )
+            .env(PHASE, phase)
+            .env("MJ_INSTANCE", "queued-lifecycle-handoff")
+            .isolated_store(directory.path())
+            .run();
+        }
+        return;
+    };
+    let destroy = phase.starts_with("destroy-");
+    let handoff = phase.ends_with("handoff");
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state();
+    let control = LifecycleControl::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let upgrade = state
+        .start_or_join_lifecycle_controlled(
+            "queued-upgrade".into(),
+            LifecycleKind::UpgradeContainer,
+            None,
+            None,
+            Some(control.clone()),
+            {
+                let release = release.clone();
+                move |state, id, cancelled, _session_admission| async move {
+                    let executor = DaemonStageReportingExecutor::new(ProcessExecutor, state, id);
+                    executor.begin_resumable_work()?;
+                    executor.stage_started(ProvisionStage::Cloning);
+                    started.send(()).unwrap();
+                    tokio::select! {
+                        () = release.notified() => {}
+                        () = crate::recovery_gate::wait_until_cancelled(&cancelled), if !destroy => {}
+                    }
+                    executor.stage_finished(ProvisionStage::Cloning);
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .await
+        .unwrap();
+    ready.await.unwrap();
+    assert!(
+        crate::upgrade::active_labels().is_empty(),
+        "resumable preparation holds no daemon admission"
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server = tokio::spawn({
+        let state = state.clone();
+        let metadata = metadata.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, metadata, state, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    let request = if destroy {
+        SessionLifecycleRequest::ForceDestroy {
+            session_id: "queued-upgrade".into(),
+            delete_branch: false,
+        }
+    } else {
+        SessionLifecycleRequest::Resume(Box::new(ResumeSessionRequest {
+            session_id: "queued-upgrade".into(),
+            workspace_id: "workspace".into(),
+            profile_id: "unconfigured".into(),
+            target_template_id: "unconfigured".into(),
+            additional_mounts: None,
+            resource_allocation: None,
+            discard_queue: false,
+            repository_preflight: None,
+        }))
+    };
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 77,
+            token: metadata.token.clone(),
+            action: DaemonAction::StartSessionLifecycle(request),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !state
+            .owner()
+            .lifecycle_intents
+            .contains_key("queued-upgrade")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the authenticated request queues behind resumable preparation");
+    assert!(
+        crate::upgrade::active_labels()
+            .iter()
+            .any(|label| label.starts_with("client request"))
+    );
+    let shutdown = CancellationToken::new();
+    let action = if handoff {
+        DaemonAction::PrepareUpgrade
+    } else {
+        DaemonAction::Stop
+    };
+    let reply = handle_action(action, &metadata, &state, &shutdown)
+        .await
+        .unwrap();
+    assert!(matches!(
+        (handoff, reply),
+        (true, DaemonReply::UpgradePending) | (false, DaemonReply::Done)
+    ));
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_frame::<ResponseEnvelope>(&mut stream),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.request_id, 77);
+    assert!(
+        matches!(response.result.unwrap(), DaemonReply::UpgradePending),
+        "the original request is explicitly unaccepted and safe to retry"
+    );
+    assert!(state.owner().lifecycle_intents.is_empty());
+    assert!(
+        control.cancelled.load(Ordering::Acquire) == destroy,
+        "only destroy requests cancellation before waiting; draining does not cancel the upgrade"
+    );
+    drop(stream);
+    server.await.unwrap();
+    assert!(
+        crate::upgrade::active_labels().is_empty(),
+        "client request admission is released after the refusal acknowledgement"
+    );
+    if handoff {
+        assert!(matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::Done
+        ));
+    }
+    assert!(shutdown.is_cancelled());
+    assert!(
+        state.owner().lifecycle["queued-upgrade"].is_running(),
+        "handoff never waited for the resumable preparation"
+    );
+    if destroy {
+        release.notify_one();
+    }
+    state.cancel_and_wait_lifecycles().await.unwrap();
+    release.notify_one();
+    let outcome = RuntimeState::wait_lifecycle_result(upgrade).await;
+    if let Err(error) = outcome {
+        assert!(
+            control.stopped_for_shutdown(),
+            "unexpected lifecycle failure: {error:#}"
+        );
+    }
 }
