@@ -88,7 +88,7 @@ impl Controller {
         layout: SessionExportLayout,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
-        crate::worker_lifecycle::run(session_id, "checkpoint session latched with layout", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, session_id, async {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
             && !operation.queue_admission_finished
@@ -906,7 +906,7 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
             tracing::info!(
                 session_id,
                 paths = ?self.paths,
-                reason = "superseded by suspend",
+                reason = "cancelled by a session operation (close, suspend, destroy, move or upgrade)",
                 "cancelled checkpoint left its files on the target; daemon start removes them from a local worker root"
             );
             return;
@@ -1115,6 +1115,9 @@ mod cancel_log_tests {
         );
         let info = log.at(tracing::Level::INFO);
         assert_eq!(info.len(), 1, "{info:?}");
-        assert!(info[0].contains("superseded by suspend"), "{info:?}");
+        assert!(
+            info[0].contains("cancelled by a session operation"),
+            "{info:?}"
+        );
     }
 }

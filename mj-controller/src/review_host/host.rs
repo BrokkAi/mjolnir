@@ -249,17 +249,39 @@ impl TurnReviewHost {
         child_session_id: String,
         answer: Option<String>,
     ) -> Result<(), String> {
+        let report = match answer {
+            Some(answer) => ReviewerReport::Answer(answer),
+            None => ReviewerReport::Failed("the reviewer finished without calling handback".into()),
+        };
+        self.report_reviewer(session_id, child_session_id, report)
+            .await
+    }
+
+    /// Reports that a reviewer's turn ended with no handback and says how the
+    /// turn ended. A turn that was interrupted or rejected is not a reviewer
+    /// that forgot to hand back, so the caller words the reason from the turn.
+    pub(crate) async fn reviewer_ended_without_handback(
+        &self,
+        session_id: String,
+        child_session_id: String,
+        reason: String,
+    ) -> Result<(), String> {
+        self.report_reviewer(session_id, child_session_id, ReviewerReport::Failed(reason))
+            .await
+    }
+
+    async fn report_reviewer(
+        &self,
+        session_id: String,
+        child_session_id: String,
+        report: ReviewerReport,
+    ) -> Result<(), String> {
         let (reply, result) = oneshot::channel();
         self.events
             .send(HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                report: match answer {
-                    Some(answer) => ReviewerReport::Answer(answer),
-                    None => ReviewerReport::Failed(
-                        "the reviewer finished without calling handback".into(),
-                    ),
-                },
+                report,
                 reply,
             })
             .map_err(|_| "review host stopped".to_owned())?;

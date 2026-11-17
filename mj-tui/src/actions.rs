@@ -22,6 +22,11 @@ use crate::{DashboardAction, DashboardState, Focus};
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
+    NotificationClear,
+    NotificationLater,
+    NotificationClearImportant,
+    NotificationScrollUp,
+    NotificationScrollDown,
     GoAfk,
     OpenSession,
     PinSession,
@@ -110,6 +115,7 @@ pub enum CommandId {
 /// path that only exists while the configuration is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
+    Notifications,
     Global,
     Settings,
     Pane,
@@ -124,6 +130,7 @@ impl Scope {
     /// The heading the command palette prints above this scope.
     pub(crate) const fn heading(self) -> &'static str {
         match self {
+            Self::Notifications => "Notifications pane",
             Self::Global => "Anywhere",
             Self::Settings => "Settings",
             Self::Pane => "Panes",
@@ -553,6 +560,66 @@ fn operation_in_flight(dashboard: &DashboardState) -> Availability {
 /// Every command the surface has. The order here is the order the footer
 /// prints its hints and the command palette groups its entries.
 pub(crate) static COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::NotificationClear,
+        label: "Clear & Next",
+        description: "Clear & Next in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('d'), "d")],
+        action: None,
+        footer: footer_word!("clear & next"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_clear_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationLater,
+        label: "Later",
+        description: "Later in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('l'), "l")],
+        action: None,
+        footer: footer_word!("later"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationClearImportant,
+        label: "Clear all !",
+        description: "Clear all ! in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('c'), "c")],
+        action: None,
+        footer: footer_word!("clear all !"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_important_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationScrollUp,
+        label: "Scroll notification up",
+        description: "Scroll notification up in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::plain(KeyCode::Up, "↑")],
+        action: None,
+        footer: footer_word!("scroll"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationScrollDown,
+        label: "Scroll notification down",
+        description: "Scroll notification down in the Notifications pane.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::plain(KeyCode::Down, "↓")],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: notification_available,
+    },
     CommandSpec {
         id: CommandId::ChangeGoSetup,
         label: "Change fast-start setup",
@@ -1562,12 +1629,39 @@ pub(crate) fn spec(id: CommandId) -> &'static CommandSpec {
 /// [`pane_command_for_key`]);
 /// it is listed here so the footer can offer it while the configuration is
 /// still empty.
+fn notification_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.notification_entries().is_empty() {
+        Availability::Hidden
+    } else {
+        Availability::Ready
+    }
+}
+fn notification_clear_available(dashboard: &DashboardState) -> Availability {
+    match dashboard.notification_entries().first() {
+        Some(entry) if entry.target.is_some() => Availability::Ready,
+        Some(_) => Availability::Blocked("Answer this request in the session."),
+        None => Availability::Hidden,
+    }
+}
+fn notification_important_available(dashboard: &DashboardState) -> Availability {
+    if dashboard
+        .notification_entries()
+        .iter()
+        .any(|entry| entry.level == crate::AttentionLevel::Important && entry.target.is_some())
+    {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
+
 fn scope_applies(scope: Scope, focus: Focus) -> bool {
     match scope {
         Scope::Global | Scope::Settings | Scope::Pane | Scope::Setup => true,
         Scope::Sessions | Scope::Session => focus == Focus::Sessions,
         Scope::Targets => focus == Focus::Targets,
         Scope::Quota => focus == Focus::Quota,
+        Scope::Notifications => focus == Focus::Notifications,
     }
 }
 
@@ -1891,6 +1985,17 @@ impl DashboardState {
                     }
                     None => DashboardAction::None,
                 }
+            }
+            CommandId::NotificationClear => self.notification_clear(),
+            CommandId::NotificationLater => self.notification_later(),
+            CommandId::NotificationClearImportant => self.notification_clear_important(),
+            CommandId::NotificationScrollUp => {
+                self.scroll_notification(-1);
+                DashboardAction::None
+            }
+            CommandId::NotificationScrollDown => {
+                self.scroll_notification(1);
+                DashboardAction::None
             }
             CommandId::IgnoreNotifications => self
                 .command_session()
@@ -2439,7 +2544,12 @@ mod tests {
     /// registry order, rather than the user's intent, decide what happens.
     #[test]
     fn no_two_commands_claim_the_same_key_in_one_pane() {
-        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
+        for focus in [
+            Focus::Sessions,
+            Focus::Targets,
+            Focus::Quota,
+            Focus::Notifications,
+        ] {
             let mut seen: Vec<KeyCode> = Vec::new();
             for entry in COMMANDS {
                 if entry.scope == Scope::Setup || !scope_applies(entry.scope, focus) {

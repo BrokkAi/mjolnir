@@ -1380,6 +1380,7 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
+        DashboardAction::NotificationLater { .. } => {}
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }

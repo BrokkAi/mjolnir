@@ -14,8 +14,8 @@ use crate::targets::{self, CommandExecutor};
 use crate::worker_lifecycle::WorkerPermit;
 
 /// Issued after retirement closes admission and every managed Stop completes.
-/// Holding each worker permit prevents an already admitted mutation from
-/// racing physical removal. Fields are private: callers cannot invent proof.
+/// Ancestor-first child admissions prevent accepted mutations from
+/// racing Stop or physical removal. Fields are private: callers cannot invent proof.
 pub(super) struct Reclamation {
     environment: EnvironmentRecord,
     workers: Vec<(EnvironmentWorker, targets::TargetLocator)>,
@@ -73,29 +73,35 @@ fn backend(worker: &EnvironmentWorker, config: &Config) -> Result<targets::Targe
 
 impl Reclamation {
     pub(super) fn acquire(
+        admission: &crate::recovery_gate::SessionAdmission,
         environment: EnvironmentRecord,
         config: &Config,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<Self> {
         // The physical owner is always first, including environments with no
         // workers yet. All entry points share this ordering with lifecycle.
-        let mut permits = vec![WorkerPermit::acquire_blocking(
+        let mut permits = vec![WorkerPermit::acquire(
             &environment.owner_session_id,
-            "environment retirement",
-            executor,
+            admission,
         )?];
+        let gate = admission.gate_and_session().0;
         let (environment, workers) = database::begin_environment_retirement(&environment.id)?;
-        for id in workers
-            .iter()
-            .map(|worker| &worker.session_id)
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            if id != &environment.owner_session_id {
-                permits.push(WorkerPermit::acquire_blocking(
+        // Reviewers can nest under workers. Suspend/ForceDestroy acquire
+        // parent then child, so retirement must take ancestors first too.
+        // Keep every capability through Stop and removal; releasing one in
+        // between would admit a checkpoint or a delivery into the target.
+        let mut admitted = std::collections::BTreeSet::from([environment.owner_session_id.clone()]);
+        for worker in &workers {
+            let id = &worker.session_id;
+            if admitted.insert(id.clone()) {
+                let child = futures::executor::block_on(gate.enter_foreground(
                     id,
                     "environment retirement",
+                    crate::recovery_gate::LifecycleOrigin::Automatic,
+                    &std::sync::atomic::AtomicBool::new(false),
                     executor,
-                )?);
+                ))?;
+                permits.push(WorkerPermit::acquire(id, &child)?);
             }
         }
         let workers = workers
@@ -368,7 +374,14 @@ pub(super) fn retire_owned_environment(
 ) -> Result<Option<std::path::PathBuf>> {
     let session_id = environment.owner_session_id.clone();
     let mut retained = None;
-    let authority = Reclamation::acquire(environment, config, executor)?;
+    let authority = Reclamation::acquire(
+        crate::worker_lifecycle::require(&environment.owner_session_id)
+            .context("retire_owned_environment requires its caller's worker permit")?
+            .admission(),
+        environment,
+        config,
+        executor,
+    )?;
     if authority.environment.phase == EnvironmentPhase::Reclaimed {
         if let Some(worktree) = &authority.environment.placement.managed_worktree {
             super::worktree::cleanup_managed_worktree_branch(executor, worktree, branch)?;
@@ -450,7 +463,14 @@ pub(super) fn quiesce_session_environment(
 ) -> Result<()> {
     let environment =
         database::session_environment(&session.id)?.context("session has no environment")?;
-    let authority = Reclamation::acquire(environment, config, executor)?;
+    let authority = Reclamation::acquire(
+        crate::worker_lifecycle::require(&environment.owner_session_id)
+            .context("quiesce_session_environment requires its caller's worker permit")?
+            .admission(),
+        environment,
+        config,
+        executor,
+    )?;
     if let Some(worktree) = &authority.environment.placement.managed_worktree {
         super::worktree::cleanup_managed_worktree(
             &authority.checkout_removal()?,
@@ -528,7 +548,14 @@ pub(super) fn remove_runtime_preserving_workspace(
         environment.placement.target == session.target.clone().map(|v| *v),
         "runtime placement changed before replacement"
     );
-    let authority = Reclamation::acquire(environment, config, executor)?;
+    let authority = Reclamation::acquire(
+        crate::worker_lifecycle::require(&environment.owner_session_id)
+            .context("remove_runtime_preserving_workspace requires its caller's worker permit")?
+            .admission(),
+        environment,
+        config,
+        executor,
+    )?;
     authority.remove_targets(executor)?;
     if authority.environment.placement.managed_worktree.is_none()
         && authority.environment.placement.project_directory.is_none()
@@ -657,19 +684,19 @@ mod tests {
             })
         }
         fn notify_notice(&self, notice: &str) {
-            if notice == "Waiting for the session's worker lifecycle operation" {
+            if notice.starts_with("Waiting for ") {
                 self.waiting.send(()).unwrap();
             }
         }
     }
 
     // Hard-won: old-placement cleanup cleared the replacement worker's restart intent.
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg_attr(
         windows,
         ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
     )]
-    fn retiring_a_move_source_preserves_the_destination_restart_intent() {
+    async fn retiring_a_move_source_preserves_the_destination_restart_intent() {
         const TEST: &str = "retiring_a_move_source_preserves_the_destination_restart_intent";
         const CHILD: &str = "MJ_TEST_MOVE_SOURCE_RETIREMENT";
         if std::env::var_os(CHILD).is_none() {
@@ -705,20 +732,36 @@ mod tests {
             target: *session.target.clone().unwrap(),
             desired_build: "test-build".into(),
         };
-        crate::worker_lifecycle::run_blocking(
+        let owner = crate::controller::test_support::worker_test_permit(
             &session.id,
             "Move destination launch",
-            &executor,
-            || {
-                database::begin_worker_restart(&session.id, &intent)?;
-                let authority =
-                    Reclamation::acquire(source, &Config::default(), &executor).unwrap();
-                authority.remove_targets(&executor).unwrap();
-                authority.finish()?;
-                Ok(())
-            },
         )
+        .unwrap()
         .unwrap();
+        owner
+            .scope_blocking(|| {
+                crate::controller::test_support::worker_test_run_blocking(
+                    &session.id,
+                    "Move destination launch",
+                    &executor,
+                    || {
+                        database::begin_worker_restart(&session.id, &intent)?;
+                        let authority = Reclamation::acquire(
+                            crate::worker_lifecycle::require(&session.id)
+                                .unwrap()
+                                .admission(),
+                            source,
+                            &Config::default(),
+                            &executor,
+                        )
+                        .unwrap();
+                        authority.remove_targets(&executor).unwrap();
+                        authority.finish()?;
+                        Ok(())
+                    },
+                )
+            })
+            .unwrap();
         assert_eq!(
             database::load_worker_restart(&session.id).unwrap(),
             Some(intent)
@@ -727,12 +770,12 @@ mod tests {
     }
 
     // Hard-won: #1506: retirement serialized historical workers and stopped each twice.
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg_attr(
         windows,
         ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
     )]
-    fn retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration() {
+    async fn retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration() {
         const TEST: &str =
             "retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration";
         const CHILD: &str = "MJ_TEST_ENVIRONMENT_ADMISSION";
@@ -775,16 +818,44 @@ mod tests {
             handback_tool: false,
         };
         database::save_subagent_session(&child, &relation).unwrap();
+        let mut grandchild = child.clone();
+        grandchild.id = "01010101010101010101010101010101".into();
+        grandchild.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join(&grandchild.id),
+        }));
+        let mut grandchild_relation = relation.clone();
+        grandchild_relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+        grandchild_relation.child_session_id = grandchild.id.clone();
+        grandchild_relation.parent_session_id = child.id.clone();
+        grandchild_relation.request_key = "grandchild-ownership-race".into();
+        database::save_subagent_session(&grandchild, &grandchild_relation).unwrap();
         let (waiting_tx, waiting_rx) = mpsc::channel();
         let executor = Arc::new(ControlledExecutor {
             waiting: waiting_tx,
             operations: Mutex::default(),
-            stop_barrier: Some(std::sync::Barrier::new(2)),
+            stop_barrier: Some(std::sync::Barrier::new(3)),
             fail_stops: std::sync::atomic::AtomicBool::new(true),
         });
-        let admitted =
-            WorkerPermit::acquire_blocking(&child.id, "accepted child launch", executor.as_ref())
-                .unwrap();
+        let gate = crate::controller::test_support::worker_test_gate();
+        let child_admission = gate
+            .enter_foreground(
+                &child.id,
+                "accepted child launch",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &std::sync::atomic::AtomicBool::new(false),
+                executor.as_ref(),
+            )
+            .await
+            .unwrap();
+        let admitted = WorkerPermit::acquire(&child.id, &child_admission).unwrap();
+        drop(child_admission);
+        assert!(
+            gate.try_start(
+                &child.id,
+                crate::recovery_gate::BackgroundWork::WorkerReplacement
+            )
+            .is_err()
+        );
         database::admit_environment_worker(&child.id, child.target.as_ref().unwrap()).unwrap();
         let environment = database::session_environment(&parent.id).unwrap().unwrap();
         assert_eq!(
@@ -799,9 +870,30 @@ mod tests {
         let mut later_relation = relation;
         later_relation.child_session_id = later.id.clone();
         assert!(database::save_subagent_session(&later, &later_relation).is_err());
+        let parent_admission = gate
+            .enter_foreground(
+                &parent.id,
+                "environment retirement",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &std::sync::atomic::AtomicBool::new(false),
+                executor.as_ref(),
+            )
+            .await
+            .unwrap();
+        let parent_admission = crate::recovery_gate::SessionAdmission::Foreground(parent_admission);
+        let runtime = tokio::runtime::Handle::try_current().ok();
         let retiring = std::thread::spawn({
             let executor = executor.clone();
-            move || Reclamation::acquire(environment, &Config::default(), executor.as_ref())
+            let admission = parent_admission.clone();
+            move || {
+                let _entered = runtime.as_ref().map(tokio::runtime::Handle::enter);
+                Reclamation::acquire(
+                    &admission,
+                    environment,
+                    &Config::default(),
+                    executor.as_ref(),
+                )
+            }
         });
         waiting_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -810,6 +902,23 @@ mod tests {
             executor.operations.lock().unwrap().is_empty(),
             "no writer may be stopped or files removed before the accepted launch settles"
         );
+        // A lower-ID grandchild must remain available to the child owner.
+        // ID-only retirement ordering would hold it while waiting on child,
+        // deadlocking the ordinary parent-to-descendant teardown order.
+        let nested = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gate.enter_foreground(
+                &grandchild.id,
+                "nested child teardown",
+                crate::recovery_gate::LifecycleOrigin::Person,
+                &std::sync::atomic::AtomicBool::new(false),
+                executor.as_ref(),
+            ),
+        )
+        .await
+        .expect("retirement cannot take a descendant before its ancestor")
+        .unwrap();
+        drop(nested);
         drop(admitted);
         let error = match retiring.join().unwrap() {
             Ok(_) => panic!("stop failures must refuse reclamation"),
@@ -822,40 +931,28 @@ mod tests {
         );
         assert_eq!(
             executor.operations.lock().unwrap().len(),
-            4,
-            "no deletion after a stop failure (each stop follows its control-worker check)"
+            3,
+            "no deletion after a stop failure"
         );
         executor.operations.lock().unwrap().clear();
         executor
             .fail_stops
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let environment = database::session_environment(&parent.id).unwrap().unwrap();
-        let authority =
-            Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
-        // The two workers stop concurrently, so their checks and kills may
-        // interleave in either order. What must hold: one check and one kill
-        // per worker, and no kill before a check has run for it.
+        let authority = Reclamation::acquire(
+            &parent_admission,
+            environment,
+            &Config::default(),
+            executor.as_ref(),
+        )
+        .unwrap();
+        // The three workers stop concurrently: one kill per worker.
         let operations = executor.operations.lock().unwrap().clone();
-        let count = |purpose: &str| operations.iter().filter(|op| *op == purpose).count();
-        assert_eq!(count("check the control worker"), 2, "{operations:?}");
         assert_eq!(
-            count("kill retired Mjolnir worker daemon"),
-            2,
+            operations,
+            vec!["kill retired Mjolnir worker daemon"; 3],
             "{operations:?}"
         );
-        assert_eq!(operations.len(), 4, "{operations:?}");
-        let mut checks_ahead = 0_i32;
-        for operation in &operations {
-            checks_ahead += if operation == "check the control worker" {
-                1
-            } else {
-                -1
-            };
-            assert!(
-                checks_ahead >= 0,
-                "a kill ran before its check: {operations:?}"
-            );
-        }
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();
         assert!(

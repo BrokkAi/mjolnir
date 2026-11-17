@@ -47,99 +47,99 @@ fn run_owned_worker_stop(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    ensure_control_worker(executor, locator, owner.session_id())?;
-    execute_checked(executor, command(locator, worker_root).unstaged_command())?;
+    let command = command(locator, worker_root).unstaged_command();
+    let output = run_control_command(executor, locator, owner.session_id(), &command)?;
+    mj_core::targets::checked_command_output(&command, output)?;
     Ok(())
 }
 
-/// Install this build's control worker in the session's root
-/// ([`targets::control_worker_path`]) when it is not there yet.
+/// Run a control command (a script from `targets::worker_daemon_*_script` or
+/// `targets::stop_worker_daemon_script`), staging the control worker only when
+/// the root cannot serve it.
 ///
-/// Control commands (`hel worker liveness|holder|stop`) never use a root's own
-/// `hel`: a parked sub-agent or a worker not yet upgraded keeps a build that
-/// predates them. The current build judges and stops an older worker correctly,
-/// because the lock and startup record it reads are older than the commands. The
-/// control worker is a hard link to this build's entry in the worker store,
-/// installed by the protocol that installs `<root>/hel`, only under another
-/// name. The worker never executes it, so this is not a worker swap and needs no
-/// swap admission; the root is its one owner. A root with no `hel` never ran a
-/// worker and needs none. When this build's worker cannot be installed for the
-/// target this fails and names it; there is no second way to stop a worker.
-/// Replacing the staged file is safe during daemon handoff: a running command
-/// keeps its inode, and an older daemon reinstalls its file before using it.
+/// The script picks, on the target and against the file it is about to run,
+/// the root's own `hel` or a staged `hel-control*` that proves it has the
+/// subcommand, and exits 78 when none does. The daemon keeps no record of that
+/// decision. On 78 this stages the control worker (a hard link to the current
+/// build's worker-store entry under the stable name
+/// [`targets::control_worker_path`]; the worker never executes it, so this is
+/// not a worker swap and needs no swap admission) and reruns the command once.
+/// A second 78 is an error: the staged build does not serve the subcommand. A
+/// binary that passed the probe and then exits 2 lost a race with an install
+/// between probe and exec; that surfaces as the command's ordinary failure and
+/// the caller retries it as it would any failed control command.
 ///
-/// Deadlines: the state check (absent, present or missing) runs on the caller's
-/// executor, deadline included. The install, meaning publication of the build
-/// to the store plus the link (and any wait behind another publication of the
-/// same digest), runs without the caller's deadline and keeps its cancellation,
-/// because it is the work a stop's timeout does not name. The untimed scope
-/// pauses that deadline so the following control command retains its budget.
-pub(crate) fn ensure_control_worker(
+/// Deadlines: the command runs on the caller's executor, deadline included. The
+/// staging, meaning publication of the build to the store plus the link (and
+/// any wait behind another publication of the same digest), runs without the
+/// caller's deadline and keeps its cancellation, because it is the work a
+/// stop's timeout does not name. The untimed scope pauses that deadline so the
+/// rerun retains its budget.
+pub(crate) fn run_control_command(
     caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
-) -> Result<()> {
-    let root = targets::worker_root(locator, session_id)?;
-    let state = execute_checked(
-        caller,
-        targets::locator_command(
-            SshTrafficClass::Control,
-            locator,
-            vec![
-                "sh".into(),
-                "-c".into(),
-                targets::control_worker_state_script(&root)
-                    .unstaged_script()
-                    .to_owned(),
-            ],
-        )
-        .purpose("check the control worker"),
-    )?;
-    // Anything but `missing` (`present`, or `absent` for a root that never ran a
-    // worker) needs no install.
-    if String::from_utf8_lossy(&state.stdout).trim() != "missing" {
-        return Ok(());
+    command: &CommandSpec,
+) -> Result<mj_core::targets::CommandOutput> {
+    let first = caller.execute(command)?;
+    if first.status != targets::WORKER_CONTROL_UNSTAGED_STATUS {
+        return Ok(first);
     }
+    let root = targets::worker_root(locator, session_id)?;
+    // Publishing a build waits behind other uploads of it and can take
+    // minutes. A resumable operation does not hold daemon admission for that:
+    // a handoff cancels the wait and the next daemon starts it again.
+    let yielded = caller.yield_admission_if_resumable();
+    let staged = stage_control_worker(caller, locator, session_id, &root);
+    if yielded && !caller.cancellation_requested() {
+        caller.end_resumable_work("control worker install")?;
+    }
+    staged?;
+    let second = caller.execute(command)?;
+    ensure!(
+        second.status != targets::WORKER_CONTROL_UNSTAGED_STATUS,
+        "the control worker staged in {root} does not serve {}: {}",
+        command.purpose,
+        String::from_utf8_lossy(&second.stderr).trim()
+    );
+    Ok(second)
+}
+
+fn stage_control_worker(
+    caller: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    root: &str,
+) -> Result<()> {
     let untimed = &targets::WithoutDeadline::new(caller);
     let worker = WorkerInstall::for_target(locator, untimed).with_context(|| {
         format!(
             "the current worker cannot be installed for {root}, so its worker cannot be stopped or probed"
         )
     })?;
-    let name = Path::new(&targets::control_worker_path(&root))
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("the control worker has a file name")?
-        .to_owned();
-    install_worker_binary(untimed, locator, session_id, &worker, &name)
-        .with_context(|| format!("install the current worker for {root}"))?;
-    let current = targets::control_worker_path(&root);
-    let cleanup = format!(
-        "for path in {}'/hel-control-'*; do [ \"$path\" = {} ] || rm -f -- \"$path\"; done",
-        targets::posix_quote(&root),
-        targets::posix_quote(&current),
-    );
-    execute_checked(
+    install_worker_binary(
         untimed,
-        targets::locator_command(
-            SshTrafficClass::Control,
-            locator,
-            vec!["sh".into(), "-c".into(), cleanup],
-        )
-        .purpose("remove superseded control workers"),
-    )?;
-    Ok(())
+        locator,
+        session_id,
+        &worker,
+        targets::CONTROL_WORKER_NAME,
+    )
+    .with_context(|| format!("install the current worker for {root}"))
 }
 
-/// Probe worker liveness through the staged current worker.
+/// Probe worker liveness, staging the control worker if the root needs it.
 pub(in crate::controller) fn probe_worker_liveness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker_root: &str,
 ) -> Result<mj_core::targets::CommandOutput> {
-    ensure_control_worker(executor, locator, session_id)?;
-    executor.execute(&worker_liveness_command(locator, worker_root).unstaged_command())
+    run_control_command(
+        executor,
+        locator,
+        session_id,
+        &worker_liveness_command(locator, worker_root).unstaged_command(),
+    )
 }
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint
@@ -776,8 +776,8 @@ pub(in crate::controller) fn probe_worker(
 }
 
 /// [`probe_worker`] for a diagnosis that only reports: it never installs and
-/// never waits on the worker store. When this build's control worker is not in
-/// the root, the diagnosis says so as its finding.
+/// never waits on the worker store. When nothing in the root serves the probe,
+/// the diagnosis says so as its finding.
 pub(in crate::controller) fn diagnose_worker_read_only(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,

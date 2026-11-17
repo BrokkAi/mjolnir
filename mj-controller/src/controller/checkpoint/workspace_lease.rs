@@ -21,13 +21,8 @@ impl IdleWorkspaceLease {
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Option<Self>> {
-        let Some(worker_owner) = crate::worker_lifecycle::WorkerPermit::try_acquire(
-            handle.session_id(),
-            "idle worker reservation",
-        )?
-        else {
-            return Ok(None);
-        };
+        let worker_owner =
+            crate::worker_lifecycle::WorkerPermit::acquire(handle.session_id(), admission)?;
         tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
             let Some(mut lease) = handle.lease_idle_connection(harness, admission).await? else {
                 return Ok(None);
@@ -181,12 +176,8 @@ impl IdleWorkspaceLease {
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Self> {
-        let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(
-            handle.session_id(),
-            "workspace write",
-            &ProcessExecutor,
-        )
-        .await?;
+        let worker_owner =
+            crate::worker_lifecycle::WorkerPermit::acquire(handle.session_id(), admission)?;
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut lease = handle.lease_connection(admission).await?;
             let snapshot = lease.connection_mut().sync().await?;

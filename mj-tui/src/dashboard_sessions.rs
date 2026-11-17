@@ -99,12 +99,28 @@ pub(crate) fn presentation_attention(
     session_id: &str,
 ) -> AttentionLevel {
     use mj_core::attention::SessionAttention;
-    match dashboard
+    let served = dashboard
         .served_attention
         .get(session_id)
         .copied()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The session row, workspace badges, host notifications and notification
+    // cards all read this projection. Locally accepted dismissals take effect
+    // here before the daemon's next served-attention publication arrives.
+    if matches!(
+        served,
+        SessionAttention::NeedsInput | SessionAttention::Important
+    ) && dashboard.notification_dismissal_pending(session_id)
     {
+        return AttentionLevel::Idle;
+    }
+    if served == SessionAttention::Important
+        && matches!(dashboard.notification_dismissals.get(session_id), Some(mj_core::attention::NotificationDismissal::ReadThrough(through))
+            if dashboard.state.sessions.get(session_id).is_some_and(|session| session.viewed_through_event_ordinal >= *through))
+    {
+        return AttentionLevel::Idle;
+    }
+    match served {
         SessionAttention::NeedsInput => AttentionLevel::Waiting,
         SessionAttention::Important => AttentionLevel::Important,
         SessionAttention::Unread => AttentionLevel::Unread,
@@ -1446,7 +1462,7 @@ impl DashboardState {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
             Focus::Quota => self.quota_profile_rows().len(),
-            Focus::Workspaces | Focus::Prompt => 0,
+            Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
 
@@ -1492,7 +1508,7 @@ impl DashboardState {
                     false
                 }
             }
-            Focus::Workspaces | Focus::Prompt => false,
+            Focus::Notifications | Focus::Workspaces | Focus::Prompt => false,
         }
     }
 
@@ -1501,7 +1517,7 @@ impl DashboardState {
             Focus::Sessions => self.selected_visible_index().unwrap_or(0),
             Focus::Targets => self.capacity_index,
             Focus::Quota => self.quota_index,
-            Focus::Workspaces | Focus::Prompt => 0,
+            Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
 

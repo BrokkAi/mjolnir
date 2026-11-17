@@ -805,7 +805,7 @@ fn source_fetch_lock(
 /// A Git command that contacts the remote, which must fail rather than wait
 /// for credentials no one is present to give. Over SSH the far side has no
 /// terminal, so Git cannot prompt there.
-fn managed_network_git_command(
+pub(super) fn managed_network_git_command(
     class: SshTrafficClass,
     target: &ManagedWorktreeTarget,
     directory: &Path,
@@ -1507,12 +1507,24 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        environment.push((
-            "GIT_SSH_COMMAND".into(),
-            std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
-                mj_checkpoint::archive::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()
-            }),
-        ));
+        // Git on this computer inherits an operator's command exactly; Git on
+        // a target receives it as text.
+        let runs_here = matches!(
+            self.location,
+            ExecutorGitLocation::Local
+                | ExecutorGitLocation::Session {
+                    backend: crate::targets::TargetLocator::LocalBare { .. },
+                    ..
+                }
+        );
+        let ssh_command = if runs_here {
+            mj_core::local_git::local_git_ssh_command().map(str::to_owned)
+        } else {
+            Some(mj_core::local_git::remote_git_ssh_command()?)
+        };
+        if let Some(ssh_command) = ssh_command {
+            environment.push(("GIT_SSH_COMMAND".into(), ssh_command));
+        }
         let mut args = vec![
             "git".into(),
             "-C".into(),
@@ -1599,7 +1611,7 @@ fn origin_refs_available(executor: &impl CommandExecutor, checkout: &Path) -> Re
     }
     // A checkout that has never fetched has no origin refs yet. Try once; a
     // remote that cannot be reached leaves the count unreported, not failed.
-    let fetch = managed_git_command(
+    let fetch = managed_network_git_command(
         SshTrafficClass::Bulk,
         &ManagedWorktreeTarget::Local,
         checkout,

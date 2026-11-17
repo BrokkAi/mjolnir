@@ -324,16 +324,19 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "claude",
-            "local-bare",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &ProcessExecutor,
+            controller.resume_session_controlled(
+                session_id,
+                "claude",
+                "local-bare",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &ProcessExecutor,
+            ),
         ))
         .unwrap_err();
 
@@ -967,16 +970,19 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "localhost",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &RefusingExecutor("resume before rejecting the target"),
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "localhost",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &RefusingExecutor("resume before rejecting the target"),
+            ),
         ))
         .unwrap_err();
 
@@ -994,16 +1000,19 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "retired-ec2",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &RefusingExecutor("retired EC2 resume must not execute a command"),
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "retired-ec2",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &RefusingExecutor("retired EC2 resume must not execute a command"),
+            ),
         ))
         .unwrap_err();
     assert!(
@@ -1180,10 +1189,8 @@ fn cross_harness_provisioning_lane_drives_tokio_io_and_timers() {
 // Hard-won: 7e50fc9fa: a cross-harness lane waited for its parent Move's worker permit.
 #[test]
 fn cross_harness_lanes_borrow_the_parent_worker_owner() {
-    use crate::worker_lifecycle::WorkerPermit;
-
     let session_id = "cross-harness-lane-owner-test";
-    let owner = WorkerPermit::try_acquire(session_id, "test parent move")
+    let owner = crate::controller::test_support::worker_test_permit(session_id, "test parent move")
         .unwrap()
         .unwrap();
     let (provision_owner, handoff_owner) = owner
@@ -1192,26 +1199,14 @@ fn cross_harness_lanes_borrow_the_parent_worker_owner() {
                 "provision",
                 |_cancellation| {
                     block_on_cross_harness_lane("provision", async {
-                        let nested = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            WorkerPermit::acquire(
-                                session_id,
-                                "test provisioning",
-                                &ProcessExecutor,
-                            ),
-                        )
-                        .await??;
+                        let nested = crate::worker_lifecycle::require(session_id)?;
                         Ok(nested.operation_id().to_owned())
                     })
                 },
                 "handoff",
                 |_cancellation| {
                     block_on_cross_harness_lane("handoff", async {
-                        let nested = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            WorkerPermit::acquire(session_id, "test handoff", &ProcessExecutor),
-                        )
-                        .await??;
+                        let nested = crate::worker_lifecycle::require(session_id)?;
                         Ok(nested.operation_id().to_owned())
                     })
                 },
@@ -1221,13 +1216,13 @@ fn cross_harness_lanes_borrow_the_parent_worker_owner() {
     assert_eq!(provision_owner, owner.operation_id());
     assert_eq!(handoff_owner, owner.operation_id());
     assert!(
-        WorkerPermit::try_acquire(session_id, "test unrelated operation")
+        crate::controller::test_support::worker_test_permit(session_id, "test unrelated operation")
             .unwrap()
             .is_none()
     );
     drop(owner);
     assert!(
-        WorkerPermit::try_acquire(session_id, "test next operation")
+        crate::controller::test_support::worker_test_permit(session_id, "test next operation")
             .unwrap()
             .is_some()
     );
@@ -1672,7 +1667,8 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         .unwrap();
     let executor = FailingPreflightExecutor::default();
     let error = runtime
-        .block_on(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
+            session_id,
             controller.resume_session_controlled_with_repository_preflight_and_admission(
                 session_id,
                 "codex",
@@ -1705,7 +1701,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                     );
                 },
             ),
-        )
+        ))
         .unwrap_err();
     assert!(
         executor
@@ -1847,16 +1843,19 @@ fn failed_resume_retires_a_checkout_it_recreated() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "local-bare",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &FailAfterWorktreeRestore,
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "local-bare",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &FailAfterWorktreeRestore,
+            ),
         ))
         .unwrap_err();
 
@@ -2110,16 +2109,19 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(controller.resume_session_controlled(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             session_id,
-            "codex",
-            "podman",
-            SessionResumeOptions {
-                additional_mounts: None,
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &GitWithoutPodmanExecutor,
+            controller.resume_session_controlled(
+                session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &GitWithoutPodmanExecutor,
+            ),
         ))
         .unwrap_err();
     // The conversion archive was written, then the destination could not be
@@ -2384,27 +2386,30 @@ exit 0
         .enable_all()
         .build()
         .unwrap();
-    let restored = runtime.block_on(controller.restore_into_target(
+    let restored = runtime.block_on(crate::controller::test_support::worker_test_scope_async(
         session_id,
-        RestoreIntoTarget {
-            profile: &profile,
-            archive: &verified,
-            restored_archive: &verified.archive_path,
-            resumed_project_directory: Some(checkout.clone()),
-            resumed_container_workspace: None,
-            restore_repositories: false,
-            native_continuity: true,
-            discard_queued_prompts: false,
-            replay_queue: true,
-            utility_handoff: None,
-            projection_build: None,
-            resume_notices: Vec::new(),
-            include_in_place_subagents: false,
-            install_attached_resources: true,
-            worker_root_reset: WorkerRootReset::FreshTarget,
-            retire_after_ready: None,
-        },
-        &ProcessExecutor,
+        controller.restore_into_target(
+            session_id,
+            RestoreIntoTarget {
+                profile: &profile,
+                archive: &verified,
+                restored_archive: &verified.archive_path,
+                resumed_project_directory: Some(checkout.clone()),
+                resumed_container_workspace: None,
+                restore_repositories: false,
+                native_continuity: true,
+                discard_queued_prompts: false,
+                replay_queue: true,
+                utility_handoff: None,
+                projection_build: None,
+                resume_notices: Vec::new(),
+                include_in_place_subagents: false,
+                install_attached_resources: true,
+                worker_root_reset: WorkerRootReset::FreshTarget,
+                retire_after_ready: None,
+            },
+            &ProcessExecutor,
+        ),
     ));
     assert!(
         restore_spec.exists(),
@@ -2750,16 +2755,19 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
             commands: Mutex::default(),
         };
         let error = runtime
-            .block_on(controller.resume_session_controlled(
+            .block_on(crate::controller::test_support::worker_test_scope_async(
                 id,
-                "codex",
-                "podman",
-                SessionResumeOptions {
-                    additional_mounts: None,
-                    resource_allocation: None,
-                    discard_queue: false,
-                },
-                &engine,
+                controller.resume_session_controlled(
+                    id,
+                    "codex",
+                    "podman",
+                    SessionResumeOptions {
+                        additional_mounts: None,
+                        resource_allocation: None,
+                        discard_queue: false,
+                    },
+                    &engine,
+                ),
             ))
             .unwrap_err();
         let error = format!("{error:#}");
@@ -2803,7 +2811,7 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
     controller.state.sessions.insert(id.into(), parent.clone());
     crate::database::save_session(&parent).unwrap();
     let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(id, "resume rollback boot regression")
+        crate::controller::test_support::worker_test_permit(id, "resume rollback boot regression")
             .unwrap()
             .unwrap();
     owner.scope_blocking(|| {
@@ -2901,13 +2909,6 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                 }
                 "probe retained environment directory" => (0, "present\n".into()),
                 "probe Mjolnir worker root" => (0, "recoverable\n".into()),
-                "check the control worker" => {
-                    assert!(
-                        *running,
-                        "control worker check ran inside a stopped container"
-                    );
-                    (0, "present\n".into())
-                }
                 "probe Mjolnir worker daemon liveness" => {
                     assert!(*running, "worker probe ran inside a stopped container");
                     (0, "dead\n".into())
@@ -3064,7 +3065,6 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
                 "probe retained target before Restart"
                     | "probe Mjolnir worker root"
                     | "probe Mjolnir worker daemon liveness"
-                    | "check the control worker"
                     | "probe retained environment directory"
             ));
             let mut local = if command.program == "ssh" {

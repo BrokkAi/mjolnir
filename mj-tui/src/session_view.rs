@@ -105,7 +105,7 @@ where
 pub(crate) struct SessionFacts {
     /// Revisions of the inputs these facts were derived from; `None` before
     /// the first derivation.
-    inputs: Option<[u64; 5]>,
+    inputs: Option<[u64; 6]>,
     /// Served attention with this terminal's unread receipt applied.
     own: HashMap<String, AttentionLevel>,
     /// Live records, and records an operation keeps on screen, by id.
@@ -116,7 +116,7 @@ pub(crate) struct SessionFacts {
 }
 
 impl SessionFacts {
-    fn derive(dashboard: &DashboardState, inputs: [u64; 5]) -> Self {
+    fn derive(dashboard: &DashboardState, inputs: [u64; 6]) -> Self {
         let mut index = dashboard.row_index.borrow_mut();
         index.synchronize(&dashboard.state);
         let own = dashboard
@@ -370,7 +370,7 @@ pub(crate) struct SessionOrder {
 
 #[derive(Clone, PartialEq, Eq)]
 struct OrderKey {
-    inputs: [u64; 14],
+    inputs: [u64; 15],
     selected: Option<String>,
 }
 
@@ -442,12 +442,13 @@ impl SessionOrder {
 }
 
 impl DashboardState {
-    fn session_facts_inputs(&self) -> [u64; 5] {
+    fn session_facts_inputs(&self) -> [u64; 6] {
         [
             self.state.revision(),
             self.session_details.revision(),
             self.session_reviews.revision(),
             self.served_attention.revision(),
+            self.notification_dismissals.revision(),
             self.session_operations.revision(),
         ]
     }
@@ -547,13 +548,15 @@ impl DashboardState {
     }
 
     fn session_order_key(&self) -> OrderKey {
-        let [state, details, reviews, unreachable, operations] = self.session_facts_inputs();
+        let [state, details, reviews, attention, dismissals, operations] =
+            self.session_facts_inputs();
         OrderKey {
             inputs: [
                 state,
                 details,
                 reviews,
-                unreachable,
+                attention,
+                dismissals,
                 operations,
                 self.config.revision(),
                 self.project_sources.revision(),

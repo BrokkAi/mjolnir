@@ -2736,9 +2736,14 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
             .as_ref(),
         Some(&runtime)
     );
-    controller
-        .force_destroy_session(&child.child_session_id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&child.child_session_id, || {
+        controller.force_destroy_session(
+            &child.child_session_id,
+            &executor,
+            BranchDisposition::Keep,
+        )
+    })
+    .unwrap();
     assert!(controller.state.sessions.contains_key(&id));
     let commands = executor.commands.lock().unwrap();
     assert!(
@@ -2751,16 +2756,21 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     executor
         .fail
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(controller.stop_subagent(&id, &executor).is_err());
+    assert!(
+        crate::controller::test_support::worker_test_scope(&id, || controller
+            .stop_subagent(&id, &executor))
+        .is_err()
+    );
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
     assert!(saved.sessions[&id].target.is_some());
     executor
         .fail
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    controller
-        .force_destroy_session(&id, &executor, BranchDisposition::Keep)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&id, || {
+        controller.force_destroy_session(&id, &executor, BranchDisposition::Keep)
+    })
+    .unwrap();
     assert!(
         !crate::database::load_state()
             .unwrap()
@@ -2864,9 +2874,9 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert!(refusal.message().contains(&session.id));
     assert!(refusal.message().contains("podman"));
     assert!(
-        controller
-            .stop_subagent(&session.id, &UnusedExecutor)
-            .is_err()
+        crate::controller::test_support::worker_test_scope(&session.id, || controller
+            .stop_subagent(&session.id, &UnusedExecutor))
+        .is_err()
     );
     assert!(
         crate::database::load_state()
@@ -3178,6 +3188,12 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         "registration is idempotent"
     );
     assert_eq!(child.kind, mj_core::subagent::SubagentKind::Reviewer);
+    // A reviewer carries no project memory even though its parent does: the
+    // staged profile then holds none (#1580, memory was 99.96% of its upload).
+    assert!(
+        !controller.state.sessions[parent_id].no_project_memory
+            && controller.state.sessions[&child.child_session_id].no_project_memory
+    );
     assert_eq!(child.profile_id, "resolved-reviewer");
     assert_eq!(child.model.as_deref(), Some("resolved-model"));
     assert!(child.handback_tool);

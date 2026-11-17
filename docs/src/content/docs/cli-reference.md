@@ -523,6 +523,12 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
+- `mj hosts [--host <name>] [--json]` prints the daemon's latest reading of each
+  host's CPU, memory, and disk: one row per physical host or EC2 fleet, with the
+  targets that share it. Run it before creating a session on a busy machine, or
+  from a script that picks a target. `--host` takes a host or one of its target
+  names. It reads the daemon's last sample and does not contact the host itself,
+  so the dashboard's numbers can differ by one refresh.
 - `mj quota` prints the daemon's latest quota reading for every enabled profile,
   or one with `--profile`: billing mode, each reported window with what remains
   and its reset, and how long ago the value was fetched. A profile whose quota
@@ -810,7 +816,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `SLOPCOP_TOKEN` / `SLOPCOP_SERVICE` | slopcop login synced into every live target except a bare runtime on this machine. They outrank the login `slopcop login` stored, as they do for slopcop itself. |
-| `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |
+| `GIT_SSH_COMMAND` | SSH command for the Git the daemon runs to reach a remote: the clone cache (on this computer or the SSH machine that holds it), checkpoint base checks, managed worktree and publication checks on this computer, and a Move's read of its source. Unset, those use a non-interactive command that trusts a new host key on first use. Git that runs on a target follows that target's own SSH settings. |
 | `RUST_LOG` | Controller logging filter. |
 
 Setting `MJ_WORKER_URL` requires `MJ_WORKER_SHA256`; an unverified downloaded worker is not accepted. A digest set without a URL is ignored.

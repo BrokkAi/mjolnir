@@ -618,7 +618,7 @@ impl RuntimeState {
                         kind,
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
-                        last_stage_change: tokio::time::Instant::now(),
+                        progress: LifecycleProgress::new(),
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,
@@ -743,7 +743,8 @@ impl RuntimeState {
                         } else {
                             None
                         };
-                        operation(operation_state, operation_id, cancelled, session_admission).await
+                        let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(&operation_id, &session_admission)?;
+                        worker_owner.scope(operation(operation_state, operation_id, cancelled, session_admission)).await
                     })
                     .await
                     {

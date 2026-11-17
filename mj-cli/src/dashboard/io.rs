@@ -103,6 +103,12 @@ pub(crate) enum DashboardIoUpdate {
     TranscriptTailSeed {
         materialized: Box<MaterializedSession>,
     },
+    StoredTranscriptItem {
+        session_id: String,
+        stable_id: String,
+        generation: u64,
+        result: std::result::Result<mj_client::daemon::StoredTranscriptItem, String>,
+    },
     StoredSessionSummary {
         session_id: String,
         generation: u64,
@@ -850,6 +856,15 @@ impl DashboardContext {
             DashboardIoUpdate::StoppedSubagentTranscript { session_id, result } => {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
+            }
+            DashboardIoUpdate::StoredTranscriptItem { session_id, stable_id, generation, result } => {
+                if !self.summary_reads.finish_item(&session_id, &stable_id, generation) { return; }
+                let item = match result {
+                    Ok(mj_client::daemon::StoredTranscriptItem::Found(item)) => Some(item),
+                    Ok(mj_client::daemon::StoredTranscriptItem::Missing | mj_client::daemon::StoredTranscriptItem::Unsupported) => None,
+                    Err(error) => { self.dashboard.set_notice(format!("Could not read notification message: {error}")); None }
+                };
+                self.dashboard.notification_message_read_finished(&session_id, &stable_id, item);
             }
             DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
                 if !self.summary_reads.finish(&session_id, generation) {

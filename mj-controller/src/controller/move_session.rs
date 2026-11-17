@@ -565,15 +565,20 @@ pub(in crate::controller) fn quota_move_recovery(
 
 /// Observe preparation state without taking the worker's mutation permit.
 /// Confirmed execution leases and refreshes the source before interruption.
+///
+/// A session without a relay actor has no worker to observe: a Move that is
+/// restoring it on its destination, or a worker that never came up, leaves
+/// the record `Disconnected` with no actor. That is the answer (`None`, an
+/// unavailable source), not something to wait for: preparing the retry of a
+/// Move that is still running must reach the Move that owns the session.
 pub async fn refresh_move_source(
     manager: &SessionManagerControl,
     id: &str,
 ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
     Ok(manager
-        .wait_for_session(id, std::time::Duration::from_secs(5))
+        .find_session(id)
         .await?
-        .view()
-        .snapshot)
+        .and_then(|handle| handle.view().snapshot))
 }
 
 /// A Move's hold on its source's relay connection, from the confirmation
@@ -602,12 +607,7 @@ impl MoveSourceRelay {
         manager: &SessionManagerControl,
         id: &str,
     ) -> Result<Self> {
-        let owner = crate::worker_lifecycle::WorkerPermit::acquire(
-            id,
-            "Move source relay",
-            &crate::targets::ProcessExecutor,
-        )
-        .await?;
+        let owner = crate::worker_lifecycle::WorkerPermit::acquire(id, admission)?;
         let handle = manager
             .wait_for_session(id, std::time::Duration::from_secs(5))
             .await?;
@@ -1610,7 +1610,7 @@ impl Controller {
         manager: &SessionManagerControl,
         on_accepted: impl FnOnce() + Send,
     ) -> Result<MoveOutcome> {
-        crate::worker_lifecycle::run(&request.preparation.selection.session_id.clone(), "move session managed controlled", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, &request.preparation.selection.session_id.clone(), async {
         let prepared = &request.preparation;
         let id = prepared.selection.session_id.clone();
         let started = std::time::Instant::now();
@@ -2088,7 +2088,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
-        crate::worker_lifecycle::run(&operation.selection.session_id.clone(), "recover move managed controlled", executor, async {
+        crate::worker_lifecycle::run_admitted(admission, &operation.selection.session_id.clone(), async {
         let id = operation.selection.session_id.clone();
         let result = async {
             let mut session = self.state.sessions.get(&id).context("move session is missing")?.clone();
@@ -2411,7 +2411,7 @@ impl Controller {
     ) -> Result<()> {
         let retained = source_relay.owner();
         let admission_id = operation.selection.session_id.clone();
-        crate::worker_lifecycle::run_with_owner(&admission_id, "execute move", executor, retained, async {
+        crate::worker_lifecycle::run_with_owner(admission, &admission_id, "execute move", executor, retained, async {
         let id = operation.selection.session_id.clone();
         let preparation = preparation.cloned();
         ensure!(

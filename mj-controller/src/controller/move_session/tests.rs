@@ -1249,6 +1249,30 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     assert_ne!(first.fingerprint, second.fingerprint);
 }
 
+// Hard-won: #1579: retrying a Move that was still restoring the session on its destination failed
+// after a guessed 5 s wait for a relay actor that session legitimately does not have.
+#[test]
+fn move_preparation_reports_a_session_without_a_relay_actor_as_unavailable_at_once() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let manager = crate::session_manager::spawn_session_manager().unwrap();
+        let started = tokio::time::Instant::now();
+        let snapshot = super::refresh_move_source(&manager.control, "restoring-on-destination")
+            .await
+            .expect("an absent actor is an unavailable source, not an error");
+        assert!(snapshot.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the lookup must not wait for an actor that never appears"
+        );
+        manager.shutdown.shutdown().await.unwrap();
+    });
+}
+
 #[cfg(unix)]
 // Hard-won: 6b51b56d6: Move preparation waited for a background checkpoint's mutation permit.
 #[test]
@@ -1275,7 +1299,7 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
                 project_memory: None,
             }])
             .unwrap();
-        let checkpoint_owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let checkpoint_owner = crate::controller::test_support::worker_test_permit(
             MOVE_QUEUE_SESSION_ID,
             "background recovery checkpoint",
         )
@@ -5378,11 +5402,14 @@ fn restart_reuses_an_error_target_and_preserves_its_queued_command() {
         .build()
         .unwrap();
     let restored = runtime
-        .block_on(controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap();
@@ -5479,11 +5506,14 @@ fn restart_classifies_a_missing_target_as_a_preflight_fallback() {
         .build()
         .unwrap();
     let error = runtime
-        .block_on(controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap_err();
@@ -6644,11 +6674,14 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
     )
     .unwrap();
     runtime
-        .block_on(fixture.controller.restore_session_in_place_for_restart(
+        .block_on(crate::controller::test_support::worker_test_scope_async(
             LATCH_RELAY_SESSION,
-            IN_PLACE_SOURCE_PROFILE,
-            "local-bare",
-            &executor,
+            fixture.controller.restore_session_in_place_for_restart(
+                LATCH_RELAY_SESSION,
+                IN_PLACE_SOURCE_PROFILE,
+                "local-bare",
+                &executor,
+            ),
         ))
         .unwrap()
         .unwrap();

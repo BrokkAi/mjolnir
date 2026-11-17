@@ -663,7 +663,7 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         let worker_binary = directory.path().join("hel-test-worker");
         std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
-        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        let owner = crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test legacy export",
         )
@@ -1973,7 +1973,7 @@ async fn live_resume_discards_queue_before_native_readiness() {
     let backend = targets::TargetLocator::LocalBare {
         worker_root: root.to_string_lossy().into_owned(),
     };
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+    let owner = crate::controller::test_support::worker_test_permit(
         LATCH_RELAY_SESSION,
         "test discard readiness",
     )
@@ -2061,10 +2061,17 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         .unwrap();
     handle.sync_now().await.unwrap();
     let ordinal = handle.view().snapshot.unwrap().operational.latest_ordinal;
+    let admission = channels
+        .control
+        .session_gate
+        .try_start(
+            LATCH_RELAY_SESSION,
+            crate::recovery_gate::BackgroundWork::WorkerReplacement,
+        )
+        .unwrap();
     let owner =
-        crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test swap")
-            .unwrap()
-            .unwrap();
+        crate::worker_lifecycle::WorkerPermit::acquire(LATCH_RELAY_SESSION, &admission).unwrap();
+    drop(admission);
     owner
         .scope_blocking(|| {
             owner.begin_restart(&durable_target, String::new())?;
@@ -3367,7 +3374,7 @@ fn latched_checkpoint(
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
         admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
-        _worker_owner: crate::worker_lifecycle::WorkerPermit::try_acquire(
+        _worker_owner: crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,
             "test checkpoint",
         )
@@ -4456,7 +4463,6 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
                     "Config": {"Image":"agent-dev:2.51.0", "Labels": {"dev.mj.managed":"true", "dev.mj.session":LATCH_RELAY_SESSION}},
                     "HostConfig": {}, "Mounts": [], "State": {"Running":true}
                 }]))?,
-                "check the control worker" => b"present\n".to_vec(),
                 "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
                 _ => anyhow::bail!(
                     "a pending upgrade tried to mutate its busy environment: {}",

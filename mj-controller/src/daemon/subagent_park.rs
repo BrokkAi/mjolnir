@@ -286,7 +286,7 @@ impl RuntimeState {
                 LifecycleKind::Unpark,
                 // A close cancels preparation or readiness observation, then
                 // settles the child through its ordinary lifecycle.
-                |state, session_id, cancelled, _session_admission| async move {
+                |state, session_id, cancelled, session_admission| async move {
                     let executor = DaemonStageReportingExecutor::new(
                         CancellableProcessExecutor::new(cancelled.clone())
                             .with_deadline(UNPARK_TIMEOUT),
@@ -295,7 +295,7 @@ impl RuntimeState {
                     );
                     let controller = blocking(Controller::load).await?;
                     controller
-                        .unpark_subagent_worker(&session_id, &executor)
+                        .unpark_subagent_worker(&session_admission, &session_id, &executor)
                         .await?;
                     Ok(DaemonLifecycleResult::Done)
                 },

@@ -4,9 +4,8 @@ use super::*;
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long a reviewer child's Create may go with no provisioning stage
-/// starting or finishing before its start is failed. It bounds idleness, not
-/// the whole Create, so a slow Create that keeps progressing is never failed.
+/// The existing ten-minute reviewer Create idle bound (#1438) also measures
+/// time since the last byte of an active transfer (#1583).
 ///
 /// The longest single stage measured on 2026-11-06 under a load average of
 /// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
@@ -325,7 +324,7 @@ impl RuntimeState {
     }
 
     /// Fail when the child's running Create has gone `bound` without a
-    /// provisioning stage starting or finishing, and cancel that Create in
+    /// provisioning stage change or transfer progress, and cancel that Create in
     /// the same decision, through the cancellation close and destroy use, so
     /// it stops holding its lifecycle admission. The stage signal is the one
     /// the lifecycle already keeps for its progress display. Waiting for a
@@ -348,6 +347,7 @@ impl RuntimeState {
             CreateProgress::Stalled {
                 idle,
                 stages,
+                stream,
                 phase,
             } => {
                 let stage = if stages.is_empty() {
@@ -360,10 +360,16 @@ impl RuntimeState {
                     StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
                     StalledCreate::Committed => "its Create had committed and was left running",
                 };
-                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?phase, "reviewer child Create stalled");
+                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?stream, ?phase, "reviewer child Create stalled");
+                let detail = match stream {
+                    Some(stream) => format!("{stream} moved no bytes for {} s", idle.as_secs()),
+                    None => format!(
+                        "no stage started or finished for {} s (stalled in: {stage})",
+                        idle.as_secs()
+                    ),
+                };
                 anyhow::bail!(
-                    "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
-                    idle.as_secs()
+                    "the reviewer child {child} stalled while provisioning: {detail}; {outcome}"
                 )
             }
         }
@@ -866,6 +872,7 @@ mod capacity_admission_tests {
 mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
 
+    // Hard-won: #1562: a cancelled create stayed unfinished when cached eligibility omitted its durable record.
     #[tokio::test]
     #[cfg_attr(
         windows,
@@ -906,13 +913,14 @@ mod delegation_replay_tests {
         );
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
-        let runtime = crate::daemon::tests::test_runtime_state();
+        let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
         runtime.profile_catalog.get_or_init(|| {
             crate::server_runtime::profile_catalog::ProfileCatalog::new(
                 tokio_util::sync::CancellationToken::new(),
             )
         });
         let path = GoPreferences::path();
+        let mut stale_candidate = None;
         for remember in [false, true, false] {
             let before = std::fs::read(&path).ok();
             let recent_before = runtime
@@ -957,6 +965,7 @@ mod delegation_replay_tests {
                 .start_create_session_controlled(request, control.clone(), publication)
                 .await
                 .unwrap();
+            stale_candidate = Some(registered.session.clone());
             if remember {
                 let saved = GoPreferences::load(&path).unwrap();
                 let default = saved.default.unwrap();
@@ -1007,9 +1016,46 @@ mod delegation_replay_tests {
             control.request_cancel("create test cancelled");
             drop(publish);
             assert!(matches!(
-                runtime.wait_create_outcome(&registered.session.id).await,
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    runtime.wait_create_outcome(&registered.session.id)
+                )
+                .await
+                .expect("cancelled creation must settle its durable intent"),
                 super::CreateWait::Failed(_)
             ));
+        }
+        // Failure settlement reads the store even when the runtime's
+        // publication has not observed a registered create yet.
+        let mut pending = stale_candidate.unwrap();
+        pending.id = "77777777777777777777777777777777".into();
+        crate::database::save_new_session(&pending, None, false, false).unwrap();
+        let stale = crate::daemon::tests::test_runtime_state();
+        assert!(
+            !stale
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .contains_key(&pending.id)
+        );
+        stale
+            .fail_unfinished_provisioning(
+                &pending.id,
+                "cancelled before admission with a stale publication",
+            )
+            .await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stale.wait_create_outcome(&pending.id),
+        )
+        .await
+        .expect("stale publication must not retain a create intent")
+        {
+            super::CreateWait::Failed(error) => {
+                assert!(error.to_string().contains("stale publication"), "{error:#}")
+            }
+            super::CreateWait::Finished => panic!("cancelled provisioning was not successful"),
         }
     }
 

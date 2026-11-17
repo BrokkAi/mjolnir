@@ -317,6 +317,30 @@ impl Gate {
         }
     }
 
+    /// Resumable background observers wait on this owner's exact drain
+    /// deadline and publication, without holding daemon admission.
+    pub(crate) async fn wait_after_draining(&self) -> bool {
+        loop {
+            let changed = self.1.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let deadline = {
+                let state = self.lock();
+                if state.closed {
+                    return false;
+                }
+                if !state.draining() {
+                    return true;
+                }
+                state.drain_requested.expect("draining has a request") + DRAIN_LAPSE
+            };
+            tokio::select! {
+                () = changed => {},
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {},
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
         loop {
@@ -863,8 +887,22 @@ mod tests {
         );
         let mut late = Box::pin(gate.wait_until_draining());
         assert!(futures::poll!(&mut late).is_ready());
+        let mut resumed = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut resumed).is_pending());
+        gate.expire_drain_for_test();
+        assert!(
+            resumed.await,
+            "lapse resumes background recovery without admission"
+        );
+        gate.begin_draining();
+        let mut shutdown = Box::pin(gate.wait_after_draining());
+        assert!(futures::poll!(&mut shutdown).is_pending());
         drop(held);
         assert!(gate.try_close());
+        assert!(
+            !shutdown.await,
+            "closure retires the old daemon's observers"
+        );
         let gate = Arc::new(Gate::default());
         let mut closing = Box::pin(gate.wait_until_draining());
         assert!(futures::poll!(&mut closing).is_pending());

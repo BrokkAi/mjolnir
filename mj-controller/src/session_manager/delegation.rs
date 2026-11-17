@@ -22,6 +22,21 @@ pub(crate) struct DelegationObservation {
 }
 
 impl DelegationObservation {
+    /// The handback requests this session's worker queue holds that the worker
+    /// has not completed. The queue owns a request until the daemon executes it.
+    pub(crate) fn queued_handbacks(&self) -> Vec<String> {
+        self.requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request.action,
+                    mj_core::subagent::SubagentToolAction::Handback { .. }
+                ) && !self.completed.contains(&request.request_id)
+            })
+            .map(|request| request.request_id.clone())
+            .collect()
+    }
+
     pub(crate) fn from_view(view: &ManagedSessionView) -> Option<Self> {
         let snapshot = view.snapshot.as_ref()?;
         Some(Self {

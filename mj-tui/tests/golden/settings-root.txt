@@ -23,22 +23,22 @@
 │                     │                                                                                              │                     │
 │                     │   Display                                                                                    │                     │
 │                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
-│                     │   Notifications                   Terminal                                                   │                     │
-│                     │   Advanced                        All off                                                    │                     │
+│                     │   Notifications                   Terminal                                                   │  ───────────────────╯
+│                     │   Advanced                        All off                                                    │  ───────────────────╮
 │                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │  ───────────────────╯
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╮
-│                     │                                                                                              │                     │
+│                     │   Privacy                                                                                    │                     │
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │   Other                                                                                      │                     │
 │                     │   GitHub events                   On · GitHub activity                                       │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
+│                     │   Save and Close                                                                             │                     │
 │                     ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯                     │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
+│                                                                                                                       ───────────────────╯
+│                                                                                                                       ──────────── ▁   ▄ ╮
+│                                            ││Nothing needs you                                                                           │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : / ? palette
 root footer alignment: save=(24,35); body=(26,11)
@@ -754,15 +754,12 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 │ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││                                                          │
-│hel ──────────────────────────────────││                     ✦  M J O L N I R                     │
-│› ■ ACP pretty name               ◇ ⋯ ││                                                          │
-│  Stopped  podman  codex-1            ││        Select a session to open its conversation.        │
+│ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
+│hel ──────────────────────────────────││                                                          │
+│› ■ ACP pretty name               ◇ ⋯ ││        Select a session to open its conversation.        │
+│  Stopped  podman  codex-1            ││                                                          │
 │  │ No messages yet                   ││                                                          │
 │  │                                   ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -778,6 +775,9 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │
 │                                      ││  codex-2   Codex        refreshing…                      │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Settings saved. New sessions use these defaults. Web listener changes apply on its next start.
 rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35, 104, 77)

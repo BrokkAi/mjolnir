@@ -157,8 +157,8 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let persisted = RefCell::new(Vec::new());
     persist_controller_fixture(&controller);
-    let failure = controller
-        .cleanup_stopped_target_with(
+    let failure = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
                 // The cleanup command fails, then the exact-absence probe
@@ -172,7 +172,8 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
                 Ok(())
             },
         )
-        .unwrap_err();
+    })
+    .unwrap_err();
     assert!(format!("{failure:#}").contains("cleanup failed"));
     assert_eq!(persisted.borrow().len(), 1);
     assert!(persisted.borrow()[0].0);
@@ -187,8 +188,8 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
 
     let retry_persisted = RefCell::new(Vec::new());
     persist_controller_fixture(&controller);
-    controller
-        .cleanup_stopped_target_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
                 statuses: std::sync::Mutex::new(Vec::new()),
@@ -200,7 +201,8 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
                 Ok(())
             },
         )
-        .unwrap();
+    })
+    .unwrap();
     assert_eq!(retry_persisted.borrow().as_slice(), &[(false, None)]);
     assert!(controller.state.sessions[session_id].target.is_none());
     assert!(controller.state.sessions[session_id].last_error.is_none());
@@ -217,15 +219,16 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let previous = controller.state.sessions[session_id].clone();
     persist_controller_fixture(&controller);
-    let failure = controller
-        .cleanup_stopped_target_with(
+    let failure = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
                 statuses: std::sync::Mutex::new(vec![1, 1]),
             },
             |_| Err(anyhow::anyhow!("database unavailable")),
         )
-        .unwrap_err();
+    })
+    .unwrap_err();
     let detail = format!("{failure:#}");
     assert!(detail.contains("cleanup failed"), "{detail}");
     assert!(detail.contains("database unavailable"), "{detail}");
@@ -309,22 +312,27 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     let persisted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
-            persisted.borrow_mut().push(record.state);
-            Ok(())
-        })
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &executor,
+            |record| {
+                persisted.borrow_mut().push(record.state);
+                Ok(())
+            },
+        )
+    })
+    .unwrap();
 
     assert_eq!(
         persisted.into_inner(),
         vec![SessionState::Destroying, SessionState::Stopped]
     );
     let commands = executor.commands.lock().unwrap().clone();
-    assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].purpose, "check the control worker");
-    assert_eq!(commands[1].purpose, "kill retired Mjolnir worker daemon");
-    assert!(commands[2].args.iter().any(|arg| arg.contains("rm -rf")));
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker daemon");
+    assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
     assert!(stopped.target.is_none());
@@ -441,19 +449,21 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let closing = scope.spawn(|| {
             persist_controller_fixture(&controller);
-            controller.destroy_after_verified_checkpoint_with(
-                session_id,
-                &checkpoint,
-                &DeferredCleanupExecutor {
-                    statuses: std::sync::Mutex::new(vec![125]),
-                },
-                |record| {
-                    assert!(*recovery.restarted.lock().unwrap());
-                    crate::database::save_lifecycle_session(record)?;
-                    persisted_tx.send(record.state).unwrap();
-                    Ok(())
-                },
-            )
+            crate::controller::test_support::worker_test_scope(session_id, || {
+                controller.destroy_after_verified_checkpoint_with(
+                    session_id,
+                    &checkpoint,
+                    &DeferredCleanupExecutor {
+                        statuses: std::sync::Mutex::new(vec![125]),
+                    },
+                    |record| {
+                        assert!(*recovery.restarted.lock().unwrap());
+                        crate::database::save_lifecycle_session(record)?;
+                        persisted_tx.send(record.state).unwrap();
+                        Ok(())
+                    },
+                )
+            })
         });
         assert!(
             persisted_rx
@@ -497,7 +507,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
     }
     persist_controller_fixture(&controller);
     assert!(
-        controller
+        crate::controller::test_support::worker_test_scope(session_id, || controller
             .destroy_after_verified_checkpoint_with(
                 session_id,
                 &checkpoint,
@@ -505,8 +515,8 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                     statuses: std::sync::Mutex::new(vec![0])
                 },
                 crate::database::save_lifecycle_session
-            )
-            .unwrap()
+            ))
+        .unwrap()
     );
     assert_eq!(
         crate::database::load_state().unwrap().sessions[session_id].state,
@@ -609,14 +619,20 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     let persisted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    let deferred = controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
-            persisted
-                .borrow_mut()
-                .push((record.state, record.target.is_some()));
-            Ok(())
-        })
-        .unwrap();
+    let deferred = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &executor,
+            |record| {
+                persisted
+                    .borrow_mut()
+                    .push((record.state, record.target.is_some()));
+                Ok(())
+            },
+        )
+    })
+    .unwrap();
 
     assert!(deferred);
     assert_eq!(
@@ -633,13 +649,14 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     drop(commands);
 
     persist_controller_fixture(&controller);
-    controller
-        .cleanup_stopped_target_with(session_id, &executor, |record| {
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_stopped_target_with(session_id, &executor, |record| {
             assert_eq!(record.state, SessionState::Stopped);
             assert!(record.target.is_none());
             Ok(())
         })
-        .unwrap();
+    })
+    .unwrap();
 
     let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(
@@ -698,11 +715,15 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &ProcessExecutor, |_| {
-            Ok(())
-        })
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &ProcessExecutor,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     assert!(!worktree.worktree_root.exists());
     assert!(checkpoint.archive_path.is_file());
@@ -724,14 +745,15 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     );
     // Hard-won: reclaimed ownership skipped a later explicit branch deletion.
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Delete,
             |_| Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
     assert!(!branch_exists(repository.path(), &worktree.branch));
 }
 #[test]
@@ -770,9 +792,10 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_stop_with(session_id, &ProcessExecutor, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_stop_with(session_id, &ProcessExecutor, |_| Ok(()))
+    })
+    .unwrap();
 
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
@@ -833,9 +856,10 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     };
 
     persist_controller_fixture(&controller);
-    let deferred = controller
-        .suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
-        .unwrap();
+    let deferred = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+    })
+    .unwrap();
 
     assert!(!deferred, "a bare target needs no storage cleanup pass");
     let closed = &controller.state.sessions[session_id];
@@ -881,9 +905,10 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     };
 
     persist_controller_fixture(&controller);
-    let error = controller
-        .suspend_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
-        .unwrap_err();
+    let error = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
+    })
+    .unwrap_err();
 
     assert!(
         error.to_string().contains("suspend it instead"),
@@ -995,9 +1020,10 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
 
     let reports = seed_child_reports(&mut controller, session_id, directory.path());
     persist_controller_fixture(&controller);
-    controller
-        .suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+    })
+    .unwrap();
 
     let closed = &controller.state.sessions[session_id];
     assert_eq!(closed.state, SessionState::Stopped);
@@ -1061,11 +1087,6 @@ impl CommandExecutor for RootProbeExecutor {
                 stdout: format!("{}\n", self.worker).into_bytes(),
                 stderr: Vec::new(),
             }),
-            "check the control worker" => Ok(CommandOutput {
-                status: 0,
-                stdout: b"present\n".to_vec(),
-                stderr: Vec::new(),
-            }),
             "probe Mjolnir worker root" | "stop Mjolnir worker daemon" => {
                 ProcessExecutor.execute(command)
             }
@@ -1114,7 +1135,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         .await
         .unwrap_err();
     assert_eq!(
-        unreachable.purposes.lock().unwrap()[1],
+        unreachable.purposes.lock().unwrap()[0],
         "probe Mjolnir worker daemon liveness",
         "a missing worker binary is a dead relay, so the close judges the worker next"
     );
@@ -1152,12 +1173,9 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     assert_eq!(
         *answered.purposes.lock().unwrap(),
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1193,8 +1211,8 @@ async fn close_child_with_partial_root(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // Control commands run this build's control worker in the root; this
-    // stand-in answers them.
+    // Control commands run a control worker staged in the root; this stand-in
+    // answers them.
     #[cfg(unix)]
     {
         let control =
@@ -1220,14 +1238,19 @@ async fn close_child_with_partial_root(
             .unwrap(),
         desired_build: String::new(),
     };
-    crate::worker_lifecycle::run_blocking(session_id, "seed intent", &ProcessExecutor, || {
-        crate::database::begin_worker_restart(session_id, &intent)?;
-        crate::database::advance_worker_restart(
-            session_id,
-            &intent.operation_id,
-            crate::database::WorkerRestartPhase::Swapping,
-        )
-    })
+    crate::controller::test_support::worker_test_run_blocking(
+        session_id,
+        "seed intent",
+        &ProcessExecutor,
+        || {
+            crate::database::begin_worker_restart(session_id, &intent)?;
+            crate::database::advance_worker_restart(
+                session_id,
+                &intent.operation_id,
+                crate::database::WorkerRestartPhase::Swapping,
+            )
+        },
+    )
     .unwrap();
     let executor = RootProbeExecutor {
         probe_fails: false,
@@ -1280,12 +1303,9 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     assert_eq!(
         purposes,
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
-            "check the control worker",
             "stop Mjolnir worker daemon"
         ]
     );
@@ -1310,9 +1330,8 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
         return;
     };
     assert_eq!(
-        purposes[..3],
+        purposes[..2],
         [
-            "check the control worker",
             "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root"
         ]
@@ -1347,13 +1366,7 @@ async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() 
     };
     // The worker is not confirmed dead, so the close stops at the liveness
     // probe: it neither reads the root nor cleans it up.
-    assert_eq!(
-        purposes,
-        [
-            "check the control worker",
-            "probe Mjolnir worker daemon liveness"
-        ]
-    );
+    assert_eq!(purposes, ["probe Mjolnir worker daemon liveness"]);
     assert!(
         !purposes
             .iter()
@@ -1387,11 +1400,15 @@ fn checkpointed_close_keeps_a_child_report_directory() {
     session.checkpoint = Some(Box::new(checkpoint.clone()));
 
     persist_controller_fixture(&controller);
-    controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &ProcessExecutor, |_| {
-            Ok(())
-        })
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &ProcessExecutor,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     let closed = &controller.state.sessions[session_id];
     assert_eq!(closed.state, SessionState::Stopped);
@@ -1538,9 +1555,10 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     };
 
     persist_controller_fixture(&controller);
-    let error = controller
-        .force_stop_with(session_id, &executor, |_| Ok(()))
-        .unwrap_err();
+    let error = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_stop_with(session_id, &executor, |_| Ok(()))
+    })
+    .unwrap_err();
 
     assert!(error.to_string().contains("existing recovery archive"));
     assert_eq!(*executor.calls.lock().unwrap(), 0);
@@ -1629,12 +1647,18 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
 
     persist_controller_fixture(&controller);
-    let error = controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
-            persisted.borrow_mut().push(record.state);
-            Ok(())
-        })
-        .unwrap_err();
+    let error = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &executor,
+            |record| {
+                persisted.borrow_mut().push(record.state);
+                Ok(())
+            },
+        )
+    })
+    .unwrap_err();
 
     assert!(error.to_string().contains("checkpoint SHA changed"));
     assert_eq!(*executor.calls.lock().unwrap(), 0);
@@ -1744,12 +1768,18 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     let persisted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    controller
-        .destroy_after_verified_checkpoint_with(session_id, &checkpoint, &executor, |record| {
-            persisted.borrow_mut().push(record.state);
-            Ok(())
-        })
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_after_verified_checkpoint_with(
+            session_id,
+            &checkpoint,
+            &executor,
+            |record| {
+                persisted.borrow_mut().push(record.state);
+                Ok(())
+            },
+        )
+    })
+    .unwrap();
 
     let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 3);
@@ -1894,8 +1924,8 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     let deleted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Delete,
@@ -1904,7 +1934,8 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
                 Ok(())
             },
         )
-        .unwrap();
+    })
+    .unwrap();
 
     assert!(!worker_root.exists(), "local target must be removed");
     let worktree_root = repository.path().join(".mj/worktrees").join(session_id);
@@ -1954,14 +1985,15 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Keep,
             |_| Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
 
     let worktree_root = repository.path().join(".mj/worktrees").join(session_id);
     assert!(!worktree_root.exists(), "managed worktree must be removed");
@@ -2002,8 +2034,8 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     let deleted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    let error = controller
-        .destroy_session_with_cleanup(
+    let error = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.destroy_session_with_cleanup(
             session_id,
             &FailingExecutor,
             BranchDisposition::Delete,
@@ -2013,7 +2045,8 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
             },
             DestroyCleanup::Required,
         )
-        .unwrap_err();
+    })
+    .unwrap_err();
 
     assert!(
         error.to_string().contains("teardown unavailable"),
@@ -2037,14 +2070,15 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     assert!(!crate::pollers::session_target_is_pollable(record));
 
     persist_controller_fixture(&controller);
-    let outcome = controller
-        .force_destroy_session_with(
+    let outcome = crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &FailingExecutor,
             BranchDisposition::Delete,
             crate::database::delete_session,
         )
-        .unwrap();
+    })
+    .unwrap();
     assert!(
         worker_root.exists(),
         "an unconfirmed worker keeps its files"
@@ -2087,14 +2121,15 @@ fn force_destroy_tolerates_a_missing_archive() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Delete,
             |_| Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
 
     assert!(!controller.state.sessions.contains_key(session_id));
 }
@@ -2411,9 +2446,15 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
+            session_id,
+            &executor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     let releases = executor.releases.into_inner().unwrap();
     assert_eq!(releases.len(), 1, "{releases:?}");
@@ -2461,9 +2502,15 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
+            session_id,
+            &executor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     assert_eq!(executor.releases.lock().unwrap().clone().len(), 1);
     assert!(!checkout.exists());
@@ -2521,9 +2568,15 @@ fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
     let executor = RecordingTargets::default();
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
+            session_id,
+            &executor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     let releases = executor.releases();
     assert_eq!(
@@ -2590,9 +2643,10 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     let executor = RecordingTargets::default();
 
     persist_controller_fixture(&controller);
-    controller
-        .cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
+    })
+    .unwrap();
 
     let releases = executor.releases();
     assert_eq!(
@@ -2670,9 +2724,15 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
     let executor = RecordingTargets::default();
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
+            session_id,
+            &executor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
 
     assert!(
         executor
@@ -2740,14 +2800,15 @@ fn destroy_removes_every_archive_of_the_session_and_only_those() {
     };
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Delete,
             |_| Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
 
     assert!(!move_handoff.archive_path.exists(), "Move archive remains");
     assert!(!current.archive_path.exists(), "current archive remains");
@@ -2778,8 +2839,8 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
     let deleted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Delete,
@@ -2788,7 +2849,8 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
                 Ok(())
             },
         )
-        .unwrap();
+    })
+    .unwrap();
 
     assert!(!controller.state.sessions.contains_key(session_id));
     assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
@@ -2813,8 +2875,8 @@ fn force_destroy_removes_a_failed_subagent() {
     let deleted = RefCell::new(Vec::new());
 
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(session_id, || {
+        controller.force_destroy_session_with(
             session_id,
             &ProcessExecutor,
             BranchDisposition::Keep,
@@ -2823,7 +2885,8 @@ fn force_destroy_removes_a_failed_subagent() {
                 Ok(())
             },
         )
-        .unwrap();
+    })
+    .unwrap();
 
     assert!(
         worker_root.exists(),
@@ -2856,17 +2919,19 @@ fn destroying_a_stopped_child_retains_reports_until_its_parent_retires() {
     child.target = None;
     crate::database::save_session(child).unwrap();
     persist_controller_fixture(&controller);
-    controller
-        .destroy_session_controlled(child_id, &ProcessExecutor)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(child_id, || {
+        controller.destroy_session_controlled(child_id, &ProcessExecutor)
+    })
+    .unwrap();
     assert!(reports.join(child_id).exists());
-    controller
-        .force_destroy_session(
+    crate::controller::test_support::worker_test_scope("abcdefabcdefabcdefabcdefabcdefab", || {
+        controller.force_destroy_session(
             "abcdefabcdefabcdefabcdefabcdefab",
             &ProcessExecutor,
             BranchDisposition::Keep,
         )
-        .unwrap();
+    })
+    .unwrap();
     assert!(!reports.join(child_id).exists());
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
@@ -2916,14 +2981,15 @@ fn report_removal_failure_does_not_fail_child_destroy() {
     let mut controller = failed_subagent_controller(&directory.path().join(child_id), child_id);
     let reports = seed_child_reports(&mut controller, child_id, directory.path());
     persist_controller_fixture(&controller);
-    controller
-        .force_destroy_session_with(
+    crate::controller::test_support::worker_test_scope(child_id, || {
+        controller.force_destroy_session_with(
             child_id,
             &ReportFailureExecutor,
             BranchDisposition::Keep,
             |_| Ok(()),
         )
-        .unwrap();
+    })
+    .unwrap();
     assert!(
         reports.join(child_id).is_dir(),
         "failure did not secretly delete reports"

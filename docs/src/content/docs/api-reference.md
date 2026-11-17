@@ -638,11 +638,14 @@ full `session_id`, `via: "turn"`, and the `turn_id` that `wait` takes.
 
 With `sender_session_id`, the daemon requires the sender to be an existing
 top-level session. An authenticated local caller may claim another top-level
-session ID. The reply is `202` with `session_id`, `via` (`mailbox` or `turn`),
-and an optional `turn_id`. Message delivery refuses an unknown, destroyed,
-stopped, self, or other session's sub-agent target. A peer mailbox message
-wakes an idle recipient; workers below relay protocol 36 receive a queued turn
-with the same sender label and reply instruction.
+session ID. The reply is `202` with `session_id`, `via` (`mailbox`, `turn`, or
+`queued`), and an optional `turn_id`. A session that is still starting accepts
+the message and replies with `via: "queued"` until startup ends. If startup
+fails, the sender is told the message was not delivered. Message delivery
+refuses an unknown, destroyed, stopped, self, or other session's sub-agent
+target. A peer mailbox message wakes an idle recipient; workers below relay
+protocol 36 receive a queued turn with the same sender label and reply
+instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.
 Its acceptance is not completion: observe the `command_ended` event and the

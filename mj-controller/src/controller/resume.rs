@@ -1384,7 +1384,6 @@ fn fetch_source_commit(
 ) -> Result<CommandOutput> {
     let mut arguments = Vec::new();
     let mut token_auth = false;
-    let mut ssh_transport = false;
     let source = if let Some(source) = accepted_source {
         source.fetch_url.clone()
     } else if let Some(local) = &configured.local {
@@ -1404,16 +1403,12 @@ fn fetch_source_commit(
                 github.owner, github.repository
             )
         } else {
-            ssh_transport = true;
             format!("git@github.com:{}/{}.git", github.owner, github.repository)
         }
     };
-    if accepted_source.is_some() {
-        if github_token.is_some() && is_github_https_url(&source) {
-            token_auth = true;
-            arguments.extend(mj_core::remote_git::github_token_credential_config());
-        }
-        ssh_transport = source.starts_with("git@") || source.starts_with("ssh://");
+    if accepted_source.is_some() && github_token.is_some() && is_github_https_url(&source) {
+        token_auth = true;
+        arguments.extend(mj_core::remote_git::github_token_credential_config());
     }
     arguments.extend([
         "-C".to_owned(),
@@ -1426,22 +1421,10 @@ fn fetch_source_commit(
         commit.to_owned(),
     ]);
     let mut command = CommandSpec::new("git", arguments).purpose("check checkpoint base commit");
-    command
-        .env
-        .insert("GIT_NO_LAZY_FETCH".to_owned(), "1".to_owned());
-    command
-        .env
-        .insert("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned());
+    mj_core::local_git::unattended_git_environment(&mut command);
     if token_auth {
         let token = github_token.expect("token authentication requires a GitHub token");
         command.env.insert("GH_TOKEN".to_owned(), token.to_owned());
-    }
-    if ssh_transport {
-        command.env.insert(
-            "GIT_SSH_COMMAND".to_owned(),
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-                .to_owned(),
-        );
     }
     executor.execute(&command)
 }

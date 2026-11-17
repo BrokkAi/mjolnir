@@ -20,7 +20,7 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
+| Jev classifier (Fastino's GLiDE) | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, a Brokk-run proxy that forwards requests to Fastino's GLiDE classifier. | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
 | GitHub relevance | GitHub item text and bounded session conversation history for every item needing classification. Local scoring can reduce these requests when explicitly enabled with `[github.watch] local_inference = true`. | The same proxy (`/v1/github-item-glide`), which forwards it to GLiDE. | `[github.watch] enabled = false` or `[jev] enabled = false`. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
@@ -84,6 +84,33 @@ under configured approvals selects dsh-acp's `permission_mode` `ask`, so every
 write, command, and MCP tool call asks first, but it has no sandbox either:
 commands run directly on the host, and only its file tools are confined to the
 workspace roots.
+
+Under configured approvals Mjolnir also pre-approves the GitHub CLI (`gh`),
+because an agent's issue, pull-request, and review work is ordinary session
+work. Every worker start writes the approval into the configuration the
+harness already reads, so a profile staged by an older release converges too:
+
+| Harness | GitHub CLI approval |
+| --- | --- |
+| Codex | `rules/mj-gh.rules` in its staged home |
+| Claude Code | `Bash(gh:*)` in the `allowedTools` of every new, load and resume request, so the grant is scoped to the session and no settings file is edited |
+| Kimi Code | an allow rule in `permission.rules` in its staged `config.toml` |
+| Grok Build | `Bash(gh *)` and `Bash(gh)` in `permission.allow` in its staged `config.toml` |
+| Muse Code | the `gh` prefix in muse-acp's `MUSE_ACP_ALLOW_COMMAND_PREFIXES` |
+| OpenCode | bash rules in the session's own `OPENCODE_CONFIG_CONTENT` document |
+| Antigravity | `command(gh)` in agy's staged project grants; a person's own `deny` rule still wins |
+| DSH | no configuration of its own: the worker answers its `gh` permission requests |
+
+OpenCode reads its configuration documents in order and takes the last rule
+that matches, and a project's `opencode.json` and a profile's
+`OPENCODE_CONFIG_CONTENT` both follow the staged file. Mjolnir therefore
+asserts OpenCode's approval in the document it supplies last, so a later
+blanket rule cannot shadow it. The staged files are part of the
+[profile staging allowlist](/profiles/#what-a-sessions-staged-home-holds),
+so the setting reaches every session. A harness with neither a configuration
+file for commands (DSH) nor session-scoped tool options keeps its approval on
+the ACP boundary instead.
+
 The dashboard's new-session and resume wizards warn when a harness without
 guardian support is paired with a raw target; `mj new`, the API, and the web
 viewer do not. A warning is not a sandbox either way—choose a container or
@@ -292,9 +319,14 @@ who can intercept a first connection can present their own key, and it is
 trusted from then on. Other Git commands that run on a target follow that
 target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
 `extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
-Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
-reliably change it for Mjolnir's Git fetches: some of them set their own
-command.
+Mjolnir's connections to that machine. A `GIT_SSH_COMMAND` set where the
+Mjolnir daemon runs replaces that default for the Git commands the daemon
+runs: on the controller, and on the SSH machines where it keeps the clone
+cache or moves a session's repository. On those machines it runs as given, so
+any key file or SSH configuration it names must exist there too. Git that a
+session's worker runs on its target, such as a branch push or a checkpoint
+export, uses the same default unless `GIT_SSH_COMMAND` is set in that
+worker's own environment.
 
 A key that is already in `known_hosts` is checked, not trusted anew, unless an
 SSH option you set turns checking off. To avoid first-use trust:
@@ -310,6 +342,9 @@ SSH option you set turns checking off. To avoid first-use trust:
   `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
   `extra_args` first, so it wins. EC2 machines take the same option in
   `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
+- To refuse unknown keys for the daemon's Git commands, start the daemon
+  with `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"`.
+  Keep `BatchMode=yes`: no one is present to answer a prompt.
 
 ## Isolated sessions use independent network clones
 

@@ -450,13 +450,17 @@ fn stale_worker_fails_before_any_container_is_created() {
         )
         .unwrap();
     let executor = RecordingExecutor::failing("no target command should run");
-    let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
-        &session,
-        &executor,
-        None,
-        ProvisioningFailureDisposition::Discard,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &session,
+            controller.provision_session_with_failure_disposition(
+                &session,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Discard,
+            ),
+        ))
+        .unwrap_err();
     let detail = format!("{error:#}");
     assert!(
         detail.contains("stale-worker") && detail.contains("missing worker build stamp"),
@@ -529,13 +533,17 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
     );
 
     let executor = RecordingExecutor::failing("verify SSH connectivity");
-    let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
-        &session_id,
-        &executor,
-        None,
-        ProvisioningFailureDisposition::Discard,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &session_id,
+            controller.provision_session_with_failure_disposition(
+                &session_id,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Discard,
+            ),
+        ))
+        .unwrap_err();
     let reported = format!("{error:#}");
     assert!(
         reported.contains("SSH connectivity test failed"),
@@ -626,15 +634,19 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
-    let error = futures::executor::block_on(controller.run_create(
-        &child_id,
-        &executor,
-        CreateKind::Subagent,
-        false,
-        || Ok(()),
-        &|| false,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &child_id,
+            controller.run_create(
+                &child_id,
+                &executor,
+                CreateKind::Subagent,
+                false,
+                || Ok(()),
+                &|| false,
+            ),
+        ))
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("refusing cleanup: container locator"),
         "unexpected error: {error:#}"
@@ -682,14 +694,14 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
     let (mut controller, child_id) = startup_cleanup_fixture();
     let stop = RecordingExecutor::failing("stop Mjolnir worker daemon");
     assert!(
-        controller
-            .finish_failed_startup_controlled(&child_id, &stop, true)
-            .is_err()
+        crate::controller::test_support::worker_test_scope(&child_id, || controller
+            .finish_failed_startup_controlled(&child_id, &stop, true))
+        .is_err()
     );
     assert_eq!(
         stop.commands().len(),
-        2,
-        "failed stop (after the control-worker check) must not reinstall or relaunch anything"
+        1,
+        "a failed stop must not reinstall or relaunch anything"
     );
     let mut recovered = Controller::load().unwrap();
     let child = &recovered.state.sessions[&child_id];
@@ -712,9 +724,10 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
         session_id: child_id.clone(),
         seen: Mutex::new(Vec::new()),
     };
-    recovered
-        .cleanup_failed_startup_controlled(&child_id, &stop)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&child_id, || {
+        recovered.cleanup_failed_startup_controlled(&child_id, &stop)
+    })
+    .unwrap();
     assert!(
         stop.seen
             .lock()
@@ -796,15 +809,19 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     crate::database::save_lifecycle_session(record).unwrap();
     // A launch the daemon's shutdown stopped is not a failure: the record and
     // the worker stay as they are for the next daemon (create intent).
-    let error = futures::executor::block_on(controller.run_create(
-        &child_id,
-        &CancelledLaunch,
-        CreateKind::Subagent,
-        false,
-        || Ok(()),
-        &|| true,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &child_id,
+            controller.run_create(
+                &child_id,
+                &CancelledLaunch,
+                CreateKind::Subagent,
+                false,
+                || Ok(()),
+                &|| true,
+            ),
+        ))
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("the Mjolnir daemon stopped during this launch"),
         "{error:#}"
@@ -814,15 +831,19 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         SessionState::Provisioning
     );
     // A launch cancelled by anything else fails, and its cleanup still runs.
-    let error = futures::executor::block_on(controller.run_create(
-        &child_id,
-        &CancelledLaunch,
-        CreateKind::Subagent,
-        false,
-        || Ok(()),
-        &|| false,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &child_id,
+            controller.run_create(
+                &child_id,
+                &CancelledLaunch,
+                CreateKind::Subagent,
+                false,
+                || Ok(()),
+                &|| false,
+            ),
+        ))
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("operation cancelled"),
         "{error:#}"
@@ -970,13 +991,17 @@ fn failed_node_preflight_retains_error_before_provisioning() {
     );
 
     let executor = RecordingExecutor::failing("preflight managed harness Node.js");
-    let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
-        &session_id,
-        &executor,
-        None,
-        ProvisioningFailureDisposition::Discard,
-    ))
-    .unwrap_err();
+    let error =
+        futures::executor::block_on(crate::controller::test_support::worker_test_scope_async(
+            &session_id,
+            controller.provision_session_with_failure_disposition(
+                &session_id,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Discard,
+            ),
+        ))
+        .unwrap_err();
     let reported = format!("{error:#}");
     assert!(
         reported.contains("use a target where Mjolnir's managed runtime can run"),
@@ -1222,13 +1247,14 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
         session_id: session_id.clone(),
         seen: Mutex::new(Vec::new()),
     };
-    controller
-        .rollback_failed_new_session_with(
+    crate::controller::test_support::worker_test_scope(&session_id, || {
+        controller.rollback_failed_new_session_with(
             &session_id,
             anyhow::anyhow!("operation cancelled while connecting to the worker relay"),
             &cleanup,
         )
-        .unwrap();
+    })
+    .unwrap();
 
     let seen = cleanup.seen.into_inner().unwrap();
     assert!(!seen.is_empty(), "the rollback removes the target");
@@ -1299,9 +1325,14 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     }));
     controller.persist_session_state(&session_id).unwrap();
     let refused = RefuseStop(Mutex::new(0));
-    controller
-        .rollback_failed_new_session_with(&session_id, anyhow::anyhow!("launch failed"), &refused)
-        .unwrap();
+    crate::controller::test_support::worker_test_scope(&session_id, || {
+        controller.rollback_failed_new_session_with(
+            &session_id,
+            anyhow::anyhow!("launch failed"),
+            &refused,
+        )
+    })
+    .unwrap();
     assert_eq!(
         *refused.0.lock().unwrap(),
         1,
@@ -2399,19 +2430,22 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout_finished: std::sync::atomic::AtomicBool::new(false),
         checkout: root.join(".mj/clones").join(&record.id),
     };
-    let error = controller
-        .run_create(
-            &record.id,
-            &executor,
-            CreateKind::TopLevel {
-                remember_launch_choices: false,
-            },
-            false,
-            || panic!("failed setup cannot commit"),
-            &|| false,
-        )
-        .await
-        .unwrap_err();
+    let error = crate::controller::test_support::worker_test_scope_async(&record.id, async {
+        controller
+            .run_create(
+                &record.id,
+                &executor,
+                CreateKind::TopLevel {
+                    remember_launch_choices: false,
+                },
+                false,
+                || panic!("failed setup cannot commit"),
+                &|| false,
+            )
+            .await
+    })
+    .await
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("injected harness preflight failure"),
         "{error:#}"

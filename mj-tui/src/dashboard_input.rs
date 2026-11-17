@@ -345,6 +345,19 @@ impl DashboardState {
             // a stray click elsewhere can't pair up with the next row click.
             self.last_row_click = None;
         }
+        if self
+            .notifications_area
+            .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+        {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.focus = Focus::Notifications,
+                MouseEventKind::ScrollUp => self.scroll_notification(-3),
+                MouseEventKind::ScrollDown => self.scroll_notification(3),
+                _ => return DashboardAction::None,
+            }
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
         // Expanded workspaces scroll their rows; the collapsed selector keeps
         // the adjacent-workspace wheel navigation.
         if matches!(
@@ -538,7 +551,7 @@ impl DashboardState {
         }
         // List navigation, shared by visible lists. It comes before the
         // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
-        if self.focused_rows_visible() {
+        if self.focus != Focus::Notifications && self.focused_rows_visible() {
             match (key.code, command) {
                 (KeyCode::Up | KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
                     self.move_selection(-1);

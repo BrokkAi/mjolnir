@@ -459,7 +459,7 @@ fn stored_summary_restores_dashboard_messages_without_marking_transcript_ready()
     assert_eq!(detail.unread_interruptions, 1);
     assert!(detail.last_agent_message_follows_last_user);
     assert_eq!(detail.current_turn_started_at, Some(4));
-    assert_eq!(detail.transcript_hydration, TranscriptHydration::Loading);
+    assert_eq!(detail.transcript_hydration, TranscriptHydration::Summary);
     assert!(detail.transcript.is_none());
 }
 
