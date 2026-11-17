@@ -91,18 +91,21 @@ impl TurnReviewDriver {
                 .filter(|request| matches!(request, ReviewRequest::StartBriefWriter { .. }))
                 .cloned()
                 .collect(),
-            TurnReviewPhase::Running { .. } => self
-                .replay_requests
-                .iter()
-                .filter(|request| match request {
-                    ReviewRequest::StartReviewer { role, .. } => self
-                        .roles
-                        .iter()
-                        .any(|slot| &slot.role == role && slot.outcome.is_none()),
-                    _ => false,
-                })
-                .cloned()
-                .collect(),
+            TurnReviewPhase::Running { .. } => {
+                self.replay_requests
+                    .iter()
+                    .filter(|request| match request {
+                        ReviewRequest::StartReviewer { role, .. } => self
+                            .roles
+                            .iter()
+                            .any(|slot| &slot.role == role && slot.outcome.is_none()),
+                        ReviewRequest::CloseBriefWriter
+                        | ReviewRequest::NoteBriefSkipped { .. } => true,
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect()
+            }
             TurnReviewPhase::Verdict(_) | TurnReviewPhase::Resolved(_) => {
                 self.replay_requests.clone()
             }
@@ -187,10 +190,9 @@ impl TurnReviewDriver {
         &self.status
     }
 
-    /// The command each running role is answering, for a caller matching the
-    /// relay's completion records. The newest message in a role's pane is not
-    /// enough on its own: an earlier prompt's answer can still be the newest
-    /// message in a role's journal when its next command starts.
+    /// Driver-local keys of unsettled role work. The host uses these to decide
+    /// which roles still await an outcome, and each registration's startup
+    /// prompt ID to match a child's relay handback.
     #[must_use]
     pub fn awaited_commands(&self) -> Vec<(String, String)> {
         if matches!(self.phase, TurnReviewPhase::WritingBrief) {
@@ -382,7 +384,7 @@ impl TurnReviewDriver {
         if !matches!(self.phase, TurnReviewPhase::WritingBrief) {
             return Vec::new();
         }
-        if text.trim().is_empty() {
+        if text.trim().is_empty() || text.trim() == "No findings." {
             return self.brief_failed("the writer handed back an empty brief".into());
         }
         self.seed.brief = Some(text);

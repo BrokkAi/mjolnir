@@ -457,10 +457,53 @@ fn a_restart_during_the_brief_replays_the_writer_and_never_starts_reviewers_earl
     let replay = again.recovery_requests();
     assert_eq!(started_roles(&replay), ["reviewer-1", "reviewer-2"]);
     assert!(
-        replay
-            .iter()
-            .all(|request| matches!(request, ReviewRequest::StartReviewer { .. })),
+        replay.iter().all(|request| matches!(
+            request,
+            ReviewRequest::StartReviewer { .. } | ReviewRequest::CloseBriefWriter
+        )),
         "the finished writer is not started again: {replay:?}"
     );
     assert!(prompt_text(&replay, "reviewer-1").contains("## Paths\n- none"));
+}
+
+// Hard-won: 5fc728617: a persisted writer outcome lost its cleanup on restart.
+#[test]
+fn a_restart_after_either_writer_outcome_replays_its_close_once() {
+    for handback in [true, false] {
+        let (mut driver, _) = writing_driver("writer-close-restart");
+        if handback {
+            driver.brief_written("## Paths\n- `a.rs:1` calls `b.rs:2`".into());
+        } else {
+            driver.brief_failed("writer stopped".into());
+        }
+        let stored = serde_json::to_string(&driver.snapshot()).unwrap();
+        let mut restored =
+            TurnReviewDriver::restore(serde_json::from_str(&stored).unwrap()).unwrap();
+        let replay = restored.recovery_requests();
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|request| matches!(request, ReviewRequest::CloseBriefWriter))
+                .count(),
+            1
+        );
+        assert_eq!(started_roles(&replay), ["reviewer-1", "reviewer-2"]);
+        assert_eq!(
+            replay.iter().filter(|request| matches!(request, ReviewRequest::NoteBriefSkipped { reason } if reason == "writer stopped")).count(),
+            usize::from(!handback)
+        );
+    }
+}
+
+// Hard-won: 5fc728617: the reviewer's clean verdict was accepted as a relation brief.
+#[test]
+fn a_leaked_clean_reviewer_handback_skips_the_brief() {
+    let (mut driver, _) = writing_driver("writer-clean-verdict");
+    let requests = driver.brief_written("  No findings.\n".into());
+    assert!(matches!(
+        requests.first(),
+        Some(ReviewRequest::NoteBriefSkipped { .. })
+    ));
+    assert!(!prompt_text(&requests, "reviewer-1").contains("Relations computed"));
+    assert_eq!(driver.snapshot().seed.brief, None);
 }

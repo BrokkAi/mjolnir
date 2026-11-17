@@ -146,6 +146,11 @@ impl HostState {
                 register.register_child(
                     &owner,
                     &reviewer,
+                    if writer {
+                        mj_core::worker_launch::ReviewChildRole::BriefWriter
+                    } else {
+                        mj_core::worker_launch::ReviewChildRole::Reviewer
+                    },
                     // The writer's prompt carries its own handback instruction.
                     if writer {
                         prompt
@@ -222,23 +227,29 @@ impl HostState {
         let Some(slot) = self.reviews.get(session_id) else {
             return;
         };
-        let Some(child) = slot
+        let Some(registration) = slot
             .state
             .active_group
             .as_ref()
             .and_then(|group| group.registrations.iter().find(|item| item.role == role))
-            .and_then(|registration| registration.child_session_id.clone())
         else {
             return;
         };
-        let Some(command_id) = slot
+        let Some(child) = registration.child_session_id.clone() else {
+            return;
+        };
+        if !slot
             .driver
             .awaited_commands()
-            .into_iter()
-            .find_map(|(name, command_id)| (name == role).then_some(command_id))
-        else {
+            .iter()
+            .any(|(name, _)| name == role)
+        {
             return;
-        };
+        }
+        // Startup owns the relay command ID; driver role keys only identify
+        // logical review work and are not the prompt the child answered.
+        let command_id =
+            crate::daemon::startup_followup::startup_step_id(&registration.request_key, "prompt");
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -525,17 +536,10 @@ impl HostState {
                     .registrations
                     .iter()
                     .find(|item| item.child_session_id.as_deref() == Some(child))?;
-                let command_id = if registration.role == BRIEF_WRITER_ROLE {
-                    brief_writer_command_id(&group.driver.review_id)
-                } else {
-                    group
-                        .driver
-                        .roles
-                        .iter()
-                        .find(|item| item.role == registration.role)?
-                        .command_id
-                        .clone()
-                };
+                let command_id = crate::daemon::startup_followup::startup_step_id(
+                    &registration.request_key,
+                    "prompt",
+                );
                 Some((
                     session_id.clone(),
                     slot.epoch,

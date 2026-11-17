@@ -40,6 +40,7 @@ pub trait ReviewEnvironment: Send + Sync {
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -307,6 +308,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         &self,
         session_id: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<std::path::PathBuf>,
@@ -315,6 +317,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         let mut launch = controller
             .reviewer_launch_config(session_id, &reviewer.profile, 0, &[])
             .map_err(|e| format!("{e:#}"))?;
+        launch.role = role;
         launch.model = reviewer.main.model.clone();
         launch.effort = reviewer.main.effort.clone();
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);

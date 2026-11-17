@@ -102,7 +102,8 @@ pub enum TurnReviewPhase {
 /// review group but never a reviewer slot, so it has no verdict of its own.
 pub const BRIEF_WRITER_ROLE: &str = "brief-writer";
 
-/// The command the brief writer's initial prompt answers.
+/// Driver-local key for the brief stage. The daemon owns the child's
+/// startup prompt ID separately, through its registration request key.
 #[must_use]
 pub fn brief_writer_command_id(review_id: &str) -> String {
     format!("{COMMAND_ID_PREFIX}{review_id}-{BRIEF_WRITER_ROLE}")

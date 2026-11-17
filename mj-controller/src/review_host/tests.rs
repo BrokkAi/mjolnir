@@ -242,6 +242,7 @@ struct FakeEnvironment {
     child_relations: Mutex<Vec<ReviewerChildRelation>>,
     registered_working_directories: Mutex<Vec<Option<PathBuf>>>,
     mailbox: Mutex<Vec<mj_core::mailbox::MailboxEvent>>,
+    registered_roles: Mutex<Vec<mj_core::worker_launch::ReviewChildRole>>,
     started: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     close_error: Mutex<Option<String>>,
@@ -337,6 +338,7 @@ impl FakeEnvironment {
             child_relations: Mutex::new(Vec::new()),
             registered_working_directories: Mutex::new(Vec::new()),
             mailbox: Mutex::new(Vec::new()),
+            registered_roles: Mutex::new(Vec::new()),
             started: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             close_error: Mutex::new(None),
@@ -483,6 +485,7 @@ impl ReviewEnvironment for FakeEnvironment {
         &self,
         session: &str,
         reviewer: &ReviewerIdentity,
+        role: mj_core::worker_launch::ReviewChildRole,
         prompt: String,
         request_key: String,
         working_directory: Option<PathBuf>,
@@ -508,6 +511,7 @@ impl ReviewEnvironment for FakeEnvironment {
         let mut children = self.children.lock().unwrap();
         let child = format!("{session}-child-{}", children.len());
         children.push((child.clone(), reviewer.clone(), prompt));
+        self.registered_roles.lock().unwrap().push(role);
         relations.push(ReviewerChildRelation {
             parent_session_id: session.to_owned(),
             request_key: canonical_key,
@@ -1000,6 +1004,13 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
     );
     assert!(children[1].2.contains("Do not edit files or push"));
     assert_eq!(children[1].1.profile, "reviewer");
+    assert_eq!(
+        *environment.registered_roles.lock().unwrap(),
+        [
+            mj_core::worker_launch::ReviewChildRole::BriefWriter,
+            mj_core::worker_launch::ReviewChildRole::Reviewer
+        ]
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         while !environment.closed.lock().unwrap().contains(&writer) {
             tokio::task::yield_now().await;
@@ -1011,6 +1022,38 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
     finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
     assert_eq!(environment.children.lock().unwrap().len(), 2);
     assert_eq!(environment.live_holds(), 0);
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: d782078aa review: reconciliation matched a logical role key instead of the submitted prompt.
+#[tokio::test]
+async fn a_brief_writer_that_ends_with_a_recorded_startup_handback_keeps_its_brief() {
+    let session = session_id("brief-recorded-handback");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed_with_writer(),
+        environment.clone(),
+    );
+    let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    let handback = stored_handback(
+        &environment,
+        "brief-writer",
+        "## Paths\n- `a.rs:1` calls `b.rs:2`",
+    );
+    environment.standings.lock().unwrap().insert(
+        writer.clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback,
+        },
+    );
+    host.child_ended(writer, "writer ended after recording its brief".into());
+    let reviewer = wait_for_nth_child(&environment, 2).await;
+    let prompt = environment.children.lock().unwrap()[1].2.clone();
+    assert!(prompt.contains("`a.rs:1` calls `b.rs:2`"), "{prompt}");
+    finish_the_review(&mut manager, &host, &environment, &session, &reviewer).await;
     host.shutdown().await.unwrap();
 }
 
@@ -1077,9 +1120,13 @@ async fn a_brief_writer_that_cannot_launch_does_not_stop_the_review() {
 
 /// A review a daemon restart interrupted while its writer worked: the writer's
 /// session ended while no daemon was attached, with `handback` recorded or not.
-async fn restart_while_the_writer_ended(name: &str, handback: Option<&str>) -> (String, String) {
+async fn restart_while_the_writer_ended(
+    name: &str,
+    handback: Option<&str>,
+    outcome_saved: bool,
+) -> (String, String) {
     let session = session_id(name);
-    let manager = FakeManager::new(&session).await;
+    let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
     let review_id = "restored-brief";
     let (mut driver, _) = TurnReviewDriver::start(
@@ -1093,6 +1140,16 @@ async fn restart_while_the_writer_ended(name: &str, handback: Option<&str>) -> (
         std::num::NonZeroUsize::MIN,
     );
     driver.delta_captured_with_writer(vec![push_delta("/workspace/app", "newtree")], true);
+    if outcome_saved {
+        match handback {
+            Some(text) => {
+                driver.brief_written(text.to_owned());
+            }
+            None => {
+                driver.brief_failed("writer stopped".into());
+            }
+        }
+    }
     *environment.owner.lock().unwrap() = Some(session.clone());
     *environment.state.lock().unwrap() = TurnReviewState {
         active: Some(review_id.into()),
@@ -1119,11 +1176,8 @@ async fn restart_while_the_writer_ended(name: &str, handback: Option<&str>) -> (
         "writer-child".into(),
         ChildStanding {
             ended: Some("stopped".into()),
-            handback: handback.map(|message| mj_core::subagent::SubagentHandback {
-                command_id: mj_core::review::driver::brief_writer_command_id(review_id),
-                message: message.to_owned(),
-                recorded_at_ms: 0,
-            }),
+            handback: handback
+                .and_then(|message| stored_handback(&environment, "brief-writer", message)),
         },
     );
     let host = TurnReviewHost::spawn_in(
@@ -1132,6 +1186,16 @@ async fn restart_while_the_writer_ended(name: &str, handback: Option<&str>) -> (
         environment.clone(),
     );
     let reviewer = wait_for_nth_child(&environment, 1).await;
+    if handback.is_none() {
+        let notice = next_notice(&mut manager).await;
+        assert!(
+            notice.starts_with("Review started without a relation brief:"),
+            "{notice}"
+        );
+        if outcome_saved {
+            assert!(notice.contains("writer stopped"), "{notice}");
+        }
+    }
     // Give a wrongly repeated start time to show up.
     for _ in 0..50 {
         tokio::task::yield_now().await;
@@ -1146,7 +1210,29 @@ async fn restart_while_the_writer_ended(name: &str, handback: Option<&str>) -> (
             .contains(&"writer-child".to_owned()),
         "the ended writer is not started again"
     );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !environment
+            .closed
+            .lock()
+            .unwrap()
+            .contains(&"writer-child".to_owned())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the restored writer is cleaned up");
     host.shutdown().await.unwrap();
+    assert_eq!(
+        environment
+            .closed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|child| child.as_str() == "writer-child")
+            .count(),
+        1
+    );
     (reviewer, children[0].2.clone())
 }
 
@@ -1155,6 +1241,7 @@ async fn a_restart_after_the_writer_handed_back_starts_the_reviewer_once_with_th
     let (_, prompt) = restart_while_the_writer_ended(
         "restored-brief-written",
         Some("## Paths\n- `a.rs:1` is called by `b.rs:2`"),
+        false,
     )
     .await;
     assert!(
@@ -1166,8 +1253,18 @@ async fn a_restart_after_the_writer_handed_back_starts_the_reviewer_once_with_th
 
 #[tokio::test]
 async fn a_restart_after_the_writer_ended_without_a_handback_starts_the_reviewer_without_a_brief() {
-    let (_, prompt) = restart_while_the_writer_ended("restored-brief-lost", None).await;
+    let (_, prompt) = restart_while_the_writer_ended("restored-brief-lost", None, false).await;
     assert!(!prompt.contains("Relations computed"), "{prompt}");
+}
+
+// Hard-won: 5fc728617: restart discarded a persisted writer cleanup after either outcome.
+#[tokio::test]
+async fn a_restart_after_the_writer_outcome_was_saved_closes_it_once() {
+    for handback in [Some("## Paths\n- `a.rs:1` calls `b.rs:2`"), None] {
+        let (_, prompt) =
+            restart_while_the_writer_ended("saved-writer-outcome", handback, true).await;
+        assert_eq!(prompt.contains("Relations computed"), handback.is_some());
+    }
 }
 
 async fn wait_for_group_children(
@@ -2709,17 +2806,29 @@ fn stored_handback(
     role: &str,
     message: &str,
 ) -> Option<mj_core::subagent::SubagentHandback> {
-    let command_id = environment
+    let request_key = environment
         .state()
         .active_group
         .expect("a restored group")
-        .driver
-        .roles
+        .registrations
         .iter()
         .find(|item| item.role == role)
-        .expect("the role exists")
-        .command_id
+        .expect("the role is registered")
+        .request_key
         .clone();
+    // Use the actual submission path, not the driver's logical command key.
+    let command_id = crate::daemon::startup_followup::api_followup_steps(
+        &request_key,
+        crate::server::api::StartFollowup {
+            prompt: Some("review the changes".into()),
+            ..Default::default()
+        },
+    )
+    .into_iter()
+    .find_map(|(id, step)| {
+        matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }).then_some(id)
+    })
+    .expect("the submitted prompt step");
     Some(mj_core::subagent::SubagentHandback {
         command_id,
         message: message.to_owned(),

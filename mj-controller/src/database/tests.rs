@@ -6171,6 +6171,7 @@ fn metadata_state_saves_preserve_complete_subagent_launch_intent() {
     launch.kind = mj_core::subagent::SubagentKind::Reviewer;
     launch.initial_prompt = "private durable launch 🙂\n".repeat(10_000);
     launch.reviewer_launch = Some(mj_core::worker_launch::ReviewerLaunchConfig {
+        role: mj_core::worker_launch::ReviewChildRole::Reviewer,
         profile_id: "reviewer".into(),
         harness: mj_core::config::HarnessKind::Codex,
         bridge_command: "review-bridge".into(),
