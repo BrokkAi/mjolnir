@@ -1496,8 +1496,9 @@ fn follow_daemon_creation(
 /// Wait for the daemon to finish creating a session, across daemon restarts.
 ///
 /// A daemon that stops mid-create does not fail it: the next daemon finishes
-/// it from its durable record and serves `WaitCreateSession` for it again. A
-/// lost connection therefore means "ask again", never "failed". The wait is
+/// it from its durable record, and any daemon answers `WaitCreateSession`
+/// from that record. A lost connection therefore means "ask again", never
+/// "failed". The wait is
 /// read-only, so repeating it is safe; `StartCreateSession` is never repeated.
 /// Each retry follows a lost connection and waits a quarter second, and the
 /// loop ends with the daemon's answer or the caller's cancellation.
@@ -1528,12 +1529,12 @@ where
         }
     };
     loop {
-        // One attempt, with no reconnect inside the client: a daemon that is
-        // stopping answers "ask again", and this loop starts the next daemon
-        // through `connect`, as it does for a dropped connection.
+        // One attempt, with no reconnect inside the client: a daemon that
+        // stops drops the connection, and this loop starts the next daemon
+        // through `connect`.
         let attempt = async {
             let mut daemon = connect().await?;
-            daemon.wait_create_session_once(session_id.to_owned()).await
+            daemon.wait_create_session(session_id.to_owned()).await
         };
         let error = tokio::select! {
             outcome = attempt => match outcome {
@@ -1542,17 +1543,13 @@ where
             },
             () = cancellation() => bail!("operation cancelled"),
         };
-        // Only a daemon that is stopping, or a connection that dropped after
-        // the wait was sent, means "ask again". A refusal, a failure to
-        // connect or start a daemon (which waits out a handoff before it
-        // fails) and a protocol mismatch are real answers and end the follow
-        // with their own error.
+        // Only a connection that dropped after the wait was sent means "ask
+        // again". A refusal, a failure to connect or start a daemon (which
+        // waits out a handoff before it fails) and a protocol mismatch are
+        // real answers and end the follow with their own error.
         if error
             .downcast_ref::<mj_client::daemon::DaemonTransportLost>()
             .is_none()
-            && error
-                .downcast_ref::<mj_client::daemon::DaemonUpgradePending>()
-                .is_none()
         {
             return Err(error);
         }
@@ -2033,16 +2030,11 @@ mod create_wait_tests {
         (metadata, server)
     }
 
-    /// A stopping daemon, then a dropped connection, then the answer: the wait
-    /// reconnects each time and ends Finished.
+    /// Dropped connections, then the answer: the wait reconnects each time
+    /// and ends Finished.
     #[tokio::test]
-    async fn the_create_wait_reconnects_after_a_stopping_daemon_and_a_dropped_connection() {
-        let (metadata, server) = serve(vec![
-            Some(Ok(DaemonReply::UpgradePending)),
-            None,
-            Some(Ok(DaemonReply::Done)),
-        ])
-        .await;
+    async fn the_create_wait_reconnects_after_a_dropped_connection() {
+        let (metadata, server) = serve(vec![None, None, Some(Ok(DaemonReply::Done))]).await;
         let cancelled = AtomicBool::new(false);
         let outcome = follow_create_wait("session-1", &cancelled, || {
             DaemonClient::connect(metadata.clone())

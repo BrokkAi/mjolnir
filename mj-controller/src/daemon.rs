@@ -94,6 +94,8 @@ pub struct LifecycleControl {
     state: Arc<AtomicU8>,
     pub cancelled: Arc<AtomicBool>,
     cancel_cause: Arc<Mutex<Option<&'static str>>>,
+    /// Woken when shutdown stops the operation, for waiters that must end then.
+    shutdown_stop: Arc<tokio::sync::Notify>,
 }
 
 const LIFECYCLE_OPEN: u8 = 0;
@@ -130,8 +132,24 @@ impl LifecycleControl {
         if accepted {
             *cancel_cause = Some(cause);
             self.cancelled.store(true, Ordering::Release);
+            if cancelled == LIFECYCLE_CANCELLED_FOR_SHUTDOWN {
+                self.shutdown_stop.notify_waiters();
+            }
         }
         accepted
+    }
+
+    /// Completes once shutdown has stopped the operation.
+    pub(crate) async fn shutdown_stopped(&self) {
+        loop {
+            let notified = self.shutdown_stop.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stopped_for_shutdown() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Commit the operation, unless a cancel was accepted first. Only the

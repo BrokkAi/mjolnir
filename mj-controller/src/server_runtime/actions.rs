@@ -124,15 +124,6 @@ pub(super) async fn record_user_prompt(session_id: String, command_id: String, t
     tracing::warn!(%error, %session_id, "prompt history could not be stored");
 }
 
-/// What the phone's New action reports for the end of its create.
-pub(crate) fn phone_create_result(wait: crate::daemon::create::CreateWait) -> Result<()> {
-    use crate::daemon::create::CreateWait;
-    match wait {
-        CreateWait::Finished | CreateWait::OwedToNextDaemon => Ok(()),
-        CreateWait::Failed(error) => Err(error),
-    }
-}
-
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -271,15 +262,22 @@ pub(super) async fn apply_phone_action(
                     published,
                 })
                 .map_err(|_| anyhow::anyhow!("phone server stopped before publishing session"))?;
-            // The phone already has the published session. One the daemon's
-            // shutdown stopped is owed to the next daemon, which finishes it
-            // and updates the record the phone shows, so it is not a failure.
-            phone_create_result(
-                services
-                    .daemon_runtime
-                    .wait_create_outcome(&registered_session_id)
-                    .await,
-            )
+            // The phone already has the published session. If the daemon stops
+            // under this wait the next daemon finishes the create and updates
+            // the record the phone shows, so that is no result, not a failure.
+            let lifecycle = control
+                .lifecycle
+                .as_ref()
+                .expect("New action has a daemon create control");
+            tokio::select! {
+                outcome = services.daemon_runtime.wait_create_outcome(&registered_session_id) => {
+                    match outcome {
+                        crate::daemon::create::CreateWait::Finished => Ok(()),
+                        crate::daemon::create::CreateWait::Failed(error) => Err(error),
+                    }
+                }
+                () = lifecycle.shutdown_stopped() => Ok(()),
+            }
         }
         ControllerAction::Prompt {
             session_id,

@@ -580,10 +580,13 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &executor,
-        || false,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -724,10 +727,13 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     crate::database::save_lifecycle_session(record).unwrap();
     // A launch the daemon's shutdown stopped is not a failure: the record and
     // the worker stay as they are for the next daemon (create intent).
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &CancelledLaunch,
-        || true,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| true,
     ))
     .unwrap_err();
     assert!(
@@ -739,10 +745,13 @@ fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
         SessionState::Provisioning
     );
     // A launch cancelled by anything else fails, and its cleanup still runs.
-    let error = futures::executor::block_on(controller.provision_subagent_session_controlled(
+    let error = futures::executor::block_on(controller.run_create(
         &child_id,
         &CancelledLaunch,
-        || false,
+        CreateKind::Subagent,
+        false,
+        || Ok(()),
+        &|| false,
     ))
     .unwrap_err();
     assert!(
@@ -2138,11 +2147,14 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         checkout: root.join(".mj/clones").join(&record.id),
     };
     let error = controller
-        .provision_session_controlled_with_commit(
+        .run_create(
             &record.id,
             &executor,
-            || panic!("failed setup cannot commit"),
+            CreateKind::TopLevel {
+                remember_launch_choices: false,
+            },
             false,
+            || panic!("failed setup cannot commit"),
             &|| false,
         )
         .await

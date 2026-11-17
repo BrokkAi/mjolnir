@@ -6210,85 +6210,6 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     assert_eq!(state.subagent_report_parent_ids(), [parent.id]);
 }
 
-/// A client waiting for a create across a daemon restart is told to ask again
-/// (the non-acceptance a draining daemon gives, which the client retries on a
-/// fresh connection), not that the create failed. A person's cancel is still
-/// a failure.
-#[tokio::test]
-async fn a_create_stopped_for_shutdown_answers_its_waiter_with_the_retryable_reply() {
-    const NAME: &str = "a_create_stopped_for_shutdown_answers_its_waiter_with_the_retryable_reply";
-    const CHILD: &str = "MJ_TEST_WAIT_CREATE_STOPPED";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(module_path!(), NAME),
-        )
-        .env(CHILD, "1")
-        .isolated_store(directory.path())
-        .run();
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let state = test_runtime_state_loading_the_store();
-    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
-    let shutdown = CancellationToken::new();
-    for (session, stopped) in [("stopped-create", true), ("cancelled-create", false)] {
-        let control = LifecycleControl::default();
-        state
-            .start_or_join_lifecycle_controlled(
-                session.into(),
-                LifecycleKind::Create,
-                None,
-                None,
-                Some(control.clone()),
-                |_, _, cancelled| async move {
-                    while !cancelled.load(Ordering::Acquire) {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                    Err(anyhow::anyhow!("operation cancelled"))
-                },
-            )
-            .unwrap();
-        let waiting = handle_action(
-            DaemonAction::WaitCreateSession {
-                session_id: session.into(),
-            },
-            &metadata,
-            &state,
-            &shutdown,
-        );
-        tokio::pin!(waiting);
-        tokio::task::yield_now().await;
-        if stopped {
-            control.cancel_for_shutdown();
-        } else {
-            control.request_cancel("person cancellation");
-        }
-        let reply = tokio::time::timeout(Duration::from_secs(10), waiting)
-            .await
-            .expect("the wait ends with the create");
-        if stopped {
-            assert!(matches!(reply.unwrap(), DaemonReply::UpgradePending));
-            // A second waiter reads the same answer from the same place.
-            let again = handle_action(
-                DaemonAction::WaitCreateSession {
-                    session_id: session.into(),
-                },
-                &metadata,
-                &state,
-                &shutdown,
-            )
-            .await;
-            assert!(matches!(again.unwrap(), DaemonReply::UpgradePending));
-            // The phone's New action does not report that as a failure.
-            let outcome = state.wait_create_outcome(session).await;
-            assert!(crate::server_runtime::phone_create_result(outcome).is_ok());
-        } else {
-            assert!(reply.is_err(), "a cancelled create is a failure");
-        }
-    }
-}
-
 /// A create stopped by shutdown before the phone was told it exists is rolled
 /// back and leaves no intent, so the next daemon provisions nothing for it. One
 /// stopped after publication keeps its intent (see the restart end-to-end test).
@@ -6328,8 +6249,10 @@ async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resu
         .start_create_lifecycle(
             session.id.clone(),
             control.clone(),
-            Some(publication),
-            false,
+            create::CreateInputs::TopLevel {
+                publication: Some(publication),
+                remember_launch_choices: false,
+            },
             None,
         )
         .unwrap();
@@ -6354,11 +6277,14 @@ async fn a_create_stopped_for_shutdown_before_publication_leaves_nothing_to_resu
     assert_eq!(record.state, SessionState::Error);
 }
 
-/// With no create running, the daemon answers a create wait from the stored
-/// record, so a client never infers "still creating" from session state.
+/// A create wait reads durable state alone: with an intent row and no
+/// lifecycle entry (what a new daemon sees before it has re-admitted the
+/// create, and what a waiter on the old daemon sees), it keeps waiting; it
+/// ends when the record leaves the creating states and the intent settles,
+/// with the real failure for `Error`.
 #[tokio::test]
-async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
-    const NAME: &str = "waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record";
+async fn a_create_wait_is_answered_from_the_intent_row_and_the_record() {
+    const NAME: &str = "a_create_wait_is_answered_from_the_intent_row_and_the_record";
     const CHILD: &str = "MJ_TEST_WAIT_CREATE_FROM_RECORD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -6372,40 +6298,55 @@ async fn waiting_for_a_create_with_no_lifecycle_is_answered_from_the_record() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Wait create").unwrap();
-    for (id, state, reason) in [
-        ("wait-failed", SessionState::Error, Some("clone refused")),
-        ("wait-running", SessionState::Running, None),
-        // A finished session whose worker dropped holds no create intent.
-        ("wait-dropped", SessionState::Disconnected, None),
-    ] {
-        let mut record = runtime_test_session(id, &workspace.id, state);
-        record.last_error = reason.map(str::to_owned);
-        crate::database::save_session(&record).unwrap();
+    for id in ["wait-finishes", "wait-fails"] {
+        let creating = runtime_test_session(id, &workspace.id, SessionState::Provisioning);
+        crate::database::save_new_session(&creating, None, false, false).unwrap();
     }
-    // A registered create holds its intent, and no lifecycle runs it.
-    let creating = runtime_test_session("wait-creating", &workspace.id, SessionState::Provisioning);
-    crate::database::save_new_session(&creating, None, false, false).unwrap();
+    // A finished session whose worker dropped holds no create intent.
+    let dropped = runtime_test_session("wait-dropped", &workspace.id, SessionState::Disconnected);
+    crate::database::save_session(&dropped).unwrap();
     let state = test_runtime_state_loading_the_store();
     use create::CreateWait;
-    let CreateWait::Failed(failed) = state.wait_create_outcome("wait-failed").await else {
+    assert!(matches!(
+        state.wait_create_outcome("wait-dropped").await,
+        CreateWait::Finished
+    ));
+    assert!(matches!(
+        state.wait_create_outcome("no-such-session").await,
+        CreateWait::Failed(_)
+    ));
+    let waiting = |id: &'static str| {
+        let state = state.clone();
+        tokio::spawn(async move { state.wait_create_outcome(id).await })
+    };
+    let finishes = waiting("wait-finishes");
+    let fails = waiting("wait-fails");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !finishes.is_finished() && !fails.is_finished(),
+        "an unfinished create keeps its waiters waiting"
+    );
+    let mut record = runtime_test_session("wait-finishes", &workspace.id, SessionState::Running);
+    crate::database::save_session(&record).unwrap();
+    record = runtime_test_session("wait-fails", &workspace.id, SessionState::Error);
+    record.last_error = Some("clone refused".to_owned());
+    crate::database::save_session(&record).unwrap();
+    state.publish_revision();
+    let finished = tokio::time::timeout(Duration::from_secs(10), finishes)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap();
+    assert!(matches!(finished, CreateWait::Finished));
+    let CreateWait::Failed(failed) = tokio::time::timeout(Duration::from_secs(10), fails)
+        .await
+        .expect("the wait wakes on the daemon's change notification")
+        .unwrap()
+    else {
         panic!("a failed create answers with its reason");
     };
     assert!(
         format!("{failed:#}").contains("clone refused"),
         "{failed:#}"
-    );
-    for finished in ["wait-running", "wait-dropped"] {
-        assert!(matches!(
-            state.wait_create_outcome(finished).await,
-            CreateWait::Finished
-        ));
-    }
-    let CreateWait::Failed(creating) = state.wait_create_outcome("wait-creating").await else {
-        panic!("an unowned create is a visible error");
-    };
-    assert!(
-        format!("{creating:#}").contains("no create operation exists"),
-        "{creating:#}"
     );
 }
 

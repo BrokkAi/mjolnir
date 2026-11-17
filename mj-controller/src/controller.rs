@@ -98,7 +98,9 @@ pub use mbx::install::{
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
-pub use provisioning::{GitIdentity, controller_git_identity, set_controller_git_identity};
+pub use provisioning::{
+    CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
+};
 pub(crate) use worker_binary::{
     image_worker_label, prepare_recovery_worker_binary, recorded_exit_reason,
     refresh_target_worker_binary_if_stale, worker_source_problem,

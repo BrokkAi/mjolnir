@@ -77,8 +77,6 @@ use support::*;
 pub(crate) mod preflight;
 use preflight::*;
 mod actions;
-#[cfg(test)]
-pub(crate) use actions::phone_create_result;
 use actions::*;
 mod project_sources;
 use project_sources::*;

@@ -689,9 +689,6 @@ impl RuntimeState {
         self.owner().lifecycle.retain(|_, active| {
             !active.result.same_channel(channel)
                 || active.is_visible()
-                // A create the daemon's shutdown stopped is owed to the next
-                // daemon; every waiter reads that from this entry until exit.
-                || (active.kind == LifecycleKind::Create && active.control.stopped_for_shutdown())
                 || (active.restart_intent.is_some()
                     && matches!(active.phase, LifecyclePhase::Completed(Err(_))))
         });

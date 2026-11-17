@@ -1098,16 +1098,9 @@ pub(super) async fn handle_action(
             state.start_create_session(request).await?,
         ))),
         DaemonAction::WaitCreateSession { session_id } => {
-            // A create the daemon's shutdown stopped is not answered as a
-            // failure: the same non-acceptance a draining daemon gives makes
-            // the client reconnect and ask the next daemon, which finishes it.
-            // The wait is read-only, so repeating it is safe.
             match state.wait_create_outcome(&session_id).await {
                 crate::daemon::create::CreateWait::Finished => Ok(DaemonReply::Done),
                 crate::daemon::create::CreateWait::Failed(error) => Err(error),
-                crate::daemon::create::CreateWait::OwedToNextDaemon => {
-                    Ok(DaemonReply::UpgradePending)
-                }
             }
         }
         DaemonAction::ResumeSession(request) => {
@@ -1240,6 +1233,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Identity
             | DaemonAction::Configuration
             | DaemonAction::WaitSessionLifecycle(_)
+            // Answered from durable state, so it holds no daemon work and a
+            // handoff does not wait for it; the client asks again.
+            | DaemonAction::WaitCreateSession { .. }
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

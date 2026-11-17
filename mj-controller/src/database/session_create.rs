@@ -35,14 +35,42 @@ pub(crate) fn create_intent_is_stale(session: &SessionRecord) -> bool {
     session.archived || !holds_create_intent(session.state)
 }
 
-/// Whether this session's creation is unfinished, as its intent row says.
-pub(crate) fn session_has_create_intent(session_id: &str) -> Result<bool> {
+/// How a session's creation stands, read from durable state alone: the
+/// intent row says whether it is unfinished, the record says how it ended.
+/// The row is read first. It is removed in the transaction that writes the
+/// final state, so a missing row means the record already shows the end.
+pub(crate) enum CreateEnd {
+    Unfinished,
+    Finished,
+    Failed(String),
+}
+
+pub(crate) fn session_create_end(session_id: &str) -> Result<CreateEnd> {
     let connection = open_reader(&database_path())?;
-    Ok(connection.query_row(
+    let unfinished: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
         [session_id],
         |row| row.get(0),
-    )?)
+    )?;
+    drop(connection);
+    if unfinished {
+        return Ok(CreateEnd::Unfinished);
+    }
+    let Some(record) = load_session_record(session_id)? else {
+        return Ok(CreateEnd::Failed(format!(
+            "session {session_id} no longer exists"
+        )));
+    };
+    // A failed create passes through StartupCleanup (intent settled) on its
+    // way to Error; that is already its failure.
+    Ok(match record.state {
+        SessionState::Error | SessionState::StartupCleanup => CreateEnd::Failed(
+            record
+                .last_error
+                .unwrap_or_else(|| "session creation failed".to_owned()),
+        ),
+        _ => CreateEnd::Finished,
+    })
 }
 
 pub(super) fn insert_create_intent(
@@ -127,18 +155,6 @@ pub(super) fn restore_create_intent_for_retry(
     session: &SessionRecord,
 ) -> Result<()> {
     insert_create_intent(tx, session, false)
-}
-
-/// Forget the worker boot an interrupted create left, once its worker is stopped.
-pub(crate) fn discard_worker_restart_intent(session_id: &str) -> Result<()> {
-    let session_id = session_id.to_owned();
-    submit_database_write("discard_worker_restart_intent", move |connection| {
-        connection.execute(
-            "DELETE FROM worker_restart_intents WHERE session_id = ?1",
-            [&session_id],
-        )?;
-        Ok(())
-    })
 }
 
 /// Reset a session to its registered form so its create can run again: the
