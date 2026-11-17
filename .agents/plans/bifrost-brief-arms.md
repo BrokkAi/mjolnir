@@ -21,7 +21,8 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Complete paired non-relation leak checks: all 13 briefs missed by both judges, 26 hash-bound verdicts, no flags or wording edits; both Sol/high judges suspended.
 - [x] Run and freeze the 26 registered non-relation A/BT jobs: 78 unique actual Terra/high outputs, clean inventories, all 26 own carriers API-confirmed suspended.
 - [x] Complete paired non-relation catch judging and all 28 required handchecks. Independent parent review and one blinded Sol/high proposal agree; final decisions were sealed before arm attribution. Secondary reading: A13/39 versus BT15/39, +5.1 points (95% paired interval 0.0 to +12.8).
-- [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
+- [x] Complete and freeze all 40 ordinary blind writers: zero lint repairs, clean inventories, all writers suspended. Four audit hits are literal quoted-heredoc brief writes; capture limitations retained.
+- [ ] Complete 80 ordinary A/BT review jobs, then the registered single pooled group-and-verify pass; handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
 
 ## Surprises & Discoveries
 

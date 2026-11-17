@@ -1,0 +1,366 @@
+{
+  "observed_at": "2026-11-17T08:28:15.603824+00:00",
+  "live_own_writers": [],
+  "sessions": [
+    {
+      "id": "diff-6f9a2656f3",
+      "sid": "96be565ed7f378c3f07b1e40685106de",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/96be565ed7f378c3f07b1e40685106de.json"
+    },
+    {
+      "id": "diff-5febdb1c44",
+      "sid": "d9f326194498d81f8e33f73bf37bb157",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d9f326194498d81f8e33f73bf37bb157.json"
+    },
+    {
+      "id": "diff-95655a5e97",
+      "sid": "d16f7646117b7855e9ffc424cfea8992",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d16f7646117b7855e9ffc424cfea8992.json"
+    },
+    {
+      "id": "diff-6449f901ba",
+      "sid": "08f02936e1843bebe3cdf72646485725",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/08f02936e1843bebe3cdf72646485725.json"
+    },
+    {
+      "id": "diff-5e17ecf53c",
+      "sid": "283a2a5be5d096eae46c837692c6567c",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/283a2a5be5d096eae46c837692c6567c.json"
+    },
+    {
+      "id": "diff-2eaec0a7ad",
+      "sid": "3581d9c000a3824f834bac98ad850665",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/3581d9c000a3824f834bac98ad850665.json"
+    },
+    {
+      "id": "diff-63713569c1",
+      "sid": "0b794b97cdb19c1974135b4c60d3b30d",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/0b794b97cdb19c1974135b4c60d3b30d.json"
+    },
+    {
+      "id": "diff-bb39a5fd49",
+      "sid": "dbb73e1c0daefd7f5da8998b63977ca8",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/dbb73e1c0daefd7f5da8998b63977ca8.json"
+    },
+    {
+      "id": "diff-9f61b39391",
+      "sid": "d036ec2f6dd617073343a9430aa9f90a",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d036ec2f6dd617073343a9430aa9f90a.json"
+    },
+    {
+      "id": "diff-c9cd4a27f9",
+      "sid": "204cd30153b61b3d3a2282de0f6c60fa",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/204cd30153b61b3d3a2282de0f6c60fa.json"
+    },
+    {
+      "id": "diff-b58235b247",
+      "sid": "6d1dd9514b0d0d096d9cbb8bc95df779",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/6d1dd9514b0d0d096d9cbb8bc95df779.json"
+    },
+    {
+      "id": "diff-a75a035026",
+      "sid": "5001c2ab46727e4a1a90fa3faf171763",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/5001c2ab46727e4a1a90fa3faf171763.json"
+    },
+    {
+      "id": "diff-b607037341",
+      "sid": "5b914ca959939b31387da4c1c0dcb3d4",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/5b914ca959939b31387da4c1c0dcb3d4.json"
+    },
+    {
+      "id": "diff-fdcd0552e9",
+      "sid": "3376634e5604e8f786c3d27a606bb9c7",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/3376634e5604e8f786c3d27a606bb9c7.json"
+    },
+    {
+      "id": "diff-0041fe831a",
+      "sid": "f05fc3993356a97d2ef0154445b7da4c",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/f05fc3993356a97d2ef0154445b7da4c.json"
+    },
+    {
+      "id": "diff-4d3aaeb3d1",
+      "sid": "ef5de3f1fac37756c44d789822398577",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/ef5de3f1fac37756c44d789822398577.json"
+    },
+    {
+      "id": "diff-1cfbe59c5b",
+      "sid": "fca94620eb38cd16e795b35cf2e5aa7b",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/fca94620eb38cd16e795b35cf2e5aa7b.json"
+    },
+    {
+      "id": "diff-695a400f18",
+      "sid": "3d239504eedfb85f68e743e9f9338dc1",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/3d239504eedfb85f68e743e9f9338dc1.json"
+    },
+    {
+      "id": "diff-22207e44f0",
+      "sid": "41a736230049ff44e9e7d602c57c581f",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/41a736230049ff44e9e7d602c57c581f.json"
+    },
+    {
+      "id": "diff-57069dc4f7",
+      "sid": "d834f990f4033ab133a67b2e4fd9c9d3",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d834f990f4033ab133a67b2e4fd9c9d3.json"
+    },
+    {
+      "id": "diff-df5fb945bf",
+      "sid": "989636ce4df80a94b20bb486e9020e3c",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/989636ce4df80a94b20bb486e9020e3c.json"
+    },
+    {
+      "id": "diff-0dc1b2afef",
+      "sid": "eefc7675af791c66a3d7683c89fc0040",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/eefc7675af791c66a3d7683c89fc0040.json"
+    },
+    {
+      "id": "diff-43823779fb",
+      "sid": "614d602b41306f7eb4132146413e4fba",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/614d602b41306f7eb4132146413e4fba.json"
+    },
+    {
+      "id": "diff-378bd893ed",
+      "sid": "1d8a1cde22dddd106fe78d68f75026a8",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/1d8a1cde22dddd106fe78d68f75026a8.json"
+    },
+    {
+      "id": "diff-5053bc5bea",
+      "sid": "2d0a131d438d1c289494fbf505efceb3",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/2d0a131d438d1c289494fbf505efceb3.json"
+    },
+    {
+      "id": "diff-c2e0ac6264",
+      "sid": "d4617d755913c4ba328c27cdc9b6af45",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d4617d755913c4ba328c27cdc9b6af45.json"
+    },
+    {
+      "id": "diff-9dad3f2c71",
+      "sid": "b637d37939d97e4d2f36b8b28f733159",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/b637d37939d97e4d2f36b8b28f733159.json"
+    },
+    {
+      "id": "diff-62d65b4fab",
+      "sid": "49d882ad74286ddd99c90abb8c169113",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/49d882ad74286ddd99c90abb8c169113.json"
+    },
+    {
+      "id": "diff-d3b5598051",
+      "sid": "95a3f34c7708b49d198e319c59c029c9",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/95a3f34c7708b49d198e319c59c029c9.json"
+    },
+    {
+      "id": "diff-4a12c7dafa",
+      "sid": "9b1a2c8da1c4c56a8f1ef703865163ca",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/9b1a2c8da1c4c56a8f1ef703865163ca.json"
+    },
+    {
+      "id": "diff-a3b59a9183",
+      "sid": "2909b9a8695cefa75990aeef1851a5ed",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/2909b9a8695cefa75990aeef1851a5ed.json"
+    },
+    {
+      "id": "diff-43553e0d35",
+      "sid": "95f95469c39145bd0f26a6b710622b63",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/95f95469c39145bd0f26a6b710622b63.json"
+    },
+    {
+      "id": "diff-bb4addf48b",
+      "sid": "41b2ea242c46ed5519facabddea72f8b",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/41b2ea242c46ed5519facabddea72f8b.json"
+    },
+    {
+      "id": "diff-8a51f05e0a",
+      "sid": "d14593460a319050c98a22dcb385cb77",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/d14593460a319050c98a22dcb385cb77.json"
+    },
+    {
+      "id": "diff-8df49fdb43",
+      "sid": "5dc018a95821e15a81e5ac25ebf2752f",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/5dc018a95821e15a81e5ac25ebf2752f.json"
+    },
+    {
+      "id": "diff-b4dc5c62d0",
+      "sid": "b09257c1407a73d84f9bf38fa86794c5",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/b09257c1407a73d84f9bf38fa86794c5.json"
+    },
+    {
+      "id": "diff-5c3a37983d",
+      "sid": "a6f33629c61d255a2c0b0f0d93bdbbf3",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/a6f33629c61d255a2c0b0f0d93bdbbf3.json"
+    },
+    {
+      "id": "diff-1c0f689be1",
+      "sid": "768e1d687f47c3af67f39877b321b662",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/768e1d687f47c3af67f39877b321b662.json"
+    },
+    {
+      "id": "diff-27a65d6991",
+      "sid": "55aa7100a66ef649cad2918fd848143c",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/55aa7100a66ef649cad2918fd848143c.json"
+    },
+    {
+      "id": "diff-7e35e90ce9",
+      "sid": "6e33f73734de229e933c7ce6ed556ae8",
+      "lifecycle": "suspended",
+      "profile": "codex4",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "session_path": "/mnt/optane/review-arms-bifrost-20261116/arms/ordinary-writer-driver/sessions/6e33f73734de229e933c7ce6ed556ae8.json"
+    }
+  ]
+}
