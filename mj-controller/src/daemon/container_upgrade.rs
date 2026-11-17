@@ -73,6 +73,7 @@ impl RuntimeState {
             session_id,
             LifecycleKind::UpgradeContainer,
             super::lifecycle::LifecycleStart {
+                origin: super::lifecycle::LifecycleOrigin::Person,
                 resume_workspace_id: None,
                 request_key: Some(request_key),
                 control: None,
@@ -104,7 +105,7 @@ impl RuntimeState {
                 let _ = accepted.send(Ok(()));
                 state.restart_admitted(session_id, cancelled, Some(intent), false).await
             },
-        )?;
+        ).await?;
         let runtime = self.clone();
         tokio::spawn(async move {
             if let Err(error) = Self::wait_lifecycle_result(operation.clone()).await {

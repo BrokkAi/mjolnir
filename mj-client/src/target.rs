@@ -4,11 +4,8 @@ use anyhow::{Result, bail};
 use mj_core::config::{Config, TargetTemplate, is_bare_project_target};
 use mj_core::state::{Checkout, ManagedWorktreeTarget, SessionRecord};
 
-// Published from containers/Containerfile.agent-dev by
-// .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
-// Git, gh, and the pinned ACP bridges, so a first session does not have to
-// install them.
-pub use mj_core::config::DEFAULT_CONTAINER_IMAGE as DEFAULT_IMAGE;
+// Session tools and harnesses are installed after cloning the project.
+pub use mj_core::config::DEFAULT_SESSION_IMAGE as DEFAULT_IMAGE;
 
 /// Convert a configured bare target to the durable target identity stored on
 /// managed worktrees.

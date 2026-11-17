@@ -74,7 +74,7 @@ pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTe
     mj_core::config::RELEASE_IMAGE_CARRIES_WORKER
         && template
             .container()
-            .is_some_and(|container| container.image == mj_core::config::DEFAULT_CONTAINER_IMAGE)
+            .is_some_and(|container| container.image == mj_core::config::RELEASE_CONTAINER_IMAGE)
 }
 
 /// Resolve the worker before expensive provisioning or transcript compaction.

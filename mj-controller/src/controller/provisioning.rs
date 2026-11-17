@@ -805,11 +805,8 @@ impl Controller {
                     .target_runtime = Some(runtime.into());
                 self.persist_session_state(session_id)?;
             }
-            let template = self
-                .config
-                .targets
-                .get(&session.target_template_id)
-                .context("target template disappeared during provisioning")?;
+            let resolved_template = super::backend::session_target(&self.config, &session.bundle_id, &session.target_template_id, executor)?;
+            let template = &resolved_template;
             let profile = self
                 .config
                 .profiles
@@ -843,11 +840,8 @@ impl Controller {
         // Keep planning, preflight, creation, and locator discovery in one
         // result so the caller's failure disposition applies to every error.
         let result = (|| {
-            let template = self
-                .config
-                .targets
-                .get(&session.target_template_id)
-                .context("target template disappeared during provisioning")?;
+            let resolved_template = super::backend::session_target(&self.config, &session.bundle_id, &session.target_template_id, executor)?;
+            let template = &resolved_template;
 
             let mut target = backend_target(
                 template,
@@ -1027,14 +1021,20 @@ impl Controller {
                 executor,
                 |_| None,
                 |outputs| {
-                    super::backend::locator_after_provision_named(
+                    let locator = super::backend::locator_after_provision_named(
                         template,
                         &target,
                         session_id,
                         outputs.first(),
                         executor,
                         &resource_name,
-                    )
+                    )?;
+                    // Creation owns HOME readiness before checkout and worker
+                    // staging split into independent background operations.
+                    targets::initialize_container_home(
+                        &backend_locator(&locator, &session, &self.config)?, executor,
+                    )?;
+                    Ok(locator)
                 },
             )
             .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
@@ -1057,12 +1057,8 @@ impl Controller {
                 return Err(self.rollback_unless_interrupted(session_id, error, interrupted)?);
             }
             Ok((locator, remainder, bundle, build_cache)) => {
-                let image = self
-                    .config
-                    .targets
-                    .get(&session.target_template_id)
-                    .and_then(TargetTemplate::container)
-                    .map(|container| container.image.as_str());
+                let resolved_template = super::backend::session_target(&self.config, &session.bundle_id, &session.target_template_id, executor)?;
+                let image = resolved_template.container().map(|container| container.image.as_str());
                 let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
                     .container_engine()
                     .map(|_| match image {

@@ -6240,7 +6240,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
 // Hard-won: a95e5e66: launch admission accepted targets that could not supply a worker.
 #[tokio::test]
 async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
-    let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
+    let check: crate::server::WorkerSourceCheck = Arc::new(|target, _bundle| {
         (target == "podman").then(|| {
             "worker source for aarch64 (Darwin) was unavailable when the daemon started: not built"
                 .to_owned()

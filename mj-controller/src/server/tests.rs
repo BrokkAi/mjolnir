@@ -70,6 +70,7 @@ use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        images: Default::default(),
         keys: Default::default(),
         jev: Default::default(),
         quota: Default::default(),

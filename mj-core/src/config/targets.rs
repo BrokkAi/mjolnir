@@ -324,14 +324,14 @@ pub fn build_cache_configuration_directory(directory: &Path) -> PathBuf {
 /// The image a container target runs when its table names none: the
 /// reference image CI publishes, which `mj setup` also writes.
 fn default_container_image() -> String {
-    super::DEFAULT_CONTAINER_IMAGE.to_owned()
+    super::DEFAULT_SESSION_IMAGE.to_owned()
 }
 
 /// Whether a container image is exactly this build's default. A template that
 /// keeps the default writes no `image` line, so an upgraded install follows
 /// the image built for its own version.
 fn is_default_image(image: &String) -> bool {
-    image == super::DEFAULT_CONTAINER_IMAGE
+    image == super::DEFAULT_SESSION_IMAGE
 }
 
 /// Every key a container runtime's table may carry beside `kind` and

@@ -188,7 +188,9 @@ pub(super) async fn prepare(
     // A copy already running is waited for, not preempted.
     let background = {
         let _stage = stages.enter(session_id, "waiting for background work on the session");
-        environment.hold_background_work(session_id, deadline).await
+        tokio::time::timeout_at(deadline, environment.hold_background_work(session_id, deadline))
+            .await
+            .map_err(|_| StartRefusal(format!("waiting for background work on session {session_id} exceeded the review preparation deadline")))?
     };
     // Capture committed work before choosing reviewers. Matching trees need
     // no reviewer, and capture refusals go straight back to the caller.

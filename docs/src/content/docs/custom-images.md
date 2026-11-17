@@ -94,6 +94,21 @@ manifest and script into your image build and run the installer with the
 manifest path and destination bin directory. It needs Python 3.11 or newer and
 curl.
 
+## Project tools
+
+After the clone, the worker installs each repository's mise recipe (see
+[Project environments](/project-environments/)) in your image too. It uses a
+`mise` on the image's `PATH` if there is one; otherwise it downloads Mjolnir's
+pinned static mise, which runs on glibc and musl images alike. Images that
+set `MISE_DATA_DIR`, `RUSTUP_HOME` or `CARGO_HOME` keep their values, so tools
+you preinstalled with mise are reused. Repositories without a recipe leave
+your image's environment untouched. `[bootstrap.packages]` needs root or
+passwordless `sudo` and a package manager mise supports.
+
+Mjolnir starts its own Node-based bridges with the Node it resolved for them,
+not whichever `node` comes first on `PATH`, so a project that pins an older
+Node does not affect the harness.
+
 ## Workspace and Mjolnir's own files
 
 Sessions work under `/workspace`. Separately, Mjolnir writes its own session

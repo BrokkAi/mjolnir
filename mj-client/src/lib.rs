@@ -22,3 +22,5 @@ pub mod executable;
 pub mod availability;
 
 pub mod discovery;
+
+pub mod session_image;

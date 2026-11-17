@@ -67,8 +67,8 @@ pub struct QuotaRefreshRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaRuntimeConfig {
     pub choice: QuotaRuntimeChoice,
-    /// The image of the enabled local Podman runtime, preferring one the
-    /// person configured over a standard candidate.
+    /// The release image with the enabled local Podman runtime's pull policy,
+    /// preferring a configured runtime over a standard candidate.
     pub podman_image: Option<RuntimeImage>,
     /// The same for Docker.
     pub docker_image: Option<RuntimeImage>,
@@ -77,7 +77,7 @@ pub struct QuotaRuntimeConfig {
     pub in_daemon_container: bool,
 }
 
-/// A local runtime's image, with that runtime's pull policy: the policy, not
+/// The quota release image, with a local runtime's pull policy: the policy, not
 /// the quota check, decides whether the daemon downloads the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeImage {
@@ -100,7 +100,7 @@ impl QuotaRuntimeConfig {
             // Configured runtimes first: `false` sorts before `true`.
             enabled.sort_by_key(|(standard, _)| *standard);
             enabled.first().map(|(_, container)| RuntimeImage {
-                image: container.image.clone(),
+                image: mj_core::config::RELEASE_CONTAINER_IMAGE.to_owned(),
                 pull_policy: container.pull_policy,
             })
         };

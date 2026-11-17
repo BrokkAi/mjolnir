@@ -1626,6 +1626,78 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+async fn prepare_project_tools(
+    root: &std::path::Path,
+    roots: &[PathBuf],
+    config: &mut WorkerLaunchConfig,
+    base_environment: &BTreeMap<String, String>,
+    status: &watch::Sender<PreparationSnapshot>,
+    relay: &Arc<RelayCell>,
+) -> Result<bool> {
+    let mut environment = base_environment.clone();
+    environment.extend(config.environment.clone());
+    let mut applied = false;
+    let result = async {
+        let recipes = super::project_tools::recipe_roots(roots).await?;
+        if recipes.is_empty() {
+            // Without a recipe the image's own environment (its Rust homes,
+            // PATH and tools) is left exactly as it was.
+            return Ok(Vec::new());
+        }
+        super::project_tools::apply_environment(&mut environment, roots, None)?;
+        config.environment = environment.clone();
+        applied = true;
+        // Toolchains can take minutes to download. The preparation owner
+        // cancels this future on close, but imposes no per-step deadline.
+        status.send_modify(|snapshot| {
+            snapshot.state = Some(mj_core::relay::HarnessPreparation::Preparing {
+                step: "Install project tools".into(),
+                since_ms: chrono::Utc::now().timestamp_millis(),
+            });
+        });
+        let breadcrumb_root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            super::record_startup_step(&breadcrumb_root, "Install project tools");
+        })
+        .await
+        .context("record project tools startup step")?;
+        let result = super::project_tools::install(root, &recipes, &mut environment).await;
+        config.environment = environment.clone();
+        result
+    }
+    .await;
+    let notices = match result {
+        Ok(notices) => notices,
+        Err(error) => {
+            let message = format!(
+                "Project tools preparation failed: {error:#}. See {}. The session will continue.",
+                root.join(super::project_tools::LOG_FILE).display()
+            );
+            let log_path = root.join(super::project_tools::LOG_FILE);
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+                .await
+            {
+                Ok(mut log) => {
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(error) = log.write_all(format!("{message}\n").as_bytes()).await {
+                        tracing::warn!(%error, "write project tools failure log");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "open project tools failure log"),
+            }
+            vec![message]
+        }
+    };
+    let mut journal = relay.lock().expect("relay state lock poisoned");
+    for message in notices {
+        journal.record_observation(RelayObservation::Notice { message })?;
+    }
+    Ok(applied)
+}
+
 async fn prepare_and_start_harness(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
@@ -1643,6 +1715,7 @@ async fn prepare_and_start_harness(
         native_session_may_have_history,
         capture,
     } = setup;
+    let project_tools_roots = super::project_tools::take_roots(&mut config.environment)?;
     let managed_subagent = config.is_managed_subagent();
     let review_tools = config.review_tools();
     let subagent_role = config.subagent_mcp_role();
@@ -1673,6 +1746,7 @@ async fn prepare_and_start_harness(
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
+    session_environment.remove(mj_core::worker_launch::SESSION_PROJECT_TOOLS_ROOTS);
     let github_root = root.to_owned();
     let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
@@ -2027,6 +2101,14 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
+    let project_tools_applied = match &project_tools_roots {
+        Some(roots) => {
+            prepare_project_tools(root, roots, &mut config, base_environment, status, &relay)
+                .await?
+        }
+        None => false,
+    };
+
     let harness_budget = preparation_step(
         root,
         status,
@@ -2035,16 +2117,36 @@ async fn prepare_and_start_harness(
         cancel,
     )
     .await?;
-    let prepared_harness = bounded_preparation_step(
-        &harness_budget,
-        super::prepare_harness_launch(
+    let mut prepared_harness = bounded_preparation_step(&harness_budget, async {
+        let mut prepared = super::prepare_harness_launch(
             config.harness,
             config.harness_runtime,
             config.execution_policy,
             super::harness_launch::primary_supervisor_spec(&config),
-        ),
-    )
+        )
+        .await?;
+        super::harness_launch::freeze_node_entrypoints(root, &mut prepared).await?;
+        Ok(prepared)
+    })
     .await?;
+    if let Some(roots) = project_tools_roots
+        .as_ref()
+        .filter(|_| project_tools_applied)
+    {
+        if let Err(error) =
+            super::project_tools::apply_environment(&mut prepared_harness.environment, roots, None)
+        {
+            relay.lock().expect("relay state lock poisoned").record_observation(
+                RelayObservation::Notice { message: format!("Project tools environment could not be applied: {error:#}. The session will continue.") }
+            )?;
+        }
+        // Managed bridge preparation can prepend its own Node bin directory.
+        // Restore the same session tool environment before launching the bridge.
+        prepared_harness
+            .spec
+            .environment
+            .extend(prepared_harness.environment.clone());
+    }
     let managed_cache_root = prepared_harness
         .managed
         .as_ref()
@@ -2884,6 +2986,63 @@ mod preparation_tests {
             .unwrap()
             .unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn failing_project_recipe_records_notice_and_continues_preparation() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let checkout = root.join("checkout");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(checkout.join("mise.toml"), "[tools]\nmissing = '1'\n").unwrap();
+        let mise = bin.join("mise");
+        // More than 64KB catches pipe truncation/deadlocks; both streams belong
+        // in the log even when installation exits unsuccessfully.
+        std::fs::write(&mise, "#!/bin/sh\n/usr/bin/head -c 131072 /dev/zero\nprintf 'recipe failed\\n' >&2\nexit 42\n").unwrap();
+        std::fs::set_permissions(&mise, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let relay = test_relay(root);
+        let (status, _) = watch::channel(PreparationSnapshot::default());
+        let mut config = super::super::relay_tests::launch_config(root.to_str().unwrap());
+        config
+            .environment
+            .insert("PATH".into(), bin.to_string_lossy().into_owned());
+        config.environment.insert(
+            "MISE_DATA_DIR".into(),
+            root.join("mise").to_string_lossy().into_owned(),
+        );
+        prepare_project_tools(
+            root,
+            &[checkout],
+            &mut config,
+            &BTreeMap::new(),
+            &status,
+            &relay,
+        )
+        .await
+        .unwrap();
+        let journal = relay.lock().unwrap();
+        let events = journal.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+        let notices = events
+            .iter()
+            .filter_map(|event| match &event.observation {
+                RelayObservation::Notice { message } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 2);
+        assert!(
+            notices
+                .iter()
+                .any(|message| message.contains("mise install")
+                    && message.contains("42")
+                    && message.contains("project-tools.log"))
+        );
+        let log = std::fs::read(root.join(super::super::project_tools::LOG_FILE)).unwrap();
+        assert!(log.len() > 262144);
+        assert!(String::from_utf8_lossy(&log).contains("recipe failed"));
     }
 
     #[tokio::test]

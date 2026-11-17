@@ -1486,7 +1486,13 @@ impl Controller {
         // A compatible in-place Move already has its worker, mounts and
         // runtime. Only reconstruction needs provisioning prerequisites.
         if !in_place || cross_harness || retry {
-            super::worker_binary::preflight_worker_binary(target, executor)?;
+            let worker_target = super::backend::session_target(
+                &self.config,
+                &source_record.bundle_id,
+                target_id,
+                executor,
+            )?;
+            super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
             super::backend::preflight_target(
                 target,
                 executor,

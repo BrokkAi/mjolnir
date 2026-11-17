@@ -1,0 +1,111 @@
+{
+  "recorded_at": "2026-11-17T07:43:33.842202+00:00",
+  "stage": "secondary13 non-relation known bugs",
+  "diffs": 13,
+  "sessions_per_arm": 39,
+  "reviewer": "3codex4/gpt-6.1-terra/high per diff and arm",
+  "writer": "blind codex4/gpt-6.1-sol/high",
+  "caught": {
+    "A": 13,
+    "BT": 15
+  },
+  "partial": {
+    "A": 0,
+    "BT": 0
+  },
+  "catch_rate": {
+    "A": 0.3333333333333333,
+    "BT": 0.38461538461538464
+  },
+  "effect_points": 5.1,
+  "paired_ci95_points": [
+    0.0,
+    12.8
+  ],
+  "secondary_reading": "Small observed gain; interval touches zero. Secondary result does not replace or revise the registered relation-stage primary reading.",
+  "primary_unchanged": {
+    "A_caught": 9,
+    "BT_caught": 4,
+    "sessions_per_arm": 51,
+    "effect_points": -9.8,
+    "paired_ci95_points": [
+      -19.6,
+      -2.0
+    ]
+  },
+  "full_study_complete": false,
+  "handcheck": {
+    "required": 28,
+    "raw_proposed_caught": 28,
+    "parent_final_caught": 28,
+    "parent_final_partial": 0,
+    "parent_changes": 0,
+    "paired_agreement": 78,
+    "decisions_fixed_before_arm_attribution": true,
+    "independent_parent_blind_review_before_proposal": true
+  },
+  "per_diff_change": {
+    "positive": 2,
+    "negative": 0,
+    "tied": 11
+  },
+  "by_source": {
+    "hard-won": {
+      "diffs": 13,
+      "A_caught": 13,
+      "BT_caught": 15,
+      "sessions_per_arm": 39
+    }
+  },
+  "by_found_by": {
+    "known-empty": {
+      "diffs": 6,
+      "A_caught": 4,
+      "BT_caught": 5,
+      "sessions_per_arm": 18
+    },
+    "unknown": {
+      "diffs": 7,
+      "A_caught": 9,
+      "BT_caught": 10,
+      "sessions_per_arm": 21
+    }
+  },
+  "attribution": "all13 confirmed source/history attributions; no new runtime bug reproduction. MCP timeout census defect_check uncertainty remains literal, not excluded.",
+  "descriptive_pooled_known_bug_totals": {
+    "diffs": 30,
+    "sessions_per_arm": 90,
+    "A_caught": 22,
+    "BT_caught": 19,
+    "A_partial": 2,
+    "BT_partial": 0,
+    "A_catch_rate": 0.24444444444444444,
+    "BT_catch_rate": 0.2111111111111111,
+    "note": "Descriptive only, not replacement primary or a new pass criterion."
+  },
+  "cost": {
+    "stages": {
+      "writers": 3.237596,
+      "paired_leak": 0.2585964,
+      "reviews_known_recorded": 4.019188128,
+      "paired_catch": 0.5597,
+      "handcheck": 0.1574784
+    },
+    "known_recorded_subtotal_usd_api_equivalent": 8.232558928,
+    "full_stage_cost_usd_api_equivalent": null,
+    "incomplete_reason": "Nine complete carrier totals missing; five missing and twelve unfinished persisted carrier usage entries. All26 actual carriers suspended.",
+    "exclusions": "Parent/helper orchestration, M1 corpus/census and auxiliary H6/contains are separate. API-equivalent estimates are not subscription charges."
+  },
+  "cleanup": {
+    "writers": 13,
+    "leak_judges": 2,
+    "carriers": 26,
+    "catch_judges": 4,
+    "handcheck": 1,
+    "all_own_roles_ended_or_suspended": true
+  },
+  "tool_audit_latency": "Reviewers unavailable after normal role destruction #1554/#1559; unknown, not zero/clean.",
+  "image_provenance": "All26currentjobs cd7e9788... balanced13perarm; earlierprimary has a balanced two-image mixture. Recorded without adjustment.",
+  "raw_score_limit": "Legacy expected_catches_of_30 field sums shares over this13-item subset without normalizing to30; it is preserved raw and unused in this reading.",
+  "next_stage": "40 registered ordinary controls: blind writers,80A/BTreviews, single pooled Control2 group-and-verify and rejected brief-reliance handmarks; no known-defect leak/catch judging."
+}

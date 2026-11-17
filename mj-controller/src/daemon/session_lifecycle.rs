@@ -87,6 +87,7 @@ impl RuntimeState {
                     },
                     LifecycleKind::ForceDestroy,
                     true,
+                    super::lifecycle::LifecycleOrigin::Person,
                 )
                 .await?
             }
@@ -207,6 +208,7 @@ mod tests {
                     }
                 },
             )
+            .await
             .unwrap();
         let receipt = started.receipt.clone();
         let mut acceptance = Box::pin(started.accepted());
@@ -240,6 +242,7 @@ mod tests {
                 None,
                 |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
             )
+            .await
             .unwrap();
         assert_ne!(newer.receipt.operation_id, receipt.operation_id);
         assert!(matches!(
@@ -266,6 +269,7 @@ mod tests {
                 None,
                 |_, _, _| async { bail!("captured checkpoint verification failure") },
             )
+            .await
             .unwrap();
         let failed_receipt = failed.receipt.clone();
         assert!(

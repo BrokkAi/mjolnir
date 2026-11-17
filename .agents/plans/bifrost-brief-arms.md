@@ -17,7 +17,10 @@ Measure whether blind relation briefs improve three Terra/high reviewers on Bifr
 - [x] Freeze relation jobs and inputs; write 17 blind Sol briefs, check leakage, run both arms with three Terra/high each, judge twice, and complete parent review of all 15 required handchecks.
 - [x] Report relation reading in e03007684: A9/51 versus BT4/51, paired −9.8 points (95% CI −19.6 to −2.0); all primary model roles ended or suspended. Lead authorized continuing after the reading, with the unchanged 25% floor.
 - [x] Register and complete one blinded contains diagnostic; read all four negative diffs and 12 brief-arm handbacks, and tabulate size/length from artifacts. Freeze these exploratory diagnostics separately; primary labels and reading remain unchanged.
-- [ ] Complete the 13 non-relation writers, paired leak checks, reviews and judging; writer operator is active, using the frozen order and unchanged harness.
+- [x] Complete and freeze all 13 non-relation writers; every session is suspended, final lint/inventory/hash checks pass, one historical-path scanner hit is classified from its captured own-workspace git diff.
+- [x] Complete paired non-relation leak checks: all 13 briefs missed by both judges, 26 hash-bound verdicts, no flags or wording edits; both Sol/high judges suspended.
+- [x] Run and freeze the 26 registered non-relation A/BT jobs: 78 unique actual Terra/high outputs, clean inventories, all 26 own carriers API-confirmed suspended.
+- [x] Complete paired non-relation catch judging and all 28 required handchecks. Independent parent review and one blinded Sol/high proposal agree; final decisions were sealed before arm attribution. Secondary reading: A13/39 versus BT15/39, +5.1 points (95% paired interval 0.0 to +12.8).
 - [ ] Complete 40 ordinary controls with the registered single pooled group-and-verify pass, handmark rejected brief-reliant findings, report final retention and costs, and suspend own remaining sessions.
 
 ## Surprises & Discoveries
@@ -42,7 +45,7 @@ Decision: writers/leak checks/both catch judges use codex4 Sol/high; every revie
 
 ## Outcomes & Retrospective
 
-M1 and the primary relation stage are complete. Blind Sol briefs reduced the observed catch share from 17.6% to 7.8%, failing the registered uplift bar. The primary result is frozen in e03007684; its known recorded API-equivalent cost is $11.692545648, incomplete because carrier usage coverage is partial. The exploratory contains diagnostic found three yes, four partial and ten no labels among 17 briefs. Four negative diffs have three no labels and one partial; artifact reads do not establish reviewer attention, deference or stopping. The lead authorized continuing the 13 non-relation diffs and 40 controls without waiting after the primary report. The 13 writers are active; no later reviewer/control stage is admitted yet.
+M1 and both known-bug stages are complete. Blind Sol briefs reduced the primary relation catch share from 17.6% to 7.8%, failing the registered uplift bar. That primary result remains frozen in e03007684. On the 13 non-relation cases, catches are A13/39 (33.3%) versus BT15/39 (38.5%), +5.1 points with a 95% paired interval of 0.0 to +12.8. Both catch judges agreed on all 78 outputs; the parent independently read all 28 required full handbacks and accepted the same caught labels as the blinded assessor before private arm attribution. Every own role ended or is suspended. Known recorded non-relation cost is $8.232558928, incomplete because carrier usage is partial. Descriptive pooled totals across 30 known bugs are A22/90 versus BT19/90; they do not replace the primary or introduce a new pass bar. The lead authorized proceeding directly to the 40 ordinary controls, whose existing writer/review path passed offline readiness checks. Their single pooled Control2 verification method and 25% per-launch floor remain unchanged.
 
 ## Context and Orientation
 

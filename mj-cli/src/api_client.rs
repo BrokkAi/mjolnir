@@ -176,6 +176,54 @@ impl ApiClient {
         }
     }
 
+    pub(crate) fn daemon_instance(&self) -> Option<&str> {
+        self.daemon_instance.as_deref()
+    }
+
+    pub(crate) async fn image_start(
+        &self,
+        request: &mj_client::session_image::ImageRequest,
+        status: bool,
+    ) -> Result<mj_client::session_image::ImageStarted> {
+        self.post_json(
+            if status {
+                "/images/status"
+            } else {
+                "/images/build"
+            },
+            request,
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn image_follow(
+        &self,
+        id: &str,
+        offset: usize,
+    ) -> Result<Option<mj_client::session_image::ImageFollow>> {
+        let response = self
+            .send_optional(
+                self.http
+                    .get(self.url(&format!("/images/operations/{id}")))
+                    .query(&[("offset", offset)]),
+            )
+            .await?;
+        match response {
+            Some(response) => Ok(Some(decode(response).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn image_cancel(&self, id: &str) -> Result<()> {
+        self.send(
+            self.http
+                .delete(self.url(&format!("/images/operations/{id}"))),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }

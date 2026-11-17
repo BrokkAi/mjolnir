@@ -39,9 +39,9 @@ pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 // Only the image for the Apple container smoke test when the config has no
 // apple-container target. This intentionally stays a small stock image rather
 // than setup::DEFAULT_IMAGE: the check just proves the runtime can start a
-// container, and pulling the multi-gigabyte agent-dev image to do that would be
+// container, and pulling a larger session image to do that would be
 // a poor trade.
-const DEFAULT_CONTAINER_IMAGE: &str = "ubuntu:24.04";
+const SMOKE_TEST_IMAGE: &str = "ubuntu:24.04";
 /// The official signed package Apple publishes for its container runtime.
 pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
     "https://github.com/apple/container#initial-install";
@@ -763,7 +763,7 @@ Finish with the opt-in disposable runtime test in JSON mode:\n\n```console\nmj d
 Apple container is ready only when that smoke test creates a disposable\n\
 container, executes `true` in it, and removes it successfully. Use the image\n\
 configured by an `apple-container` target; without one, doctor uses\n\
-`{DEFAULT_CONTAINER_IMAGE}` for the smoke test.\n\n\
+`{SMOKE_TEST_IMAGE}` for the smoke test.\n\n\
 ## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
@@ -3443,21 +3443,27 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote_kind, known_arch)| {
+        .flat_map(|(id, container, remote_kind, known_arch)| {
             if let Some(remote_kind) = remote_kind
                 && container.platform.is_none()
             {
-                // The remote CPU architecture is only observable once the host
-                // is reachable, so an explicit `platform` is required here.
-                return DoctorCheck::unsupported(
+                return vec![DoctorCheck::unsupported(
                     format!("worker.{id}"),
                     format!("Container worker binary for target {id}"),
-                    format!(
-                        "Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."
-                    ),
-                );
+                    format!("Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."),
+                )];
             }
-            worker_binary_check_on(id, container, known_arch)
+            let mut checks = vec![worker_binary_check_on(id, container, known_arch)];
+            let Ok(architecture) = known_arch.map_or_else(|| container_architecture(container.platform.as_deref()), Ok) else { return checks; };
+            let platform = mj_core::config::canonical_image_platform(architecture);
+            for (bundle_id, images) in &config.images.bundles {
+                if !config.bundles.contains_key(bundle_id) || !images.contains_key(platform) { continue; }
+                let mut effective = container.clone();
+                effective.image = config.session_image(Some(bundle_id), id, platform).expect("container target exists").to_owned();
+                effective.platform = Some(platform.to_owned());
+                checks.push(worker_binary_check_on(&format!("{id}.{bundle_id}.{platform}"), &effective, known_arch));
+            }
+            checks
         })
         .collect()
 }
@@ -3503,8 +3509,8 @@ fn worker_binary_check_on(
 ) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
-    let default_image = image == mj_core::config::DEFAULT_CONTAINER_IMAGE;
-    if default_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+    let release_image = image == mj_core::config::RELEASE_CONTAINER_IMAGE;
+    if release_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
         return DoctorCheck::ready(
             format!("worker.{id}"),
             title,
@@ -3528,7 +3534,7 @@ fn worker_binary_check_on(
         &triple,
         worker_binary_prerequisite_for_arch(arch),
     );
-    let provenance = if default_image {
+    let provenance = if release_image {
         "the development image published from master"
     } else {
         "a configured image"
@@ -3602,7 +3608,7 @@ fn apple_container_image(config: ConfigStatus<'_>) -> String {
                 _ => None,
             })
         })
-        .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.into())
+        .unwrap_or_else(|| SMOKE_TEST_IMAGE.into())
 }
 
 /// Platform support and daemon readiness shared by setup and doctor.

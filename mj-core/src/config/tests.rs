@@ -17,7 +17,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
         else {
             panic!("{kind} changed kind")
         };
-        assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+        assert_eq!(container.image, DEFAULT_SESSION_IMAGE);
     }
 
     let table = serde_json::json!({
@@ -818,6 +818,7 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
 
 fn sample_config() -> Config {
     Config {
+        images: ImagesConfig::default(),
         version: CONFIG_VERSION,
         keys: Default::default(),
         sessions_side: Default::default(),
@@ -1279,7 +1280,42 @@ fn config_toml_round_trip_is_atomic() {
     let path = directory.path().join("nested/config.toml");
     let mut config = sample_config();
     config.sidebar_size = crate::workspace::PaneSize::Minimized;
+    config.images.repository = Some("localhost:5000/projects".into());
+    config
+        .images
+        .bundles
+        .entry("hel".into())
+        .or_default()
+        .insert(
+            "linux/amd64".into(),
+            "localhost:5000/projects/hel:recipe".into(),
+        );
+    config.images.bundles.insert(
+        "retired".into(),
+        BTreeMap::from([(
+            "linux/amd64".into(),
+            "localhost:5000/projects/retired:recipe".into(),
+        )]),
+    );
     config.save_to(&path).unwrap();
+    let loaded = Config::load_from(&path).unwrap();
+    assert_eq!(
+        loaded.session_image(Some("retired"), "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
+    assert!(loaded.images.bundles.contains_key("retired"));
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/amd64"),
+        Some("localhost:5000/projects/hel:recipe")
+    );
+    assert_eq!(
+        loaded.session_image(Some("hel"), "podman-default", "linux/arm64"),
+        Some("ubuntu:24.04")
+    );
+    assert_eq!(
+        loaded.session_image(None, "podman-default", "linux/amd64"),
+        Some("ubuntu:24.04")
+    );
     assert_eq!(Config::load_from(&path).unwrap(), config);
     assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));
     assert_eq!(
@@ -2890,7 +2926,7 @@ machine = "ec2"
         panic!("nitro on an ssh machine must fuse into the remote kind");
     };
     assert_eq!(ssh.host, "ec2.example.com");
-    assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+    assert_eq!(container.image, DEFAULT_SESSION_IMAGE);
     assert_eq!(runtime_kind_name(&config.targets["ec2-nitro"]), "nitro");
     assert_eq!(config.targets["ec2-nitro"].kind_name(), "ssh-nitro");
     assert!(config.targets["ec2-nitro"].execution_policy() == ExecutionPolicy::Unconstrained);
@@ -3001,10 +3037,10 @@ fn the_current_version_refuses_the_old_fused_kinds() {
 /// A single `build.rs` run compiles one channel, so the rule both channels
 /// follow is checked directly here, and the baked value is checked against it.
 #[test]
-fn the_baked_default_image_agrees_with_the_channel_rule() {
+fn the_baked_release_image_agrees_with_the_channel_rule() {
     let release = env!("MJ_AGENT_DEV_IMAGE_RELEASE") == "1";
     assert_eq!(
-        DEFAULT_CONTAINER_IMAGE,
+        RELEASE_CONTAINER_IMAGE,
         container_image_for(env!("CARGO_PKG_VERSION"), release)
     );
 }
@@ -3039,13 +3075,13 @@ fn container_target(image: &str) -> TargetTemplate {
 
 #[test]
 fn migrating_the_legacy_default_image_rewrites_only_the_default() {
-    let release_default = "ghcr.io/brokkai/mjolnir/agent-dev:9.9.9";
+    let session_default = DEFAULT_SESSION_IMAGE;
     let mut default = container_target(LEGACY_DEFAULT_CONTAINER_IMAGE);
-    migrate_legacy_default_image(&mut default, release_default);
-    assert_eq!(default.container().unwrap().image, release_default);
+    migrate_legacy_default_image(&mut default, session_default);
+    assert_eq!(default.container().unwrap().image, session_default);
 
     let mut custom = container_target("example.invalid/agent:1");
-    migrate_legacy_default_image(&mut custom, release_default);
+    migrate_legacy_default_image(&mut custom, session_default);
     assert_eq!(custom.container().unwrap().image, "example.invalid/agent:1");
 }
 
@@ -3068,7 +3104,7 @@ fn a_version_14_file_follows_the_running_builds_default_image() {
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(
         config.targets["podman"].container().unwrap().image,
-        DEFAULT_CONTAINER_IMAGE
+        DEFAULT_SESSION_IMAGE
     );
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();

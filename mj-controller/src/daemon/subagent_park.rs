@@ -205,13 +205,6 @@ impl RuntimeState {
                     // A park is short and not cancellable: a close that asks for
                     // the child waits for it instead, so it never finds a worker
                     // stopped under a record that still says running.
-                    let never = AtomicBool::new(false);
-                    let _recovery_reservation = blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &never)
-                    })
-                    .await?;
                     if state.close_is_requested(&session_id) {
                         return Ok(DaemonLifecycleResult::Park(
                             crate::controller::ParkOutcome::NotRunning,
@@ -298,17 +291,6 @@ impl RuntimeState {
                         state.clone(),
                         session_id.clone(),
                     );
-                    executor.begin_resumable_work()?;
-                    // Waiting for a cancelled recovery copy is interruptible
-                    // preparation, not an admitted database operation.
-                    let _recovery_reservation = tokio::task::spawn_blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        let cancelled = cancelled.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                    })
-                    .await
-                    .context("reserve recovery for sub-agent wake")??;
                     let controller = blocking(Controller::load).await?;
                     controller
                         .unpark_subagent_worker(&session_id, &executor)

@@ -2,6 +2,12 @@ use super::*;
 
 pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/images/build", post(images::start))
+        .route("/images/status", post(images::status))
+        .route(
+            "/images/operations/{id}",
+            get(images::follow).delete(images::cancel),
+        )
         .route(
             "/sessions/{session_id}/native-agents/{child_id}/history",
             get(native_agent_history),

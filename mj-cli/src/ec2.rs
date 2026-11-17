@@ -1083,7 +1083,7 @@ fn create_attempt(
         eprintln!("Installing mj's pinned mbx on the new host.");
         mj_controller::controller::install_mbx(&machine, &mj_controller::targets::ProcessExecutor)?;
     }
-    let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
+    let image = mj_core::config::DEFAULT_SESSION_IMAGE;
     Config::update(|config| {
         ensure!(
             !config.machines.contains_key(&record.target)
@@ -2479,7 +2479,7 @@ else:
             [
                 "pull",
                 "--platform=linux/amd64",
-                mj_core::config::DEFAULT_CONTAINER_IMAGE
+                mj_core::config::DEFAULT_SESSION_IMAGE
             ]
         );
 
