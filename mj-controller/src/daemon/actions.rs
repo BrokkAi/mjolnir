@@ -725,6 +725,16 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
         }
+        DaemonAction::StoredAgentMessageThrough {
+            session_id,
+            through,
+        } => {
+            let item = blocking(move || {
+                crate::database::load_materialized_agent_item_through(&session_id, through)
+            })
+            .await?;
+            Ok(DaemonReply::StoredTranscriptItem(item.map(Box::new)))
+        }
         DaemonAction::StoredSessionSummary { session_id } => {
             let summary =
                 blocking(move || crate::database::load_materialized_session_summary(&session_id))
