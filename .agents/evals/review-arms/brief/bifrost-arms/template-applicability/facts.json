@@ -1,0 +1,106 @@
+{
+  "facts": [
+    {
+      "id": "fact-001",
+      "fact": "Python already registers its real module CodeUnit using the tree root range (src/analyzer/python/adapter.rs:78-84), giving it the same whole-file span as the new synthetic FileScope on the supplied ordinary Python module.",
+      "kind": "value flow",
+      "query_description": "What source range does the Python adapter assign to its real module CodeUnit, and can it equal the new FileScope range used by enclosing_code_unit?"
+    },
+    {
+      "id": "fact-002",
+      "fact": "C++ class CodeUnits receive scope.template_signature as their identity signature (src/analyzer/cpp/declarations.rs:317-323), and that value contains only the template parameter head (src/analyzer/cpp/declarations.rs:1317-1331), excluding the class base clause.",
+      "kind": "value flow",
+      "query_description": "What values reach CodeUnit::signature for class-template owners passed to cpp_direct_base_types, and do those values contain the class base clause?"
+    },
+    {
+      "id": "fact-003",
+      "fact": "Before the new generated-production gate, verify_release_bundle decodes every curated manifest and shard at crates/bifrost-semantic-packs/src/release_bundle.rs:1733-1779, and its checksum helper hashes every listed asset at :2377-2395.",
+      "kind": "path",
+      "query_description": "Which asset-reading and decoding paths execute in verify_release_bundle before verify_generated_production checks generated schema_version and cache_version?"
+    },
+    {
+      "id": "fact-004",
+      "fact": "JavaSource::unique_class_by_fqn_in_file uses the request-domain JavaFileClassIndexMemo, caches the result of declarations(file) unconditionally, and returns cached indexes without replaying their build gaps at crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:777-814.",
+      "kind": "affected callers",
+      "query_description": "Which consumers of the request-cache domain store declaration-derived results without preserving or replaying incomplete-read reasons when a later retained fill reuses the domain?"
+    },
+    {
+      "id": "fact-005",
+      "fact": "The unchanged comment-density consumer expands the ranges of every direct child (crates/bifrost-analysis/src/analyzer/comment_density.rs:162-185) and assigns overlapping comments to the deepest declaration (crates/bifrost-analysis/src/analyzer/comment_density.rs:248-270), with no primary-constructor exclusion.",
+      "kind": "affected callers",
+      "query_description": "Which consumers of Kotlin direct_children and summary_file_projection depend on synthetic constructors being filtered, particularly when assigning ownership to comments?"
+    },
+    {
+      "id": "fact-006",
+      "fact": "MCP run_policy maps outcome.exit_status() directly to the public status string, with POLICY_EXIT_CLEAN becoming clean, at crates/bifrost-mcp/src/searchtools_service.rs:7024-7039.",
+      "kind": "affected callers",
+      "query_description": "Which consumers of PolicyBatchOutcome::exit_status outside coordinator.rs interpret POLICY_EXIT_CLEAN as a proven-clean public verdict?"
+    },
+    {
+      "id": "fact-007",
+      "fact": "may_name_result_contract stores and tests only (language, member, parameter_count), omitting summary.target.has_receiver, so a receiverless os.Open contract also matches an unrelated receiver Open call of the same arity (crates/bifrost-rql/src/structural/search/effects.rs:263).",
+      "kind": "value flow",
+      "query_description": "Which semantic-model target fields reach result_contract_member_shapes in may_name_result_contract, and can an os.Open receiverless entry match a bound receiver call with member Open and one argument?"
+    },
+    {
+      "id": "fact-008",
+      "fact": "Repeated module assignments replace one Field CodeUnit and its declaration range with the last assignment, rather than retaining a declaration range for each binding event (crates/bifrost-python/src/declarations.rs:551-569; crates/bifrost-core/src/analyzer/parsed_file.rs:266-275,425).",
+      "kind": "value flow",
+      "query_description": "Where do the declaration ranges returned for a repeatedly assigned Python module Field come from, and does replacement preserve earlier assignment ranges?"
+    },
+    {
+      "id": "fact-009",
+      "fact": "jvm_type_is_subtype initializes uncertain=false, only marks uncertainty inside returned supertype edges, and returns Some(false) after exhausting an empty inventory without any closed-hierarchy proof (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26547-26597).",
+      "kind": "value flow",
+      "query_description": "Under what conditions does jvm_type_is_subtype return Some(false), and does an empty supertype inventory require proof that the selected hierarchy is closed before yielding that access verdict?"
+    },
+    {
+      "id": "fact-010",
+      "fact": "class_hierarchy constructs one ResolutionSession and PythonDefinitionProvider for the whole ancestry traversal (crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:373), and runtime_source_bases repeatedly calls python_class_object_base_candidate with that same provider for each base (hierarchy.rs:711).",
+      "kind": "path",
+      "query_description": "Trace class_hierarchy through runtime_source_bases to python_class_object_base_candidate: do successive base proofs reuse the same provider and bounded ResolutionSession?"
+    },
+    {
+      "id": "fact-011",
+      "fact": "Caller-supplied activation evidence can independently activate Go session declaration packs: tests/suite_semantic/semantic_model_overlay.rs:348-384 supplies module fixture.invalid and enables the registered Go packs, then acquires a Ready runtime without dependency discovery.",
+      "kind": "value flow",
+      "query_description": "Can SemanticModelActivationRequest.evidence already match and activate Go session packs without resolve_go_semantic_pack_dependencies, and where are those evidence values constructed and consumed?"
+    },
+    {
+      "id": "fact-012",
+      "fact": "infer_indexed_local_element_type traverses the enclosing scope, accepts assignments solely because their start precedes before_byte, and calls resolve_value on their RHS even if they enclose the current read at crates/bifrost-php/src/graph/syntax.rs:1393-1421.",
+      "kind": "path",
+      "query_description": "Can the new subscript receiver inference reach itself through collection_element_type_fq_name and infer_indexed_local_element_type when the selected indexed write contains the current RHS read?"
+    },
+    {
+      "id": "fact-013",
+      "fact": "A this_expression reads the separately created procedure receiver, rather than a bound local or parameter, in crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:268-283 and :316-320; that receiver is created without a carrier binding.",
+      "kind": "value flow",
+      "query_description": "Where does the value of a Kotlin this_expression originate, and does the dispatch receiver created for a value-class member receive an entry in LoweringContext.carriers?"
+    },
+    {
+      "id": "fact-014",
+      "fact": "The activated-model API can prove absent normal continuation independently of summary completeness at crates/bifrost-analysis/src/analyzer/semantic_model/runtime.rs:432-441, and the existing testing.T.Fatal model supplies exactly that fact despite partial completeness at crates/bifrost-semantic-packs/models/go-stdlib-testing.json:474-484.",
+      "kind": "value flow",
+      "query_description": "Where does the exact normal_continuation_absent fact for activated testing.T.Fatal originate, and is it propagated into ScalarStateDerivation when nilness_operation_expansions computes reachability?"
+    },
+    {
+      "id": "fact-015",
+      "fact": "The unchanged Kotlin producer publishes a top-level property getter as ResolutionJvmAliasKind::Getter with is_static set from top_level (crates/bifrost-jvm/src/kotlin/resolution.rs:2307-2316), pointing to the property declaration in the Value namespace (crates/bifrost-jvm/src/kotlin/resolution.rs:1487-1490).",
+      "kind": "value flow",
+      "query_description": "Which alias kinds, static flags, statuses, and declaration namespaces can the Kotlin property producer supply to jvm_alias_import_bridges for a Java callable static import?"
+    },
+    {
+      "id": "fact-016",
+      "fact": "virtual_dispatch_implementor_targets returns Some(Vec::new()) when answer.is_proven() is false, at crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:941-970, so an empty result does not prove that no override exists.",
+      "kind": "value flow",
+      "query_description": "What return values can virtual_dispatch_implementor_targets produce for incomplete or unsupported member-family answers, and can Some(empty) mean anything besides proven absence?"
+    },
+    {
+      "id": "fact-017",
+      "fact": "The unchanged summary renderer uses each declaration range to enlarge the corresponding signature element, taking max(signature line count, range line count), so a newly stored root range makes the synthetic import signature cover the whole file (src/searchtools.rs:1156-1198).",
+      "kind": "affected callers",
+      "query_description": "Which summary consumers read the ranges and signatures of CodeUnits registered by ParsedFile::add_code_unit, and how do they compute element boundaries?"
+    }
+  ]
+}
