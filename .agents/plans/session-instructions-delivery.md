@@ -1,0 +1,124 @@
+# Deliver Mjolnir's standing instructions and project memory through one compaction-proof channel
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It must be maintained in accordance with `.agents/PLANS.md` at the repository root.
+
+
+## Purpose / Big Picture
+
+Mjolnir runs coding agents ("harnesses": Claude Code, Codex, Muse, DSH, Antigravity, Kimi Code, OpenCode and Grok Build) and gives each session standing instructions. Examples are how to use project memory (shared Markdown notes with an index file `MEMORY.md`), how to use Mjolnir's own MCP tools (sub-agents, mailboxes, review, history search), and, for sub-agent sessions, the role the session plays (child implementer, reviewer, relation-brief writer, oracle advisor). Today these reach the model through three unrelated channels: a hidden block in the first user message (project memory), the `instructions` field Mjolnir's MCP servers return when the harness connects to them, and a visible prefix on the first prompt of sub-agent sessions.
+
+All three can vanish when the harness compacts its context, that is, when it summarises or drops old conversation to fit the context window. After that the agent forgets the project memory, how Mjolnir's tools are meant to be used, or what role it was given. The text is also scattered and partly duplicated.
+
+After this change there is one composer that builds a session's standing instructions and one delivery owner that puts them where the harness keeps them through compaction. Harnesses that accept an ACP system-prompt append get the text there. The other three get it in their native instruction file, which each of them keeps in context through compaction. To see it working, start sessions in an isolated instance, force a compaction, and ask the agent where its project memory lives and what its role and tool rules are; it answers from the instructions.
+
+
+## Progress
+
+- [x] (2026-11-18) Reconnaissance, live harness traces and an instruction audit (evidence summarised in Context and Orientation; full reports are listed in Artifacts and Notes).
+- [x] (2026-11-18) Design decisions taken with the user (Decision Log).
+- [ ] Milestone 1: composer and delivery owner, with project memory as the first section; remove the first-prompt memory block.
+- [ ] Milestone 2: move the MCP servers' guidance and the standing parts of sub-agent first prompts into the composer.
+- [ ] Milestone 3: live acceptance on every harness in an isolated instance.
+
+
+## Surprises & Discoveries
+
+- Observation: an earlier attempt (detached worktree `~/Projects/mjolnir-wt/memory-compaction`, commits `ef6c07081` and `cd79f2d22`, never pushed) re-sent the memory block as a user message after detecting each compaction for Kimi, OpenCode and Grok. It needed a durable relay slot, a relay snapshot revision bump, per-harness compaction recognisers and a background refresher. A later check showed all three harnesses keep their native instruction file through compaction, which makes all of that unnecessary. Reuse that worktree's system-prompt plumbing, recorded ACP fixtures and tests, and none of its re-send machinery.
+  Evidence: Kimi 2.6.3 copies `AGENTS.md` into its system prompt when a session binds and supplies it separately from history on every provider request. OpenCode 2.2.7 renders its instruction baseline into a system part on every request (`session/model-request.ts:114–141`, `session/instruction-state.ts:159–168`) and advances that baseline when a compaction ends (`session/projector.ts:1118–1122`). Grok Build 1.0.89 re-inserts the initial native instruction snapshot after compaction: a marker that existed only in the staged `AGENTS.md` survived two real automatic compactions (27693→18824 and 40208→15415 tokens).
+- Observation: the ACP system-prompt field is behind the `unstable_session_system_prompt` cargo feature of `agent-client-protocol-schema` 1.15.1. Enabling it adds an optional `systemPrompt` capability to `AgentCapabilities`, which changes the serialized `AgentInitialized` relay event and therefore the event digests older daemons compute (relay protocol 71). The earlier worktree solved this with a serializer on that event that clears the new field; reuse it.
+- Observation: Codex accepts a different system prompt on resume but keeps answering from the original one. Muse, DSH and Antigravity take the new value on resume; Antigravity reverts to the stored original if the field is omitted, so the text must be sent on every open. Kimi and Grok snapshot the native file when the session opens; rewriting the file mid-session does not change what they see. OpenCode picks up file changes when the next compaction ends.
+
+
+## Decision Log
+
+- Decision: delivery channel per harness, decided once per session open from what the harness advertises: the standard ACP `sessionCapabilities.systemPrompt` (Claude, Codex, Muse, DSH); otherwise Antigravity's vendor capability `agentCapabilities._meta.antigravity.systemPrompt = {append: true}`, which takes a string at `_meta.antigravity.systemPrompt.append` on the open request; otherwise the harness's native instruction file (Kimi, OpenCode, Grok).
+  Rationale: each channel was verified live to keep its content through compaction. Each harness has exactly one path.
+  Date/Author: 2026-11-18, user ("Persistent where offered"; "Staged file; check memory too") and parent agent.
+- Decision: no compaction detection, no re-sending, no relay snapshot change.
+  Rationale: every channel above survives compaction by itself; see Surprises.
+  Date/Author: 2026-11-18, parent agent, following the user's conditional choice.
+- Decision: what moves. The MCP servers' `instructions` guidance moves into the composer and is removed from the MCP servers (they keep tool names and descriptions). The standing parts of sub-agent first prompts (child authority and report contract, reviewer and brief-writer role, oracle role, the review rubric) move too. Text that only makes sense once stays in the first prompt: the assignment itself, the oracle's question, and the review packet (tree IDs, diff commands, changed files, briefs, declined findings).
+  Rationale: user choice: "MCP: move it into the optimized delivery. first-prompt prefixes: probably also move but make sure we don't move something that genuinely applies only on first."
+  Date/Author: 2026-11-18, user.
+- Decision: what stays. The content Mjolnir appends to the staged `AGENTS.md`/`CLAUDE.md` today (disposable environment, container storage and attachments, the delegation policy) stays there, unchanged. Mailbox deliveries, shell output, resume rosters, handoffs, reminders and continuations stay per-event user content. Native mechanisms (Claude's own memory, goals, permission modes) stay native.
+  Rationale: user: "AGENTS.md: leave it there, slightly different purpose." Per-event content is data, not standing instruction.
+  Date/Author: 2026-11-18, user and parent agent.
+- Decision: Claude gets the composed instructions through its system-prompt append, except the project-memory section, because Claude Code has its own native memory that already survives compaction.
+  Rationale: the pinned Claude bridge 0.108.0 advertises and forwards `systemPrompt` (append maps to the Claude Code preset append).
+  Date/Author: 2026-11-18, parent agent.
+- Decision: an unreadable `MEMORY.md` never blocks opening a session. The memory section then says the index is unavailable and why, and the worker emits a visible warning naming the path and the error. A harness that rejects the system prompt fails the open visibly, with no retry without it.
+  Rationale: never leave the user stuck, while failing visibly (AGENTS.md).
+  Date/Author: 2026-11-18, parent agent.
+
+
+## Outcomes & Retrospective
+
+Not started.
+
+
+## Context and Orientation
+
+Terms. ACP (Agent Client Protocol) is the JSON-RPC protocol Mjolnir uses to drive every harness over stdio: `initialize` (the agent replies with its capabilities), then `session/new`, `session/load` (reopen with replay) or `session/resume` (reopen without replay), then `session/prompt` per user turn, with `session/update` notifications streaming back. The worker (`mj-worker`) is the per-session process that runs the harness; its ACP code is in `mj-worker/src/acp/`. The controller (`mj-controller`) prepares and launches workers. The "staged profile" is the per-session copy of the harness's home/config directory that the controller prepares at each worker launch; the harness's native instruction file in it is named by `HarnessKind::agent_instructions_file()` (`mj-core/src/config/harness.rs`, around line 776: `CLAUDE.md` for Claude, `AGENTS.md` for the others). The controller writes Mjolnir's environment and delegation text into it through `append_staged_instructions` (`mj-worker-staging/src/worker_binary/install.rs:125`), called from `mj-controller/src/controller/worker_launch.rs:267–286`.
+
+Project memory today. `mj_core::project_memory::startup_prompt_context` (`mj-core/src/project_memory.rs`, around line 1080) builds the block: a wrapper `<mj-project-memory>`, the guidance constant `MEMORY_GUIDANCE`, the memory directory path, root lines for multi-repository bundles, and the `MEMORY.md` index (capped by existing code at 200 lines / 25 KiB). `mj-worker/src/worker_runtime/unix.rs` (around lines 2053–2090) installs it as hidden context before the harness starts, for non-Claude sessions that are not resumed; `/clear` rebuilds it in `mj-worker/src/acp/session.rs` (around 724–746) and carries it in `RuntimeEvent::ContextCleared { memory }`, applied in `mj-core/src/relay/snapshot/apply.rs` around 1278. The hidden context goes out with the first prompt (`mj-worker/src/relay/commands.rs` around 1262; `mj-worker/src/worker_runtime/unix/dispatch.rs` around 1537; `mj-worker/src/acp.rs:125–177`).
+
+MCP guidance today. `mj-worker/src/mcp_stdio.rs:129–135` returns `instructions` on MCP initialize. The texts: parent delegation and mailbox policy `SERVER_INSTRUCTIONS` and the Codex discovery suffix (`mj-worker/src/subagent_mcp.rs:16–37`), child instructions (`:39–44`, built from `HANDBACK_REPORT_RULES` in `mj-core/src/subagent.rs:1098–1120`), reviewer and brief-writer variants (`subagent_mcp.rs:442–489`), message-only and fetch-only variants (`:458–475`), review procedure (`:47–52`, `:1123–1144`), and history-search guidance (`mj-worker/src/memory_mcp/history.rs:12`, selected in `mj-worker/src/memory_mcp.rs:27`).
+
+Sub-agent first prompts today. `mj-controller/src/controller/subagents.rs`: oracle role constant at line 15 and prompt at 437–453; reviewer prefix at 432–435; child prefix at 456–459. Review lanes build their prompt from `mj-review/templates/review_rubric.md`, `templates/brief_writer.md` and the packet in `mj-review/src/lanes.rs:154–194`. The reviewer first prefix asks for one output format and the reviewer MCP text for another; whichever the review consumer actually parses is correct, and the composed text must say only that.
+
+ACP session opening. `mj-worker/src/acp/session.rs:160–360` sends `initialize` and opens the session through `new_session_request`, `load_session_request`, `resume_session_request` in `mj-worker/src/acp/launch.rs` (around 735–772). Resume is used when the agent advertises `sessionCapabilities.resume` and the session has no native sub-agents; otherwise load. A cleared session is opened through the same path.
+
+Earlier worktree to reuse from, read-only: `~/Projects/mjolnir-wt/memory-compaction` at `cd79f2d22` (plus a local commit of its last uncommitted work if the parent made one). Reuse: the cargo feature, the content-agnostic system-prompt request plumbing for both the standard field and the Antigravity vendor field, the `AgentInitialized` serializer and its digest test, the off-runtime file reader shared with the Claude login reader (`file_read_off_runtime`), the split of memory composition from index I/O (contents or unavailable), and the recorded ACP lifecycle fixtures under `mj-worker/src/acp/testdata/project-memory/` with their tests. Do not reuse: `pending_project_memory`, relay revision 28, compaction recognisers, the refresher, restored-open plumbing, or the publication-phase change.
+
+
+## Plan of Work
+
+Milestone 1: composer, delivery owner, memory.
+
+Enable `unstable_session_system_prompt` on the workspace `agent-client-protocol` dependency and port the `AgentInitialized` serializer with its digest test.
+
+Create the composer in the worker, next to session opening, as one function that takes the facts of this open and returns the ordered text: project memory first (omitted for Claude and when no project memory is configured), then, in Milestone 2, the tool and role sections. Build the memory section with the off-runtime reader; on a read failure, emit `RuntimeEvent::Warning` naming the path and the error and compose the section with an "index unavailable: <reason>" line instead of the index. Compose on every open (new, cleared, load, resume) so a reopened session gets the current index.
+
+Create the delivery owner as one function, called after `initialize` and before the open request: standard system prompt if advertised, else the Antigravity vendor field if advertised, else the native instruction file. For the first two, pass the text to the request builders (port the earlier plumbing; Antigravity's string goes inside the existing `_meta` map, merged, not replacing it). For the native file, write the text into the session's staged instruction file inside a section Mjolnir owns, delimited by marker lines, replacing any previous Mjolnir section and leaving every other byte of the file unchanged, off the async runtime and before the open request. Before writing, confirm from the code that the worker can locate that staged file and that it is a per-session copy, never the user's own profile file or a file shared between sessions (check `shared_profile_login` and the staging copy in `mj-worker-staging/src/worker_binary/harness.rs:165–220`); if it is not per-session, stop and report.
+
+Remove the old memory path: the pre-start installation in `unix.rs`, the `/clear` memory rebuild and the memory use of `ContextCleared { memory }` (keep the field on the wire as an always-`None` value if removing it would change the relay journal format; check `mj-core/src/relay/snapshot.rs` around 1452 and the journal readers). Existing sessions whose snapshot already holds a memory block in `pending_prompt_context` keep delivering it once through that generic slot, which stays for its other users; no migration.
+
+Milestone 2: tool and role guidance.
+
+Move each MCP guidance text into the composer as a section included only when this session actually offers that server and role (parent, child, reviewer, brief writer, message-only, fetch-only, review tools offered, history tools offered), keeping the Codex discovery suffix for Codex. Remove those `instructions` from the MCP initialize replies; keep tool descriptions, including the handback tool's description, so the tool remains self-explanatory. Move the standing parts of the child, reviewer and oracle first prompts and the review rubric and brief template into role sections; leave the assignment, question and packet in the prompt. The role must reach the worker as durable session facts available at every launch (new, resume, move), not as text inside a stored prompt; find where the worker learns that it is a child, reviewer or oracle and extend that if needed. Reconcile the reviewer output format with what the review consumer parses.
+
+Milestone 3: live acceptance (Validation).
+
+
+## Concrete Steps
+
+Work in `~/Projects/mjolnir-wt/session-instructions` (detached at origin/master). Build and test only there, on the dev profile, outside the sandbox, running only the tests for what changed in each round:
+
+    cd ~/Projects/mjolnir-wt/session-instructions
+    cargo check -p brokk-mj-worker-runtime -p brokk-mj-core
+    cargo test -p <crate> <filter>
+    cargo clippy -p <edited crates> --all-targets -- -D warnings
+
+(Use the actual package names from each crate's `Cargo.toml`.)
+
+
+## Validation and Acceptance
+
+Tests follow AGENTS.md "Which tests to add". Recorded ACP integration: for each standard-system-prompt harness and Antigravity, the open request built by the real builders carries the composed text on new, load and resume, and the recorded agent accepts it (reuse the earlier fixtures). Native-file integration: for Kimi, OpenCode and Grok, opening twice replaces Mjolnir's section without touching user text in the file, and a file with no Mjolnir section gains exactly one. Tricky conditions: an unreadable or non-UTF-8 `MEMORY.md` opens the session with a warning and the unavailable line; a stalled read does not hold runtime shutdown (port the earlier FIFO test). A golden test of the composed text per role (parent, child, reviewer, oracle) with a fixed memory directory keeps the wording reviewable.
+
+Live acceptance in an isolated instance (never the default one): for every harness, start a parent session and one child, force a compaction (automatic where cheap, otherwise `/compact`), then ask where the project memory is, what `MEMORY.md` lists, and how to hand back. Answers must come from the composed instructions. Kimi's login is at its weekly quota until it resets; record that check as pending until then. Stop the instance's daemon afterwards.
+
+
+## Idempotence and Recovery
+
+Rewriting the native file's Mjolnir section is idempotent by construction. No persisted format changes besides the cargo feature's effect on `AgentInitialized`, which the serializer neutralises. If a pinned harness rejects the system prompt in acceptance, record it in Surprises and stop; do not add a fallback.
+
+
+## Artifacts and Notes
+
+Evidence reports (in the parent session's clone, `~/Projects/mjolnir/.mj/clones/c5dbf86d7cc3978aa0b6129a8c544ba8/.mj/agents/`): `4e014247b7bb2af73e2f243a0b39c689/findings.md` (harness compaction behaviour), `b1e50d77dd7373f226d281a1a65a3f51/findings.md` and its `traces/` (live traces), `a1b6d71037f25c6d906d907187b377ac/instruction-map.md` (instruction audit), `612df0f8daa5f49428d1b1093d7225f0/` (native-file reload evidence).
+
+
+## Interfaces and Dependencies
+
+In `mj-worker/src/acp/`, one composer function returning the ordered text for an open, and one delivery function returning which channel this open uses; the three request builders take an optional system-prompt text and an optional Antigravity append. The native-file writer lives next to the delivery function and reuses `append_staged_instructions`'s file-naming helper rather than hard-coding file names.
