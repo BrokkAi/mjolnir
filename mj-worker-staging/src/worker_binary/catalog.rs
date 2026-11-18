@@ -3,23 +3,23 @@ use super::*;
 /// Fetches a provider's model catalog. A function parameter so tests can supply
 /// a body without reaching the network. Takes the catalog URL and the API key;
 /// returns the raw response body.
-pub(in crate::controller) type CatalogFetch<'a> = &'a dyn Fn(&str, &str) -> Result<Vec<u8>>;
+pub type CatalogFetch<'a> = &'a dyn Fn(&str, &str) -> Result<Vec<u8>>;
 
 /// The catalog file Mjolnir writes into a staged Codex home, and the key it
 /// points `config.toml` at. Relative to `CODEX_HOME`, so the staged copy works
 /// unchanged on any target.
-pub(super) const STAGED_CATALOG_FILE: &str = "models.json";
+pub const STAGED_CATALOG_FILE: &str = "models.json";
 
 /// The key one provider's fetched catalog is remembered under. Every
 /// provider has its own, named after its base URL.
-pub(in crate::controller) fn catalog_cache_key(base_url: &str) -> String {
+pub fn catalog_cache_key(base_url: &str) -> String {
     format!("catalog:{base_url}")
 }
 
 /// Where a fetched catalog is remembered so a provider outage cannot block a
 /// launch. The daemon's memory is one implementation; a test can supply
 /// another. `key` is [`catalog_cache_key`] of the provider the body came from.
-pub(in crate::controller) trait CatalogCache {
+pub trait CatalogCache {
     fn load(&self, profile_id: &str, key: &str) -> Option<String>;
     fn store(&self, profile_id: &str, key: &str, body: &str);
 }
@@ -31,7 +31,7 @@ static CATALOGS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(Default::default);
 
 /// The catalog cache shared by everything in this daemon.
-pub(in crate::controller) struct SharedCatalogCache;
+pub struct SharedCatalogCache;
 
 impl CatalogCache for SharedCatalogCache {
     fn load(&self, profile_id: &str, key: &str) -> Option<String> {
@@ -62,7 +62,7 @@ impl CatalogCache for SharedCatalogCache {
 /// Profiles with no custom provider are left alone. A failed fetch falls back to
 /// the last catalog stored for this profile, so a provider outage does not block
 /// a launch; with neither, the launch fails naming the profile and the URL.
-pub(in crate::controller) fn stage_codex_catalog(
+pub fn stage_codex_catalog(
     profile_id: &str,
     profile: &mj_core::config::HarnessProfile,
     destination: &Path,
@@ -127,7 +127,7 @@ pub(in crate::controller) fn stage_codex_catalog(
 /// slug the provider did not list is added. Mjolnir writes the merged result
 /// over the staged `models.json`, so the user's own file never reaches Codex
 /// unmerged.
-pub(super) fn apply_catalog_overrides(
+pub fn apply_catalog_overrides(
     profile_id: &str,
     home: &Path,
     catalog: &mut mj_core::codex_catalog::CodexCatalog,
@@ -159,7 +159,7 @@ pub(super) fn apply_catalog_overrides(
 /// fallback), or a named slug. A named slug the catalog does not list fails the
 /// launch, because stamping it would leave Codex silently reviewing with
 /// something else.
-pub(super) fn stamp_guardian_reviewer(
+pub fn stamp_guardian_reviewer(
     profile_id: &str,
     profile: &mj_core::config::HarnessProfile,
     catalog: &mut mj_core::codex_catalog::CodexCatalog,
@@ -210,7 +210,7 @@ const CATALOG_KEY: &str = "model_catalog_json";
 /// would be a duplicate key Codex rejects outright. The replacement keeps the
 /// user's own decoration around the key. Only the staged copy changes; the
 /// profile's own `config.toml` is never written.
-pub(super) fn point_config_at_catalog(path: &Path) -> Result<()> {
+pub fn point_config_at_catalog(path: &Path) -> Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut document = existing
         .parse::<toml_edit::Document>()
@@ -234,7 +234,7 @@ pub(super) fn point_config_at_catalog(path: &Path) -> Result<()> {
 
 /// Fetch a provider's catalog over HTTPS. Mirrors the bounded client the Coding
 /// Plan quota reader uses: a short timeout and no redirects.
-pub(in crate::controller) fn fetch_catalog_over_https(url: &str, api_key: &str) -> Result<Vec<u8>> {
+pub fn fetch_catalog_over_https(url: &str, api_key: &str) -> Result<Vec<u8>> {
     on_dedicated_thread(|| {
         let response = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(8))

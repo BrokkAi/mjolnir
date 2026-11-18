@@ -5,7 +5,7 @@ use super::*;
 use mj_core::targets::SshTrafficClass;
 
 /// Where an agent-dev image keeps the worker built from its own commit.
-pub(in crate::controller) const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
+pub const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
 
 /// Print the build of the image's worker, or `absent` when the image has
 /// none. A worker that is present but cannot run fails the command, so an
@@ -15,7 +15,7 @@ const IMAGE_WORKER_BUILD_SCRIPT: &str = "if [ -e /opt/mjolnir/mj-worker ]; then 
 /// How a session's target gets the worker this controller needs. Either way
 /// the worker carries [`worker_build_id`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::controller) enum WorkerInstall {
+pub enum WorkerInstall {
     /// The container's image carries this controller's worker build. The
     /// session's `hel` links to it and nothing is copied.
     Image,
@@ -32,7 +32,7 @@ impl WorkerInstall {
     /// build can still lack a developer's uncommitted changes. It runs the
     /// image's worker only when it has none of its own. A custom or older
     /// image gets the host binary, which must carry this build too.
-    pub(in crate::controller) fn for_target(
+    pub fn for_target(
         locator: &targets::TargetLocator,
         executor: &impl CommandExecutor,
     ) -> Result<Self> {
@@ -68,7 +68,7 @@ impl WorkerInstall {
     }
 
     /// The host binary this install copies, if it copies one.
-    pub(in crate::controller) fn host_binary(&self) -> Option<&Path> {
+    pub fn host_binary(&self) -> Option<&Path> {
         match self {
             Self::Image => None,
             Self::Host(path) => Some(path),
@@ -78,7 +78,7 @@ impl WorkerInstall {
 
 /// The worker build a container's image carries at [`IMAGE_WORKER`], or
 /// `None` when the image has no worker there.
-pub(in crate::controller) fn image_worker_build(
+pub fn image_worker_build(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<Option<String>> {
@@ -108,7 +108,7 @@ fn parse_image_worker_build(stdout: &[u8]) -> Result<Option<String>> {
 
 /// The label `containers/Containerfile.agent-dev` gives the worker it bakes in.
 /// The image build fails unless the worker reports exactly this build.
-pub(crate) const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
+pub const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
 
 /// The worker build an image's `image inspect` JSON is labelled with, from
 /// Docker's or Podman's shape; `None` when it has none or cannot be read.

@@ -52,6 +52,7 @@ exceptions = [
     { crate = "brokk-mj-import", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-sessionwiki", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-build-cache", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-worker-staging", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-github-relevance", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-controller", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-setup", allow = ["GPL-3.0-only"] },

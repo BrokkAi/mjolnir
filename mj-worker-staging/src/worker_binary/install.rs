@@ -4,10 +4,10 @@ use super::*;
 mod profile_transfer;
 use crate::targets::CommandOutput;
 use mj_core::targets::SshTrafficClass;
-pub(in crate::controller) use profile_transfer::ProfileContentManifest;
+pub use profile_transfer::ProfileContentManifest;
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
-pub(super) fn append_hel_target_environment(
+pub fn append_hel_target_environment(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
     target: &targets::TargetLocator,
@@ -30,7 +30,7 @@ pub(super) fn append_hel_target_environment(
     append_staged_instructions(harness, destination, &environment)
 }
 
-pub(super) fn append_container_storage_guidance(
+pub fn append_container_storage_guidance(
     harness: HarnessKind,
     destination: &Path,
     target: &targets::TargetLocator,
@@ -105,7 +105,7 @@ pub(super) fn append_container_storage_guidance(
     append_staged_instructions(harness, destination, &guidance)
 }
 
-pub(super) fn append_subagent_policy(
+pub fn append_subagent_policy(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
     policy: &mj_core::subagent::SubagentPolicy,
@@ -122,7 +122,7 @@ pub(super) fn append_subagent_policy(
     Ok(())
 }
 
-pub(super) fn append_staged_instructions(
+pub fn append_staged_instructions(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
     text: &str,
@@ -151,18 +151,18 @@ pub(super) fn append_staged_instructions(
 /// A profile's own login file that a worker on this machine links to instead
 /// of copying (see [`HarnessKind::shares_local_login`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::controller) struct SharedLogin {
+pub struct SharedLogin {
     /// Where the login file sits in a staged home.
-    pub(in crate::controller) name: &'static str,
+    pub name: &'static str,
     /// The profile's login file the staged home links to.
-    pub(in crate::controller) file: PathBuf,
+    pub file: PathBuf,
 }
 
 /// The login file a worker for `profile` on `backend` shares with the profile,
 /// or `None` when the worker keeps its own copy: on every other target, for a
 /// harness that cannot share one, and for a profile that signs in some other
 /// way than the harness's login file.
-pub(in crate::controller) fn shared_profile_login(
+pub fn shared_profile_login(
     profile: &HarnessProfile,
     backend: &targets::TargetLocator,
 ) -> Option<SharedLogin> {
@@ -189,7 +189,7 @@ pub(in crate::controller) fn shared_profile_login(
 /// A link an earlier install left is removed before copying, whether or not
 /// this install shares the login: copying a file through it would write the
 /// stage over the profile's login.
-pub(super) fn install_local_profile_stage(
+pub fn install_local_profile_stage(
     stage: &Path,
     home: &Path,
     shared_login: Option<&SharedLogin>,
@@ -207,7 +207,7 @@ pub(super) fn install_local_profile_stage(
 }
 
 /// Replace the login file in `home` with a link to the profile's own.
-pub(in crate::controller) fn link_shared_login(home: &Path, login: &SharedLogin) -> Result<()> {
+pub fn link_shared_login(home: &Path, login: &SharedLogin) -> Result<()> {
     let link = home.join(login.name);
     match std::fs::remove_file(&link) {
         Ok(()) => {}
@@ -242,14 +242,14 @@ fn remove_link(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
+pub fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
     copy_profile_entry_within(source, destination, &HashSet::new(), &[])
 }
 
 /// [`copy_profile_entry`], leaving out the paths in `excluded`. Each is
 /// compared with the path the walk reaches it by, below `source` as given,
 /// not with where a link resolves.
-pub(super) fn copy_profile_entry_except(
+pub fn copy_profile_entry_except(
     source: &Path,
     destination: &Path,
     excluded: &[PathBuf],
@@ -261,7 +261,7 @@ pub(super) fn copy_profile_entry_except(
 /// settings or instructions elsewhere still stages their contents. `entered`
 /// holds the canonical paths of the directories already entered on this branch
 /// of the recursion, which stops a symlinked directory cycle.
-pub(super) fn copy_profile_entry_within(
+pub fn copy_profile_entry_within(
     source: &Path,
     destination: &Path,
     entered: &HashSet<PathBuf>,
@@ -353,7 +353,7 @@ pub(super) fn copy_profile_entry_within(
 // Container copies may be root-owned while the worker directory belongs to a
 // different user. Run this ownership-only operation as container root; normal
 // Podman execs inherit the user recorded when each container was created.
-pub(in crate::controller) fn container_upload_ownership_args(
+pub fn container_upload_ownership_args(
     engine: &str,
     container_id: &str,
     worker_root: &str,
@@ -457,7 +457,7 @@ done
 "#;
 
 /// Install marked Cargo and mbx launchers that use the shared cache copy.
-pub(super) fn install_mbx_shims(
+pub fn install_mbx_shims(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -524,7 +524,7 @@ pub(super) fn install_mbx_shims(
     Ok(())
 }
 
-pub(super) fn remove_generated_mbx_shims(
+pub fn remove_generated_mbx_shims(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -567,7 +567,7 @@ pub(super) fn remove_generated_mbx_shims(
     Ok(())
 }
 
-pub(super) fn verify_mbx_binary(
+pub fn verify_mbx_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     mbx_binary: &Path,
@@ -661,7 +661,7 @@ fn mbx_configuration_argv(
 
 /// Preserve legacy private mbx installations and link their shared config in
 /// the same container command that distinguishes them from generated shims.
-pub(super) fn link_legacy_mbx_configuration(
+pub fn link_legacy_mbx_configuration(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -719,7 +719,7 @@ pub(super) fn link_legacy_mbx_configuration(
     }
 }
 
-pub(super) struct StagedWorkerProfile<'a> {
+pub struct StagedWorkerProfile<'a> {
     pub launch: &'a Path,
     pub ownership: &'a Path,
     pub profile: &'a Path,
@@ -728,7 +728,7 @@ pub(super) struct StagedWorkerProfile<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn install_worker_files(
+pub fn install_worker_files(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -761,7 +761,7 @@ pub(super) fn install_worker_files(
     install_worker_binary(executor, locator, session_id, worker, "hel")
 }
 
-pub(super) fn install_worker_profile_files(
+pub fn install_worker_profile_files(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -1066,7 +1066,7 @@ pub(super) fn install_worker_profile_files(
 
 /// Refresh configuration without removing native history or skills the harness
 /// maintains itself. Absent destination settings must not inherit the source's.
-pub(super) fn clear_profile_configuration(
+pub fn clear_profile_configuration(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -1124,7 +1124,7 @@ pub(super) fn clear_profile_configuration(
 /// Stream a file into private staging, where the caller owns partial-file
 /// cleanup. OpenSSH's scp reads its input itself, outside the lifecycle's byte
 /// accounting. Carry the bytes on the same supervised stdin path as profiles.
-pub(super) fn upload_worker_file(
+pub fn upload_worker_file(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
     source: &Path,
@@ -1153,7 +1153,7 @@ pub(super) fn upload_worker_file(
 /// Install the session-private SSH metadata; binary installation is shared
 /// with creation, upgrades and recovery in `install_worker_binary`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn install_worker_over_ssh(
+pub fn install_worker_over_ssh(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
     worker_root: &str,
@@ -1734,7 +1734,7 @@ fn upload_legacy_profile_archive(
             destination,
             "send profile content"
         );
-        let token = crate::session_manager::new_command_id("profile-stage")?;
+        let token = mj_client::session::new_command_id("profile-stage")?;
         let work = format!("{PROFILE_CONTENT_STORE}/.stage-{token}");
         let _active = {
             let _store = super::store::lock_gate(

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Checkpoint export starts that path as a new process. A live daemon already
 /// has the previous inode mapped, so this does not restart it. Writing through
 /// `hel.next` and renaming avoids `ETXTBSY` on a running image.
-pub(in crate::controller) fn replace_installed_worker_binary(
+pub fn replace_installed_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -40,7 +40,7 @@ pub struct PreparedWorkerBinary<'a, E: CommandExecutor> {
 /// one owner of "which staged files are still in use": a new staging removes
 /// every other private staging file in the worker root, which can only be a
 /// leftover from an attempt that failed or a daemon that stopped mid-upload.
-pub(super) struct LiveStaging {
+pub struct LiveStaging {
     key: (PathBuf, String),
     name: String,
 }
@@ -53,7 +53,7 @@ fn live_stagings() -> &'static LiveStagingRegistry {
 }
 
 impl LiveStaging {
-    pub(super) fn register_and_sweep(
+    pub fn register_and_sweep(
         executor: &impl CommandExecutor,
         locator: &targets::TargetLocator,
         session_id: &str,
@@ -173,7 +173,7 @@ pub fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
         .map(Some);
     };
     let expected = mj_core::worker_launch::worker_executable_digest(source)?;
-    if crate::session_manager::installed_digest_matches(
+    if mj_targets::command_checks::installed_digest_matches(
         executor,
         &refresh.installed_digest,
         &expected,
@@ -200,13 +200,13 @@ impl<E: CommandExecutor> Drop for PreparedWorkerBinary<'_, E> {
 }
 
 /// The bytes a local file will take on the target.
-pub(in crate::controller) fn file_size(path: &Path) -> Result<u64> {
+pub fn file_size(path: &Path) -> Result<u64> {
     Ok(std::fs::metadata(path)
         .with_context(|| format!("measure {}", path.display()))?
         .len())
 }
 
-pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
+pub fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
     executor: &'a E,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -214,7 +214,7 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
 ) -> Result<PreparedWorkerBinary<'a, E>> {
     let staging = format!(
         "hel.prepared-{}",
-        crate::session_manager::new_command_id("upgrade-stage")?
+        mj_client::session::new_command_id("upgrade-stage")?
     );
     let root = targets::worker_root(locator, session_id)?;
     let live = LiveStaging::register_and_sweep(executor, locator, session_id, &root, &staging)?;
@@ -245,11 +245,11 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
 
 // mv rejects two different names for the same inode. Reinstalling a current
 // shared binary therefore consumes the private link without changing hel.
-pub(super) const PROMOTE_WORKER_BINARY: &str = r#"promote_worker_binary() {
+pub const PROMOTE_WORKER_BINARY: &str = r#"promote_worker_binary() {
     if [ "$1" -ef "$2" ]; then rm -f -- "$1"; else mv -f -- "$1" "$2"; fi
 }"#;
 
-pub(in crate::controller) fn install_staged_worker_binary(
+pub fn install_staged_worker_binary(
     owner: &crate::worker_lifecycle::WorkerPermit,
     staging: &str,
     executor: &impl CommandExecutor,
@@ -290,7 +290,7 @@ pub(in crate::controller) fn install_staged_worker_binary(
     Ok(())
 }
 
-pub(in crate::controller) fn replace_installed_worker_launch_config(
+pub fn replace_installed_worker_launch_config(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -309,7 +309,7 @@ pub(in crate::controller) fn replace_installed_worker_launch_config(
 /// directly with a private launch config. The running worker is not stopped or
 /// replaced, so any failure here leaves the quiet session attachable on its
 /// previous build.
-pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
+pub fn prepare_managed_harness_for_upgrade(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -340,7 +340,7 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     let worker_root = targets::worker_root(locator, session_id)?;
     let staging_root = format!(
         "{worker_root}/{}",
-        crate::session_manager::new_command_id("harness-prepare")?
+        mj_client::session::new_command_id("harness-prepare")?
     );
     let staging_binary = format!("{staging_root}/hel");
     let staging_config = format!("{staging_root}/launch.json");
@@ -529,7 +529,7 @@ fn prepare_container_harness_for_upgrade(
     Ok(())
 }
 
-pub(in crate::controller) fn prepare_installed_managed_harness(
+pub fn prepare_installed_managed_harness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -569,7 +569,7 @@ pub(in crate::controller) fn prepare_installed_managed_harness(
 
 /// Transfer into a private path. Published store and session paths never
 /// appear as upload destinations; callers verify before publishing them.
-pub(super) fn worker_binary_upload_plan(
+pub fn worker_binary_upload_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
     worker: &WorkerInstall,
@@ -766,7 +766,7 @@ pub(super) fn worker_binary_upload_plan(
     })
 }
 
-pub(super) fn installed_file_digest_command(
+pub fn installed_file_digest_command(
     locator: &targets::TargetLocator,
     path: &str,
     purpose: &str,
@@ -789,7 +789,7 @@ pub(super) fn installed_file_digest_command(
     .purpose(purpose)
 }
 
-pub(super) fn worker_launch_refresh_plan(
+pub fn worker_launch_refresh_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
     launch: &WorkerLaunchConfig,
@@ -833,7 +833,7 @@ fn write_launch_config_command(
 
 /// Plan a refresh without resolving or hashing a worker binary. Both happen
 /// only after recovery has proved that the worker needs a restart.
-pub(super) fn worker_binary_refresh_plan(
+pub fn worker_binary_refresh_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<Option<WorkerBinaryRefresh>> {
@@ -897,7 +897,7 @@ pub fn refresh_target_worker_binary_if_stale(
 /// the session's installed one, only when their digests differ. A parked
 /// sub-agent calls this before its worker starts again, so a daemon that was
 /// upgraded while the child was parked starts it on the current build.
-pub(in crate::controller) fn refresh_installed_worker_binary(
+pub fn refresh_installed_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -914,7 +914,7 @@ pub(in crate::controller) fn refresh_installed_worker_binary(
 /// digest differs from `source`'s. Returns whether a copy ran. Split from the
 /// resolver above so the digest gate is testable without resolving a real
 /// worker binary for a target architecture.
-pub(super) fn replace_target_worker_binary_if_stale(
+pub fn replace_target_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,

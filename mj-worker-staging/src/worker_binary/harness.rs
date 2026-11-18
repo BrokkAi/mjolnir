@@ -4,7 +4,7 @@ use mj_core::targets::SshTrafficClass;
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
 /// its parent.
-pub(super) fn workspace_paths(
+pub fn workspace_paths(
     locator: &targets::TargetLocator,
     bundle: &ProjectBundle,
     session_id: &str,
@@ -53,20 +53,20 @@ pub(super) fn workspace_paths(
 /// Stage shown after the worker is reachable and while its ACP bridge becomes
 /// ready. Every remaining harness launches through a default launcher that can
 /// fetch it, so the stage names the harness being installed.
-pub(in crate::controller) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
+pub fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
     ProvisionStage::Installing(profile.kind)
 }
 
 /// The target-provided launcher used before the worker decides whether to
 /// replace it with an exact managed installation.
-pub(in crate::controller) fn bridge_launch(
+pub fn bridge_launch(
     harness: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
     mj_core::harness_runtime::fallback_launch(harness, policy)
 }
 
-pub(in crate::controller) fn preflight_harness(
+pub fn preflight_harness(
     template: &mj_core::config::TargetTemplate,
     profile: &HarnessProfile,
     executor: &impl CommandExecutor,
@@ -141,7 +141,7 @@ pub(in crate::controller) fn preflight_harness(
     if output.status == 0 {
         return Ok(());
     }
-    let detail = crate::controller::command_error_detail(&output.stderr);
+    let detail = command_error_detail(&output.stderr);
     let failure = if detail.is_empty() {
         anyhow::anyhow!("{} failed with status {}", command.purpose, output.status)
     } else {
@@ -160,7 +160,7 @@ fn node_or_downloader_preflight_script() -> String {
     )
 }
 
-pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nOutside the project workspace directories and any external attachments described below, files (including installed packages, `$HOME`, and `/tmp`) are ephemeral and will be lost. Keep durable results in a project workspace directory, a read-write external attachment, or push them to a remote. External attachments follow their listed access modes and are not included in project workspace checkpoints.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
+pub const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nOutside the project workspace directories and any external attachments described below, files (including installed packages, `$HOME`, and `/tmp`) are ephemeral and will be lost. Keep durable results in a project workspace directory, a read-write external attachment, or push them to a remote. External attachments follow their listed access modes and are not included in project workspace checkpoints.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
 fn profile_configuration_entries(harness: HarnessKind) -> Vec<(&'static str, bool)> {
     // Only the files peculiar to a harness are listed per harness. The
@@ -221,7 +221,7 @@ fn profile_configuration_entries(harness: HarnessKind) -> Vec<(&'static str, boo
         .collect()
 }
 
-pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static str> {
+pub fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static str> {
     profile_configuration_entries(harness)
         .into_iter()
         .map(|(path, _)| path)
@@ -233,7 +233,7 @@ const MUSE_MODEL_CATALOG: &str = ".data/muse/model-catalog";
 /// The profile kinds that may outlive a session in the receiver's store.
 /// Harness configuration, instructions, credentials and new kinds are private
 /// unless explicitly declared here or as a staged project-memory root.
-pub(in crate::controller) fn shared_profile_paths(harness: HarnessKind) -> Vec<&'static Path> {
+pub fn shared_profile_paths(harness: HarnessKind) -> Vec<&'static Path> {
     let asset = match harness {
         HarnessKind::Codex => Some(STAGED_CATALOG_FILE),
         HarnessKind::Muse => Some(MUSE_MODEL_CATALOG),
@@ -249,10 +249,7 @@ pub(in crate::controller) fn shared_profile_paths(harness: HarnessKind) -> Vec<&
 
 /// The profile's own files only. Outside this module, stage through
 /// [`stage_profile_with_catalog`].
-pub(super) fn stage_profile(
-    profile: &mj_core::config::HarnessProfile,
-    destination: &Path,
-) -> Result<()> {
+pub fn stage_profile(profile: &mj_core::config::HarnessProfile, destination: &Path) -> Result<()> {
     let harness = profile.kind;
     let source = profile.home.as_path();
     std::fs::create_dir_all(destination)?;
@@ -313,7 +310,7 @@ pub(super) fn stage_profile(
 /// Every staged copy of a login is made here (sessions, reviewers, sub-agents
 /// and capability probes), so this is where a harness copy loses the refresh
 /// token that only the daemon may spend (#1490).
-pub(super) fn strip_staged_refresh_token(
+pub fn strip_staged_refresh_token(
     harness: mj_core::config::HarnessKind,
     destination: &Path,
 ) -> Result<()> {
@@ -345,7 +342,7 @@ pub(super) fn strip_staged_refresh_token(
 /// goes through here, so a session, a reviewer and a capability probe all
 /// offer the same models: a reviewer staged without the catalog offered
 /// OpenAI's built-in model names on a DeepSeek profile (#1320).
-pub(in crate::controller) fn stage_profile_with_catalog(
+pub fn stage_profile_with_catalog(
     profile_id: &str,
     profile: &mj_core::config::HarnessProfile,
     destination: &Path,

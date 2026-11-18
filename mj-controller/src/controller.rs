@@ -40,8 +40,12 @@ pub use subagents::recover_registered_subagent_startup;
 #[doc(hidden)]
 pub mod test_support;
 pub mod update;
-mod worker_binary;
+pub(crate) use mj_worker_staging::worker_binary;
+mod worker_launch;
+mod worker_project_memory;
 mod worker_restart;
+#[cfg(test)]
+mod worker_staging_tests;
 mod worktree;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,7 +53,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub(crate) use crate::targets::{removable_profile_root, target_profile_home};
-pub(crate) use mj_targets::command_checks::{check_output, command_error_detail, execute_checked};
+pub(crate) use mj_targets::command_checks::{check_output, execute_checked};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;

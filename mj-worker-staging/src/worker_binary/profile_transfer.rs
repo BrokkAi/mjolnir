@@ -21,7 +21,7 @@ struct ManifestEntry {
 
 /// Content inventory for a staged profile snapshot. Keep the staging tree
 /// alive until transfer completes so claimed bodies match the recorded digest.
-pub(in crate::controller) struct ProfileContentManifest {
+pub struct ProfileContentManifest {
     source: PathBuf,
     entries: Vec<ManifestEntry>,
     objects: BTreeMap<String, (PathBuf, u64)>,
@@ -31,10 +31,7 @@ pub(in crate::controller) struct ProfileContentManifest {
 impl ProfileContentManifest {
     /// Use only roots declared by the profile stager. Unknown entries travel
     /// in the private bundle and are never offered to the receiver.
-    pub(in crate::controller) fn from_staged(
-        source: &Path,
-        shared_paths: &[&Path],
-    ) -> Result<Self> {
+    pub fn from_staged(source: &Path, shared_paths: &[&Path]) -> Result<Self> {
         let entries = profile_archive_entries(source, shared_paths)?;
         let mut manifest = Self {
             source: source.to_owned(),
@@ -95,7 +92,7 @@ impl ProfileContentManifest {
     /// Transfer to a fresh staging home, or prewarm just the non-secret
     /// objects when the destination is absent. A false result means the host
     /// lacks the receiver runtime. No profile bytes have been sent then.
-    pub(in crate::controller) fn try_transfer(
+    pub fn try_transfer(
         &self,
         executor: &impl CommandExecutor,
         ssh: &SshTarget,

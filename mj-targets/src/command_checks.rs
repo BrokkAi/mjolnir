@@ -44,3 +44,19 @@ pub fn command_error_detail(stderr: &[u8]) -> String {
         .trim()
         .to_owned()
 }
+
+/// Whether the digest `command` prints for an installed file equals
+/// `expected`. A command that fails, or prints nothing, does not match.
+pub fn installed_digest_matches(
+    executor: &impl CommandExecutor,
+    command: &CommandSpec,
+    expected: &str,
+) -> bool {
+    executor.execute(command).as_ref().is_ok_and(|output| {
+        output.status == 0
+            && String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .is_some_and(|digest| digest.eq_ignore_ascii_case(expected))
+    })
+}

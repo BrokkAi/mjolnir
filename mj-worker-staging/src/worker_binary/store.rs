@@ -5,7 +5,7 @@ use mj_core::targets::SshTrafficClass;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// Beside the session roots, in their target filesystem (inside containers).
-pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
+pub fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
     store_directory(Path::new(&targets::worker_root(locator, session_id)?))
         .context("worker root has no parent")
 }
@@ -21,7 +21,7 @@ fn store_directory(worker_root: &Path) -> Option<PathBuf> {
 
 /// Key of one target store: this daemon's data directory, the target's command
 /// prefix and the store path.
-pub(super) fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
+pub fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     let command = targets::locator_command(SshTrafficClass::Control, locator, vec!["true".into()]);
     format!(
         "{:?}:{}:{:?}:{root}",
@@ -39,7 +39,7 @@ pub(super) fn store_key(locator: &targets::TargetLocator, root: &str) -> String 
 /// of these. Other
 /// daemons targeting the same host are protected by the upload's unique name
 /// and its atomic publication. Waiting observes the executor cancellation.
-pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<StoreGate> {
+pub fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<StoreGate> {
     type Gates = Mutex<HashMap<String, Weak<StoreGate>>>;
     static GATES: OnceLock<Gates> = OnceLock::new();
     let key = store_key(locator, root);
@@ -87,7 +87,7 @@ fn gate_target(locator: &targets::TargetLocator) -> String {
 /// the lock itself: taking the gate sets it and releasing the guard on any
 /// path clears it, so a waiter reads the owner from the same place that
 /// decides ownership.
-pub(super) struct StoreGate {
+pub struct StoreGate {
     label: String,
     holder: Mutex<Option<GateHolder>>,
 }
@@ -99,7 +99,7 @@ struct GateHolder {
 }
 
 /// Ownership of a [`StoreGate`]; dropping it releases the gate.
-pub(super) struct GateGuard<'a>(&'a StoreGate);
+pub struct GateGuard<'a>(&'a StoreGate);
 
 impl StoreGate {
     fn holder(&self) -> MutexGuard<'_, Option<GateHolder>> {
@@ -145,7 +145,7 @@ impl Drop for GateGuard<'_> {
 /// Waiting observes the executor's cancellation. A wait that has to queue is
 /// reported as its own stage, so a lifecycle watching for stalls does not
 /// count the queue as time with no progress.
-pub(super) fn lock_gate<'a>(
+pub fn lock_gate<'a>(
     executor: &impl CommandExecutor,
     gate: &'a StoreGate,
     session_id: &str,
@@ -301,7 +301,7 @@ fn collections() -> &'static Mutex<HashMap<String, Instant>> {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(super) fn forget_collections() {
+pub fn forget_collections() {
     collections()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -343,7 +343,7 @@ fn collect_reporting(
     }
 }
 
-pub(in crate::controller) fn install_worker_binary(
+pub fn install_worker_binary(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -371,7 +371,7 @@ const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
 
-pub(super) fn install_worker_binary_at(
+pub fn install_worker_binary_at(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -392,10 +392,7 @@ pub(super) fn install_worker_binary_at(
     let store = mj_core::target_path::text(&store_root(locator, session_id)?);
     // Register before any pin can be created. Registration and sweeping share
     // one session owner, so no sweep can use a snapshot predating a live pin.
-    let name = format!(
-        "hel.store-{}",
-        crate::session_manager::new_command_id("link")?
-    );
+    let name = format!("hel.store-{}", mj_client::session::new_command_id("link")?);
     let _live = session_root
         .map(|root| {
             super::upgrade::LiveStaging::register_and_sweep(
@@ -506,7 +503,7 @@ fn ensure_published(
     let directory = format!("{store}/{digest}");
     let gate = store_gate(locator, &directory);
     let _guard = lock_gate(executor, &gate, session_id, "publish a worker build")?;
-    if crate::session_manager::installed_digest_matches(
+    if mj_targets::command_checks::installed_digest_matches(
         executor,
         &super::upgrade::installed_file_digest_command(
             locator,
@@ -530,7 +527,7 @@ fn ensure_published(
     collect_reporting(executor, locator, store, Some(digest));
     let upload = format!(
         "{store}/.upload-{}",
-        crate::session_manager::new_command_id("worker-store")?
+        mj_client::session::new_command_id("worker-store")?
     );
     let temporary = format!("{upload}/hel");
     crate::target_storage::ensure_room_for(
@@ -667,7 +664,7 @@ fn transfer_binary(
             &store_root(&host, session_id)?,
             Path::new(&format!(
                 ".transport-{}",
-                crate::session_manager::new_command_id("container-upload")?
+                mj_client::session::new_command_id("container-upload")?
             )),
         ));
         let pin = mj_core::target_path::text(&mj_core::target_path::join(

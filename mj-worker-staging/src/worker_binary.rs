@@ -11,10 +11,6 @@ use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use crate::session_manager::{
-    DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, WorkerBinaryRefresh,
-    WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
-};
 use crate::targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
 };
@@ -25,11 +21,13 @@ use mj_core::project_memory::ProjectMemoryIdentity;
 use mj_core::worker_build::{verify_worker_build, worker_build_id};
 use mj_core::worker_launch::{
     HarnessRuntimePolicy, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery, WorkerLaunchConfig,
-    WorkerOwnership,
+};
+use mj_session_types::{
+    DeferredWorkerBinaryRefresh, WorkerBinaryRefresh, WorkerLaunchRefreshPlan, WorkerWorkspace,
 };
 
-use super::backend::backend_locator;
-use super::{Controller, execute_checked, target_profile_home};
+use crate::targets::{backend_locator, target_profile_home};
+use mj_targets::command_checks::{command_error_detail, execute_checked};
 
 /// Run a `reqwest::blocking` request on a dedicated OS thread and return its
 /// result.
@@ -54,39 +52,43 @@ fn on_dedicated_thread<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Resu
     })
 }
 
-mod launch;
-pub(in crate::controller) use launch::{LaunchHistory, WorkerFilePreparation};
+pub mod launch;
+pub use launch::{LaunchHistory, WorkerFilePreparation};
 mod staging;
-pub(super) use staging::*;
-mod project_memory;
-use project_memory::*;
+pub use staging::*;
 mod binary_source;
 pub use binary_source::*;
 mod binary_select;
 pub use binary_select::ssh_worker_binary_prerequisite;
 pub use binary_select::worker_source_problem;
-pub(super) use binary_select::*;
+pub use binary_select::*;
 mod harness;
-pub(super) use harness::*;
+pub use harness::*;
 mod catalog;
-pub(super) use catalog::*;
+pub use catalog::*;
 mod image_worker;
 pub use image_worker::image_worker_label;
-pub(super) use image_worker::*;
+pub use image_worker::*;
 mod install;
 mod prewarm;
-pub(super) use install::*;
+pub use install::*;
 pub use prewarm::{prewarm_profile_content, shared_content_ssh};
 mod store;
-pub(in crate::controller) use store::install_worker_binary;
 use store::*;
+pub use store::{install_worker_binary, store_root};
 mod microvm;
 pub use microvm::ensure_microvm_engine;
 mod upgrade;
 pub use upgrade::*;
+mod session_token;
+pub use session_token::*;
+mod project_memory;
+pub use project_memory::*;
 mod process;
-pub(super) use process::*;
+pub use process::*;
 pub use process::{ControlWorker, recorded_exit_reason, run_control_command};
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixtures;
 #[cfg(test)]
 mod tests;

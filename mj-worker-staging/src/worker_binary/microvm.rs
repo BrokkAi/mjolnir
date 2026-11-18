@@ -30,7 +30,7 @@ pub fn ensure_microvm_engine(ssh: &SshTarget, executor: &impl CommandExecutor) -
         .context("find the worker binary for the Nitro sandbox host")?;
     let digest = mj_core::worker_launch::worker_executable_digest(&source)?;
     let destination = targets::MICROVM_ENGINE_WORKER;
-    if crate::session_manager::installed_digest_matches(
+    if mj_targets::command_checks::installed_digest_matches(
         executor,
         &upgrade::installed_file_digest_command(&host, destination, "verify the host engine"),
         &digest,
