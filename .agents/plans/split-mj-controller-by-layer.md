@@ -13,6 +13,7 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - [x] (2026-11-18 05:45Z) Measured the current build and the references that cross each proposed boundary (see Context and Surprises).
 - [x] (2026-11-18 06:05Z) Added `scripts/check-controller-layers.py`, which lists the upward reference sites (not yet run in CI).
 - [ ] Milestone 1: cut every reference from lower modules up into the top layer, inside the existing crate, and enforce the check (completed: the pure helpers, `ProfileCatalog`, the startup-step types and the session predicates, 125 sites down to 54; remaining: the modules that take the daemon's `RuntimeState`, the HTTP API types named by lower code, and lower tests that drive top-layer code, listed under Surprises).
+- [ ] Owner publishes placeholder `brokk-mj-daemon` and `brokk-mj-store` crates and configures their trusted publishers (blocks Milestones 2 and 4 from landing on master; see Decision Log).
 - [ ] Milestone 2: move the top layer into `mj-daemon` (`brokk-mj-daemon`).
 - [ ] Milestone 3: cut every reference from the storage modules up into the rest, inside `mj-controller`.
 - [ ] Milestone 4: move the storage layer into `mj-store` (`brokk-mj-store`).
@@ -36,7 +37,7 @@ After this work the same code lives in three crates stacked by dependency: a sto
 
 - Decision: split by layer into three crates, not by feature area.
   Rationale: the measured references run mostly downward already. About 100 reference sites point from lower modules into the top layer and about 45 from the storage modules into the rest, against thousands pointing down. A layered split needs only those cut. Feature areas (quota, GitHub, review) are small; the size is in `controller`, `daemon`, `database` and the two server modules.
-  Date/Author: 2026-11-18, Claude. Ryan Svihla asked for work on mj-controller's build cost; the crate boundaries are proposed here and not yet confirmed by him.
+  Date/Author: 2026-11-18, Claude. Ryan Svihla asked for work on mj-controller's build cost; the crate boundaries were proposed here and he confirmed going ahead the same day.
 - Decision: new crates are justified under the repository rule that a crate needs a compilation boundary.
   Rationale: the compile of this one unit is the measured bottleneck for CI, for local builds and for the macOS lane's memory. The rule forbids crates made only to reorganize code; this is the case it allows.
   Date/Author: 2026-11-18, Claude.
@@ -46,6 +47,10 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - Decision: top layer first, storage second.
   Rationale: the top layer is 119k lines against 61k, and the daemon and server are where an edit most often forces a rebuild of code that did not change.
   Date/Author: 2026-11-18, Claude.
+
+- Decision: the new crates are `brokk-mj-store` and `brokk-mj-daemon`, and both names must exist on crates.io, with a trusted publisher configured, before the commit that creates either crate reaches master.
+  Rationale: `.github/workflows/publish.yml` authenticates with `rust-lang/crates-io-auth-action`, that is, crates.io trusted publishing, which is configured in the settings of a crate that already exists. `nightly.yml` releases master automatically, and `publish.yml` publishes crates in dependency order and stops at the first failure, so a crate the workflow may not publish would leave a release with `brokk-mj-core` published and `brokk-mj-controller` and `brokk-mj-mjolnir` missing. The owner publishes a `0.0.0` placeholder of each name with a personal token, then adds the trusted publisher (repository `BrokkAi/mjolnir`, workflow `publish.yml`, environment `crates-io`) and the same owners as `brokk-mj-controller`. Both names were free on 2026-11-18.
+  Date/Author: 2026-11-18, Ryan Svihla confirmed the split and raised the manual first publish; Claude checked the workflow.
 
 ## Outcomes & Retrospective
 
