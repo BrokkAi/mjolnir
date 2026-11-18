@@ -86,11 +86,13 @@ pub struct SubagentMailboxMessage {
 /// What an enqueue did. The store ignores an event for a session that is
 /// gone (schema revision 121), so the caller learns there is no one to
 /// deliver to and decides whether that is an error for its sender.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Enqueued {
     Inserted,
     AlreadyQueued,
     TargetGone,
+    /// Recorded in the same transaction, but permanently undeliverable.
+    Failed(String),
 }
 
 impl Enqueued {
@@ -125,10 +127,17 @@ pub fn enqueue_mailbox_event(
         tx.commit()?;
         Ok(result)
     })?;
-    if inserted.inserted() {
+    if matches!(&inserted, Enqueued::Inserted) {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
-    Ok(inserted)
+    // The transaction must commit its failure receipt before returning the
+    // known failure to the sender. Returning Err inside it would roll it back.
+    match inserted {
+        Enqueued::Failed(reason) => Err(anyhow::Error::new(
+            mj_core::refusal::Refusal::precondition(reason),
+        )),
+        outcome => Ok(outcome),
+    }
 }
 
 pub fn enqueue_mailbox_event_with(
@@ -159,7 +168,7 @@ pub fn enqueue_mailbox_event_with(
             .optional()?
             .and_then(|(state, error)| {
                 mj_core::state::SessionState::from_stored(&state)
-                    .and_then(|state| failed_parent_message_reason(state, error.as_deref()))
+                    .and_then(|state| terminal_parent_message_failure(state, error.as_deref()))
             })
     } else {
         None
@@ -181,11 +190,11 @@ pub fn enqueue_mailbox_event_with(
         ],
     )?;
     let inserted = connection.changes() == 1;
-    let Some(existing): Option<(String, String, bool)> = connection
+    let Some(existing): Option<(String, String, bool, Option<String>)> = connection
         .query_row(
-            "SELECT target_session_id, event_json, wake FROM mailbox_outbox WHERE event_key=?1",
+            "SELECT target_session_id, event_json, wake, failure FROM mailbox_outbox WHERE event_key=?1",
             [event_key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?
     else {
@@ -203,6 +212,9 @@ pub fn enqueue_mailbox_event_with(
                 "mailbox event key {event_key:?} already names a different session, body, or wake value"
             ),
         )));
+    }
+    if let Some(reason) = existing.3.filter(|reason| reason != MAILBOX_CLEARED_REASON) {
+        return Ok(Enqueued::Failed(reason));
     }
     // The durable row is authoritative on a retry. Timestamp, source, and
     // unpark metadata from a later request do not rewrite the first event.
@@ -281,11 +293,22 @@ pub fn subagent_mailbox_messages(parent_session_id: &str) -> Result<Vec<Subagent
         .collect()
 }
 
-fn failed_parent_message_reason(state: SessionState, error: Option<&str>) -> Option<String> {
-    matches!(state, SessionState::Error | SessionState::StartupCleanup).then(|| match error {
-        Some(error) => format!("child startup failed: {error}"),
-        None => format!("child session is {state:?}; queued parent message was not delivered"),
-    })
+fn terminal_parent_message_failure(state: SessionState, error: Option<&str>) -> Option<String> {
+    match state {
+        SessionState::StartupCleanup => Some(match error {
+            Some(error) => format!("child startup failed: {error}"),
+            None => "child startup cleanup prevents delivery of the queued parent message".into(),
+        }),
+        SessionState::Destroying => Some(match error {
+            Some(error) => format!(
+                "child is being destroyed; queued parent message was not delivered: {error}"
+            ),
+            None => "child is being destroyed; queued parent message was not delivered".into(),
+        }),
+        // Error is recoverable: Resume/Restart reattaches the worker and the
+        // outbox must still have the parent's message to deliver then.
+        _ => None,
+    }
 }
 
 /// The lifecycle record and its undeliverable parent messages commit together.
@@ -293,7 +316,8 @@ pub(super) fn settle_failed_parent_messages_with(
     connection: &Connection,
     session: &SessionRecord,
 ) -> Result<()> {
-    if let Some(reason) = failed_parent_message_reason(session.state, session.last_error.as_deref())
+    if let Some(reason) =
+        terminal_parent_message_failure(session.state, session.last_error.as_deref())
     {
         connection.execute(
             "UPDATE mailbox_outbox SET accepted_at=?2, failure=?3

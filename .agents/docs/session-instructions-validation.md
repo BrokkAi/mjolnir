@@ -175,3 +175,20 @@ A normal dev rebuild and full delegation seed 1171 passed after source checkpoin
 - An explicit stop with that runtime's private config/data and the same named instance confirmed the daemon was already stopped (`memory-instructions-review4-cleanup.log`).
 
 No still-failing checks, default-instance operations, pushes or Milestone 3 live acceptance. Diagnostic memory-*.log files remain untracked. The schema, relay revision/snapshot and RuntimeEvent shapes are unchanged; Failed uses the existing compatible outbox representation. The corrected checkpoint is submitted for formal re-review.
+
+
+## Fifth review: recoverable Error and original enqueue failure
+
+The parent corrected the terminal-state rule: Error can recover through explicit Resume/Restart, so its pending ParentMessages must survive. No durable initial-launch marker or Error auto-resume is added. Only StartupCleanup/Destroying settle queued messages as Failed; a removed target retains the existing TargetGone/error path. Reservation release still follows exits from Starting as before.
+
+Before implementation edits, `/tmp/session-instructions-error-resume-probe.py` reused the existing delegation fixture with the current real dev CLI/worker. With the isolated daemon stopped it seeded a legacy Error record and pending parent-message row, restarted the daemon to load that state, then explicitly resumed the retained environment. The outbox accepted the message and the native harness prompt contained its text exactly once. Result: PASS in `instructions-error-resume2-55d6204e`; log `memory-instructions-review5-error-resume-probe-fixed.log`; artifacts `target/reliability-artifacts/delegation-seed-1171-516249`; runtime `/mnt/optane/tmp/hel-r-516249-57uqlgjs`. An initial probe only missed the existing [phone].enabled prerequisite for Resume (`memory-instructions-review5-error-resume-probe.log`); enabling it in that private test configuration allowed the actual recovery check. Fixture cleanup stopped its processes.
+
+Enqueue now carries an internal Failed(reason) outcome out of the writer transaction, preserving its durable failure receipt, and the public operation returns that failure to the sender after commit. Existing failure receipts are authoritative on retries; /clear's distinct discard receipt retains its previous behavior. The no-attachment regression pauses a sender after the real manager chooses its mailbox route, commits terminal startup cleanup, then verifies the original call returns the stored error. A control child's pending row survives Error and its return to Running. No implementation behavior was changed before the real recovery probe passed. After the interrupted build, process inspection confirmed that no prior test/build remained; validation restarted and completed outside the sandbox on the dev profile:
+
+- `cargo test -p brokk-mj-daemon failed_startup_settles_queued_parent_messages_without_attachment`: 1 passed; original-call failure after the routing/enqueue race, committed failure receipts and recoverable-Error control (`memory-instructions-review5-terminal-final-test.log`).
+- `cargo test -p brokk-mj-daemon outbox_`: 3 passed (`memory-instructions-review5-outbox-tests.log`).
+- `cargo test -p brokk-mj-daemon send_message_`: 9 passed (`memory-instructions-review5-message-tests.log`).
+- `cargo test -p brokk-mj-store database::mailbox::tests`: 4 passed, including /clear discard and removed-target compatibility (`memory-instructions-review5-store-tests.log`).
+- `cargo clippy -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review5-clippy.log`).
+- Explicit stop of the private recovery-probe instance confirmed it was already stopped (`memory-instructions-review5-probe-cleanup.log`).
+- Formatting and diff checks are clean. No still-failing checks, default-instance operations, pushes or Milestone 3 live acceptance. Logs remain untracked; schema, relay snapshot and RuntimeEvent shapes remain unchanged. Corrections are committed and submitted for re-review.

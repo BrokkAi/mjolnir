@@ -3738,6 +3738,7 @@ async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_tur
 }
 
 // Hard-won: 9674cd6aa: a launch that failed before attachment left acknowledged parent messages pending.
+// Hard-won: 4e37c532c: recoverable Error lost queued work and terminal enqueue returned false success.
 #[tokio::test]
 async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     if !isolated_parked_test("failed_startup_settles_queued_parent_messages_without_attachment") {
@@ -3777,11 +3778,52 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
     let mut child = mj_controller::database::load_session_record("child-1")
         .unwrap()
         .unwrap();
+    let key = "subagent-message-before-startup-failure";
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture provisioning failed before the worker started".into());
-    mj_controller::database::save_lifecycle_session(&child).unwrap();
-    let key = "subagent-message-before-startup-failure";
     let expected = "child startup failed: fixture provisioning failed before the worker started";
+
+    struct FailAfterRoute {
+        inner: SessionControl,
+        failed: SessionRecord,
+    }
+    impl SessionControlBackend for FailAfterRoute {
+        fn session(&self, id: String) -> BoxFuture<'_, Result<SessionHandle>> {
+            Box::pin(self.inner.session(id))
+        }
+        fn parent_message_route(
+            &self,
+            id: String,
+        ) -> BoxFuture<'_, Result<mj_client::session::ParentMessageRoute>> {
+            Box::pin(async move {
+                let route = self.inner.parent_message_route(id).await?;
+                let failed = self.failed.clone();
+                tokio::task::spawn_blocking(move || {
+                    mj_controller::database::save_lifecycle_session(&failed)
+                })
+                .await??;
+                Ok(route)
+            })
+        }
+    }
+    // Pause this sender after the real owner chose the mailbox route, then
+    // commit failure before its enqueue. The original call must return it.
+    let late_backend = ApiBackend::new(
+        SessionControl::new(FailAfterRoute {
+            inner: manager.control.client(),
+            failed: child.clone(),
+        }),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    );
+    let mut late_request = request.clone();
+    late_request.request_id = "after-startup-failure".into();
+    let error = late_backend
+        .deliver_subagent_input("child-1", "late context", &late_request)
+        .await
+        .err()
+        .expect("terminal enqueue must fail the original call");
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
     assert_eq!(
         mj_controller::database::mailbox_delivery_state("child-1", key).unwrap(),
         mj_controller::database::MailboxDeliveryState::Failed(expected.into())
@@ -3791,29 +3833,6 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
             .unwrap()
             .is_empty()
     );
-    // A sender that still holds the old Running view cannot recreate pending
-    // work after failure, and retrying the original event preserves its reason.
-    child.state = SessionState::Error;
-    mj_controller::database::save_lifecycle_session(&child).unwrap();
-    // Model a producer paused after choosing mailbox delivery but before its
-    // writer transaction. A new route lookup would correctly refuse the child.
-    let late = mj_core::mailbox::MailboxEvent {
-        key: "subagent-message-after-startup-failure".into(),
-        source: "parent".into(),
-        wake: true,
-        created_at_ms: 2,
-        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
-            text: "late context".into(),
-        },
-    };
-    mj_controller::database::enqueue_mailbox_event(
-        &late.key,
-        "child-1",
-        &serde_json::to_string(&late).unwrap(),
-        true,
-        true,
-    )
-    .unwrap();
     assert_eq!(
         mj_controller::database::mailbox_delivery_state(
             "child-1",
@@ -3836,6 +3855,45 @@ async fn failed_startup_settles_queued_parent_messages_without_attachment() {
             .iter()
             .all(|report| report["status"] == "failed" && report["error"] == expected),
         "{reports:?}"
+    );
+    // Control: a different child's recoverable Error keeps its queued work
+    // for explicit Resume/Restart, rather than poisoning it as startup failure.
+    store_parent_and_child("child-recoverable");
+    let retained = mj_core::mailbox::MailboxEvent {
+        key: "subagent-message-recoverable-error".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 3,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "keep for recovery".into(),
+        },
+    };
+    mj_controller::database::enqueue_mailbox_event(
+        &retained.key,
+        "child-recoverable",
+        &serde_json::to_string(&retained).unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+    let mut recoverable = mj_controller::database::load_session_record("child-recoverable")
+        .unwrap()
+        .unwrap();
+    recoverable.state = SessionState::Error;
+    recoverable.last_error = Some("Restart was cancelled; the environment was retained".into());
+    mj_controller::database::save_lifecycle_session(&recoverable).unwrap();
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-recoverable", &retained.key)
+            .unwrap(),
+        mj_controller::database::MailboxDeliveryState::Pending
+    );
+    recoverable.state = SessionState::Running;
+    recoverable.last_error = None;
+    mj_controller::database::save_lifecycle_session(&recoverable).unwrap();
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-recoverable", &retained.key)
+            .unwrap(),
+        mj_controller::database::MailboxDeliveryState::Pending
     );
     manager.shutdown.shutdown().await.unwrap();
 }
