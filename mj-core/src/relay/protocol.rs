@@ -285,6 +285,8 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     CommandRetentionStatus,
+    /// Seed orphan adoption after acknowledged history has been collected.
+    AdoptionSnapshot,
     /// Register operation-owned retry receipts before submitting any of its commands.
     UpdateCommandRetention {
         operation_id: Option<String>,
@@ -578,6 +580,7 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::AdoptionSnapshot => "adoption_snapshot",
             Self::CommandRetentionStatus => "command_retention_status",
             Self::UpdateCommandRetention { .. } => "update_command_retention",
             Self::Status => "status",
@@ -659,9 +662,9 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
-            Self::CommandRetentionStatus | Self::UpdateCommandRetention { .. } => {
-                super::RELAY_COMMAND_RETENTION_PROTOCOL
-            }
+            Self::AdoptionSnapshot
+            | Self::CommandRetentionStatus
+            | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -953,6 +956,10 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
+    AdoptionSnapshot {
+        state: RelayOperationalState,
+        native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
+    },
     MailboxDrained {
         /// Present when mailbox events or a Claude boundary steer are leased.
         #[serde(default, skip_serializing_if = "Option::is_none")]

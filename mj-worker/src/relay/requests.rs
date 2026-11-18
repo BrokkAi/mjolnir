@@ -109,6 +109,10 @@ impl DurableRelay {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
+            RelayRequest::AdoptionSnapshot => RelayResponsePayload::AdoptionSnapshot {
+                state: self.operational_state(),
+                native_use_evidence: self.snapshot.native_use_evidence.clone(),
+            },
             RelayRequest::CommandRetentionStatus => RelayResponsePayload::CommandRetentionState {
                 legacy_pending: self.snapshot.legacy_command_retention,
                 operation_ids: self.snapshot.command_retention.keys().cloned().collect(),

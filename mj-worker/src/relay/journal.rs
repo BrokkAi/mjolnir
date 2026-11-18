@@ -940,6 +940,11 @@ impl DurableRelay {
         let mut last: Option<RelayEvent> = None;
         let mut written_through = retain_after;
         for span in &self.journal_spans {
+            // The durable ACK already covers this whole file. Do not read or
+            // decompress discarded history, including damaged old segments.
+            if span.file_last_ordinal <= retain_after {
+                continue;
+            }
             visit_relay_journal_file(&span.path, JournalReadMode::Strict, |event, _| {
                 if event.ordinal <= span.after_ordinal || event.ordinal <= written_through {
                     return Ok(ControlFlow::Continue(()));

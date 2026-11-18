@@ -239,6 +239,13 @@ mj recover scan --json
 mj recover adopt --session <session-id> --target <target-id>
 ```
 
+If the daemon's store was lost after the worker discarded acknowledged history,
+adoption starts Mjolnir's transcript view at the current worker snapshot and
+records a notice about the missing earlier transcript. The agent's own native
+conversation and queued work remain on the worker. Workers that still retain
+the journal from its beginning restore the full transcript.
+
+
 Older resources without current ownership metadata may additionally require
 `--profile` and `--bundle`. Adoption is preferable to destruction when the
 resource may contain work not present in a recovery archive. See the recovery

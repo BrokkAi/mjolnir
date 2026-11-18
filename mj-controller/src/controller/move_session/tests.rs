@@ -228,6 +228,80 @@ fn move_queue_relay_child() {
     }
 }
 
+#[cfg(unix)]
+// Hard-won: 581ae9e: adopting a live worker required journal genesis after ACK pruning.
+#[test]
+fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
+    let name = test_name("adoption_seeds_a_pruned_live_worker_without_replacing_native_history");
+    if !isolated_test_child(&name, "MJ_PRUNED_ADOPTION_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    let marker = directory.path().join("adoption.marker");
+    install_move_queue_relay_worker(&root, &marker, true);
+    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "surviving-native-conversation".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    for command_id in ["active-before-loss", "surviving-queue"] {
+        relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: command_id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: command_id.into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("work survives")],
+                },
+            },
+        });
+    }
+    let frontier = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.handle(mj_core::relay::RelayRequestEnvelope {
+        request_id: "ack-before-loss".into(),
+        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Acknowledge {
+            through_ordinal: frontier,
+            through_digest: digest,
+        },
+    });
+    drop(relay);
+    let snapshot_before: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
+            .unwrap();
+    let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    crate::database::save_session(&session).unwrap();
+    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let connection = crate::session_manager::StandaloneSession::connect_adopting(&spec, MOVE_QUEUE_SESSION_ID).await.unwrap();
+        assert_eq!(connection.operational().native_session_id.as_deref(), Some("surviving-native-conversation"));
+        let projection = connection.snapshot().materialized;
+        assert!(projection.applied_event_ordinal >= frontier);
+        assert_eq!(projection.queued_prompts[0].command_id, "surviving-queue");
+        assert_eq!(projection.queued_prompts[0].content[0]["text"], "queued prompt (text not recoverable after store loss)");
+        assert_eq!(projection.active_turn.as_ref().unwrap().command_id, "active-before-loss");
+        assert!(serde_json::to_string(&projection).unwrap().contains("Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact."));
+    });
+    let snapshot_after: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
+            .unwrap();
+    assert_eq!(
+        snapshot_before.native_use_evidence,
+        snapshot_after.native_use_evidence
+    );
+}
+
 #[test]
 fn mutation_guard_rejects_conflicting_commands_but_allows_observation() {
     let session_id = "move-guard-test";
@@ -1012,6 +1086,37 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     operation = crate::database::load_move_operation(MOVE_QUEUE_SESSION_ID)
         .unwrap()
         .unwrap();
+
+    // Hard-won: 581ae9e: a missing legacy Move archive prevented ordinary attachment.
+    let snapshot_path = worker_root.join(mj_core::relay::RELAY_STATE_FILE);
+    let mut saved: mj_core::relay::RelaySnapshot =
+        serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    saved.legacy_command_retention = true;
+    saved.command_retention.clear();
+    fs::write(&snapshot_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let archive_path = operation.restore_artifact().unwrap().archive_path.clone();
+    let archive = fs::read(&archive_path).unwrap();
+    let spec = controller.reconnect_command(MOVE_QUEUE_SESSION_ID).unwrap();
+    for corrupt in [false, true] {
+        if corrupt {
+            fs::write(&archive_path, b"corrupt archive").unwrap();
+        } else {
+            fs::remove_file(&archive_path).unwrap();
+        }
+        runtime.block_on(async {
+            let connection = crate::session_manager::StandaloneSession::connect_command(
+                &spec,
+                MOVE_QUEUE_SESSION_ID,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                connection.operational().store_id.as_deref(),
+                Some(destination_store_id.as_str())
+            );
+        });
+    }
+    fs::write(&archive_path, archive).unwrap();
 
     runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))

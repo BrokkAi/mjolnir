@@ -287,7 +287,7 @@ impl Controller {
         spec: &CommandSpec,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        let mut relay = StandaloneSession::connect_command(spec, session_id)
+        let mut relay = StandaloneSession::connect_adopting(spec, session_id)
             .await
             .context("orphan relay did not complete the v1 handshake")?;
         let harness = self

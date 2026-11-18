@@ -13,6 +13,27 @@ impl DurableRelay {
             self.snapshot.record_native_use(NativeSessionUse::Used);
             return true;
         }
+        // Shipped snapshots already proved this identity was opened after the
+        // retained floor and never used. Startup text is not contrary evidence.
+        if self
+            .snapshot
+            .native_session_opened_ordinal
+            .is_some_and(|opened| opened > self.snapshot.recovery_floor_ordinal)
+        {
+            let usage = if self
+                .snapshot
+                .dispatches
+                .values()
+                .any(prompt_may_have_reached_agent)
+            {
+                self.snapshot.native_session_used = true;
+                NativeSessionUse::Unknown
+            } else {
+                NativeSessionUse::Unused
+            };
+            self.snapshot.record_native_use(usage);
+            return true;
+        }
         let evidence = match self.read_native_history_evidence() {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -227,6 +248,35 @@ mod tests {
                 replaced_unused_native_session_id: None,
             })
             .unwrap();
+    }
+
+    // Hard-won: 581ae9e: startup agent text overwrote an existing legacy unused proof.
+    #[test]
+    fn upgrade_preserves_existing_unused_proof_despite_startup_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+        open_session(&mut relay, false);
+        relay
+            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::from("startup greeting"),
+            )))
+            .unwrap();
+        relay.persist_snapshot().unwrap();
+        drop(relay);
+        let path = temp.path().join(RELAY_STATE_FILE);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved.as_object_mut().unwrap().remove("native_use_evidence");
+        saved["format_version"] = serde_json::json!(27);
+        fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        for _ in 0..2 {
+            let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+            assert!(!relay.native_session_may_have_history());
+            assert_eq!(
+                relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+                NativeSessionUse::Unused
+            );
+        }
     }
 
     #[test]

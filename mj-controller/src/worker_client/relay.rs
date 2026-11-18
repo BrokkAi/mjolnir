@@ -888,6 +888,21 @@ impl RelayClient {
         }
     }
 
+    pub async fn adoption_snapshot(
+        &mut self,
+    ) -> Result<(
+        RelayOperationalState,
+        Option<mj_core::relay::NativeSessionUseEvidence>,
+    )> {
+        match self.call(RelayRequest::AdoptionSnapshot).await? {
+            RelayResponsePayload::AdoptionSnapshot {
+                state,
+                native_use_evidence,
+            } => Ok((state, native_use_evidence)),
+            _ => bail!("relay returned an unexpected adoption snapshot"),
+        }
+    }
+
     pub async fn command_retention_status(&mut self) -> Result<Option<(bool, BTreeSet<String>)>> {
         if self.protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
             return Ok(None);

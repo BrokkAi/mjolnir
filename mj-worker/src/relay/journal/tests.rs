@@ -10,6 +10,46 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
+// Hard-won: 581ae9e: catch-up ACK decompressed damaged segments already covered by its cursor.
+#[test]
+fn acknowledgement_discards_unreadable_covered_segments_without_reading_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    for _ in 0..80 {
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: "x".repeat(64 * 1024),
+            })
+            .unwrap();
+    }
+    let covered = relay.journal_spans.first().unwrap();
+    assert_eq!(covered.path.extension().unwrap(), "gz");
+    let through = relay.latest_ordinal() - 1;
+    let digest = relay.digest_at(through).unwrap().unwrap();
+    fs::write(&covered.path, b"damaged compressed history").unwrap();
+    let response = relay.handle(relay_request(
+        "ack-damaged-prefix",
+        RelayRequest::Acknowledge {
+            through_ordinal: through,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert!(
+        matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ),
+        "{response:?}"
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    let events = relay.events_after(through, &digest).unwrap();
+    assert_eq!(events.first().unwrap().ordinal, through + 1);
+    assert_eq!(events.last().unwrap().ordinal, 80);
+}
+
 /// Streamed chunk cost, measured both ways in one process so a loaded
 /// machine cannot flatter either policy. Run with
 /// `cargo test --lib worker::journal::tests::streamed_chunk_append_cost

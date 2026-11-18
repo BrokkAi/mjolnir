@@ -30,6 +30,10 @@ impl StandaloneSession {
     }
 
     pub async fn connect(target: &RelaySessionTarget) -> Result<Self> {
+        Self::connect_inner(target, false).await
+    }
+
+    async fn connect_inner(target: &RelaySessionTarget, adopting: bool) -> Result<Self> {
         // Reach the worker before reading the projection. A stored session can
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
@@ -60,11 +64,13 @@ impl StandaloneSession {
                 if !legacy_pending {
                     return Ok((None, completed));
                 }
-                let legacy = if let Some(operation) = pending.filter(|operation| {
-                    operation.queue == mj_core::state::ResumeQueueDisposition::Start
-                }) {
-                    let checkpoint = operation
-                        .restore_artifact()
+                let legacy = (|| -> Result<_> {
+                    let Some(operation) = pending.filter(|operation| {
+                        operation.queue == mj_core::state::ResumeQueueDisposition::Start
+                    }) else {
+                        return Ok((None, Default::default()));
+                    };
+                    let checkpoint = operation.restore_artifact()
                         .context("pending Move queue archive is missing")?;
                     let verified = verify_archive_streaming(&checkpoint.archive_path)?;
                     anyhow::ensure!(
@@ -72,17 +78,21 @@ impl StandaloneSession {
                             && verified.manifest.session.id == session,
                         "pending Move queue checkpoint verification failed"
                     );
-                    (
-                        Some(operation.operation_id.clone()),
-                        crate::controller::move_session::move_queue_command_ids(
-                            operation,
-                            &verified.canonical_session,
-                        ),
-                    )
-                } else {
-                    (None, Default::default())
+                    Ok((Some(operation.operation_id.clone()),
+                        crate::controller::move_session::move_queue_command_ids(operation, &verified.canonical_session)))
+                })();
+                let legacy = match legacy {
+                    Ok(legacy) => Some(legacy),
+                    Err(error) => {
+                        // Keep the worker's legacy receipt hold intact. Queue
+                        // replay reports this error; ordinary attachment must
+                        // still expose the live destination and its status.
+                        tracing::warn!(session_id = %session,
+                            "could not reconcile pending Move receipts; retaining legacy protection: {error:#}");
+                        None
+                    }
                 };
-                Ok((Some(legacy), completed))
+                Ok((legacy, completed))
             })
             .await
             .context("reconcile command retention owners")??;
@@ -115,8 +125,109 @@ impl StandaloneSession {
             operator_presence_revision: None,
             history_active: Default::default(),
         };
+        if adopting && connection.materialized.applied_event_ordinal == 0 {
+            match connection
+                .client
+                .attach(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+                .await
+            {
+                Ok(_) => {}
+                Err(error)
+                    if relay_desynchronized(&error)
+                        && protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL =>
+                {
+                    let (snapshot, _native_use_evidence) =
+                        connection.client.adoption_snapshot().await?;
+                    ensure!(
+                        snapshot.session_id == target.session_id,
+                        "adoption snapshot belongs to another session"
+                    );
+                    connection
+                        .client
+                        .attach(snapshot.latest_ordinal, &snapshot.latest_digest)
+                        .await?;
+                    let mut projection = MaterializedSession::empty(&target.session_id);
+                    projection.applied_event_ordinal = snapshot.latest_ordinal;
+                    projection.applied_event_digest = snapshot.latest_digest.clone();
+                    projection.execution = match snapshot.execution {
+                        mj_core::relay::RelayExecutionState::Idle => {
+                            mj_core::state::MaterializedExecutionState::Idle
+                        }
+                        mj_core::relay::RelayExecutionState::Running => {
+                            mj_core::state::MaterializedExecutionState::Running {
+                                started_at_ms: snapshot
+                                    .active_prompt
+                                    .as_ref()
+                                    .map_or(0, |active| active.started_at_ms),
+                            }
+                        }
+                        mj_core::relay::RelayExecutionState::Closing => {
+                            mj_core::state::MaterializedExecutionState::Closing
+                        }
+                        mj_core::relay::RelayExecutionState::Closed => {
+                            mj_core::state::MaterializedExecutionState::Closed
+                        }
+                    };
+                    projection.active_turn = snapshot.active_prompt.as_ref().map(|active| {
+                        mj_core::state::MaterializedTurn {
+                            command_id: active.command_id.clone(),
+                            accepted_ordinal: None,
+                            turn_start_position: snapshot.latest_ordinal,
+                            started_at_ms: active.started_at_ms,
+                            steered_into: None,
+                        }
+                    });
+                    projection.queued_prompts = snapshot
+                        .queued_prompts
+                        .iter()
+                        .map(|queued| mj_core::state::MaterializedQueuedPrompt {
+                            command_id: queued.command_id.clone(),
+                            kind: mj_core::state::QueuedCommandKind::Prompt,
+                            content: vec![serde_json::json!({
+                                "type": "text",
+                                "text": "queued prompt (text not recoverable after store loss)"
+                            })],
+                            queued_at_ms: queued.created_at_ms,
+                            accepted_ordinal: None,
+                        })
+                        .collect();
+                    // Save the notice and seed atomically. A crash cannot
+                    // advance the projection past an unprojected warning.
+                    let adopted_at = mj_core::clock::epoch_millis();
+                    projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
+                        stable_id: "system:adoption-history-unavailable".into(),
+                        position: snapshot.latest_ordinal,
+                        latest_content_event_ordinal: None,
+                        created_at_ms: adopted_at,
+                        last_changed_at_ms: adopted_at,
+                        body: mj_core::transcript::TranscriptBody::System {
+                            text: "Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact.".into(),
+                        },
+                    }));
+                    // Persist the exact cursor before ACKing any replacement
+                    // history. Native-use proof stays with its owning worker.
+                    save_materialized_session(&projection)?;
+                    connection.window = mj_core::state::ProjectionWindow::of(&projection);
+                    connection.materialized = projection;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         connection.sync_in_place().await?;
         Ok(connection)
+    }
+
+    pub(crate) async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {
+        Self::connect_inner(
+            &RelaySessionTarget {
+                session_id: session_id.to_owned(),
+                spec: spec.clone(),
+                worker_recovery: None,
+                project_memory: None,
+            },
+            true,
+        )
+        .await
     }
 
     pub async fn connect_command(spec: &CommandSpec, session_id: &str) -> Result<Self> {
