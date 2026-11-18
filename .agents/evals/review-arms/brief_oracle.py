@@ -715,10 +715,13 @@ def noleak_check_collect(n):
     for bug, d in decisions.items():
         if d["decision"] == "carries":
             path = W / "texts" / bug / f"round-{n}.md"
-            if path.exists() and path.read_text() != edits[bug]["brief"]:
-                raise SystemExit(f"{path} holds other text")
+            if path.exists() and path.read_text() == edits[bug]["brief"]:
+                continue
+            # Write then rename, so an interrupted write never leaves a truncated text in place.
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(edits[bug]["brief"])
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(edits[bug]["brief"])
+            tmp.replace(path)
     print(json.dumps({"round": n, "carries": sorted(b for b, d in decisions.items() if d["decision"] == "carries"),
                       "rejected": sorted(b for b, d in decisions.items() if d["decision"] != "carries")}))
 

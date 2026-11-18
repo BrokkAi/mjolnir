@@ -171,9 +171,10 @@ def leak_build(n, scope):
             raise SystemExit(f"round {n} fact check is not collected: {results}")
         decisions = json.loads(results.read_text())["decisions"]
         bugs = [b for b in scope["diffs"] if (decisions.get(b) or {}).get("decision") == "carries"]
-        absent = [b for b in bugs if not brief_path(scope, b, n).is_file()]
+        absent = [b for b in bugs if not brief_path(scope, b, n).is_file()
+                  or sha(brief_path(scope, b, n).read_text()) != decisions[b]["brief_sha256"]]
         if absent or not bugs:
-            raise SystemExit(f"round {n}: accepted texts missing {absent}, or none accepted")
+            raise SystemExit(f"round {n}: accepted texts missing or not the checked bytes {absent}, or none accepted")
     elif n == 0:
         bugs = list(scope["diffs"])
     elif scope["kind"] == "oracle":
