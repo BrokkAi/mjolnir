@@ -33,9 +33,14 @@ GIT_ENV = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
 
 
 def git(repo, *args, stdin=None, timeout=300):
-    r = subprocess.run(["git", "--no-optional-locks", "-C", str(CLONES / repo), *args],
-                       input=stdin, capture_output=True, text=True, timeout=timeout, env=GIT_ENV)
-    return r.returncode, r.stdout, r.stderr
+    """Run read-only git; bytes are decoded with surrogateescape (no newline translation), so a
+    path with a carriage return or non-UTF-8 bytes round-trips exactly into later arguments."""
+    r = subprocess.run(["git", "--no-optional-locks", "-c", "diff.interHunkContext=0",
+                        "-C", str(CLONES / repo), *args],
+                       input=None if stdin is None else stdin.encode("utf-8", "surrogateescape"),
+                       capture_output=True, timeout=timeout, env=GIT_ENV)
+    decode = lambda b: b.decode("utf-8", "surrogateescape")
+    return r.returncode, decode(r.stdout), decode(r.stderr)
 
 
 def window(ts):
@@ -168,8 +173,8 @@ def changed_sites(repo, h):
             rc, old, se = git(repo, "show", "--no-textconv", f"{h}^:{old_path}")
             if rc:  # an unreadable old blob would misplace every hunk: fail the draw visibly
                 raise RuntimeError(f"old blob {old_path}: " + se.strip()[-200:])
-            old_lines = old.splitlines()
-        for line in diff.splitlines():
+            old_lines = old.split("\n")  # git numbers lines by LF only
+        for line in diff.split("\n"):
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)
             if not m:
                 continue
@@ -238,7 +243,7 @@ def blame_one(c):
                 failed.append({"path": path, "stderr": se.strip()[-200:]})
                 continue
             sha = None
-            for line in so.splitlines():
+            for line in so.split("\n"):
                 m = re.match(r"^([0-9a-f]{40}) \d+ \d+", line)
                 if m:
                     sha = m.group(1)

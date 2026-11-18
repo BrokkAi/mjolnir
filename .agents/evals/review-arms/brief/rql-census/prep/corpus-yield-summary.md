@@ -1,4 +1,4 @@
-# Local Rust corpus yield screen (2026-11-18, dbcece95; v12 after twenty-four review rounds)
+# Local Rust corpus yield screen (2026-11-18, dbcece95; v13 after twenty-seven review rounds)
 
 Candidates: brokkbench sft-tools-commits/rust (993 repos), records with test_files>=1, non_test_files>=1 and a bug word in the oneline: 9,647. Clones /nfs/morannon/nvme/repo-clones, read only.
 Method: `scan.py` dates every candidate and blames the fix's deleted non-test .rs lines at fix^ on a capped sample (10 per repo per window from 2024; 300 pre-2024 globally). A fix with any failed blame is an incomplete trace and never strong. `yield_rank.py` turns the samples into per-repo yields, counting distinct introducing changes once per repo across the window and also giving yields capped at the tracing stop of 25: upper bound x bug precision 0.85 x admission 31/67.
