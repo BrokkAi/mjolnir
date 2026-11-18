@@ -2214,8 +2214,10 @@ fn github_tokens_sync_to_every_session_target() {
 // Hard-won: c94c68c0: the shared Claude refresh grant could expire during a long-running session
 #[test]
 fn a_refused_claude_login_offers_the_long_lived_token() {
-    use mj_core::config::HarnessKind;
-    use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+    use mj_core::config::{HarnessKind, HarnessProfile};
+    use mj_core::credentials::{
+        CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
+    };
 
     let result = CredentialSyncResult {
         profile_id: "claude-max".into(),
@@ -2223,12 +2225,12 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
             session_id: "018f9dd2-a3b4".into(),
             ordinal: 1,
             reason: CredentialSyncReason::AuthenticationFailure,
-            login_fingerprint: None,
+            login_fingerprint: Some("failed-token".into()),
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
-            unchanged_login: None,
-            current_access_token: None,
+            unchanged_login: Some(CredentialSnapshot::of(HarnessKind::Claude, b"fixture")),
+            current_access_token: Some("failed-token".into()),
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -2236,18 +2238,18 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         partial: false,
     };
 
-    let refused = |harness| {
+    let home = tempfile::tempdir().unwrap();
+    let notice = |result: &CredentialSyncResult, harness| {
+        let profile = HarnessProfile::new(harness, home.path().to_path_buf());
+        let mut registry = RejectedLogins::default();
+        registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
+        let verdict = registry.conclude(result, Some(&profile));
         CredentialSyncNotices::default()
-            .leveled_notice(
-                &result,
-                Some(harness),
-                &State::default(),
-                Some(&mj_core::credentials::LoginFailureVerdict::Refused),
-            )
+            .leveled_notice(result, Some(harness), &State::default(), verdict.as_ref())
             .unwrap()
             .text
     };
-    let claude = refused(HarnessKind::Claude);
+    let claude = notice(&result, HarnessKind::Claude);
     assert!(
         claude.ends_with(
             "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
@@ -2256,10 +2258,18 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
     );
 
     // Only Claude can rotate ahead of expiry this way.
-    let codex = refused(HarnessKind::Codex);
+    let codex = notice(&result, HarnessKind::Codex);
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
         "{codex}"
+    );
+
+    let mut stale = result.clone();
+    stale.outcomes[0].current_access_token = Some("renewed-token".into());
+    let stale = notice(&stale, HarnessKind::Claude);
+    assert!(
+        stale.contains("stale login") && !stale.contains("mj login"),
+        "{stale}"
     );
 
     // A failed check cannot establish that signing in again will help.
@@ -2274,9 +2284,7 @@ fn a_refused_claude_login_offers_the_long_lived_token() {
         partial: false,
         ..result
     };
-    let claude_failure = CredentialSyncNotices::default()
-        .notice(&failed, Some(HarnessKind::Claude), &State::default())
-        .unwrap();
+    let claude_failure = notice(&failed, HarnessKind::Claude);
     assert!(!claude_failure.contains("mj login"), "{claude_failure}");
 }
 

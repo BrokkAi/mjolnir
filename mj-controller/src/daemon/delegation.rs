@@ -494,7 +494,7 @@ async fn run(
                 None => { quota_open = false; tracing::error!("delegation quota service stopped"); }
             },
             _ = tick.tick() => {
-                policy.tick().await;
+                policy.tick();
             },
         }
         // Coalesced receives can be immediately ready without Tokio's channel budget.
