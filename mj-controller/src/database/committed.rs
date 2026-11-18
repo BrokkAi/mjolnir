@@ -62,6 +62,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("startup_steps", "startup", "session_id"),
         ("subagent_handbacks", "report", "child_session_id"),
         ("materialized_sessions", "turn", "session_id"),
+        ("api_events", "turn", "session_id"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
         // an unrelated optional table. Its own read/write still reports damage.
@@ -78,6 +79,11 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
             ("DELETE", &["OLD"][..]),
             ("UPDATE", &["OLD", "NEW"][..]),
         ] {
+            // A projection page can resolve a form and raise an identical
+            // form before committing, leaving the pending JSON unchanged.
+            if table == "api_events" && event != "INSERT" {
+                continue;
+            }
             let calls = references
                 .iter()
                 .map(|reference| {
@@ -91,12 +97,15 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
                     format!("SELECT mj_changed_record('{kind}', {key});")
                 })
                 .collect::<String>();
-            let condition = if kind == "turn" && event == "UPDATE" {
+            let condition = if table == "api_events" {
+                " WHEN json_extract(NEW.body, '$.type') IN ('input_required', 'input_resolved')"
+            } else if kind == "turn" && event == "UPDATE" {
                 " WHEN OLD.session_id IS NOT NEW.session_id
                    OR OLD.execution_state IS NOT NEW.execution_state
                    OR OLD.running_started_at_ms IS NOT NEW.running_started_at_ms
                    OR OLD.active_turn_json IS NOT NEW.active_turn_json
-                   OR OLD.last_turn_outcome_json IS NOT NEW.last_turn_outcome_json"
+                   OR OLD.last_turn_outcome_json IS NOT NEW.last_turn_outcome_json
+                   OR OLD.pending_elicitations_json IS NOT NEW.pending_elicitations_json"
             } else {
                 ""
             };
@@ -145,6 +154,7 @@ pub struct CommittedTurn {
     pub state: materialized::MaterializedTurnState,
     /// Read once when a failed turn changes, never on each observation.
     pub failed_message: Option<String>,
+    pub pending_form_times: BTreeMap<String, i64>,
 }
 
 impl CommittedTurn {
@@ -169,9 +179,40 @@ impl CommittedTurn {
             }
             _ => None,
         };
+        let mut pending_forms = connection.prepare(
+            "SELECT json_extract(request.value, '$.id')
+             FROM materialized_sessions AS session, json_each(session.pending_elicitations_json) AS request
+             WHERE session.session_id = ?1",
+        )?;
+        let mut pending_form_times = BTreeMap::new();
+        for request in pending_forms.query_map([id], |row| row.get::<_, String>(0))? {
+            let request = request?;
+            // An ID may be reused after a response. Within the current
+            // request, later body updates preserve when it was raised.
+            let raised = connection
+                .query_row(
+                    "SELECT recorded_at_ms FROM api_events
+                     WHERE session_id = ?1
+                       AND json_extract(body, '$.type') = 'input_required'
+                       AND json_extract(body, '$.data.request.id') = ?2
+                       AND seq > COALESCE((
+                           SELECT MAX(seq) FROM api_events
+                           WHERE session_id = ?1
+                             AND json_extract(body, '$.type') = 'input_resolved'
+                             AND json_extract(body, '$.data.elicitation_id') = ?2
+                       ), 0)
+                     ORDER BY seq LIMIT 1",
+                    params![id, request],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            pending_form_times.insert(request, raised);
+        }
         Ok(Some(Self {
             state,
             failed_message,
+            pending_form_times,
         }))
     }
 }
@@ -683,6 +724,69 @@ mod tests {
                 .contains_key("first")
         );
         assert!(running.turns.contains_key("first"));
+    }
+
+    #[test]
+    fn committed_form_time_uses_the_recorded_raise_across_updates_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        save_session_to(&path, &super::super::tests::session("session", "project")).unwrap();
+        let owner = start_database_writer_at(&path, false).unwrap();
+        use mj_core::elicitation::ElicitationRequest;
+        use mj_core::storage::ApiEventData;
+
+        for (raised_at, expected) in [(11, 11), (99, 11), (111, 111)] {
+            owner
+                .writer
+                .execute("record request and activity", move |connection| {
+                    let tx = connection.transaction()?;
+                    let request = ElicitationRequest {
+                        id: "form".into(),
+                        message: raised_at.min(99_i64).to_string(),
+                        title: None,
+                        description: None,
+                        fields: vec![],
+                        tool_permission: None,
+                    };
+                    if raised_at == 111 {
+                        super::super::events::insert_api_event(
+                            &tx,
+                            "session",
+                            110,
+                            &ApiEventData::InputResolved {
+                                elicitation_id: request.id.clone(),
+                                turn_id: None,
+                                action: "submit".into(),
+                            },
+                        )?;
+                    }
+                    tx.execute(
+                        "UPDATE materialized_sessions SET pending_elicitations_json = ?1,
+                             last_activity_at_ms = ?2 WHERE session_id = 'session'",
+                        params![serde_json::to_string(&[&request])?, raised_at],
+                    )?;
+                    super::super::events::insert_api_event(
+                        &tx,
+                        "session",
+                        raised_at,
+                        &ApiEventData::InputRequired {
+                            request: Some(request),
+                            turn_id: None,
+                        },
+                    )?;
+                    tx.commit()?;
+                    Ok(())
+                })
+                .unwrap();
+            let state = owner.writer.committed_state().unwrap();
+            assert_eq!(state.turns["session"].pending_form_times["form"], expected);
+        }
+        owner.shutdown().unwrap();
+        let owner = start_database_writer_at(&path, false).unwrap();
+        assert_eq!(
+            owner.writer.committed_state().unwrap().turns["session"].pending_form_times["form"],
+            111,
+        );
     }
 
     #[test]

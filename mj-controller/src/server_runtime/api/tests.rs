@@ -36,6 +36,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         "child".into(),
         crate::database::CommittedTurn {
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
+            pending_form_times: Default::default(),
             failed_message: Some("owned failure details".into()),
         },
     );

@@ -200,6 +200,9 @@ pub struct NativeAgentSummary {
     pub pending_input_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_input_request_id: Option<String>,
+    /// Recorded activity for the daemon to order a native request.
+    #[serde(skip)]
+    pub pending_input_raised_at_ms: Option<i64>,
 }
 
 impl NativeAgentSummary {
@@ -213,6 +216,7 @@ impl NativeAgentSummary {
             pending_input: pending_input.is_some(),
             pending_input_message: pending_input.map(|request| request.message.clone()),
             pending_input_request_id: pending_input.map(|request| request.id.clone()),
+            pending_input_raised_at_ms: pending_input.and(view.projection.last_activity_at_ms),
         }
     }
 

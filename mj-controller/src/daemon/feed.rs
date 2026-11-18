@@ -209,7 +209,8 @@ impl RuntimeState {
         // History serialization never holds the operational owner. Only immutable
         // roots and the bounded active-operation projection cross that lock.
         let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        let (mut full, native_owners) = {
+        let reviews = self.review_host.views();
+        let (mut full, native_owners, committed) = {
             let owner = self.owner();
             owner.ensure_available()?;
             let controller = owner.controller();
@@ -244,6 +245,7 @@ impl RuntimeState {
                     .committed()
                     .map(|state| state.native_agents.clone())
                     .unwrap_or_default(),
+                owner.committed_snapshot(),
             )
         };
         full.metadata.container_upgrade_sessions =
@@ -302,7 +304,7 @@ impl RuntimeState {
             .iter()
             .map(|w| (w.id.clone(), w.name.clone()))
             .collect();
-        full.metadata.reviews = self.review_host.views();
+        full.metadata.reviews = reviews;
         full.metadata.notices = self
             .notices
             .lock()
@@ -334,7 +336,7 @@ impl RuntimeState {
             history.full.metadata.launch_recency.clone()
         };
         let mut source = full.clone();
-        super::attention::update(&history.attention_source, &mut full);
+        super::attention::update(&history.attention_source, &mut full, committed.as_deref());
         // Preserve decorated rows as well as the attention tree across polls.
         let mut sessions = history.full.sessions.clone();
         for (id, view) in history.attention_source.sessions.changes(&source.sessions) {
@@ -979,6 +981,7 @@ mod tests {
                     pending_input: false,
                     pending_input_message: None,
                     pending_input_request_id: None,
+                    pending_input_raised_at_ms: None,
                 },
             )
         };
@@ -1190,6 +1193,7 @@ mod tests {
             pending_input: false,
             pending_input_message: None,
             pending_input_request_id: None,
+            pending_input_raised_at_ms: None,
         };
         full.native_agents.insert(view_id.clone(), summary.clone());
         let mut native_owners = NativeOwners::new();

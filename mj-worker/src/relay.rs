@@ -472,6 +472,7 @@ impl DurableRelay {
             if snapshot.format_version < 27 {
                 seed_legacy_notification_stack(&mut snapshot);
             }
+            seed_missing_notification_time(&mut snapshot);
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -514,6 +515,7 @@ impl DurableRelay {
                 snapshot.latest_ordinal = restored.event_frontier;
                 if let Some(stack) = restored.notification_stack {
                     snapshot.notification_stack = Arc::new(stack);
+                    seed_missing_notification_time(&mut snapshot);
                 } else {
                     seed_legacy_notification_stack(&mut snapshot);
                 }
@@ -2024,7 +2026,13 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
     let mut entries = Vec::new();
     if let Some(request) = snapshot.open_request() {
         entries.push(NotificationStackEntry {
-            completed_at_ms: 0,
+            completed_at_ms: snapshot
+                .assessment
+                .as_deref()
+                .filter(|assessment| {
+                    assessment.completed_ordinal == request.question.completed_ordinal
+                })
+                .map_or(0, |assessment| assessment.completed_at_ms),
             completed_ordinal: request.question.completed_ordinal,
             kind: NotificationKind::NeedsInput,
             message: request
@@ -2046,7 +2054,7 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
             .any(|entry| entry.completed_ordinal == assessment.completed_ordinal)
     {
         entries.push(NotificationStackEntry {
-            completed_at_ms: 0,
+            completed_at_ms: assessment.completed_at_ms,
             completed_ordinal: assessment.completed_ordinal,
             kind: NotificationKind::Important,
             message: snapshot
@@ -2061,5 +2069,23 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
             revision: snapshot.latest_ordinal,
             entries,
         });
+    }
+}
+
+/// Older stack snapshots omitted the time. The matching assessment retains
+/// the original completion event's time even when its journal was collected.
+fn seed_missing_notification_time(snapshot: &mut RelaySnapshot) {
+    if let Some(assessment) = snapshot.assessment.as_deref()
+        && let Some(index) = snapshot
+            .notification_stack
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.completed_at_ms == 0
+                    && entry.completed_ordinal == assessment.completed_ordinal
+            })
+    {
+        Arc::make_mut(&mut snapshot.notification_stack).entries[index].completed_at_ms =
+            assessment.completed_at_ms;
     }
 }

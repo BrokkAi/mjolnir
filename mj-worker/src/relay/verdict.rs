@@ -1710,6 +1710,15 @@ mod settled_task_tests {
                 .finish_question_locator(question.completed_ordinal, None)
                 .unwrap()
         );
+        assert!(important.completed_at_ms > 0 && question.completed_at_ms > 0);
+        let times: Vec<_> = relay
+            .snapshot
+            .notification_stack
+            .entries
+            .iter()
+            .map(|entry| entry.completed_at_ms)
+            .collect();
+        assert_eq!(times, [important.completed_at_ms, question.completed_at_ms]);
         let stack = relay.snapshot.notification_stack.clone();
         assert_eq!(
             stack

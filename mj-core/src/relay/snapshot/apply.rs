@@ -81,12 +81,13 @@ fn clear_notifications(snapshot: &mut RelaySnapshot, ordinal: u64) {
 fn record_notification(
     snapshot: &mut RelaySnapshot,
     completed_ordinal: u64,
+    completed_at_ms: i64,
     kind: NotificationKind,
     message: EntryMessage,
     ordinal: u64,
 ) {
     let entry = NotificationStackEntry {
-        completed_at_ms: 0,
+        completed_at_ms,
         completed_ordinal,
         kind,
         message,
@@ -129,10 +130,11 @@ fn settle_question_target(
     }) {
         return;
     }
-    if entry.is_some() {
+    if let Some(entry) = entry {
         record_notification(
             snapshot,
             completed_ordinal,
+            entry.completed_at_ms,
             NotificationKind::NeedsInput,
             target.map_or(EntryMessage::None, |id| EntryMessage::Found(id.to_owned())),
             ordinal,
@@ -365,6 +367,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             {
                 bail!("assessment completion changed");
             }
+            let completed_at_ms = current.completed_at_ms;
             if assessment.action == Some(crate::assessment::Action::RetryProvider)
                 && assessment.status == crate::assessment::Status::Scheduled
             {
@@ -409,6 +412,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     record_notification(
                         snapshot,
                         completed,
+                        completed_at_ms,
                         NotificationKind::NeedsInput,
                         message,
                         event.ordinal,
@@ -432,6 +436,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         record_notification(
                             snapshot,
                             completed,
+                            completed_at_ms,
                             NotificationKind::Important,
                             message,
                             event.ordinal,
@@ -448,7 +453,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
             }
             snapshot.retry_assessment = None;
-            snapshot.assessment = Some(std::sync::Arc::new((**assessment).clone()));
+            let mut assessment = (**assessment).clone();
+            assessment.completed_at_ms = completed_at_ms;
+            snapshot.assessment = Some(Arc::new(assessment));
         }
         RelayObservation::SteeringUnconfirmed {
             command_id,
@@ -2274,6 +2281,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 record_notification(
                     snapshot,
                     event.ordinal,
+                    event.recorded_at_ms,
                     NotificationKind::NeedsInput,
                     message,
                     event.ordinal,

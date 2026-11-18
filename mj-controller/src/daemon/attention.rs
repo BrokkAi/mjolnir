@@ -1,4 +1,5 @@
 //! The sole person-facing classification, applied at the common runtime publication.
+use crate::database::CommittedState;
 use mj_client::runtime_feed::{CardForm, NotificationCard, RuntimeProjection};
 use mj_core::attention::{
     AssessmentAttention, EntryMessage, NotificationDismissal, NotificationKind,
@@ -22,7 +23,11 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
 
 /// Only publication calls this rule. Raw owner views are compared before attention
 /// is overlaid, so the overlay cannot make an unchanged input appear dirty.
-pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection) {
+pub(super) fn update(
+    previous: &RuntimeProjection,
+    next: &mut RuntimeProjection,
+    committed: Option<&CommittedState>,
+) {
     let global = previous.metadata.config != next.metadata.config
         || previous.metadata.reviews != next.metadata.reviews
         || previous.metadata.lifecycles != next.metadata.lifecycles
@@ -97,7 +102,7 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
         holders,
         cards,
         held_questions,
-    } = project_states(next, ids.clone());
+    } = project_states(next, ids.clone(), committed);
     next.metadata.form_holders = previous.metadata.form_holders.clone();
     next.metadata.session_attention = previous.metadata.session_attention.clone();
     next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
@@ -464,7 +469,7 @@ fn project_ids(
     runtime: &RuntimeProjection,
     ids: BTreeSet<String>,
 ) -> BTreeMap<String, SessionAttention> {
-    project_states(runtime, ids).states
+    project_states(runtime, ids, None).states
 }
 
 struct AttentionProjection {
@@ -475,7 +480,11 @@ struct AttentionProjection {
     held_questions: BTreeSet<String>,
 }
 
-fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> AttentionProjection {
+fn project_states(
+    runtime: &RuntimeProjection,
+    ids: BTreeSet<String>,
+    committed: Option<&CommittedState>,
+) -> AttentionProjection {
     use SessionAttention::*;
     let mut reviews = BTreeMap::new();
     for review in &runtime.metadata.reviews {
@@ -680,7 +689,7 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                     raised_question.as_ref(),
                     holder,
                     native_forms.get(id.as_str()).copied(),
-                    record,
+                    committed,
                 )
             } else {
                 None
@@ -707,10 +716,39 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 // several reviewer roles contributed findings.
                 card.holder = Some(review.session_id.clone());
                 card.form = Some(CardForm {
-                    raised_at_ms: 0,
+                    raised_at_ms: committed.map_or(0, |state| {
+                        review
+                            .reviewer_children()
+                            .chain(review.child_session_id.as_deref())
+                            .filter_map(|child| {
+                                state
+                                    .subagent_reports
+                                    .get(child)
+                                    .and_then(|report| report.handback.as_ref())
+                                    .map(|handback| handback.recorded_at_ms)
+                                    .or_else(|| {
+                                        state
+                                            .turns
+                                            .get(child)
+                                            .and_then(|turn| turn.state.2.as_ref())
+                                            .map(|outcome| outcome.completed_at_ms)
+                                    })
+                            })
+                            .max()
+                            .unwrap_or(0)
+                    }),
                     request_id: format!("review-verdict.{reviewer}.findings"),
                     message: review.status.clone(),
                 });
+            }
+            if let Some(card) = &mut card {
+                card.since_ms = card
+                    .entries
+                    .iter()
+                    .map(|entry| entry.completed_at_ms)
+                    .chain(card.form.iter().map(|form| form.raised_at_ms))
+                    .min()
+                    .unwrap_or(0);
             }
             let state = match card.as_ref().map(|card| card.badge) {
                 Some(NotificationKind::NeedsInput) => NeedsInput,
@@ -826,72 +864,86 @@ fn notification_card(
     raised_question: Option<&mj_core::assessment::InferredQuestion>,
     holder: Option<&String>,
     native: Option<(&String, &mj_core::native_agent::NativeAgentSummary)>,
-    record: &mj_core::state::SessionRecord,
+    committed: Option<&CommittedState>,
 ) -> Option<NotificationCard> {
+    let record = runtime.records.get(id)?;
     let live = runtime
         .sessions
         .get(id)
         .and_then(|view| view.operational.as_deref())
         // A parked parent can still own a child's form.
         .filter(|_| record.state != mj_core::state::SessionState::Parked);
-    let (entries, dismissal) =
-        if let Some(live) = live.filter(|live| live.supports_notification_stack()) {
-            let stack = &live.notification_stack;
-            let entries: Vec<_> = stack
-                .entries
-                .iter()
-                .filter(|entry| match entry.kind {
-                    NotificationKind::Important => {
-                        entry.completed_ordinal > record.viewed_through_event_ordinal
-                    }
-                    NotificationKind::NeedsInput => raised_question.is_some(),
-                })
-                .cloned()
-                .collect();
-            let dismissal = if entries
-                .iter()
-                .any(|entry| entry.kind == NotificationKind::NeedsInput)
-            {
-                Some(NotificationDismissal::Stack {
-                    revision: stack.revision,
-                })
-            } else {
-                entries
-                    .last()
-                    .map(|entry| NotificationDismissal::ReadThrough(entry.completed_ordinal))
-            };
-            (entries, dismissal)
+    let (entries, dismissal) = if let Some(live) =
+        live.filter(|live| live.supports_notification_stack())
+    {
+        let stack = &live.notification_stack;
+        let entries: Vec<_> = stack
+            .entries
+            .iter()
+            .filter(|entry| match entry.kind {
+                NotificationKind::Important => {
+                    entry.completed_ordinal > record.viewed_through_event_ordinal
+                }
+                NotificationKind::NeedsInput => raised_question.is_some(),
+            })
+            .cloned()
+            .collect();
+        let dismissal = if entries
+            .iter()
+            .any(|entry| entry.kind == NotificationKind::NeedsInput)
+        {
+            Some(NotificationDismissal::Stack {
+                revision: stack.revision,
+            })
         } else {
-            let entry = if let Some(question) = raised_question {
-                let message = if let Some(target) = live.and_then(|live| live.question_message()) {
-                    EntryMessage::Found(target.to_owned())
-                } else if live.is_some_and(|live| live.supports_open_request()) {
-                    EntryMessage::None
-                } else {
-                    legacy_completed_reply(runtime, id, question.completed_ordinal)
-                };
-                Some(NotificationStackEntry {
-                    completed_at_ms: 0,
-                    completed_ordinal: question.completed_ordinal,
-                    kind: NotificationKind::NeedsInput,
-                    message,
-                })
-            } else if attention == SessionAttention::Important {
-                live.and_then(|live| live.assessment.as_ref())
-                    .map(|assessment| NotificationStackEntry {
-                        completed_at_ms: 0,
-                        completed_ordinal: assessment.completed_ordinal,
-                        kind: NotificationKind::Important,
-                        message: legacy_completed_reply(runtime, id, assessment.completed_ordinal),
-                    })
-            } else {
-                None
-            };
-            let dismissal = entry
-                .as_ref()
-                .and_then(|_| dismissal(runtime, id, attention));
-            (entry.into_iter().collect(), dismissal)
+            entries
+                .last()
+                .map(|entry| NotificationDismissal::ReadThrough(entry.completed_ordinal))
         };
+        (entries, dismissal)
+    } else {
+        let entry = if let Some(question) = raised_question {
+            let message = if let Some(target) = live.and_then(|live| live.question_message()) {
+                EntryMessage::Found(target.to_owned())
+            } else if live.is_some_and(|live| live.supports_open_request()) {
+                EntryMessage::None
+            } else {
+                legacy_completed_reply(runtime, id, question.completed_ordinal)
+            };
+            Some(NotificationStackEntry {
+                completed_at_ms: live
+                    .and_then(|live| live.assessment.as_deref())
+                    .filter(|assessment| assessment.completed_ordinal == question.completed_ordinal)
+                    .map(|assessment| assessment.completed_at_ms)
+                    .or_else(|| {
+                        runtime
+                            .transcripts
+                            .get(id)
+                            .and_then(|tail| tail.header.last_turn_outcome.as_ref())
+                            .filter(|turn| turn.completed_ordinal == question.completed_ordinal)
+                            .map(|turn| turn.completed_at_ms)
+                    })
+                    .unwrap_or(0),
+                completed_ordinal: question.completed_ordinal,
+                kind: NotificationKind::NeedsInput,
+                message,
+            })
+        } else if attention == SessionAttention::Important {
+            live.and_then(|live| live.assessment.as_ref())
+                .map(|assessment| NotificationStackEntry {
+                    completed_at_ms: assessment.completed_at_ms,
+                    completed_ordinal: assessment.completed_ordinal,
+                    kind: NotificationKind::Important,
+                    message: legacy_completed_reply(runtime, id, assessment.completed_ordinal),
+                })
+        } else {
+            None
+        };
+        let dismissal = entry
+            .as_ref()
+            .and_then(|_| dismissal(runtime, id, attention));
+        (entry.into_iter().collect(), dismissal)
+    };
     let badge = if attention == SessionAttention::NeedsInput {
         NotificationKind::NeedsInput
     } else if entries.is_empty() {
@@ -900,6 +952,13 @@ fn notification_card(
         NotificationKind::Important
     };
     let direct_form = holder.and_then(|holder| {
+        let raised_at = |request: &str| {
+            committed
+                .and_then(|state| state.turns.get(holder))
+                .and_then(|turn| turn.pending_form_times.get(request))
+                .copied()
+                .unwrap_or(0)
+        };
         runtime
             .transcripts
             .get(holder)
@@ -912,7 +971,7 @@ fn notification_card(
                         !runtime.subagents.contains_key(holder) || !request.goes_to_parent()
                     })
                     .map(|request| CardForm {
-                        raised_at_ms: 0,
+                        raised_at_ms: raised_at(&request.id),
                         request_id: request.id.clone(),
                         message: request.message.clone(),
                     })
@@ -926,9 +985,10 @@ fn notification_card(
                     .rev()
                     .find(|question| question.role == *holder && !question.request.goes_to_parent())
                     .map(|question| {
+                        let raised_at_ms = raised_at(&question.request.id);
                         let request = question.session_request();
                         CardForm {
-                            raised_at_ms: 0,
+                            raised_at_ms,
                             request_id: request.id,
                             message: request.message,
                         }
@@ -952,7 +1012,7 @@ fn notification_card(
         (
             Some(native.agent.owner_session_id.clone()),
             Some(CardForm {
-                raised_at_ms: 0,
+                raised_at_ms: native.pending_input_raised_at_ms.unwrap_or(0),
                 request_id: format!(
                     "native.{}:{source}.{}.{request}",
                     source.len(),
@@ -978,6 +1038,14 @@ fn notification_card(
 mod tests {
     use super::*;
     use mj_core::state::{MaterializedSession, ProjectionWindow, SessionState};
+
+    fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> AttentionProjection {
+        super::project_states(runtime, ids, None)
+    }
+
+    fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection) {
+        super::update(previous, next, None);
+    }
 
     // Hard-won: 8dd7f6384: clearing a visible Important entry dismissed a held question.
     #[test]
@@ -1027,13 +1095,13 @@ mod tests {
             revision: 11,
             entries: vec![
                 NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 100,
                     completed_ordinal: 7,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
                 NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 20,
                     completed_ordinal: 10,
                     kind: NotificationKind::NeedsInput,
                     message: EntryMessage::None,
@@ -1072,6 +1140,7 @@ mod tests {
         let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
         assert_eq!(card.badge, NotificationKind::Important);
         assert_eq!(card.entries.len(), 1);
+        assert_eq!(card.since_ms, 100, "held questions do not order the card");
         let Some(NotificationDismissal::ReadThrough(through)) = card.dismissal else {
             panic!("Clear must leave the held question intact");
         };
@@ -1228,6 +1297,7 @@ mod tests {
                 pending_input: true,
                 pending_input_message: Some("Approve the native action?".into()),
                 pending_input_request_id: Some("first-request".into()),
+                pending_input_raised_at_ms: Some(42),
             },
         );
         let attention = project(&runtime);
@@ -1241,6 +1311,28 @@ mod tests {
         let first_request = format!("native.{}:{id}.1.first-request", id.len());
         assert_eq!(form.request_id, first_request);
         assert_eq!(form.message, "Approve the native action?");
+        assert_eq!(form.raised_at_ms, 42);
+        assert_eq!(card.since_ms, 42);
+
+        let mut mixed = runtime.clone();
+        let mut live = mj_core::relay::RelaySnapshot::new("parent".into()).operational_state();
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL);
+        live.notification_stack = mj_core::attention::NotificationStack {
+            revision: 11,
+            entries: vec![NotificationStackEntry {
+                completed_at_ms: 60,
+                completed_ordinal: 10,
+                kind: NotificationKind::Important,
+                message: EntryMessage::None,
+            }],
+        }
+        .into();
+        mixed.sessions.get_mut("parent").unwrap().operational = Some(live.into());
+        let mixed = project_states(&mixed, BTreeSet::from(["parent".into()]));
+        let mixed = &mixed.cards["parent"];
+        assert_eq!(mixed.entries.len(), 1);
+        assert_eq!(mixed.since_ms, 42);
+
         assert!(!projection.cards.contains_key(&id));
         runtime
             .native_agents
@@ -1315,13 +1407,13 @@ mod tests {
             revision: 14,
             entries: vec![
                 NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 20,
                     completed_ordinal: 10,
                     kind: NotificationKind::Important,
                     message: EntryMessage::Found("agent:earlier".into()),
                 },
                 NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 30,
                     completed_ordinal: 11,
                     kind: NotificationKind::NeedsInput,
                     message: EntryMessage::Found("agent:question".into()),
@@ -1330,7 +1422,21 @@ mod tests {
         }
         .into();
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
-        let materialized = MaterializedSession::empty("parent");
+        let mut materialized = MaterializedSession::empty("parent");
+        materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            command_id: "question".into(),
+            completed_ordinal: 11,
+            completed_at_ms: 30,
+            accepted_ordinal: None,
+            turn_start_position: None,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        });
         next.transcripts.insert(
             "parent".into(),
             mj_client::runtime_feed::SessionTail::of(
@@ -1353,6 +1459,7 @@ mod tests {
         let card = publish(&mut previous, &mut next).unwrap();
         assert_eq!(card.badge, NotificationKind::Important);
         assert_eq!(card.entries, &worker.notification_stack.entries[..1]);
+        assert_eq!(card.since_ms, 20);
         assert_eq!(
             next.metadata.session_attention["parent"],
             SessionAttention::Important
@@ -1380,6 +1487,14 @@ mod tests {
             .get_mut("parent")
             .unwrap()
             .notifications_ignored = false;
+        worker.harness_turn = None;
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
+        let mixed = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(mixed.entries.len(), 2);
+        assert_eq!(mixed.since_ms, 20);
+
+        worker.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
         next.records
             .get_mut("parent")
             .unwrap()
@@ -1391,11 +1506,16 @@ mod tests {
         let card = publish(&mut previous, &mut next).unwrap();
         assert_eq!(card.badge, NotificationKind::NeedsInput);
         assert_eq!(card.entries, &worker.notification_stack.entries[1..]);
+        assert_eq!(
+            card.since_ms, 30,
+            "read Important entries do not order the card"
+        );
 
         worker.relay_protocol_version = Some(RELAY_NOTIFICATION_STACK_PROTOCOL - 1);
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.into());
         let legacy = publish(&mut previous, &mut next).unwrap();
         assert_eq!(legacy.entries, card.entries);
+        assert_eq!(legacy.since_ms, 30);
         assert!(matches!(
             legacy.dismissal,
             Some(NotificationDismissal::Question(_))
@@ -2142,6 +2262,7 @@ mod tests {
                 pending_input: true,
                 pending_input_message: None,
                 pending_input_request_id: None,
+                pending_input_raised_at_ms: None,
             },
         );
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
