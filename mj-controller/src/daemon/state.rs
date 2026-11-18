@@ -793,7 +793,7 @@ impl RuntimeState {
         self.revisions.allocate()
     }
 
-    pub(super) fn publish_revision(&self) -> u64 {
+    pub(crate) fn publish_revision(&self) -> u64 {
         self.revisions.publish()
     }
 

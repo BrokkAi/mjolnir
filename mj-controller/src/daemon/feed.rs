@@ -32,6 +32,7 @@ const SCOPED_VIEWS: usize = 32;
 impl RuntimeHistory {
     fn cursor(&self) -> RuntimeCursor {
         RuntimeCursor {
+            alert_sequence: 0,
             incarnation: self.incarnation.clone(),
             sequence: self.sequence,
             subagent_parents: Default::default(),
@@ -412,15 +413,54 @@ impl RuntimeState {
         revisions.borrow_and_update();
         let mut current = self.capture_runtime()?;
         current.subagent_parents = subagent_parents.clone();
-        if wait && cursor.as_ref() == Some(&current) {
+        if wait
+            && cursor.as_ref().is_some_and(|cursor| {
+                cursor.incarnation == current.incarnation
+                    && cursor.sequence == current.sequence
+                    && cursor.subagent_parents == current.subagent_parents
+            })
+        {
             let _ = tokio::time::timeout(Duration::from_secs(30), revisions.changed()).await;
             self.capture_runtime()?;
         }
-        Ok(self
-            .feed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .frame_for_subagent_parents(cursor.as_ref(), &subagent_parents))
+        // Read outside the feed lock and off the runtime thread. The durable
+        // cursor survives a daemon incarnation; history retention never caps alerts.
+        let after = cursor.as_ref().map(|cursor| cursor.alert_sequence);
+        let (high, events) =
+            crate::web_push::blocking(move || crate::database::alert_events_since(after)).await?;
+        let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        let metadata = history.full.metadata.clone();
+        let mut frame = history.frame_for_subagent_parents(cursor.as_ref(), &subagent_parents);
+        if matches!(frame, RuntimeFrame::ResetRequired) {
+            let mut cursor = history.cursor();
+            cursor.subagent_parents = subagent_parents.clone();
+            let projection = history
+                .scoped(cursor.sequence, &subagent_parents)
+                .context("current runtime scope")?
+                .projection
+                .clone();
+            frame = RuntimeFrame::Snapshot {
+                cursor,
+                projection: Box::new(projection),
+            };
+        }
+        match &mut frame {
+            RuntimeFrame::Snapshot { cursor, projection } => {
+                cursor.alert_sequence = high;
+                projection.metadata.alert_high_sequence = high;
+                projection.metadata.alert_events = events;
+            }
+            RuntimeFrame::Delta {
+                cursor, changes, ..
+            } => {
+                cursor.alert_sequence = high;
+                let metadata = changes.metadata.get_or_insert(metadata);
+                metadata.alert_high_sequence = high;
+                metadata.alert_events = events;
+            }
+            RuntimeFrame::ResetRequired => {}
+        }
+        Ok(frame)
     }
 }
 
@@ -428,6 +468,181 @@ impl RuntimeState {
 mod tests {
     use super::*;
     use mj_client::runtime_feed::RuntimeReplica;
+
+    #[tokio::test]
+    async fn alert_events_cross_the_protocol_107_feed_and_resume_after_restart() {
+        const CHILD: &str = "MJ_TEST_ALERT_EVENTS_FEED";
+        const TEST: &str = "alert_events_cross_the_protocol_107_feed_and_resume_after_restart";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "alert-events-107")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        assert_eq!(
+            mj_client::daemon::PROTOCOL_VERSION,
+            mj_client::daemon::ALERT_EVENTS_PROTOCOL
+        );
+        let _writer = crate::database::install_isolated_test_writer();
+        let state = super::super::tests::test_runtime_state();
+        let mut publication = RuntimeProjection::default();
+        publication.metadata.notification_cards = Some(Default::default());
+        crate::web_push::blocking(move || crate::database::push_reconcile(publication))
+            .await
+            .unwrap();
+        let mut replica = RuntimeReplica::default();
+        replica
+            .apply(state.runtime_changes(None, false).await.unwrap())
+            .unwrap();
+        let attached = replica.cursor.clone();
+        let mut publication = RuntimeProjection::default();
+        publication.metadata.notification_cards =
+            Some(mj_core::snapshot_map::SnapshotMap::from([(
+                "parent".into(),
+                mj_client::runtime_feed::NotificationCard {
+                    since_ms: 1,
+                    badge: mj_core::attention::NotificationKind::NeedsInput,
+                    entries: vec![],
+                    dismissal: None,
+                    holder: Some("child".into()),
+                    form: Some(mj_client::runtime_feed::CardForm {
+                        raised_at_ms: 1,
+                        request_id: "elicitation-1".into(),
+                        message: "Choose a branch".into(),
+                    }),
+                },
+            )]));
+        crate::web_push::blocking(move || crate::database::push_reconcile(publication))
+            .await
+            .unwrap();
+        // Alert publication may race the runtime snapshot: advancing the alert
+        // frontier is valid even when the runtime sequence has not changed.
+        let frame = state
+            .runtime_changes(attached.clone(), false)
+            .await
+            .unwrap();
+        let wire = serde_json::to_vec(&frame).unwrap();
+        replica
+            .apply(serde_json::from_slice(&wire).unwrap())
+            .unwrap();
+        let events = &replica.projection.metadata.alert_events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "child");
+        assert_eq!(events[0].text, "Choose a branch");
+        let high = replica.projection.metadata.alert_high_sequence;
+        // Publication, not the terminal, excludes managed children and muted rows.
+        let mut hidden = RuntimeProjection::default();
+        hidden.metadata.config = super::super::tests::runtime_test_config().into();
+        let mut record =
+            super::super::tests::runtime_test_session("hidden", "workspace", SessionState::Running);
+        hidden.records.insert("hidden".into(), record.clone());
+        let mut worker = mj_core::relay::RelaySnapshot::new("hidden".into()).operational_state();
+        worker.relay_protocol_version = Some(mj_core::relay::RELAY_NOTIFICATION_STACK_PROTOCOL);
+        worker.notification_stack = mj_core::attention::NotificationStack {
+            revision: 10,
+            entries: vec![mj_core::attention::NotificationStackEntry {
+                completed_at_ms: 1,
+                completed_ordinal: 10,
+                kind: mj_core::attention::NotificationKind::Important,
+                message: mj_core::attention::EntryMessage::None,
+            }],
+        }
+        .into();
+        let mut view = RuntimeSessionView::from_managed(
+            "hidden".into(),
+            mj_client::session::ManagedSessionView {
+                connected: true,
+                ..Default::default()
+            },
+        );
+        view.operational = Some(worker.into());
+        hidden.sessions.insert("hidden".into(), view);
+        hidden.subagents.insert(
+            "hidden".into(),
+            super::super::tests::runtime_test_subagent("hidden", "parent").into(),
+        );
+        super::super::attention::update(&RuntimeProjection::default(), &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        crate::web_push::blocking({
+            let hidden = hidden.clone();
+            move || crate::database::push_reconcile(hidden)
+        })
+        .await
+        .unwrap();
+        let previous = hidden.clone();
+        hidden.subagents.clear();
+        super::super::attention::update(&previous, &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .contains_key("hidden"),
+            "the same item is visible when it belongs to a top-level session"
+        );
+        let previous = hidden.clone();
+        record.notifications_ignored = true;
+        hidden.records.insert("hidden".into(), record);
+        super::super::attention::update(&previous, &mut hidden, None);
+        assert!(
+            hidden
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        crate::web_push::blocking(move || crate::database::push_reconcile(hidden))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::web_push::blocking(|| crate::database::alert_events_since(None))
+                .await
+                .unwrap()
+                .0,
+            high
+        );
+        replica
+            .apply(
+                state
+                    .runtime_changes(replica.cursor.clone(), false)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        // The replacement daemon has no runtime history for the old cursor.
+        let replacement = super::super::tests::test_runtime_state();
+        let resumed = replacement
+            .runtime_changes(replica.cursor.clone(), false)
+            .await
+            .unwrap();
+        replica.apply(resumed).unwrap();
+        assert_eq!(replica.projection.metadata.alert_high_sequence, high);
+        assert!(replica.projection.metadata.alert_events.is_empty());
+        // A client disconnected before the event catches up through a snapshot.
+        let resumed = replacement.runtime_changes(attached, false).await.unwrap();
+        replica.apply(resumed).unwrap();
+        assert_eq!(replica.projection.metadata.alert_events.len(), 1);
+        let mut fresh = RuntimeReplica::default();
+        fresh
+            .apply(replacement.runtime_changes(None, false).await.unwrap())
+            .unwrap();
+        assert_eq!(fresh.projection.metadata.alert_high_sequence, high);
+        assert!(fresh.projection.metadata.alert_events.is_empty());
+    }
 
     #[test]
     fn retained_cursors_replay_and_slow_or_replaced_clients_reset() {
@@ -444,6 +659,7 @@ mod tests {
         replica.apply(history.frame(Some(&original))).unwrap();
         assert_eq!(replica.projection, next);
         let wrong = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "previous-daemon".into(),
             sequence: 1,
             subagent_parents: Default::default(),
@@ -513,6 +729,7 @@ mod tests {
             SessionTailReply::NoTail
         );
         let replaced = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "previous-daemon".into(),
             sequence: held.sequence,
             subagent_parents: Default::default(),
@@ -522,6 +739,7 @@ mod tests {
             SessionTailReply::ResetRequired
         );
         let pruned = RuntimeCursor {
+            alert_sequence: 0,
             sequence: 0,
             ..held
         };

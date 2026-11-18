@@ -1705,10 +1705,6 @@ fn row_menu_opens_served_holder_without_child_details_and_rechecks_on_activation
         dashboard.waiting_child_of(&parent).as_deref(),
         Some("child-session")
     );
-    assert!(dashboard.notification_events(0).is_empty());
-    let due = dashboard.notification_events(2_000);
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].session_id, parent);
     dashboard.set_current_session(Some("child-session"));
     dashboard.begin_session_row_menu(&parent, (1, 1));
     let lines = drawn(&mut dashboard, 120, 40);
@@ -2355,7 +2351,7 @@ fn session_order_and_attention_are_derived_once_per_change_and_follow_it() {
     let settled = dashboard.session_view_derivations();
     for _ in 0..3 {
         drawn(&mut dashboard, 160, 40);
-        dashboard.notification_events(0);
+        dashboard.notification_events();
     }
     assert_eq!(
         dashboard.session_view_derivations(),
@@ -3440,8 +3436,18 @@ fn golden_attention_navigation() {
         .get_mut("done")
         .unwrap()
         .last_agent_message = Some("Review the deployment result".into());
-    assert!(important.notification_events(0).is_empty());
-    let notices = important.notification_events(2_000);
+    important.set_alert_events(0, Vec::new());
+    important.set_alert_events(
+        1,
+        vec![mj_client::runtime_feed::AlertEvent {
+            sequence: 1,
+            destination: "done".into(),
+            session_title: "ACP pretty name".into(),
+            text: "Review the deployment result".into(),
+            kind: mj_core::attention::NotificationKind::Important,
+        }],
+    );
+    let notices = important.notification_events();
     let notice = notices
         .iter()
         .find(|notice| notice.session_id == "done")
@@ -4330,9 +4336,9 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 /// the Sub-agents view while its parent's row read only "Working" with no
 /// attention mark, so nobody knew to look. A child's question marks its parent
 /// the way the parent's own question would: the row's symbol, the attention
-/// queue and a notification, and the row says whose question it is.
+/// queue, and the row says whose question it is.
 // Hard-won: 91244ea: a child permission question left its parent without an attention mark.
-// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls, one episode per parent or per session swallowed a child's later form, and a form behind the displayed one counted as seen.
+// Hard-won: #1451: the restored mark hid the parent's running turn from turn controls.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -4351,7 +4357,6 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     set_working(&mut dashboard, "child-session");
     dashboard.set_current_session(None);
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
-    assert!(dashboard.notification_events(0).is_empty());
 
     dashboard
         .session_details
@@ -4382,11 +4387,6 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         }
     );
     dashboard.command_session_override = None;
-    // The child's form is not on screen while only the parent is, so the
-    // episode is not marked seen and still rings below.
-    dashboard.set_current_session(Some(&parent));
-    assert!(dashboard.notification_events(0).is_empty());
-    dashboard.set_current_session(None);
 
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
     assert_eq!(
@@ -4416,16 +4416,6 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         "{}",
         lines[row + 1]
     );
-    assert!(dashboard.notification_events(0).is_empty());
-    let due = dashboard.notification_events(2_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(due[0].session_id, parent);
-    assert_eq!(due[0].level, AttentionLevel::Waiting);
-    assert_eq!(
-        due[0].body,
-        "Sub-agent \"Answer project codename\": Choose a path"
-    );
-
     // Answering the child's question clears the parent's mark.
     dashboard
         .session_details
@@ -4442,96 +4432,6 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
 
     dashboard.set_form_holders(Default::default());
-
-    // The parent's own question was seen; a child's form that arrives while
-    // it is still open has its own episode and still rings.
-    dashboard
-        .session_details
-        .get_mut(&parent)
-        .unwrap()
-        .pending_elicitations = vec![question(&parent)];
-    crate::test_support::serve_attention(
-        &mut dashboard,
-        &[&parent],
-        mj_core::attention::SessionAttention::NeedsInput,
-    );
-
-    dashboard.set_form_holders([(parent.clone(), parent.clone())].into_iter().collect());
-    assert_eq!(dashboard.waiting_child_of(&parent), None);
-    dashboard.set_current_session(Some(&parent));
-    assert!(dashboard.notification_events(3_000).is_empty());
-    dashboard.set_current_session(None);
-    dashboard
-        .session_details
-        .get_mut("child-session")
-        .unwrap()
-        .pending_elicitations = vec![child_form()];
-    crate::test_support::serve_attention(
-        &mut dashboard,
-        &[&parent, "child-session"],
-        mj_core::attention::SessionAttention::NeedsInput,
-    );
-
-    // Hard-won: 1be86a096: the parent's own form hid the child's notification episode.
-    dashboard.set_form_holders(
-        [
-            (parent.clone(), parent.clone()),
-            ("child-session".into(), "child-session".into()),
-        ]
-        .into_iter()
-        .collect(),
-    );
-    assert_eq!(dashboard.waiting_child_of(&parent), None);
-    assert!(dashboard.notification_events(3_000).is_empty());
-    let due = dashboard.notification_events(5_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(due[0].session_id, parent);
-    assert_eq!(
-        due[0].body,
-        "Sub-agent \"Answer project codename\": Choose a path"
-    );
-
-    // A second form from the same child, opened while the first one it was
-    // seen for is still open, rings too.
-    dashboard.set_current_session(Some("child-session"));
-    assert!(dashboard.notification_events(6_000).is_empty());
-    dashboard.set_current_session(None);
-    let mut second = child_form();
-    second.id = "child-session-second-question".into();
-    second.message = "Allow the command?".into();
-    dashboard
-        .session_details
-        .get_mut("child-session")
-        .unwrap()
-        .pending_elicitations
-        .push(second);
-    assert!(dashboard.notification_events(6_000).is_empty());
-    let due = dashboard.notification_events(8_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(
-        due[0].body,
-        "Sub-agent \"Answer project codename\": Allow the command?"
-    );
-
-    // The open conversation shows only its first form, so a form that
-    // arrives behind it while the child is on screen still rings.
-    dashboard.set_current_session(Some("child-session"));
-    let mut third = child_form();
-    third.id = "child-session-third-question".into();
-    third.message = "Approve the plan?".into();
-    dashboard
-        .session_details
-        .get_mut("child-session")
-        .unwrap()
-        .pending_elicitations
-        .push(third);
-    assert!(dashboard.notification_events(9_000).is_empty());
-    let due = dashboard.notification_events(11_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(
-        due[0].body,
-        "Sub-agent \"Answer project codename\": Approve the plan?"
-    );
 }
 
 /// Reviewers are listed in their own workspace, not among the Sub-agents,
@@ -4623,10 +4523,6 @@ fn a_childs_reviewer_question_reaches_the_top_level_row() {
         lines.iter().any(|line| line.contains("Reviewer question")),
         "{lines:#?}"
     );
-    assert!(dashboard.notification_events(0).is_empty());
-    let due = dashboard.notification_events(2_000);
-    assert_eq!(due.len(), 1, "{due:?}");
-    assert_eq!(due[0].session_id, parent);
     dashboard.step_attention(1);
     assert!(dashboard.reviewers_workspace_open());
     assert_eq!(dashboard.selected_session_id(), Some("reviewer-session"));

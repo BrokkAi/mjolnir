@@ -14,6 +14,10 @@ pub fn spawn_remote_dashboard_worker_poller(
         mut requests,
     } = channels;
     let metadata = &bootstrap.projection.metadata;
+    let (alerts_tx, alerts_rx) = tokio::sync::mpsc::unbounded_channel();
+    alerts_tx
+        .send((metadata.alert_high_sequence, Vec::new()))
+        .context("initialize alert stream")?;
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(metadata.reviews.clone());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(metadata.notices.clone());
     let (ui_requests_tx, ui_requests_rx) =
@@ -72,6 +76,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             let metadata = &snapshot.metadata;
+                            if alerts_tx.send((metadata.alert_high_sequence, metadata.alert_events.clone())).is_err() { return; }
                             send_if_changed(&config_tx, metadata.installed_config());
                             native.update_snapshot(snapshot.native_agents.clone());
                             health_tx.send_if_modified(|health| {
@@ -113,6 +118,7 @@ pub fn spawn_remote_dashboard_worker_poller(
         }
     });
     Ok(RemoteDashboardWorkerPoller {
+        alerts: alerts_rx,
         updates,
         control,
         shutdown,
@@ -285,19 +291,29 @@ pub(super) async fn poll_daemon_runtime(
 ) -> Result<mj_client::runtime_feed::RuntimeProjection> {
     loop {
         let parents = scopes.borrow_and_update().clone();
-        let (cursor, revision) = {
-            let mut replica = replica.lock().await;
-            if replica
-                .cursor
-                .as_ref()
-                .is_some_and(|cursor| cursor.subagent_parents != parents)
+        let (held_cursor, cursor, revision) =
             {
-                replica.cursor = None;
-            }
-            (replica.cursor.clone(), replica.projection.revision)
-        };
+                let replica = replica.lock().await;
+                // Invalidated history and scope changes keep the durable alert frontier.
+                let cursor = replica.cursor.clone().unwrap_or_else(|| {
+                    mj_client::runtime_feed::RuntimeCursor {
+                        alert_sequence: replica.projection.metadata.alert_high_sequence,
+                        incarnation: String::new(),
+                        sequence: 0,
+                        subagent_parents: parents.clone(),
+                    }
+                });
+                (
+                    replica.cursor.clone(),
+                    Some(cursor),
+                    replica.projection.revision,
+                )
+            };
         let mut daemon = mj_client::daemon::connect_existing().await?;
-        let wait = cursor.is_some() && after_revision != 0 && after_revision == revision;
+        let wait = cursor.as_ref().is_some_and(|cursor| {
+            !cursor.incarnation.is_empty() && cursor.subagent_parents == parents
+        }) && after_revision != 0
+            && after_revision == revision;
         // A pending read never owns the replica: transcript-tail requests must
         // be able to use its current cursor while the daemon waits for changes.
         let frame = tokio::select! {
@@ -312,9 +328,10 @@ pub(super) async fn poll_daemon_runtime(
         }
         let mut replica = replica.lock().await;
         // An expired tail can invalidate a cursor while this request waits.
-        if replica.cursor != cursor {
+        if replica.cursor != held_cursor {
             continue;
         }
+        // A snapshot can replace an expired base while preserving alerts.
         if let Err(error) = replica.apply(frame) {
             replica.cursor = None;
             return Err(error);
@@ -370,6 +387,7 @@ mod expired_tail_cursor_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let cursor = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "bootstrap-daemon".into(),
             sequence: 42,
             subagent_parents: Default::default(),
@@ -414,13 +432,14 @@ mod expired_tail_cursor_tests {
             let (mut fresh, _) = listener.accept().await.unwrap();
             let request: RequestEnvelope = mj_client::daemon::read_frame(&mut fresh).await.unwrap();
             let DaemonAction::RuntimeChanges {
-                cursor: None,
+                cursor: Some(requested),
                 wait: false,
                 subagent_parents,
             } = request.action
             else {
-                panic!("scope changes need a fresh snapshot");
+                panic!("scope changes preserve the alert frontier while requesting a fresh scope");
             };
+            assert_eq!(requested, cursor);
             assert_eq!(subagent_parents, BTreeSet::from(["parent".to_owned()]));
             mj_client::daemon::write_frame(
                 &mut fresh,
@@ -430,6 +449,7 @@ mod expired_tail_cursor_tests {
                     result: Ok(DaemonReply::RuntimeChanges(Box::new(
                         RuntimeFrame::Snapshot {
                             cursor: RuntimeCursor {
+                                alert_sequence: 0,
                                 incarnation: "replacement-daemon".into(),
                                 sequence: 1,
                                 subagent_parents: subagent_parents.clone(),
@@ -552,6 +572,7 @@ mod expired_tail_cursor_tests {
         });
 
         let cursor = RuntimeCursor {
+            alert_sequence: 0,
             incarnation: "previous-daemon".into(),
             sequence: 42,
             subagent_parents: Default::default(),

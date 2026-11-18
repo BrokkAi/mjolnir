@@ -2660,6 +2660,17 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         ))?;
     }
+    // Compatible: older readers and writers leave the independent alert ledger intact.
+    if version < 139 {
+        connection.execute_batch(concat!(
+            "BEGIN IMMEDIATE;",
+            include_str!("alert_events.sql"),
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (139, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 139;
+             COMMIT;",
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

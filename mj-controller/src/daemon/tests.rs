@@ -7942,6 +7942,7 @@ async fn dashboard_startup_larger_than_a_frame_arrives_whole() {
     let startup = DashboardStartup {
         runtime: mj_client::runtime_feed::RuntimeBootstrap {
             cursor: mj_client::runtime_feed::RuntimeCursor {
+                alert_sequence: 0,
                 incarnation: "startup".into(),
                 sequence: 1,
                 subagent_parents: Default::default(),
@@ -11618,6 +11619,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
                 Ok(DaemonReply::RuntimeChanges(Box::new(
                     RuntimeFrame::Snapshot {
                         cursor: RuntimeCursor {
+                            alert_sequence: 0,
                             incarnation: "test".into(),
                             sequence: 1,
                             subagent_parents: Default::default(),

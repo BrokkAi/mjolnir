@@ -17,6 +17,9 @@ use crate::review::RuntimeReviewView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCursor {
+    /// Durable alert frontier acknowledged by this client.
+    #[serde(default)]
+    pub alert_sequence: u64,
     pub incarnation: String,
     pub sequence: u64,
     /// Families whose historical session rows belong to this cursor's view.
@@ -368,9 +371,24 @@ pub struct CardForm {
     pub message: String,
 }
 
+/// A notify-once decision persisted alongside the Web Push item identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertEvent {
+    pub sequence: u64,
+    pub destination: String,
+    pub session_title: String,
+    pub text: String,
+    pub kind: mj_core::attention::NotificationKind,
+}
+
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    /// Events after the requesting client cursor; empty on initial attach.
+    #[serde(default)]
+    pub alert_events: Vec<AlertEvent>,
+    #[serde(default)]
+    pub alert_high_sequence: u64,
     /// Absent on daemons that do not publish cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_cards: Option<SnapshotMap<String, NotificationCard>>,
@@ -928,7 +946,10 @@ impl RuntimeReplica {
                 }
                 ensure!(self.cursor.as_ref() == Some(&from), "runtime cursor gap");
                 ensure!(
-                    from.incarnation == cursor.incarnation && from.sequence < cursor.sequence,
+                    from.incarnation == cursor.incarnation
+                        && (from.sequence < cursor.sequence
+                            || (from.sequence == cursor.sequence
+                                && from.alert_sequence < cursor.alert_sequence)),
                     "invalid runtime cursor transition"
                 );
                 changes.apply(&mut self.projection);
@@ -991,6 +1012,7 @@ mod tests {
 
     fn cursor(incarnation: &str, sequence: u64) -> RuntimeCursor {
         RuntimeCursor {
+            alert_sequence: 0,
             incarnation: incarnation.into(),
             sequence,
             subagent_parents: Default::default(),

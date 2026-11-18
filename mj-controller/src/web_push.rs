@@ -271,7 +271,12 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
                 message_id,
             });
         }
-        if let Some(form) = &card.form {
+        if let Some(form) = &card.form
+            && !runtime
+                .records
+                .get(holder)
+                .is_some_and(|record| record.notifications_ignored)
+        {
             let identity = serde_json::json!(["form", holder, form.request_id]).to_string();
             entries.insert(
                 identity,
@@ -329,7 +334,10 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     blocking(db::push_recover).await?;
     loop {
         let runtime = state.runtime_publication()?;
-        let (due, next) = blocking(move || db::push_reconcile(runtime)).await?;
+        let (due, next, alerts_changed) = blocking(move || db::push_reconcile(runtime)).await?;
+        if alerts_changed {
+            state.publish_revision();
+        }
         for delivery in due {
             let client = client.clone();
             let vapid = vapid.clone();

@@ -79,13 +79,42 @@ fn push_unsubscribe_with(db: &Connection, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a consistent durable frontier and only the events this client needs.
+/// No retention cap: a cursor may resume after any length of disconnection.
+pub(crate) fn alert_events_since(
+    after: Option<u64>,
+) -> Result<(u64, Vec<mj_client::runtime_feed::AlertEvent>)> {
+    let db = open_reader(&database_path())?;
+    alert_events_since_with(&db, after)
+}
+fn alert_events_since_with(
+    db: &Connection,
+    after: Option<u64>,
+) -> Result<(u64, Vec<mj_client::runtime_feed::AlertEvent>)> {
+    let tx = db.unchecked_transaction()?;
+    let high = tx.query_row(
+        "SELECT coalesce(max(sequence),0) FROM alert_events",
+        [],
+        |r| r.get::<_, u64>(0),
+    )?;
+    let events = tx.prepare("SELECT sequence,destination,session_title,text,kind FROM alert_events WHERE sequence>?1 AND sequence<=?2 ORDER BY sequence")?
+        .query_map(params![after.unwrap_or(high), high], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get::<_,String>(4)?)))?
+        .map(|row| { let (sequence,destination,session_title,text,kind) = row?; Ok(mj_client::runtime_feed::AlertEvent { sequence,destination,session_title,text,kind: serde_json::from_str(&kind)? }) })
+        .collect::<Result<Vec<_>>>()?;
+    tx.commit()?;
+    Ok((high, events))
+}
+
 /// Reconcile the authoritative card snapshot and admit its sends in one
 /// transaction. Presence controls delivery and never changes entry identity.
 pub(crate) fn push_reconcile(
     runtime: RuntimeProjection,
-) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+) -> Result<(Vec<PushDelivery>, Option<i64>, bool)> {
     submit_database_write("reconcile Web Push entries", move |db| {
-        push_reconcile_with(db, &runtime, Utc::now().timestamp())
+        let before = alert_events_since_with(db, None)?.0;
+        let (due, next) = push_reconcile_with(db, &runtime, Utc::now().timestamp())?;
+        let changed = alert_events_since_with(db, None)?.0 != before;
+        Ok((due, next, changed))
     })
 }
 
@@ -98,7 +127,7 @@ fn push_reconcile_with(
     let automatic = runtime.metadata.operator_presence.away && entries.is_some();
     let tx = db.transaction()?;
     if let Some(entries) = &entries {
-        push_observe_in(&tx, entries, automatic, now)?;
+        push_observe_in(&tx, runtime, entries, automatic, now)?;
     }
     let due = push_claim_in(&tx, runtime, entries.as_ref(), automatic, now)?;
     let next = tx.query_row(
@@ -112,6 +141,7 @@ fn push_reconcile_with(
 
 fn push_observe_in(
     tx: &Transaction<'_>,
+    runtime: &RuntimeProjection,
     entries: &BTreeMap<String, PushEntry<'_>>,
     away: bool,
     now: i64,
@@ -146,6 +176,27 @@ fn push_observe_in(
             baseline,
             now.saturating_mul(1_000),
         ])?;
+    }
+    // The same identity reservation owns both terminal alerts and push delivery.
+    // Presence and device enrollment do not participate in this decision.
+    for (identity, entry) in entries {
+        if entry.paused {
+            continue;
+        }
+        let eligible: bool = tx.query_row(
+            "SELECT baseline=0 AND NOT EXISTS(SELECT 1 FROM alert_baseline WHERE identity=?1) AND NOT EXISTS(SELECT 1 FROM alert_events WHERE identity=?1) FROM push_entries WHERE identity=?1",
+            [identity],
+            |r| r.get(0),
+        )?;
+        if !eligible {
+            continue;
+        }
+        let message = push_entry_text(tx, runtime, entry)?;
+        let notice = entry.notice(runtime, identity.clone(), message.as_deref());
+        tx.execute(
+            "INSERT INTO alert_events(identity,destination,session_title,text,kind) VALUES(?1,?2,?3,?4,?5)",
+            params![identity, entry.holder, notice.title, notice.body, serde_json::to_string(&entry.kind)?],
+        )?;
     }
     if away {
         tx.execute(
@@ -619,6 +670,11 @@ mod tests {
         assert_eq!(due.len(), 1);
         let notice: Notice = serde_json::from_str(&due[0].payload).unwrap();
         assert_eq!(notice.body, "Keep the old format?");
+        let (high, events) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "s");
+        assert_eq!(events[0].text, notice.body);
+        assert_eq!(events[0].sequence, high);
         assert_eq!(notice.episode.as_deref(), Some(due[0].identity.as_str()));
         assert_eq!(notice.observed_revision, 40);
         result(&db, &due[0], Some(201), 0);
@@ -642,6 +698,81 @@ mod tests {
         entry.kind = NotificationKind::Important;
         show(&mut runtime, "s", vec![entry]);
         assert!(claim(&mut db, &runtime, 0).is_empty());
+        assert_eq!(alert_events_since_with(&db, Some(0)).unwrap().1.len(), 1);
+        assert!(alert_events_since_with(&db, None).unwrap().1.is_empty());
+        assert!(
+            alert_events_since_with(&db, Some(high))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn alert_decision_is_independent_of_presence_devices_and_reused_form_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.sqlite3");
+        let mut db = open(&path).unwrap();
+        let mut runtime = runtime(false);
+        assert!(claim(&mut db, &runtime, 0).is_empty());
+        let mut parent = crate::database::tests::session("parent", "project");
+        parent.session_title_override = Some("Branch review".into());
+        runtime.records.insert("parent".into(), parent);
+        show(&mut runtime, "parent", vec![]);
+        let card = runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .get_mut("parent")
+            .unwrap();
+        card.holder = Some("child".into());
+        card.form = Some(CardForm {
+            raised_at_ms: 1,
+            request_id: "elicitation-1".into(),
+            message: "Which branch?".into(),
+        });
+        let mut holder = crate::database::tests::session("child", "project");
+        holder.notifications_ignored = true;
+        runtime.records.insert("child".into(), holder);
+        assert!(claim(&mut db, &runtime, 1).is_empty());
+        assert!(
+            alert_events_since_with(&db, Some(0)).unwrap().1.is_empty(),
+            "a muted holder cannot notify through its parent's card"
+        );
+        runtime
+            .records
+            .get_mut("child")
+            .unwrap()
+            .notifications_ignored = false;
+        assert!(claim(&mut db, &runtime, 1).is_empty());
+        let (high, events) = alert_events_since_with(&db, Some(0)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].destination, "child");
+        assert_eq!(events[0].text, "Which branch?");
+        assert_eq!(events[0].session_title, "Branch review");
+        let card = runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .remove("parent")
+            .unwrap();
+        claim(&mut db, &runtime, 2);
+        drop(db);
+        let mut db = open(&path).unwrap();
+        runtime
+            .metadata
+            .notification_cards
+            .as_mut()
+            .unwrap()
+            .insert("parent".into(), card);
+        claim(&mut db, &runtime, 3);
+        assert_eq!(
+            alert_events_since_with(&db, Some(0)).unwrap().0,
+            high,
+            "push identifies forms by holder and request id, even across a restart"
+        );
     }
 
     #[test]
@@ -754,7 +885,8 @@ mod tests {
             "DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;
              DROP TABLE push_entry_cutover;
-             DELETE FROM schema_migrations WHERE version=138;
+             DROP TABLE alert_events;
+             DELETE FROM schema_migrations WHERE version>=138;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )
