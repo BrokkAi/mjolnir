@@ -130,7 +130,7 @@ pub const MUSE_VERSION: &str = "1.4.20-R8619.1";
 pub const OPENCODE_VERSION: &str = "2.2.7";
 pub const DSH_ACP_VERSION: &str = "0.7.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
-pub const ANTIGRAVITY_VERSION: &str = "1.5.8";
+pub const ANTIGRAVITY_VERSION: &str = "1.5.11";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -465,7 +465,7 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Antigravity => HarnessPin {
-            install_id: "antigravity-1.5.8",
+            install_id: "antigravity-1.5.11",
             display_version: ANTIGRAVITY_VERSION,
             entrypoint: "bin/agy",
             cli_entrypoint: "bin/agy",

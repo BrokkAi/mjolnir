@@ -505,7 +505,7 @@ const ANTIGRAVITY_GH_GRANT: &str = "command(gh)";
 /// more, so the title cannot tell `mj-agents`/`send_message` from a foreign
 /// server `mj-agents_send`/`message`. agy's own grant rule
 /// `mcp(<server>/*)` names the server, and agy matches it against the server
-/// that owns the tool, so the lookalike still asks (checked against agy 1.5.8;
+/// that owns the tool, so the lookalike still asks (checked against agy 1.5.11;
 /// `tests/e2e/antigravity_owned_mcp_grants.py` repeats the check). That is the
 /// whole mechanism: the worker answers none of agy's permission requests for
 /// these servers. Claude's allowed tools and Codex's server approval mode do
@@ -513,7 +513,7 @@ const ANTIGRAVITY_GH_GRANT: &str = "command(gh)";
 ///
 /// Also grant reads below the home directory agy sees in its launch environment.
 /// A trailing directory separator allows nested files and keeps sibling paths
-/// outside the grant (checked against agy 1.5.8). This grants no writes or
+/// outside the grant (checked against agy 1.5.11). This grants no writes or
 /// commands; agy keeps applying its Auto-mode policy to those tools. One
 /// command grant is staged: `command(gh)`, Mjolnir's GitHub CLI approval, so
 /// an agent's issue and pull-request work reaches no person. A person's own
