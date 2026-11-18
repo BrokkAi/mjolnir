@@ -813,7 +813,7 @@ def strict_fidelity_decision(r, e):
                 + [f"added: {a}" for a in added])
     quote = r.get("carrying_item")
     whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
-    if r["decision"] == "pass" and (uncovered or not whole_line):
+    if uncovered or (r["decision"] == "pass" and not whole_line):
         # The checker claims a pass but left lines unassessed or quoted no valid line: fidelity was not
         # assessed, so rerun the checker rather than charge the edit with a failure.
         raise SystemExit(f"{r['id']}: fidelity pass with unassessed pairs {uncovered} or an invalid quote; "

@@ -269,6 +269,11 @@ def run_unit(batch_path, judge=None):
         producer = json.loads(out_path.read_text()).get("producer") or {}
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
+        if not producer and a.kind == "judge" and len(JUDGES) == 1:
+            # A split-judge invocation pins one side's model; an output that predates producer records
+            # cannot show it matches, so it is not reused.
+            raise RuntimeError(f"unit {tag} has output without a recorded producer; move {out_path.name} "
+                               f"and sessions/batch-{tag}.json aside to rerun it on {a.model}")
         if (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
             # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
             # reads verdicts this check rejects.
