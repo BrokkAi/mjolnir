@@ -1815,7 +1815,8 @@ async fn a_failed_review_closes_without_advancing_coverage() {
         armed(Some("reviewer")),
         environment.clone(),
     );
-    *environment.start_error.lock().unwrap() = Some("review harness failed to launch".to_owned());
+    let cause = "Cannot start the automated reviewer: Muse adapter 0.0.0 does not advertise a persistent instruction channel";
+    *environment.start_error.lock().unwrap() = Some(cause.to_owned());
     *environment.close_error.lock().unwrap() = Some("temporary close admission refusal".into());
     finish_a_turn(&manager, &host).await;
 
@@ -1864,11 +1865,22 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     // Hard-won: f47500b6c: the close notice hid the reviewer launch failure reason.
     let notice = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            let request = manager.next().await;
+            assert!(
+                !matches!(
+                    &request,
+                    RemoteSessionRequest::Reviewer {
+                        action: ReviewerAction::RecordReviewed { .. },
+                        ..
+                    }
+                ),
+                "a failed reviewer must not advance the baseline"
+            );
             if let RemoteSessionRequest::Submit {
                 command: RelayCommand::RecordNotice { text },
                 reply,
                 ..
-            } = manager.next().await
+            } = request
             {
                 let _ = reply.send(Ok(1));
                 if text.starts_with("Review failed:") {
@@ -1879,10 +1891,7 @@ async fn a_failed_review_closes_without_advancing_coverage() {
     })
     .await
     .expect("failed review records a notice");
-    assert!(
-        notice.contains("review harness failed to launch"),
-        "{notice}"
-    );
+    assert!(notice.contains(cause), "{notice}");
 
     host.shutdown().await.expect("shutdown the host");
 }

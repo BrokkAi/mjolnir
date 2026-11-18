@@ -103,3 +103,20 @@ Affected checks, outside the sandbox on the dev profile:
 - `cargo clippy -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-daemon -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed. Log: `memory-instructions-routing-clippy.log`.
 
 Full default delegation seed 1171 will run after the source commits and a normal dev CLI/worker rebuild. The initial test-hooks binary build exposed conflicting test/production identity stamps; it was replaced with the normal dev configuration rather than bypassing binary validation. No live/default instance was used.
+
+
+## Third review corrections
+
+Automated reviewers now use the existing unsupported-channel failure exception alongside brief writers. The actionable error names the harness and adapter version and occurs before native open; the daemon's role_failed path leaves the review incomplete and never advances its baseline. Ordinary unsupported-adapter sessions still open with their warning. The existing Decision Log entry records the parent ruling.
+
+Durable reviewer_launch.role is authoritative when loading historical reviewer launches that omit subagent_kind. The role golden derives reviewer and brief-writer text from a sanitized real launch record instead of manually injecting the role. The delegation fixture advertises standard append support, captures the native open's systemPrompt, and checks that standing child/report guidance moved there while the assignment and report directory remain in the first prompt. Its startup model gate and mailbox ordering/idempotency assertions are unchanged.
+
+Affected checks outside the sandbox on the dev profile:
+
+- `cargo test -p brokk-mj-worker-runtime session_instructions_system_prompt_contract_replays_pinned_adapters`: 1 passed, including unsupported reviewer rejection with no native open. Log: `memory-instructions-review3-lifecycle-tests.log`.
+- `cargo test -p brokk-mj-daemon a_failed_review_closes_without_advancing_coverage`: 1 passed, including visible adapter cause and no RecordReviewed. Log: `memory-instructions-review3-failure-test.log`.
+- `cargo test -p brokk-mj-worker-runtime golden_session_instructions_by_durable_role`: 1 passed using the historical launch fixture. The first run caught an incorrectly sanitized seed_image_environment value; correcting that field to boolean false restored the actual launch shape. Logs: `memory-instructions-review3-legacy-role-test.log` (initial fixture failure), `memory-instructions-review3-legacy-role-fixed-test.log` (passing correction).
+- `python3 -m py_compile tests/e2e/delegation.py`: passed outside the sandbox.
+- Final edited-crate clippy after the routing correction also covers these worker/daemon fixes: `memory-instructions-routing-clippy.log` (passed).
+
+Default delegation seed 1171 is pending the normal dev rebuild after the source commits. No Milestone 3 live harness acceptance was started.

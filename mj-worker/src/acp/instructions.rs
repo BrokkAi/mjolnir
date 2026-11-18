@@ -14,15 +14,16 @@ pub enum InstructionRole {
 impl InstructionRole {
     pub(crate) fn from_launch(config: &mj_core::worker_launch::WorkerLaunchConfig) -> Option<Self> {
         use mj_core::{subagent::SubagentKind, worker_launch::ReviewChildRole};
+        if let Some(review) = &config.reviewer_launch {
+            return Some(match review.role {
+                ReviewChildRole::BriefWriter => Self::BriefWriter,
+                ReviewChildRole::Reviewer => Self::Reviewer,
+            });
+        }
         config.subagent_kind.map(|kind| match kind {
             SubagentKind::Worker => Self::Worker,
             SubagentKind::Oracle => Self::Oracle,
-            SubagentKind::Reviewer => {
-                match config.reviewer_launch.as_ref().map(|review| review.role) {
-                    Some(ReviewChildRole::BriefWriter) => Self::BriefWriter,
-                    _ => Self::Reviewer,
-                }
-            }
+            SubagentKind::Reviewer => Self::Reviewer,
         })
     }
 }
@@ -174,8 +175,14 @@ pub(super) async fn deliver(
             spec.harness.display_name(),
             adapter_version.unwrap_or("(unknown version)")
         );
-        if matches!(spec.instruction_role, Some(InstructionRole::BriefWriter)) {
-            bail!("Cannot start the relation brief writer: {message}");
+        match spec.instruction_role {
+            Some(InstructionRole::BriefWriter) => {
+                bail!("Cannot start the relation brief writer: {message}")
+            }
+            Some(InstructionRole::Reviewer) => {
+                bail!("Cannot start the automated reviewer: {message}")
+            }
+            _ => {}
         }
         emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
         return Ok(None);
@@ -431,7 +438,22 @@ mod tests {
             )
             .unwrap();
             let mut spec = super::super::tests::reload_fallback_spec(HarnessKind::Codex);
-            spec.instruction_role = role;
+            spec.instruction_role = if matches!(
+                role,
+                Some(InstructionRole::Reviewer | InstructionRole::BriefWriter)
+            ) {
+                let mut launch: mj_core::worker_launch::WorkerLaunchConfig = serde_json::from_str(
+                    include_str!("testdata/project-memory/legacy-reviewer-launch.json"),
+                )
+                .unwrap();
+                if matches!(role, Some(InstructionRole::BriefWriter)) {
+                    launch.reviewer_launch.as_mut().unwrap().role =
+                        mj_core::worker_launch::ReviewChildRole::BriefWriter;
+                }
+                InstructionRole::from_launch(&launch)
+            } else {
+                role
+            };
             spec.project_memory = Some(ProjectMemoryLaunchConfig {
                 root: temp.path().into(),
                 baseline_root: "/baseline".into(),
