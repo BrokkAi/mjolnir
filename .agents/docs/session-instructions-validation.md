@@ -102,7 +102,7 @@ Affected checks, outside the sandbox on the dev profile:
 - `cargo test -p brokk-mj-controller reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity`: 1 passed. Log: `memory-instructions-routing-registration-test.log`.
 - `cargo clippy -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-daemon -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed. Log: `memory-instructions-routing-clippy.log`.
 
-Full default delegation seed 1171 will run after the source commits and a normal dev CLI/worker rebuild. The initial test-hooks binary build exposed conflicting test/production identity stamps; it was replaced with the normal dev configuration rather than bypassing binary validation. No live/default instance was used.
+Full default delegation seed 1171 passed after the source commits and a normal dev CLI/worker rebuild; see Final acceptance below. The initial test-hooks binary build exposed conflicting test/production identity stamps; it was replaced with the normal dev configuration rather than bypassing binary validation. No live/default instance was used.
 
 
 ## Third review corrections
@@ -119,4 +119,15 @@ Affected checks outside the sandbox on the dev profile:
 - `python3 -m py_compile tests/e2e/delegation.py`: passed outside the sandbox.
 - Final edited-crate clippy after the routing correction also covers these worker/daemon fixes: `memory-instructions-routing-clippy.log` (passed).
 
-Default delegation seed 1171 is pending the normal dev rebuild after the source commits. No Milestone 3 live harness acceptance was started.
+Default delegation seed 1171 passed after the normal dev rebuild of the source commits; see Final acceptance below. No Milestone 3 live harness acceptance was started.
+
+
+## Final acceptance after third review and routing correction
+
+- Source checkpoints: `5cdda85fa` (starting registration ownership) and `a0b529777` (third-review corrections).
+- `cargo build -p brokk-mjolnir -p brokk-mj-worker --bins`: passed on the normal dev profile, with no test-hooks or identity-validation bypass. Source and HEAD remained unchanged during the build. Log: `memory-instructions-routing-e2e-build.log`.
+- `python3 tests/e2e/delegation.py --mj target/debug/mj --worker target/debug/mj-worker --instance instructions-routing-55d6204e`: full default scenario, seed 1171, PASSED. The startup gate and mailbox ordering/deduplication checks remain unchanged. The held-model send_message returned in 0.180 s (pre-fix failure: 60.373 s). Standing role/report text was checked in the native open's append; task and directory remained in the first prompt. Later handoff, recovery, user-message and usage-retention checks also passed. Log: `memory-instructions-routing-delegation-e2e.log`.
+- Artifacts: `target/reliability-artifacts/delegation-seed-1171-903074`. Parent `058bb1d323ed793180dc632e49214dd3`, child `9e3131b7dc58b9495c16e574d4384ee8`; runtime `/mnt/optane/tmp/hel-r-903074-27262rd5`.
+- The fixture cleaned up its processes; an explicit daemon stop using that runtime's private MJ_CONFIG_DIR/MJ_DATA_DIR and the same named instance confirmed it was already stopped. Log: `memory-instructions-routing-cleanup.log`.
+
+All affected checks now pass. Initial failures and their fixes remain documented above; diagnostic memory-*.log files are intentionally untracked. Relay revision 27, snapshot fields and RuntimeEvent serialization remain unchanged; the new registration/route query is in-process only. The AgentInitialized serializer continues preserving existing protocol-71 event digests. Formal re-review follows the documentation checkpoint. No default-instance operation, push or Milestone 3 live harness acceptance was performed.

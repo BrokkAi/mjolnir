@@ -19,3 +19,8 @@ The manager becomes available about 30 ms after the decision, without releasing 
 Before committing a new child relation, the daemon's blocking registration asks the session manager to acknowledge a Starting entry. Thus the database cannot expose an unowned launching child. A failed database registration removes the reservation. Both ordinary and automated-review creation use this path; the plain registration wrapper is gated to tests/test-support and the production API requires a manager. Target publication advances its lifecycle; target retirement removes it. Startup failure also releases it. The manager answers the one parent-message route query from its own registration and current published protocol. A registered child with no attachment queues a durable mailbox event; a published incompatible protocol keeps the historical turn route. No delay, route retry or timeout re-check is added.
 
 The deterministic daemon regression `send_to_registered_child_before_attachment_queues_mailbox_without_a_turn` registers before publishing the child and never publishes a target or attaches an actor. Two identical sends produce one mailbox row and no accepted prompt.
+
+
+## Acceptance result
+
+After source commits 5cdda85fa and a0b529777, a normal dev rebuild and the full default seed-1171 scenario passed in isolated instance instructions-routing-55d6204e. The held-model send_message completed successfully in 0.180 seconds, and the unchanged startup gate and mailbox ordering/deduplication checks passed. Later handoff/recovery and cleanup checks passed too. Stdout: `memory-instructions-routing-delegation-e2e.log`; artifacts: `target/reliability-artifacts/delegation-seed-1171-903074`. The test daemon was confirmed stopped.
