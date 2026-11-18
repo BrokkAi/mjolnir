@@ -192,24 +192,21 @@ jobs:
         # mj-controller's tests take 8 to 9 minutes to run on one runner, after
         # a 6 minute build, so three runners each build the crate and run a
         # part of them. `select` names the part: see "Run tests".
-        # `--tests` leaves out the doc tests, which need a second, plain build
-        # of the crate; `worker-cli` builds that anyway and runs them.
         - name: controller, controller modules
           lane: tests-controller
-          tests: -p brokk-mj-controller --tests
+          tests: -p brokk-mj-controller
           select: first
         - name: controller, daemon and server modules
           lane: tests-controller
-          tests: -p brokk-mj-controller --tests
+          tests: -p brokk-mj-controller
           select: second
         - name: controller, other modules
           lane: tests-controller
-          tests: -p brokk-mj-controller --tests
+          tests: -p brokk-mj-controller
           select: rest
         - name: worker-cli
           lane: tests-worker-cli
           tests: -p brokk-mj-worker -p brokk-mjolnir
-          doc-tests: -p brokk-mj-controller
         # mj-core has tests behind `test-hooks`, which only the crates in the
         # other shards enable.
         - name: libraries
@@ -258,11 +255,6 @@ jobs:
           *) echo "unknown test selection: $SELECT" >&2; exit 2 ;;
         esac
         cargo test --no-fail-fast ${{ matrix.tests }} -- "$@"
-
-    # Also after a test failure: the doc tests do not depend on the tests.
-    - name: Run doc tests
-      if: ${{ !cancelled() && matrix.doc-tests }}
-      run: cargo test --doc ${{ matrix.doc-tests }}
 
   # Check-ins run Linux only. macOS and Windows run nightly in nightly.yml,
   # and here only when release.yml calls this workflow for a tag, so a release
