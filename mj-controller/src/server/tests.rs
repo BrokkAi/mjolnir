@@ -5754,6 +5754,7 @@ async fn notification_message_for_an_important_card_requires_its_read_through_bo
 
 // Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
 // Hard-won: 4c2c5b4f8: selector-free notification text exposed a newer held question.
+// Hard-won: b30132512: matching legacy selectors were rejected for published cards.
 #[tokio::test]
 async fn notification_message_reads_only_entries_on_the_current_card() {
     use mj_client::runtime_feed::NotificationCard;
@@ -5900,6 +5901,33 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         }
     }
 
+    // Hard-won: b30132512: an older viewer retried a valid legacy identity forever.
+    for (query, status) in [
+        ("holder=session-1&through=9", StatusCode::OK),
+        ("holder=session-1&through=5", StatusCode::CONFLICT),
+        ("holder=wrong&through=9", StatusCode::CONFLICT),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{query}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{query}");
+        if status == StatusCode::OK {
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(body["text"], serde_json::Value::Null);
+        }
+    }
+
     let response = app
         .oneshot(
             Request::get("/api/snapshot")
@@ -5967,6 +5995,20 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["text"], serde_json::json!(expected_text));
+        let question = match &message {
+            EntryMessage::Found(id) => id.as_str(),
+            _ => "",
+        };
+        let response = app.clone().oneshot(Request::get(format!("/api/sessions/session-1/notification-message?holder=session-1&question={question}")).header(COOKIE, &cookie).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "matching legacy question selector"
+        );
         let body: serde_json::Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();

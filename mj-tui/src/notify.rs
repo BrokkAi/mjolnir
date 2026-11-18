@@ -39,7 +39,7 @@ pub(crate) struct AttentionEpisode {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum CardItemIdentity {
-    Form(String),
+    Form { holder: String, request_id: String },
     Question(u64),
     Important(u64),
 }
@@ -241,7 +241,10 @@ impl DashboardState {
             let (index, identity, level) = if let Some(form) = &card.form {
                 (
                     card.entries.len(),
-                    CardItemIdentity::Form(form.request_id.clone()),
+                    CardItemIdentity::Form {
+                        holder: card.item_destination(id, card.entries.len()).to_owned(),
+                        request_id: form.request_id.clone(),
+                    },
                     AttentionLevel::Waiting,
                 )
             } else if let Some(entry) = card.entries.last() {
@@ -275,7 +278,13 @@ impl DashboardState {
                 continue;
             }
             let destination = card.item_destination(id, index);
-            let on_screen = visible.as_deref() == Some(destination);
+            let on_screen = visible.as_deref() == Some(destination)
+                && card.form.as_ref().is_none_or(|form| {
+                    self.session_details
+                        .get(destination)
+                        .and_then(|detail| detail.pending_elicitations.first())
+                        .is_some_and(|displayed| displayed.id == form.request_id)
+                });
             if !on_screen && now_ms.saturating_sub(alert.since_ms) < delay_ms {
                 continue;
             }
@@ -830,6 +839,7 @@ mod tests {
     }
 
     // Hard-won: bbe5c1a01: independent form/question alert state suppressed unseen items and native forms.
+    // Hard-won: b30132512: holder collisions and hidden conversation forms suppressed alerts.
     #[test]
     fn published_cards_alert_only_the_newest_item_and_remember_each_identity() {
         use mj_client::runtime_feed::{CardForm, NotificationCard};
@@ -950,6 +960,79 @@ mod tests {
                 dashboard.notification_events(112_000).len(),
                 1,
                 "{name}: a returned card may alert again"
+            );
+        }
+        // Hard-won: b30132512: different holders reused a request id, and an
+        // open conversation marked its hidden second form as already seen.
+        let mut dashboard = dashboard();
+        let mut card = NotificationCard {
+            since_ms: 0,
+            badge: NotificationKind::NeedsInput,
+            entries: Vec::new(),
+            dismissal: None,
+            holder: None,
+            form: Some(CardForm {
+                raised_at_ms: 0,
+                request_id: "shared".into(),
+                message: String::new(),
+            }),
+        };
+        for (step, holder) in ["asks", "done"].into_iter().enumerate() {
+            card.holder = Some(holder.into());
+            card.form.as_mut().unwrap().message = format!("Approval for {holder}");
+            dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+                "asks".into(),
+                card.clone(),
+            )])));
+            let now = step as u64 * 10_000;
+            assert!(
+                dashboard
+                    .notification_events(now)
+                    .iter()
+                    .all(|notice| notice.session_id != "asks")
+            );
+            let notices = dashboard.notification_events(now + 2_000);
+            assert_eq!(
+                notices
+                    .iter()
+                    .find(|notice| notice.session_id == "asks")
+                    .unwrap()
+                    .body,
+                format!("Approval for {holder}")
+            );
+        }
+        for (step, first_request, should_alert) in [(2, "earlier", true), (3, "shared", false)] {
+            dashboard.set_notification_cards(Some(Default::default()));
+            let mut first = question("done");
+            first.id = first_request.into();
+            let mut newest = question("done");
+            newest.id = "shared".into();
+            dashboard
+                .session_details
+                .get_mut("done")
+                .unwrap()
+                .pending_elicitations = if first_request == "shared" {
+                vec![first]
+            } else {
+                vec![first, newest]
+            };
+            dashboard.set_current_session(Some("done"));
+            dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+                "asks".into(),
+                card.clone(),
+            )])));
+            let now = step * 10_000;
+            assert!(dashboard.notification_events(now).is_empty());
+            let notices = dashboard.notification_events(now + 2_000);
+            assert_eq!(
+                notices.iter().any(|notice| notice.session_id == "asks"),
+                should_alert,
+                "only the form actually displayed is seen"
+            );
+            dashboard.set_current_session(None);
+            assert!(
+                dashboard.notification_events(now + 3_000).is_empty(),
+                "switching away must not replay a seen or alerted form"
             );
         }
     }

@@ -293,11 +293,26 @@ pub(super) async fn notification_message(
                     text: form.message.clone(),
                 }
             } else if let Some(entry) = card.entries.last() {
-                if expected.holder.is_some()
+                let has_legacy_identity = expected.holder.is_some()
                     || !expected.requests.is_empty()
                     || !expected.question.is_empty()
-                    || expected.through.is_some()
-                {
+                    || expected.through.is_some();
+                let matches_item = expected.holder.as_deref() == Some(session_id.as_str())
+                    && expected.requests.is_empty()
+                    && match entry.kind {
+                        NotificationKind::NeedsInput => {
+                            let question = match &entry.message {
+                                mj_core::attention::EntryMessage::Found(id) => id.as_str(),
+                                _ => "",
+                            };
+                            expected.through.is_none() && expected.question == question
+                        }
+                        NotificationKind::Important => {
+                            expected.question.is_empty()
+                                && expected.through == Some(entry.completed_ordinal)
+                        }
+                    };
+                if has_legacy_identity && !matches_item {
                     return Err(ApiError::new(
                         StatusCode::CONFLICT,
                         "the notification changed; select its entry to read it",
