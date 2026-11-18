@@ -1730,23 +1730,25 @@ impl ProfileCatalog {
     }
 
     /// The efforts profile `id` offers for `model` when a completed discovery
-    /// already holds them; `None` is unknown. Never starts a probe.
+    /// already holds them, including a confirmed empty list; `None` is
+    /// unknown. Never starts a probe. Muse is always unknown: its catalogue is
+    /// read live because the service changes it, so a retained answer can be
+    /// stale.
     pub fn cached_model_efforts(
         &self,
         id: &str,
         model: &str,
     ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
         let inner = self.lock();
-        let identity = inner
-            .live
-            .as_ref()?
-            .named_profile(id)
-            .ok()?
-            .capabilities_key(id);
-        match inner.entries.get(&(identity, Some(model.to_owned()))) {
-            Some(Entry::Ready(choices)) if !choices.efforts.is_empty() => {
-                Some(choices.efforts.clone())
-            }
+        let profile = inner.live.as_ref()?.named_profile(id).ok()?;
+        if profile.kind == HarnessKind::Muse {
+            return None;
+        }
+        match inner
+            .entries
+            .get(&(profile.capabilities_key(id), Some(model.to_owned())))
+        {
+            Some(Entry::Ready(choices)) => Some(choices.efforts.clone()),
             _ => None,
         }
     }

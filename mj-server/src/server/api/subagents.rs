@@ -1508,13 +1508,16 @@ mod tests {
             profile: &str,
             _model: &str,
         ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
-            profile.starts_with("cached-low").then(|| {
-                vec![mj_core::acp::SessionConfigChoice {
+            match profile {
+                "cached-low" => Some(vec![mj_core::acp::SessionConfigChoice {
                     value: "low".into(),
                     name: "Low".into(),
                     description: None,
-                }]
-            })
+                }]),
+                // A completed discovery that found no effort choices.
+                "cached-none" => Some(Vec::new()),
+                _ => None,
+            }
         }
 
         fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
@@ -1915,6 +1918,7 @@ mod tests {
             description: None,
         }];
         let cached_low = candidate("cached-low", Some(80), &["other", "fixed"]);
+        let cached_none = candidate("cached-none", Some(80), &["other", "fixed"]);
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
             staged: None,
@@ -1924,6 +1928,7 @@ mod tests {
                 offered: vec![
                     low_only,
                     cached_low,
+                    cached_none,
                     candidate("unknown", Some(10), &["fixed"]),
                 ],
                 unavailable: Vec::new(),
