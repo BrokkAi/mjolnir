@@ -1677,6 +1677,9 @@ pub struct RelaySnapshot {
     pub latest_prompt_accepted_ordinal: Option<u64>,
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
+    /// Worker-owned form bodies survive acknowledgement-based journal GC.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_elicitations: BTreeMap<String, ElicitationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1876,6 +1879,7 @@ impl RelaySnapshot {
         Self {
             handback_checks: Default::default(),
             assessment_questions: Default::default(),
+            pending_elicitations: Default::default(),
             completed_reply_message: None,
             managed_subagent: false,
             work_liveness: None,

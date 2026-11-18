@@ -13,53 +13,91 @@ use crate::relay::{
 // Hard-won: 806b123: a crash during ACK cleanup left sealed history below the durable cut.
 #[test]
 fn acknowledged_worker_reopens_after_interrupted_sealed_segment_cleanup() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
-    for _ in 0..40 {
-        relay
-            .record_observation(RelayObservation::Warning {
-                message: "x".repeat(64 * 1024),
-            })
-            .unwrap();
-    }
-    let old_segment = relay.journal_spans.first().unwrap().path.clone();
-    assert_eq!(old_segment.extension().unwrap(), "gz");
-    let leftover = fs::read(&old_segment).unwrap();
-    let frontier = relay.latest_ordinal();
-    let digest = relay.latest_digest().to_owned();
-    let response = acknowledge_relay(&mut relay, "collect-before-crash", frontier);
-    assert!(matches!(
-        response.body,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Acknowledged { .. }
+    for replacement_installed in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        for _ in 0..40 {
+            relay
+                .record_observation(RelayObservation::Warning {
+                    message: "x".repeat(64 * 1024),
+                })
+                .unwrap();
         }
-    ));
-    assert_eq!(
-        fs::metadata(
+        let old_segment = relay.journal_spans.first().unwrap().path.clone();
+        assert_eq!(old_segment.extension().unwrap(), "gz");
+        let leftover = fs::read(&old_segment).unwrap();
+        let old_active = fs::read(
             temp.path()
                 .join(RELAY_JOURNAL_DIR)
-                .join(RELAY_ACTIVE_SEGMENT)
+                .join(RELAY_ACTIVE_SEGMENT),
         )
-        .unwrap()
-        .len(),
-        0
-    );
-    drop(relay);
-    // The snapshot and empty active replacement are durable, but deletion of
-    // this already covered sealed file did not finish before the worker died.
-    fs::write(&old_segment, leftover).unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
-    assert_eq!(relay.latest_ordinal(), frontier);
-    assert_eq!(relay.latest_digest(), digest);
-    relay
-        .record_observation(RelayObservation::Warning {
-            message: "after restart".into(),
-        })
         .unwrap();
-    assert_eq!(
-        relay.events_after(frontier, &digest).unwrap()[0].ordinal,
-        frontier + 1
-    );
+        let frontier = relay.latest_ordinal();
+        let digest = relay.latest_digest().to_owned();
+        let response = acknowledge_relay(&mut relay, "collect-before-crash", frontier);
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ));
+        assert_eq!(
+            fs::metadata(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT)
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        drop(relay);
+        // The snapshot and empty active replacement are durable, but deletion of
+        // this already covered sealed file did not finish before the worker died.
+        fs::write(&old_segment, leftover).unwrap();
+        if !replacement_installed {
+            fs::write(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT),
+                old_active,
+            )
+            .unwrap();
+        }
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        assert_eq!(relay.latest_ordinal(), frontier);
+        assert_eq!(relay.latest_digest(), digest);
+        let retried = acknowledge_relay(&mut relay, "retry-identical-ack", frontier);
+        assert!(matches!(
+            retried.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ));
+        assert!(
+            !old_segment.exists(),
+            "the same ACK must remove physical leftovers after reopen"
+        );
+        assert_eq!(
+            fs::metadata(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT)
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: "after restart".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            relay.events_after(frontier, &digest).unwrap()[0].ordinal,
+            frontier + 1
+        );
+    }
 }
 
 // Hard-won: 581ae9e: catch-up ACK decompressed damaged segments already covered by its cursor.

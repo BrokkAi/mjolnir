@@ -290,6 +290,9 @@ pub enum RelayRequest {
     ReadQueuedCommand {
         command_id: String,
     },
+    ReadPendingElicitation {
+        elicitation_id: String,
+    },
     /// Register operation-owned retry receipts before submitting any of its commands.
     UpdateCommandRetention {
         operation_id: Option<String>,
@@ -583,6 +586,7 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
             Self::AdoptionSnapshot => "adoption_snapshot",
             Self::CommandRetentionStatus => "command_retention_status",
@@ -666,7 +670,8 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
-            Self::ReadQueuedCommand { .. }
+            Self::ReadPendingElicitation { .. }
+            | Self::ReadQueuedCommand { .. }
             | Self::AdoptionSnapshot
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
@@ -964,10 +969,14 @@ pub enum RelayResponsePayload {
     AdoptionSnapshot {
         state: RelayOperationalState,
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
+        pending_elicitation_ids: std::collections::BTreeSet<String>,
     },
     QueuedCommand {
         command: Option<RelayCommand>,
         accepted_ordinal: Option<u64>,
+    },
+    PendingElicitation {
+        request: Option<crate::elicitation::ElicitationRequest>,
     },
     MailboxDrained {
         /// Present when mailbox events or a Claude boundary steer are leased.

@@ -1806,6 +1806,32 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
             "an empty catch-up must retain its operational publication"
         );
     }
+    // Model the actor committing and ACKing while a standalone connection
+    // still holds an older projection. Both views share the durable store.
+    let stale = connection.materialized.clone();
+    connection
+        .submit(
+            new_command_id("actor-notice").unwrap(),
+            RelayCommand::RecordNotice {
+                text: "another connection advanced the durable projection".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let durable = connection.materialized.clone();
+    connection.materialized = stale;
+    connection.window = mj_core::state::ProjectionWindow::of(&connection.materialized);
+    // Hard-won: 363ef03: a concurrent ACK sent standalone repair below the retained cursor.
+    connection.sync_in_place().await.unwrap();
+    assert_eq!(
+        connection.materialized.applied_event_ordinal,
+        durable.applied_event_ordinal
+    );
+    assert_eq!(
+        connection.materialized.applied_event_digest,
+        durable.applied_event_digest
+    );
+    connection.detach().await.unwrap();
 }
 
 #[cfg(unix)]

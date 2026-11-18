@@ -2229,6 +2229,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     match &event.observation {
         RelayObservation::ElicitationRequested { request } => {
             snapshot.assessment_questions.insert(request.id.clone());
+            snapshot
+                .pending_elicitations
+                .insert(request.id.clone(), request.clone());
         }
         RelayObservation::ElicitationResolved {
             elicitation_id,
@@ -2236,6 +2239,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => {
             snapshot.assessment_questions.remove(elicitation_id);
+            snapshot.pending_elicitations.remove(elicitation_id);
             if reply.is_some() {
                 clear_notifications(snapshot, event.ordinal);
                 if let Some(context) = &mut snapshot.assessment_context {
@@ -2245,6 +2249,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         RelayObservation::ElicitationsCleared => {
             snapshot.assessment_questions.clear();
+            snapshot.pending_elicitations.clear();
         }
         RelayObservation::SessionUpdate { update } => {
             if let SessionUpdate::AgentMessageChunk(chunk) = update.as_ref()

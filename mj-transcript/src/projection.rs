@@ -6,6 +6,7 @@ mod session_update;
 mod terminals;
 pub use materialize::*;
 pub use observation::*;
+pub use session_update::configuration_values;
 use session_update::*;
 use terminals::*;
 

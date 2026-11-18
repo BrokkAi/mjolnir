@@ -124,9 +124,19 @@ impl DurableRelay {
                     .get(command_id)
                     .map(|handled| handled.accepted_ordinal),
             },
+            RelayRequest::ReadPendingElicitation { elicitation_id } => {
+                RelayResponsePayload::PendingElicitation {
+                    request: self
+                        .snapshot
+                        .pending_elicitations
+                        .get(elicitation_id)
+                        .cloned(),
+                }
+            }
             RelayRequest::AdoptionSnapshot => RelayResponsePayload::AdoptionSnapshot {
                 state: self.operational_state(),
                 native_use_evidence: self.snapshot.native_use_evidence.clone(),
+                pending_elicitation_ids: self.snapshot.assessment_questions.clone(),
             },
             RelayRequest::CommandRetentionStatus => RelayResponsePayload::CommandRetentionState {
                 legacy_pending: self.snapshot.legacy_command_retention,

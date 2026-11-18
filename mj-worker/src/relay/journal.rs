@@ -1007,13 +1007,36 @@ impl DurableRelay {
         Ok(())
     }
 
+    fn has_acknowledged_journal_files(&self, through: u64) -> Result<bool> {
+        if self
+            .journal_spans
+            .iter()
+            .any(|span| span.file_first_ordinal <= through)
+        {
+            return Ok(true);
+        }
+        let journal = self.root.join(RELAY_JOURNAL_DIR);
+        if journal.exists() {
+            for entry in fs::read_dir(journal)? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|extension| extension == "gz")
+                    && sealed_relay_journal_metadata(&path)?.file_first_ordinal <= through
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn garbage_collect_relay_history(&mut self) -> Result<()> {
         let through = self.snapshot.retained_through();
         let journal_floor = self
             .journal_spans
             .first()
             .map_or(self.snapshot.latest_ordinal, |span| span.after_ordinal);
-        let rewrites_journal = through > journal_floor;
+        let rewrites_journal = through > journal_floor
+            || (self.journal_cleanup_pending && self.has_acknowledged_journal_files(through)?);
 
         // The retained frontier this collection acts on has to be durable
         // before the journal loses the events below it: recovery reads that
@@ -1024,8 +1047,10 @@ impl DurableRelay {
         // With the ACK and recovery frontiers durable, either the old or the
         // rewritten journal is valid after a crash.
         if rewrites_journal {
+            self.journal_cleanup_pending = true;
             self.rewrite_relay_journal(through)?;
         }
+        self.journal_cleanup_pending = false;
         // The pruned ledger reaches memory only after its own durable write
         // succeeds, so a transient failure cannot forget command IDs while the
         // daemon keeps serving retries. A catch-up ACK usually prunes nothing

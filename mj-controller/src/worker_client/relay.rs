@@ -904,17 +904,32 @@ impl RelayClient {
         }
     }
 
+    pub async fn read_pending_elicitation(
+        &mut self,
+        elicitation_id: String,
+    ) -> Result<Option<mj_core::elicitation::ElicitationRequest>> {
+        match self
+            .call(RelayRequest::ReadPendingElicitation { elicitation_id })
+            .await?
+        {
+            RelayResponsePayload::PendingElicitation { request } => Ok(request),
+            _ => bail!("relay returned an unexpected pending question response"),
+        }
+    }
+
     pub async fn adoption_snapshot(
         &mut self,
     ) -> Result<(
         RelayOperationalState,
         Option<mj_core::relay::NativeSessionUseEvidence>,
+        BTreeSet<String>,
     )> {
         match self.call(RelayRequest::AdoptionSnapshot).await? {
             RelayResponsePayload::AdoptionSnapshot {
                 state,
                 native_use_evidence,
-            } => Ok((state, native_use_evidence)),
+                pending_elicitation_ids,
+            } => Ok((state, native_use_evidence, pending_elicitation_ids)),
             _ => bail!("relay returned an unexpected adoption snapshot"),
         }
     }

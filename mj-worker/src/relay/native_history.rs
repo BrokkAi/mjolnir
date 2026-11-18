@@ -70,6 +70,48 @@ impl DurableRelay {
     }
 
     fn read_native_history_evidence(&self) -> Result<NativeHistoryEvidence> {
+        let mut evidence = NativeHistoryEvidence::default();
+        self.visit_legacy_evidence(|event| evidence.observe(event, &self.snapshot.dispatches))?;
+        Ok(evidence)
+    }
+
+    pub(super) fn recover_pending_elicitations(&mut self) -> Result<bool> {
+        let missing: BTreeSet<_> = self
+            .snapshot
+            .assessment_questions
+            .iter()
+            .filter(|id| !self.snapshot.pending_elicitations.contains_key(*id))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        let mut recovered = BTreeMap::new();
+        for event in &self.hot_events {
+            if let RelayObservation::ElicitationRequested { request } = &event.observation
+                && missing.contains(&request.id)
+            {
+                recovered.insert(request.id.clone(), request.clone());
+            }
+        }
+        if recovered.len() != missing.len() {
+            self.visit_legacy_evidence(|event| {
+                if let RelayObservation::ElicitationRequested { request } = event.observation
+                    && missing.contains(&request.id)
+                {
+                    recovered.insert(request.id.clone(), request);
+                }
+            })?;
+        }
+        anyhow::ensure!(
+            missing.iter().all(|id| recovered.contains_key(id)),
+            "pending question bodies are unavailable in the legacy journal"
+        );
+        self.snapshot.pending_elicitations.extend(recovered);
+        Ok(true)
+    }
+
+    fn visit_legacy_evidence(&self, mut visit: impl FnMut(RelayEvent)) -> Result<()> {
         let mut ordinal = self
             .snapshot
             .acknowledged_through
@@ -80,18 +122,17 @@ impl DurableRelay {
             self.snapshot.recovery_floor_digest.clone()
         };
         let plan = self.legacy_native_replay_plan(ordinal, &digest);
-        let mut evidence = NativeHistoryEvidence::default();
         // Reuse bounded, digest-validated replay, including sealed segments.
         // This runs during worker startup, before it serves any requests.
         while ordinal < self.snapshot.latest_ordinal {
             let page = plan.read_events_after(ordinal, &digest, RELAY_REPLAY_BYTE_BUDGET)?;
             for event in page.events {
-                evidence.observe(event, &self.snapshot.dispatches);
+                visit(event);
             }
             ordinal = page.through_ordinal;
             digest = page.through_digest;
         }
-        Ok(evidence)
+        Ok(())
     }
 }
 
@@ -248,6 +289,89 @@ mod tests {
                 replaced_unused_native_session_id: None,
             })
             .unwrap();
+    }
+
+    // Hard-won: 363ef03: ACK pruning discarded the only durable pending-question body.
+    #[test]
+    fn legacy_pending_question_survives_migration_pruning_and_worker_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+        let question = mj_core::elicitation::ElicitationRequest::from_acp_params("legacy-question", serde_json::json!({
+            "mode":"form", "sessionId":SESSION, "message":"Which destination?", "requestedSchema":{"type":"object", "properties":{}}
+        })).unwrap();
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: question.clone(),
+            })
+            .unwrap();
+        for _ in 0..40 {
+            relay
+                .record_observation(RelayObservation::Warning {
+                    message: "x".repeat(64 * 1024),
+                })
+                .unwrap();
+        }
+        relay.persist_snapshot().unwrap();
+        let frontier = relay.latest_ordinal();
+        let digest = relay.latest_digest().to_owned();
+        drop(relay);
+        let path = temp.path().join(RELAY_STATE_FILE);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved["format_version"] = serde_json::json!(27);
+        saved["acknowledged_through"] = serde_json::json!(frontier);
+        saved["acknowledged_digest"] = serde_json::json!(digest);
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_elicitations");
+        fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        let acknowledged = acknowledge_relay(&mut relay, "prune-migrated-question", frontier);
+        assert!(matches!(
+            acknowledged.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Acknowledged { .. }
+            }
+        ));
+        assert_eq!(
+            fs::metadata(
+                temp.path()
+                    .join(RELAY_JOURNAL_DIR)
+                    .join(RELAY_ACTIVE_SEGMENT)
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        let response = relay.handle(relay_request(
+            "read-question",
+            RelayRequest::ReadPendingElicitation {
+                elicitation_id: question.id.clone(),
+            },
+        ));
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::PendingElicitation { request: Some(ref recovered) } } if recovered == &question)
+        );
+        relay
+            .record_observation(RelayObservation::ElicitationResolved {
+                elicitation_id: question.id.clone(),
+                action: "accept".into(),
+                reply: None,
+            })
+            .unwrap();
+        assert!(relay.snapshot.pending_elicitations.is_empty());
+        relay
+            .record_observation(RelayObservation::ElicitationRequested { request: question })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::ElicitationsCleared)
+            .unwrap();
+        drop(relay);
+        let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+        assert!(relay.snapshot.pending_elicitations.is_empty());
     }
 
     // Hard-won: 581ae9e: startup agent text overwrote an existing legacy unused proof.

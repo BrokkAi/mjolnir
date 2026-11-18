@@ -136,7 +136,7 @@ impl StandaloneSession {
                     if relay_desynchronized(&error)
                         && protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL =>
                 {
-                    let (snapshot, queue) = connection.read_adoption_queue().await?;
+                    let (snapshot, queue, questions) = connection.read_adoption_state().await?;
                     ensure!(
                         snapshot.session_id == target.session_id,
                         "adoption snapshot belongs to another session"
@@ -148,6 +148,24 @@ impl StandaloneSession {
                     let mut projection = MaterializedSession::empty(&target.session_id);
                     projection.applied_event_ordinal = snapshot.latest_ordinal;
                     projection.applied_event_digest = snapshot.latest_digest.clone();
+                    projection.configuration.values =
+                        mj_transcript::projection::configuration_values(&snapshot.config_options)?;
+                    projection
+                        .configuration
+                        .values
+                        .extend(snapshot.config.iter().map(|(key, value)| {
+                            (key.clone(), serde_json::Value::String(value.clone()))
+                        }));
+                    projection
+                        .configuration
+                        .values
+                        .remove(mj_core::goal::PROJECTION_KEY);
+                    projection
+                        .configuration
+                        .values
+                        .remove(mj_transcript::handoff::HANDOFF_STATE_KEY);
+                    projection.configuration.goal =
+                        snapshot.goal.known.then(|| Box::new(snapshot.goal.clone()));
                     projection.execution = match snapshot.execution {
                         mj_core::relay::RelayExecutionState::Idle => {
                             mj_core::state::MaterializedExecutionState::Idle
@@ -177,6 +195,7 @@ impl StandaloneSession {
                         }
                     });
                     projection.queued_prompts = queue;
+                    projection.pending_elicitations = questions;
                     // Save the notice and seed atomically. A crash cannot
                     // advance the projection past an unprojected warning.
                     let adopted_at = mj_core::clock::epoch_millis();
@@ -204,14 +223,16 @@ impl StandaloneSession {
         Ok(connection)
     }
 
-    async fn read_adoption_queue(
+    async fn read_adoption_state(
         &mut self,
     ) -> Result<(
         RelayOperationalState,
         Vec<mj_core::state::MaterializedQueuedPrompt>,
+        Vec<mj_core::elicitation::ElicitationRequest>,
     )> {
         loop {
-            let (state, _native_use_evidence) = self.client.adoption_snapshot().await?;
+            let (state, _native_use_evidence, question_ids) =
+                self.client.adoption_snapshot().await?;
             let mut queue = Vec::with_capacity(state.queued_prompts.len());
             for identity in &state.queued_prompts {
                 let (command, accepted_ordinal) = self
@@ -250,12 +271,20 @@ impl StandaloneSession {
                     accepted_ordinal,
                 });
             }
-            let current = self.client.status().await?;
+            let mut questions = Vec::with_capacity(question_ids.len());
+            for id in &question_ids {
+                if let Some(request) = self.client.read_pending_elicitation(id.clone()).await? {
+                    questions.push(request);
+                }
+            }
+            let (current, _, current_questions) = self.client.adoption_snapshot().await?;
             if current.queued_prompts == state.queued_prompts
                 && current.active_prompt == state.active_prompt
+                && current_questions == question_ids
                 && queue.len() == state.queued_prompts.len()
+                && questions.len() == question_ids.len()
             {
-                return Ok((state, queue));
+                return Ok((state, queue, questions));
             }
             // Queue mutation ended this attempt. Reuse the reconnect cadence
             // before reading another snapshot; never hold or stop the worker.
@@ -414,6 +443,15 @@ impl StandaloneSession {
                     continue;
                 }
                 Err(error) if relay_desynchronized(&error) => {
+                    // Another connection can commit and ACK beyond our cursor.
+                    // The shared durable projection, rather than a checkpoint,
+                    // owns that advancement and is the first repair source.
+                    let (durable, window) = load_projection(&self.materialized.session_id).await?;
+                    if durable.applied_event_ordinal > after_ordinal {
+                        self.materialized = durable;
+                        self.window = window;
+                        continue;
+                    }
                     self.repair_projection()
                         .await
                         .with_context(|| {

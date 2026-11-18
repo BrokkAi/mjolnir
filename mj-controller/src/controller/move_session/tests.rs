@@ -250,6 +250,18 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "accepted-model-before-loss".into(),
+        })
+        .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
+            key: "reasoning_effort".into(),
+            value: "high".into(),
+        })
+        .unwrap();
     for command_id in ["active-before-loss", "surviving-queue", "surviving-config"] {
         let command = if command_id == "surviving-config" {
             RelayCommand::SetConfig {
@@ -270,6 +282,11 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             },
         });
     }
+    relay.record_observation(mj_core::relay::RelayObservation::ElicitationRequested {
+        request: mj_core::elicitation::ElicitationRequest::from_acp_params("question-before-loss", serde_json::json!({
+            "mode":"form", "sessionId":MOVE_QUEUE_SESSION_ID, "message":"Which destination?", "requestedSchema":{"type":"object", "properties":{}}
+        })).unwrap(),
+    }).unwrap();
     let frontier = relay.latest_ordinal();
     let digest = relay.latest_digest().to_owned();
     relay.handle(mj_core::relay::RelayRequestEnvelope {
@@ -296,6 +313,10 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
         assert_eq!(connection.operational().native_session_id.as_deref(), Some("surviving-native-conversation"));
         let projection = connection.snapshot().materialized;
         assert!(projection.applied_event_ordinal >= frontier);
+        assert_eq!(projection.pending_elicitations[0].id, "question-before-loss");
+        assert_eq!(projection.pending_elicitations[0].message, "Which destination?");
+        assert_eq!(projection.configuration.values["model"], "accepted-model-before-loss");
+        assert_eq!(projection.configuration.values["reasoning_effort"], "high");
         assert_eq!(projection.queued_prompts[0].command_id, "surviving-queue");
         assert_eq!(projection.queued_prompts[0].content[0]["text"], "work survives".repeat(6000));
         assert_eq!(projection.queued_prompts[1].kind, QueuedCommandKind::SetConfig { key: "model".into(), value: "original-model".into() });
@@ -343,6 +364,18 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     )
     .unwrap();
     let mut resumed = DurableRelay::open(&restored_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+    let verified = mj_checkpoint::archive::verify_archive_streaming(
+        &directory.path().join("adopted-suspend.hel.zip"),
+    )
+    .unwrap();
+    assert_eq!(
+        verified.canonical_session.session.configuration.values["model"],
+        "accepted-model-before-loss"
+    );
+    assert_eq!(
+        verified.canonical_session.session.configuration.values["reasoning_effort"],
+        "high"
+    );
     let prompts = resumed.claim_pending_commands(true).unwrap();
     assert!(
         prompts

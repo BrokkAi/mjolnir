@@ -264,6 +264,8 @@ pub struct DurableRelay {
     /// appends never bump it — they only extend the active segment, which a
     /// lock-free reader already tolerates.
     journal_generation: u64,
+    /// Retry physical prefix cleanup once after reopen, or after a failed GC.
+    journal_cleanup_pending: bool,
     acp_activity: AcpActivityClock,
     step_clock: crate::acp::StepClock,
     /// Whether harness announcements or output with no prompt open a turn.
@@ -618,14 +620,19 @@ impl DurableRelay {
         // Upgrade native-use evidence before discarding the old retained prefix.
         let upgrading_native =
             snapshot.native_session_id.is_some() && snapshot.native_use_evidence.is_none();
-        let retained_through = if upgrading_native {
+        let upgrading_questions = snapshot
+            .assessment_questions
+            .iter()
+            .any(|id| !snapshot.pending_elicitations.contains_key(id));
+        let upgrading_history = upgrading_native || upgrading_questions;
+        let retained_through = if upgrading_history {
             snapshot
                 .acknowledged_through
                 .min(snapshot.recovery_floor_ordinal)
         } else {
             snapshot.retained_through()
         };
-        let retained_digest = if upgrading_native
+        let retained_digest = if upgrading_history
             && snapshot.recovery_floor_ordinal < snapshot.acknowledged_through
         {
             snapshot.recovery_floor_digest.clone()
@@ -690,6 +697,7 @@ impl DurableRelay {
             replay_cursors: VecDeque::new(),
             unpersisted_journal_bytes: 0,
             journal_generation: 0,
+            journal_cleanup_pending: true,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
@@ -727,6 +735,10 @@ impl DurableRelay {
         }
         let recovered_native_history =
             missing_native_history && relay.recover_native_history_evidence();
+        let recovered_questions = upgrading_questions
+            && relay.recover_pending_elicitations().context(
+                "recover pending questions before acknowledgement-based journal collection",
+            )?;
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
@@ -794,6 +806,7 @@ impl DurableRelay {
             || replayed
             || assigned_store_id
             || recovered_native_history
+            || recovered_questions
             || migrated_assessment
             || compacted_terminal_commands
         {
