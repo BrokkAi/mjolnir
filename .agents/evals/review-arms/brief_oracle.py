@@ -956,6 +956,11 @@ def noleak_gate_collect(n):
     keymap = json.loads((unit.parent / "key.json").read_text()) if (unit.parent / "key.json").exists() else {}
     causes = {}
     if keymap:
+        # The registered cause checker is Opus/high on claude7; check the producer of its answers.
+        producer = json.loads((unit.parent / "out" / "task-cause.json").read_text()).get("producer") or {}
+        if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+            raise SystemExit(f"round {n} cause answers came from {producer.get('profile')}/"
+                             f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
         rows = [json.loads(line) for line in (unit / "cause.jsonl").read_text().splitlines() if line.strip()]
         got = {r.get("id"): r for r in rows}
         if set(got) != set(keymap) or len(rows) != len(keymap):

@@ -370,19 +370,12 @@ def run_unit(batch_path, judge=None):
         save(V / "out" / f"invalid-{tag}.json", {"session_id": sid, "problems": problems})
         raise RuntimeError(f"batch {tag} output does not cover its items exactly once: "
                            f"{ {k: len(v) for k, v in problems.items()} }")
-    if a.kind == "task":
-        (batch_path / a.output).write_text(out["text"])
-        out = {"output": str(batch_path / a.output), "session_id": sid}
-    # Bind the output to the session that produced it, so a consumer can check the model and
-    # profile of the exact verdicts it reads rather than a session record that a rerun replaces.
-    # The profile recorded is the one the session was on when its turn completed: quota recovery can
-    # move a session to another profile after launch.
-    out = {**out, "producer": {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
-                               "launch_profile": rec.get("profile"), "config": rec.get("config")}}
-    made_on, made_by = out["producer"]["profile"], (rec.get("config") or {}).get("model")
+    # Check who produced the result before exposing it anywhere a collector reads: the profile the
+    # session was on when its turn completed (quota recovery can move it) and the recorded model.
+    producer = {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
+                "launch_profile": rec.get("profile"), "config": rec.get("config")}
+    made_on, made_by = producer["profile"], (rec.get("config") or {}).get("model")
     if made_on not in PROFILES or made_by != a.model:
-        # The turn finished outside the requested profiles (quota recovery moved it) or without a
-        # recorded model: never publish it as this invocation's result.
         import fcntl
         with open(V / "workflow-out.lock", "w") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -391,6 +384,10 @@ def run_unit(batch_path, judge=None):
                                                      "session_id": sid})
             (V / "workflow-out.json").unlink(missing_ok=True)
         raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}, not {','.join(PROFILES)}/{a.model}")
+    if a.kind == "task":
+        (batch_path / a.output).write_text(out["text"])
+        out = {"output": str(batch_path / a.output), "session_id": sid}
+    out = {**out, "producer": producer}
     save(out_path, out)
     # A valid replacement makes the unit eligible again.
     (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
