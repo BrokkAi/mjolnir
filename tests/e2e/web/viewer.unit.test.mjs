@@ -1342,7 +1342,7 @@ function delegationContext(kind = 'codex', configured = true) {
 
 test('Create gives a YOLO target its own configured Mjolnir choices', () => {
   const context = delegationContext('codex', true);
-  context.snapshot.targets = [{ id: 'yolo', permission_mode: 'yolo', subagents_configured: false }];
+  context.snapshot.targets = [{ id: 'yolo', yolo: true, subagents_configured: false }];
   const available = () => vm.runInContext(
     `mjolnirAvailable({ profileId: 'profile', targetId: 'yolo', subagents: { mode: 'mjolnir' } })`,
     context,
@@ -1350,8 +1350,8 @@ test('Create gives a YOLO target its own configured Mjolnir choices', () => {
   assert.equal(available(), false);
   context.snapshot.targets[0].subagents_configured = true;
   assert.equal(available(), true);
-  // A container target has no permission mode and keeps the shared choices.
-  context.snapshot.targets[0] = { id: 'yolo', subagents_configured: true };
+  // A target that keeps approvals uses the shared choices.
+  context.snapshot.targets[0] = { id: 'yolo', yolo: false, subagents_configured: true };
   context.snapshot.subagents_configured = false;
   assert.equal(available(), true);
 });
