@@ -24,11 +24,15 @@ from reliability_lab import ScenarioFailure, process_is_running
 
 class ResumeRegression(Regression):
     def save_recovery_point(self, session):
-        # A live bundle export still saves an archive without replacing the
-        # environment whose later repair this regression exercises.
-        self.cli("export", "--session", session, "--kind", "bundle", "--out",
-                 str(self.root / f"{session}-recovery.bundle"))
-        assert self.record(session).get("checkpoint"), "bundle export did not save a recovery point"
+        # A live bundle export saves the archive before deciding whether the
+        # repository has new commits to export. Fresh fixtures have none.
+        before = self.record(session).get("checkpoint")
+        result = self.cli("export", "--session", session, "--kind", "bundle", "--out",
+                          str(self.root / f"{session}-recovery.bundle"), check=False)
+        if result.returncode and "no commits beyond the session base" not in result.stderr:
+            raise ScenarioFailure(f"save recovery point: {result.stderr}")
+        checkpoint = self.record(session).get("checkpoint")
+        assert checkpoint and checkpoint != before, "bundle export did not save a fresh recovery point"
 
     def worker_python(self, session, script, *arguments):
         target = self.record(session).get("target")
