@@ -50,6 +50,21 @@ GitHub prereleases and use npm's `next` channel; stable versions use `latest`.
 A release request authorizes the normal tag push and publication. Registry
 authorization is configured once, not audited again for every release.
 
+## Add a published crate
+
+Register a new workspace crate on crates.io before the commit that creates it
+reaches master, because the nightly release publishes master and
+`publish.yml` stops at the first crate it may not publish:
+
+    scripts/register-crate.py brokk-mj-<name> --description "<one line>"
+
+The script reserves the name with a `0.0.0` placeholder, adds the standard
+owners, configures Trusted Publishing for `publish.yml`, and then restricts the
+crate to Trusted Publishing. It needs a crates.io token with the scopes
+`publish-new`, `change-owners` and `trusted-publishing`, and it is safe to run
+again. `--check` reports the state of a crate without changing it. Then add the
+crate to the publication order in `.github/workflows/publish.yml`.
+
 ## Nightly release
 
 The scheduled run of `.github/workflows/nightly.yml` (05:41 UTC) releases
