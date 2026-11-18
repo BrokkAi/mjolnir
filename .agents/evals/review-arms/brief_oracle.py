@@ -488,10 +488,251 @@ def annotate(path, run_started):
     save(pathlib.Path(path), out)
 
 
+# Non-leaking oracle arm (brief/PLAN-bifrost-oracle-noleak.md). Each round is an editor task
+# per active diff (noleak-edit-build/-collect), one blind fact-check task over the round's edits
+# (noleak-check-build/-collect), then the paired leak check of brief_writer_terra.py with
+# --kind oracle-noleak --round N. A diff passes when both leak judges answer missed; up to
+# NOLEAK_ROUNDS rounds. Only fact-checked texts are written to texts/<diff>/round-N.md, which
+# is what the leak check judges and what noleak-publish publishes.
+NOLEAK_ROUNDS = 3
+
+
+def noleak_ids():
+    _, jobs = load_task_inputs()
+    return [j["bug"] for j in jobs]
+
+
+def noleak_record(bug):
+    path = ROOT / "briefs" / f"{TASK_NAME}-leak-records" / bug / "blind-leak.json"
+    return json.loads(path.read_text()) if path.exists() else {"rounds": []}
+
+
+def noleak_state(bug, upto):
+    """(passed_round or None, source_text, previous) for a diff after rounds 1..upto.
+
+    The source is the last fact-checked text, or the published OT brief. previous is what the
+    last check of that diff found: leak reasons, a fact-check rejection, or None."""
+    W = task_work()
+    ot = ROOT / "briefs" / "oracle" / bug / "brief.md"
+    source = ot.read_text()
+    previous = ot_leak_reasons(bug, source)
+    rounds = {r["round"]: r for r in noleak_record(bug)["rounds"]}
+    for n in range(1, upto + 1):
+        check = W / f"round-{n}" / "check-results.json"
+        if not check.exists():
+            raise SystemExit(f"round {n} fact check is not collected")
+        decision = json.loads(check.read_text())["decisions"].get(bug)
+        if decision is None:
+            continue  # not active in round n
+        if decision["decision"] != "carries":
+            previous = {"kind": "fact check rejected the last edit", "why": decision["why"]}
+            continue
+        text = (W / "texts" / bug / f"round-{n}.md").read_text()
+        leak = rounds.get(n)
+        if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
+            raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
+        source = text
+        if leak["label"] == "missed":
+            return n, source, None
+        previous = {"kind": "leak judges", "label": leak["label"],
+                    "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale")}
+                                for v in leak["verdicts"] if v["label"] != "missed"]}
+    return None, source, previous
+
+
+def ot_leak_reasons(bug, text):
+    """The stored final leak verdicts of the published OT brief (round L's leak flags)."""
+    record = json.loads((ROOT / "briefs" / "bifrost-oracle-leak-records" / bug / "blind-leak.json").read_text())
+    last = max(record["rounds"], key=lambda r: r["round"])
+    if last["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
+        raise SystemExit(f"{bug}: the OT brief's final leak record does not bind the published OT brief")
+    if last["label"] == "missed":
+        return None
+    return {"kind": "leak judges", "label": last["label"],
+            "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale")}
+                        for v in last["verdicts"] if v["label"] != "missed"]}
+
+
+def noleak_edit_build(n):
+    if not 1 <= n <= NOLEAK_ROUNDS:
+        raise SystemExit(f"rounds run 1..{NOLEAK_ROUNDS}")
+    census_rows, _ = load_task_inputs()
+    corpus = driver.CORPUS
+    W = task_work()
+    base = W / f"round-{n}" / "edit"
+    if base.exists():
+        raise SystemExit(f"{base} exists; refusing to rebuild a round's editor units")
+    scope_path = W / "settings.json"
+    if scope_path.exists() and json.loads(scope_path.read_text()) != task_scope():
+        raise SystemExit(f"{scope_path}: scope differs from saved settings")
+    made = []
+    for bug in noleak_ids():
+        passed, source, previous = noleak_state(bug, n - 1)
+        if passed:
+            continue
+        census = census_rows[bug]
+        item = {"id": bug, "intro": corpus[bug]["intro_commit"], "base": corpus[bug]["base_commit"],
+                "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
+                "brief": source, "previous": previous}
+        unit = base / bug
+        unit.mkdir(parents=True)
+        save(unit / "item.json", item)
+        (unit / "NOLEAK.md").write_text((SCRIPTS / "brief/NOLEAK.md").read_text())
+        (unit / "WRITER.md").write_text((SCRIPTS / "brief/WRITER.md").read_text())
+        (unit / "INSTRUCTIONS.md").write_text(
+            "Read NOLEAK.md and WRITER.md and follow them exactly. Your item is item.json. "
+            "Read code only through git show or git diff at the item's intro and base commits; "
+            "do not read code from the current checkout or other history. Do not read any other "
+            "experiment data or history, use the network, build, test, or edit tracked files. "
+            "Write edit.json in the repository working directory and edit no other file.")
+        made.append({"id": bug, "source_sha256": hashlib.sha256(source.encode()).hexdigest()})
+    if not scope_path.exists():
+        save(scope_path, task_scope())
+    save(base.parent / "edit-build.json", {"round": n, "units": made})
+    print(json.dumps({"dir": str(base), "units": made}))
+
+
+def noleak_validate(bug, item, raw):
+    """The edited brief, after checking the edit is wording-only on whole item lines."""
+    if not isinstance(raw, dict) or set(raw) != {"id", "items", "brief", "rationale"} or raw["id"] != bug:
+        raise SystemExit(f"{bug}: editor output schema/id invalid")
+    if not isinstance(raw["items"], list) or not raw["items"] or not isinstance(raw["brief"], str):
+        raise SystemExit(f"{bug}: editor output needs a non-empty items list and a brief")
+    source = item["brief"].splitlines()
+    result_text = raw["brief"].rstrip() + "\n"
+    result = result_text.splitlines()
+    if len(result) != len(source):
+        raise SystemExit(f"{bug}: edit added or removed lines")
+    declared = {}
+    for e in raw["items"]:
+        before, after = e.get("before"), e.get("after")
+        if not (isinstance(before, str) and isinstance(after, str) and before.startswith("- ") and after.startswith("- ")):
+            raise SystemExit(f"{bug}: each edited item needs complete before/after item lines")
+        hits = [i for i, line in enumerate(source) if line == before]
+        if len(hits) != 1:
+            raise SystemExit(f"{bug}: before line must match exactly one source line: {before[:80]}")
+        anchors = lambda t: sorted(m.group(0) for m in brief_driver.ANCHOR.finditer(t))
+        if anchors(before) != anchors(after):
+            raise SystemExit(f"{bug}: an edit changed anchors: {before[:80]}")
+        declared[hits[0]] = after
+    for i, (old, new) in enumerate(zip(source, result)):
+        if new != declared.get(i, old):
+            raise SystemExit(f"{bug}: line {i + 1} differs from the declared edits")
+    problems = brief_driver.lint(result_text, driver.CORPUS[bug])
+    if problems:
+        raise SystemExit(f"{bug}: edited brief fails lint: {problems}")
+    return result_text
+
+
+def noleak_edit_collect(n):
+    W = task_work()
+    base = W / f"round-{n}" / "edit"
+    units = json.loads((base.parent / "edit-build.json").read_text())["units"]
+    out_path = base.parent / "edit-results.json"
+    if out_path.exists():
+        raise SystemExit(f"{out_path} exists")
+    # Validate every unit before writing anything, so a failure leaves nothing half collected.
+    recs = []
+    for u in units:
+        bug = u["id"]
+        item = json.loads((base / bug / "item.json").read_text())
+        raw = json.loads((base / bug / "edit.json").read_text())
+        text = noleak_validate(bug, item, raw)
+        recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
+                     "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest()})
+    save(out_path, {"round": n, "results": recs})
+    print(json.dumps([{k: r[k] for k in ("id", "edited_items", "brief_sha256")} for r in recs]))
+
+
+def noleak_check_build(n):
+    W = task_work()
+    edits = json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
+    census_rows, _ = load_task_inputs()
+    corpus = driver.CORPUS
+    unit = W / f"round-{n}" / "check" / "factcheck"
+    if unit.exists():
+        raise SystemExit(f"{unit} exists")
+    unit.mkdir(parents=True)
+    for r in edits:
+        census = census_rows[r["id"]]
+        save(unit / f"item-{r['id']}.json", {
+            "id": r["id"], "intro": corpus[r["id"]]["intro_commit"], "base": corpus[r["id"]]["base_commit"],
+            "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
+            "brief": r["brief"], "brief_sha256": r["brief_sha256"]})
+    (unit / "FACTCHECK.md").write_text((SCRIPTS / "brief/FACTCHECK.md").read_text())
+    (unit / "INSTRUCTIONS.md").write_text(
+        f"Read FACTCHECK.md and follow it exactly. Your item files are the {len(edits)} item-*.json files "
+        "in this folder. Read code only through git show or git diff at each item's intro and base commits. "
+        "Do not read any other experiment data or history, use the network, build, test, or edit tracked "
+        "files. Write factcheck.jsonl in the repository working directory and edit no other file.")
+    print(json.dumps({"dir": str(unit.parent), "items": len(edits)}))
+
+
+def noleak_check_collect(n):
+    W = task_work()
+    edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
+    out_path = W / f"round-{n}" / "check-results.json"
+    if out_path.exists():
+        raise SystemExit(f"{out_path} exists")
+    rows = [json.loads(line) for line in
+            (W / f"round-{n}" / "check" / "factcheck" / "factcheck.jsonl").read_text().splitlines() if line.strip()]
+    if sorted(r.get("id") for r in rows) != sorted(edits):
+        raise SystemExit("fact check must cover each edited brief exactly once")
+    decisions = {}
+    for r in rows:
+        e = edits[r["id"]]
+        if r.get("brief_sha256") != e["brief_sha256"] or r.get("decision") not in ("carries", "does not carry"):
+            raise SystemExit(f"{r['id']}: fact check names another brief or an invalid decision")
+        if r["decision"] == "carries":
+            # The checker quotes a whole line of exactly this text; a substring is not a quote.
+            if not isinstance(r.get("item"), str) or r["item"] not in e["brief"].splitlines() or not r["item"].startswith("- "):
+                raise SystemExit(f"{r['id']}: carrying item is not a complete line of the checked brief")
+        decisions[r["id"]] = {"decision": r["decision"], "item": r.get("item"), "why": r.get("why"),
+                              "brief_sha256": e["brief_sha256"]}
+    for bug, d in decisions.items():
+        if d["decision"] == "carries":
+            path = W / "texts" / bug / f"round-{n}.md"
+            if path.exists():
+                raise SystemExit(f"{path} exists")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(edits[bug]["brief"])
+    save(out_path, {"round": n, "decisions": decisions})
+    print(json.dumps({"round": n, "carries": sorted(b for b, d in decisions.items() if d["decision"] == "carries"),
+                      "rejected": sorted(b for b, d in decisions.items() if d["decision"] != "carries")}))
+
+
+def noleak_publish(jobs_out):
+    W = task_work()
+    done = max((n for n in range(1, NOLEAK_ROUNDS + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
+    retained, excluded = [], []
+    for bug in noleak_ids():
+        passed, source, previous = noleak_state(bug, done)
+        if passed:
+            retained.append({"bug": bug, "round": passed, "brief_sha256": hashlib.sha256(source.encode()).hexdigest()})
+        elif done < NOLEAK_ROUNDS:
+            raise SystemExit(f"{bug}: not passed after round {done}; run the remaining rounds first")
+        else:
+            excluded.append({"bug": bug, "after_round": done, "last_check": previous})
+    for r in retained:
+        d = ROOT / "briefs" / "oracle-noleak" / r["bug"]
+        text = (W / "texts" / r["bug"] / f"round-{r['round']}.md").read_text()
+        if (d / "brief.md").exists() and (d / "brief.md").read_text() != text:
+            raise SystemExit(f"{d}: a different brief is already published")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text(text)
+    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": "ON"} for r in retained])
+    save(W / "publication.json", {"retained": retained, "excluded": excluded, "jobs": str(jobs_out)})
+    print(json.dumps({"retained": len(retained), "excluded": [e["bug"] for e in excluded]}))
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate",
-                                    "edit-build", "edit-collect", "task-sync"])
+                                    "edit-build", "edit-collect", "task-sync",
+                                    "noleak-edit-build", "noleak-edit-collect", "noleak-check-build",
+                                    "noleak-check-collect", "noleak-publish"])
+    p.add_argument("--round", type=int, help="noleak steps: round 1..3")
+    p.add_argument("--jobs-out", help="noleak-publish: where to write the ON jobs file")
     p.add_argument("path", nargs="?")
     p.add_argument("--run-started", help="annotate: ISO time the workflow run started")
     p.add_argument("--census", help="task editor census JSONL")
@@ -499,7 +740,7 @@ if __name__ == "__main__":
     p.add_argument("--name", help="task-specific work name")
     a = p.parse_args()
     if a.census or a.bugs_from or a.name:
-        if a.step not in ("edit-build", "edit-collect", "task-sync", "collect"):
+        if a.step not in ("edit-build", "edit-collect", "task-sync", "collect") and not a.step.startswith("noleak-"):
             p.error("--census/--bugs-from/--name apply only to task construction and collect steps")
         if not a.census or not a.bugs_from:
             p.error("task construction needs both --census and --bugs-from")
@@ -507,7 +748,19 @@ if __name__ == "__main__":
             p.error("--name must be a single path component")
         TASK_CENSUS, TASK_JOBS, TASK_NAME = a.census, a.bugs_from, a.name
         load_task_inputs()
-    if a.step == "merge":
+    if a.step.startswith("noleak-"):
+        if not TASK_NAME:
+            p.error("noleak steps need --census, --bugs-from and --name")
+        if a.step == "noleak-publish":
+            if not a.jobs_out:
+                p.error("noleak-publish needs --jobs-out")
+            noleak_publish(a.jobs_out)
+        else:
+            if a.round is None:
+                p.error("noleak steps need --round")
+            {"noleak-edit-build": noleak_edit_build, "noleak-edit-collect": noleak_edit_collect,
+             "noleak-check-build": noleak_check_build, "noleak-check-collect": noleak_check_collect}[a.step](a.round)
+    elif a.step == "merge":
         merge(a.path)
     elif a.step == "blind-collect":
         blind_collect(a.path)

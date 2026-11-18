@@ -111,7 +111,7 @@ def rewrite_dir(scope):
 
 
 def round_scope(kind, name, bugs_from, brief_root=None):
-    if kind == "oracle":
+    if kind in ORACLE_KINDS:
         jobs = json.loads(bugs_from.read_text())
         ids = [j["bug"] for j in jobs]
         if not ids or len(ids) != len(set(ids)) or any(j.get("arm") != "OT" for j in jobs):
@@ -127,8 +127,16 @@ def round_scope(kind, name, bugs_from, brief_root=None):
     return {"kind": kind, "name": name or kind, "diffs": selected}
 
 
+# Leak scopes over candidate texts under --brief-root rather than a published brief kind.
+# oracle: round 0 judges candidate.md, round 1 the accepted rewrite (final.md).
+# oracle-noleak (brief/PLAN-bifrost-oracle-noleak.md): round N judges the fact-checked round-N.md.
+ORACLE_KINDS = ("oracle", "oracle-noleak")
+
+
 def brief_path(scope, bug, n=0):
     """The text a leak round judges: oracle round 1 judges the accepted rewrite where one exists."""
+    if scope["kind"] == "oracle-noleak":
+        return pathlib.Path(scope["brief_root"]) / bug / f"round-{n}.md"
     if scope["kind"] == "oracle":
         root = pathlib.Path(scope["brief_root"]) / bug
         return root / ("final.md" if n == 1 and (root / "final.md").exists() else "candidate.md")
@@ -136,7 +144,7 @@ def brief_path(scope, bug, n=0):
 
 
 def record_path(scope, bug):
-    if scope["kind"] == "oracle":
+    if scope["kind"] in ORACLE_KINDS:
         return ROOT / "briefs" / f"{scope['name']}-leak-records" / bug / "blind-leak.json"
     return out_dir(scope) / bug / "blind-leak.json"
 
@@ -156,7 +164,12 @@ def check_scope(directory, scope, *, create=False, legacy=False):
 def leak_build(n, scope):
     out = out_dir(scope)
     corpus = driver.CORPUS
-    if n == 0:
+    if scope["kind"] == "oracle-noleak":
+        # Only diffs whose round-n edit passed the fact check have a round-n text.
+        bugs = [b for b in scope["diffs"] if brief_path(scope, b, n).is_file()]
+        if not bugs:
+            raise SystemExit(f"no fact-checked round-{n} texts")
+    elif n == 0:
         bugs = list(scope["diffs"])
     elif scope["kind"] == "oracle":
         bugs = []
@@ -168,7 +181,7 @@ def leak_build(n, scope):
                 bugs.append(b)
     else:
         bugs = [b for b in scope["diffs"] if (out / b / "brief-writer.md").exists()]
-    missing = [] if scope["kind"] == "oracle" else [b for b in bugs if not (out / b / "done.json").exists()]
+    missing = [] if scope["kind"] in ORACLE_KINDS else [b for b in bugs if not (out / b / "done.json").exists()]
     if missing:
         raise SystemExit(f"briefs not written yet: {missing}")
     d = leak_dir(n, scope)
@@ -433,11 +446,11 @@ def observations(round_name, groups, arm_conditions):
 
 def compare_same_sessions(round_name, reference_round, bugs, arms=("A", "BT"), model=REVIEW_MODEL):
     """Compare final labels for identical (bug, condition, session) observations across rounds."""
-    if not bugs or not arms or set(arms) - {"A", "BT"}:
-        raise SystemExit("same-session comparison needs bugs and A/BT arms")
+    conditions = {"A": "no-brief", "BT": "blind", "OT": "oracle"}
+    if not bugs or not arms or set(arms) - set(conditions):
+        raise SystemExit(f"same-session comparison needs bugs and arms among {sorted(conditions)}")
     rounds = (round_name, reference_round)
     selected, finals = {}, {}
-    conditions = {"A": "no-brief", "BT": "blind"}
     for name in rounds:
         key, finals[name] = judged_round(name)
         cells = {}
@@ -704,9 +717,10 @@ def main():
     p.add_argument("step", choices=["leak-build", "leak-collect", "rewrite-build", "rewrite-collect",
                                     "contains-build", "usage", "readout"])
     p.add_argument("--writer", choices=sorted(STUDIES), default="terra")
-    p.add_argument("--round", type=int, choices=[0, 1], default=0)
+    p.add_argument("--round", type=int, choices=[0, 1, 2, 3], default=0,
+                   help="leak round; 2 and 3 exist only for --kind oracle-noleak, which starts at 1")
     p.add_argument("--name", help="readout judging round, or path prefix for leak/rewrite")
-    p.add_argument("--kind", choices=("blind", "oracle", *(s["kind"] for s in STUDIES.values())),
+    p.add_argument("--kind", choices=("blind", *ORACLE_KINDS, *(s["kind"] for s in STUDIES.values())),
                    help="leak/rewrite brief kind (default: the selected writer's kind)")
     p.add_argument("--bugs-from", type=pathlib.Path, help="leak/rewrite jobs whose diffs are the explicit subset")
     p.add_argument("--brief-root", type=pathlib.Path, help="oracle leak/rewrite: root containing <bug>/candidate.md")
@@ -715,8 +729,12 @@ def main():
     leak_steps = ("leak-build", "leak-collect", "rewrite-build", "rewrite-collect")
     if (a.kind or a.bugs_from or a.brief_root) and a.step not in leak_steps:
         p.error("--kind, --bugs-from and --brief-root apply only to leak/rewrite steps")
-    if a.kind == "oracle" and (a.brief_root is None or a.bugs_from is None):
-        p.error("--kind oracle requires --brief-root and --bugs-from")
+    if a.kind in ORACLE_KINDS and (a.brief_root is None or a.bugs_from is None):
+        p.error(f"--kind {a.kind} requires --brief-root and --bugs-from")
+    if (a.kind == "oracle-noleak") != (a.round >= 2) and not (a.kind == "oracle-noleak" and a.round == 1):
+        p.error("rounds 2-3 apply only to --kind oracle-noleak, whose rounds are 1-3")
+    if a.kind == "oracle-noleak" and a.step not in ("leak-build", "leak-collect"):
+        p.error("--kind oracle-noleak has no rewrite step; edits run through brief_oracle.py noleak steps")
     if a.step in leak_steps and a.name is not None and (
             pathlib.Path(a.name).name != a.name or a.name in ("", ".", "..")):
         p.error("--name must be a single round path component")
