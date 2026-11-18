@@ -6651,6 +6651,32 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     assert!(cleared.clear_resource_allocation);
     assert_eq!(cleared.resource_allocation, None);
 
+    // A fixed destination has no default, so the clear request survives even
+    // though the source has a size: it is what allows the Move onto that host,
+    // and validation has to see no allocation to accept it.
+    let mut no_default = selection("podman", None, false);
+    let fixed_host = mj_core::config::TargetTemplate::LocalBare;
+    let mut sizing_source = sized_source(container_size(16, 32));
+    assert!(!super::resolve_move_destination_size(
+        &sizing_source,
+        &mut no_default,
+        &state,
+        &fixed_host,
+    ));
+    assert_eq!(no_default.resource_allocation, None);
+    assert!(!no_default.clear_resource_allocation);
+    // An inherited size on a fixed host is left as the request wrote it too.
+    sizing_source.resource_allocation = None;
+    let mut cleared_on_fixed = selection("local-bare", None, true);
+    assert!(!super::resolve_move_destination_size(
+        &sizing_source,
+        &mut cleared_on_fixed,
+        &state,
+        &fixed_host,
+    ));
+    assert!(cleared_on_fixed.clear_resource_allocation);
+    assert_eq!(cleared_on_fixed.resource_allocation, None);
+
     // A container destination takes the host's remembered size, else the
     // baseline, and carries it instead of the clear instruction.
     let mut defaulted = selection("podman", None, true);
@@ -6672,6 +6698,18 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &config.targets["podman"],
     ));
     assert_eq!(explicit.resource_allocation, container_size(6, 16));
+
+    // An inherited size becomes the sealed size, so the confirmation and every
+    // later reader see the size the rebuilt container really gets instead of
+    // working it out from the source record again.
+    let mut inheriting = selection("podman", None, false);
+    assert!(!super::resolve_move_destination_size(
+        &sized_source(container_size(16, 32)),
+        &mut inheriting,
+        &state,
+        &config.targets["podman"],
+    ));
+    assert_eq!(inheriting.resource_allocation, container_size(16, 32));
 
     state.remember_container_size(
         "local",

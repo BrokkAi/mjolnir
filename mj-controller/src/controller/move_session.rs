@@ -3288,26 +3288,32 @@ fn move_default_allocation(
     })
 }
 
-/// What a Move applies where its selection names no size: the destination's
-/// default, decided once here so the environment decision, the sealed
-/// selection, capacity admission and the destination record cannot disagree
-/// (#1585). Returns whether the applied size is that default.
+/// What a Move applies where its selection names no size: the inherited size,
+/// or the destination's default, decided once here so the environment
+/// decision, the sealed selection, capacity admission and the destination
+/// record cannot disagree (#1585). Returns whether the applied size is that
+/// default.
 ///
 /// A destination without a default -- a fixed host -- has none to give, so
-/// there the clear request survives: it is what allows a sized session onto
-/// that host at all.
+/// there the request keeps its own meaning, and the clear request is what
+/// allows a sized session onto that host at all. Where a default exists the
+/// sealed selection names the size that will be applied, so no later reader
+/// has to work it out from the source record again.
 fn resolve_move_destination_size(
     source: &mj_core::state::SessionRecord,
     selection: &mut MoveSelection,
     state: &mj_core::state::State,
     target: &mj_core::config::TargetTemplate,
 ) -> bool {
-    if move_requested_allocation(source, selection).is_some() {
-        return false;
-    }
     let Some(default_size) = move_default_allocation(state, target) else {
         return false;
     };
+    if let Some(inherited) = move_requested_allocation(source, selection) {
+        if selection.resource_allocation.is_none() {
+            selection.resource_allocation = Some(inherited.clone());
+        }
+        return false;
+    }
     selection.resource_allocation = Some(default_size);
     selection.clear_resource_allocation = false;
     true

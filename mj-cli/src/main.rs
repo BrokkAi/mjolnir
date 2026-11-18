@@ -1366,12 +1366,25 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     };
     let resource_allocation = match (args.cpus, args.memory_gib) {
         (Some(cpus), Some(memory_gib)) => {
-            Some(mj_core::state::SessionResourceAllocation::Container {
-                cpus,
-                memory_bytes: memory_gib
-                    .checked_mul(1 << 30)
-                    .context("--memory-gib is too large")?,
-            })
+            let memory_bytes = match memory_gib.checked_mul(1 << 30) {
+                Some(bytes) => bytes,
+                None => {
+                    let error = anyhow::anyhow!("--memory-gib is too large");
+                    if args.json {
+                        print_move_json(&mj_core::state::MoveOutcome {
+                            operation_id: String::new(),
+                            session_id: args.session.clone(),
+                            profile_id: args.profile.clone().unwrap_or_default(),
+                            target_template_id: args.target.clone().unwrap_or_default(),
+                            outcome: "failed".to_owned(),
+                            error: Some(error.to_string()),
+                            recovery: None,
+                        })?;
+                    }
+                    return Err(error);
+                }
+            };
+            Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes })
         }
         _ => None,
     };
