@@ -8,15 +8,16 @@ use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, SessionManifest, TargetManifest, write_archive_atomic,
 };
 use mj_core::config::{
-    Config, ContainerTemplate as ConfigContainer, ProjectBundle, ProjectRepository, SshConnection,
-    TargetTemplate,
+    Config, ContainerTemplate as ConfigContainer, SshConnection, TargetTemplate,
 };
 use mj_core::state::{
     CheckpointMetadata, ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget, SessionRecord,
     SessionState,
 };
 
-pub use crate::database::test_fixtures::checkpoint_test_session;
+pub use crate::database::test_fixtures::{
+    checkpoint_test_session, local_bundle, worker_test_gate, worker_test_permit,
+};
 use crate::targets::ProcessExecutor;
 pub use crate::test_isolation::{IsolatedTest, test_name};
 
@@ -280,19 +281,6 @@ pub fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecord {
 
 pub fn ssh_worktree_target() -> ManagedWorktreeTarget {
     managed_worktree_target(&resume_compatibility_config().targets["ssh-bare"]).unwrap()
-}
-
-pub fn local_bundle(repository: &Path) -> ProjectBundle {
-    ProjectBundle {
-        primary_repo: "project".into(),
-        repositories: vec![ProjectRepository {
-            id: "project".into(),
-            github: None,
-            local: Some(repository.to_path_buf()),
-            destination: PathBuf::from("project"),
-            git_ref: None,
-        }],
-    }
 }
 
 pub fn test_git(directory: &Path, args: &[&str]) -> String {
@@ -593,35 +581,6 @@ pub(crate) fn relay_admission(session_id: &str) -> crate::recovery_gate::RelayLe
 }
 
 /// Shared owner for fixtures exercising process mutation without a daemon.
-pub(crate) fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    static GATES: OnceLock<
-        Mutex<
-            std::collections::BTreeMap<std::path::PathBuf, Arc<crate::recovery_gate::RecoveryGate>>,
-        >,
-    > = OnceLock::new();
-    GATES
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap()
-        .entry(mj_core::config::data_dir())
-        .or_default()
-        .clone()
-}
-pub fn worker_test_permit(
-    id: &str,
-    _reason: &'static str,
-) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
-    if let Some(owner) = crate::worker_lifecycle::current(id) {
-        return Ok(Some(owner));
-    }
-    let Ok(admission) =
-        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerReplacement)
-    else {
-        return Ok(None);
-    };
-    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
-}
 pub(crate) fn worker_test_observation(
     id: &str,
 ) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {

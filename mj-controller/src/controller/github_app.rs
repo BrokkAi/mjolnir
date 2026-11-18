@@ -1,6 +1,5 @@
 //! GitHub App JWTs and installation access tokens owned by the controller.
 
-use mj_core::targets::SshTrafficClass;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +19,8 @@ use mj_core::config::{
 };
 use mj_core::remote_git::{github_owner_repo, resolve_repository};
 
+use super::worker_binary::configured_session_github_token;
+pub use super::worker_binary::install_configured_session_github_token;
 use super::{Controller, controller_github_token};
 use crate::targets::{CommandExecutor, ProcessExecutor};
 
@@ -836,31 +837,6 @@ pub async fn renew_session_github_app_token(session_id: String) -> Result<Option
     controller.github_app_token_for_session(&session_id).await
 }
 
-/// Read the controller-side override afresh; missing is an error when configured.
-pub(super) fn configured_session_github_token(github: &GithubConfig) -> Result<Option<String>> {
-    use std::io::Read;
-
-    let Some(path) = &github.session_token_path else {
-        return Ok(None);
-    };
-    let path =
-        mj_core::path_input::expand_local(path).context("resolve [github] session_token_path")?;
-    let read = || -> Result<String> {
-        ensure!(
-            fs::metadata(&path)?.is_file(),
-            "session token must be a regular file"
-        );
-        let file = fs::File::open(&path)?;
-        let mut bytes = Vec::new();
-        file.take(mj_core::credentials::MAX_GITHUB_TOKEN_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        Ok(mj_core::credentials::validate_github_token(&bytes)?.to_owned())
-    };
-    read()
-        .map(Some)
-        .with_context(|| format!("read [github] session_token_path {}", path.display()))
-}
-
 async fn session_token_override(github: &GithubConfig) -> Result<Option<String>> {
     if github.session_token_path.is_none() {
         return Ok(None);
@@ -869,50 +845,6 @@ async fn session_token_override(github: &GithubConfig) -> Result<Option<String>>
     tokio::task::spawn_blocking(move || configured_session_github_token(&github))
         .await
         .context("read session GitHub token task stopped")?
-}
-
-/// Refresh the override before a worker starts, including retained workers.
-/// Lifecycle ownership excludes periodic reconciliation while this runs.
-pub fn install_configured_session_github_token(
-    github: &GithubConfig,
-    executor: &impl CommandExecutor,
-    locator: &mj_core::targets::TargetLocator,
-    worker_root: &str,
-) -> Result<()> {
-    let Some(token) = configured_session_github_token(github)? else {
-        return Ok(());
-    };
-    const INSTALL: &str = r#"set -eu
-umask 077
-root=$1
-path=$root/github-token
-if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
-    echo 'session GitHub token is not a regular file' >&2; exit 1
-fi
-temporary=$(mktemp "$root/github-token.XXXXXXXX")
-trap 'rm -f -- "$temporary"' EXIT
-cat > "$temporary"
-mv -f -- "$temporary" "$path"
-"#;
-    let mut bytes = token.into_bytes();
-    bytes.push(b'\n');
-    // A token is a few bytes and a session waits on it, so it must not queue
-    // behind bulk transfers to the same target.
-    let command = crate::targets::locator_command(
-        SshTrafficClass::Control,
-        locator,
-        vec![
-            "sh".into(),
-            "-c".into(),
-            INSTALL.into(),
-            "mj-session-github-token".into(),
-            worker_root.into(),
-        ],
-    )
-    .purpose("install configured session GitHub token")
-    .with_sensitive_stdin(bytes);
-    super::execute_checked(executor, command)?;
-    Ok(())
 }
 
 pub(super) fn github_repositories(

@@ -96,19 +96,7 @@ pub(super) fn refresh_worker_binary_if_stale(
     }
 }
 
-pub(crate) fn installed_digest_matches(
-    executor: &impl CommandExecutor,
-    command: &CommandSpec,
-    expected: &str,
-) -> bool {
-    executor.execute(command).as_ref().is_ok_and(|output| {
-        output.status == 0
-            && String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .next()
-                .is_some_and(|digest| digest.eq_ignore_ascii_case(expected))
-    })
-}
+pub(crate) use mj_targets::command_checks::installed_digest_matches;
 
 pub(super) fn refresh_worker_launch_if_stale(
     executor: &impl CommandExecutor,

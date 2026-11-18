@@ -1,23 +1,9 @@
 use super::*;
 
-impl Controller {
-    pub(super) fn subagent_parent_worktree(
-        &self,
-        id: &str,
-    ) -> Option<&mj_core::state::ManagedWorktree> {
-        match self.state.checkout(id).ok()?.effective() {
-            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
-            mj_core::state::Checkout::Attached { .. }
-            | mj_core::state::Checkout::ManagedWorkspace
-            | mj_core::state::Checkout::Borrowed { .. } => None,
-        }
-    }
-}
-
 /// Claude Code's switch for its auto-memory directory and memory reminder.
-pub(super) const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+pub const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 
-pub(super) fn project_memory_launch(
+pub fn project_memory_launch(
     session: &mj_core::state::SessionRecord,
     bundle: Option<&ProjectBundle>,
     workspace: &(String, Vec<String>),
@@ -69,11 +55,11 @@ pub(super) fn project_memory_launch(
     })
 }
 
-pub(super) fn project_memory_replica_slug(project_key: &str, session_id: &str) -> String {
+pub fn project_memory_replica_slug(project_key: &str, session_id: &str) -> String {
     format!("hel-{}-{session_id}", &project_key[..16])
 }
 
-pub(super) fn project_memory_mcp_delivery(
+pub fn project_memory_mcp_delivery(
     harness: mj_core::config::HarnessKind,
     target: &targets::TargetLocator,
 ) -> ProjectMemoryMcpDelivery {
@@ -86,11 +72,11 @@ pub(super) fn project_memory_mcp_delivery(
     }
 }
 
-pub(super) fn canonical_memory_root(project_key: &str) -> PathBuf {
+pub fn canonical_memory_root(project_key: &str) -> PathBuf {
     data_dir().join("projects").join(project_key).join("memory")
 }
 
-pub(super) fn stage_memory_replica<'a>(
+pub fn stage_memory_replica<'a>(
     memory: &'a ProjectMemoryLaunchConfig,
     target_profile_home: &Path,
     profile_stage: &Path,

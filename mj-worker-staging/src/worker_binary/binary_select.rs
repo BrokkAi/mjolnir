@@ -4,7 +4,7 @@ use mj_core::targets::SshTrafficClass;
 
 /// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
 /// marker belongs in a message but never in a decision, which `is_file` makes.
-pub(super) fn display_path(path: &Path) -> String {
+pub fn display_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_suffix(" (deleted)").unwrap_or(&text).to_owned()
 }
@@ -15,9 +15,7 @@ pub(super) fn display_path(path: &Path) -> String {
 /// configured target template can state: the configured `AwsEc2` variant names
 /// a launch template, whose instance type is only discoverable through the AWS
 /// API.
-pub(super) fn template_architecture(
-    template: &mj_core::config::TargetTemplate,
-) -> Option<&'static str> {
+pub fn template_architecture(template: &mj_core::config::TargetTemplate) -> Option<&'static str> {
     use mj_core::config::TargetTemplate as Template;
     let platform = match template {
         Template::LocalPodman { container }
@@ -41,9 +39,7 @@ pub(super) fn template_architecture(
 /// without one: an architecture the template names, else the controller's own
 /// architecture for a target that runs on this machine, else either Linux
 /// architecture for a remote target.
-pub(super) fn preflight_architectures(
-    template: &mj_core::config::TargetTemplate,
-) -> Vec<&'static str> {
+pub fn preflight_architectures(template: &mj_core::config::TargetTemplate) -> Vec<&'static str> {
     use mj_core::config::TargetTemplate as Template;
     if let Some(arch) = template_architecture(template) {
         return vec![arch];
@@ -70,7 +66,7 @@ pub(super) fn preflight_architectures(
 /// names this release's own default image, which the release workflow
 /// published with this build's worker. Installation still asks the image's
 /// worker for its build before linking it (see [`WorkerInstall::for_target`]).
-pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTemplate) -> bool {
+pub fn release_image_supplies_worker(template: &mj_core::config::TargetTemplate) -> bool {
     mj_core::worker_build::release_image_carries_worker()
         && template
             .container()
@@ -85,7 +81,7 @@ pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTe
 /// performed before target creation, so a resume that could never install a worker
 /// must fail before spending any of that. Remote sources are downloaded and
 /// verified here too, before provisioning can create a container.
-pub(in crate::controller) fn preflight_worker_binary(
+pub fn preflight_worker_binary(
     template: &mj_core::config::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
@@ -97,7 +93,7 @@ pub(in crate::controller) fn preflight_worker_binary(
 
 /// [`preflight_worker_binary`] without trusting a release's image: a worker of
 /// this build must be available from the host.
-pub(in crate::controller) fn preflight_host_worker_binary(
+pub fn preflight_host_worker_binary(
     template: &mj_core::config::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
@@ -208,7 +204,7 @@ pub fn ssh_worker_binary_prerequisite(
     ))
 }
 
-pub(in crate::controller) fn worker_binary_for(
+pub fn worker_binary_for(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<PathBuf> {
@@ -242,7 +238,7 @@ fn probe_platform(
     targets::TargetPlatform::parse(std::str::from_utf8(&output.stdout)?)
 }
 
-pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {
+pub fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {
     validate_worker_sha256(expected_sha256)?;
     let digest = expected_sha256.to_ascii_lowercase();
     let directory = data_dir().join("workers").join("pinned");
@@ -290,7 +286,7 @@ pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) ->
     publish_cached_worker(temporary, &directory, &digest)
 }
 
-pub(super) fn validate_worker_sha256(expected_sha256: &str) -> Result<()> {
+pub fn validate_worker_sha256(expected_sha256: &str) -> Result<()> {
     if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         bail!("MJ_WORKER_SHA256 must be a 64-character hexadecimal digest");

@@ -41,7 +41,7 @@ pub fn prewarm_profile_content(
         .target
         .as_ref()
         .context("session target is missing")?;
-    let backend = crate::controller::backend_locator(locator, session, config)?;
+    let backend = backend_locator(locator, session, config)?;
     let Some(ssh) = shared_content_ssh(&backend) else {
         return Ok(PrewarmOutcome::NotApplicable(
             "the session's target does not use the shared profile store",

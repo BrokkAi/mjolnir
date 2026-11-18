@@ -156,6 +156,13 @@ it or introduce a dependency between sibling branches.
   installation, the shared clone cache, and the native build-tool caches. It
   builds on the targets, store and import crates. `mj_controller::controller`
   re-exports its modules under their old names.
+- `brokk-mj-worker-staging` (`mj-worker-staging/`, library
+  `mj_worker_staging`) puts what a session needs onto its target and keeps it
+  current: selecting, verifying and installing the worker binary, installing
+  the harness, transferring the profile, and the commands that probe, stop
+  and restart a staged worker. It fills in the plans of the session types
+  crate and builds on the targets, store and accounts crates.
+  The methods on `Controller` that orchestrate it stay in the controller.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

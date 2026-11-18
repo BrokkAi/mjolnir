@@ -6,7 +6,7 @@ use super::*;
 /// credentials file, and a setup token does not rotate, so a container copy
 /// cannot lose the single-use refresh race with the host. A profile that sets
 /// the variable itself stays authoritative.
-pub(in crate::controller) fn apply_claude_setup_token(
+pub fn apply_claude_setup_token(
     environment: &mut std::collections::BTreeMap<String, String>,
     kind: mj_core::config::HarnessKind,
     token_path: &Path,
@@ -44,7 +44,7 @@ pub(in crate::controller) fn apply_claude_setup_token(
 
 /// Whether Claude is authenticated by a non-blank launch variable. A blank
 /// value is absent, matching how the profile model interprets API keys.
-pub(super) fn claude_environment_login_present(
+pub fn claude_environment_login_present(
     profile: &mj_core::config::HarnessProfile,
     environment: &std::collections::BTreeMap<String, String>,
 ) -> bool {
@@ -82,7 +82,7 @@ pub(super) fn claude_environment_login_present(
 ///
 /// The setup token takes precedence: when that environment variable is
 /// present, Claude never reads this file.
-pub(super) fn stage_claude_keychain_login(
+pub fn stage_claude_keychain_login(
     profile: &mj_core::config::HarnessProfile,
     host: mj_core::config::HarnessHost,
     destination: &Path,
@@ -124,7 +124,7 @@ pub(super) fn stage_claude_keychain_login(
 /// Kimi's runtime-aware engine cannot infer a runtime identity from an ACP
 /// stdio server. Add Hel's history server to the session-private profile
 /// instead, where Kimi's native schema can bind it to the target's local runtime.
-pub(super) fn configure_kimi_history_mcp(
+pub fn configure_kimi_history_mcp(
     profile_stage: &Path,
     worker_root: &str,
     history_socket: Option<&Path>,
@@ -196,7 +196,7 @@ pub(super) fn configure_kimi_history_mcp(
 /// Add the worker-owned mailbox drain to Claude's session-private settings.
 /// The command is finalized on the worker because remote worker roots are
 /// home-relative while staging runs on the controller.
-pub(super) fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
+pub fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
     let path = profile_stage.join("settings.json");
     let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
     let socket = mj_core::target_path::join(Path::new(worker_root), Path::new("control.sock"));
@@ -261,7 +261,7 @@ pub(super) fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &
 ///
 /// Reserve the same directory and honor the same target scope as
 /// [`mj_core::skills::session_skills`], so later sync preserves this tree.
-pub(super) fn stage_managed_skills(
+pub fn stage_managed_skills(
     kind: mj_core::config::HarnessKind,
     profile_stage: &Path,
     scope: mj_core::skills::SkillsScope,
@@ -293,7 +293,7 @@ pub(super) fn stage_managed_skills(
 /// Write the enforcement table's staged setting, if the harness has one. Muse
 /// composes a session's permission profile from its settings file and nothing
 /// on the ACP wire overrides that choice, so the profile has to be staged.
-pub(in crate::controller) fn apply_staged_execution_setting(
+pub fn apply_staged_execution_setting(
     kind: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
     profile_stage: &Path,
@@ -316,7 +316,7 @@ pub(in crate::controller) fn apply_staged_execution_setting(
 /// Read a staged JSON settings file (treating a missing file as an empty
 /// object), let `edit` change its root object, and write it back atomically.
 /// `label` names the file in every error message.
-pub(super) fn edit_staged_json_object(
+pub fn edit_staged_json_object(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,

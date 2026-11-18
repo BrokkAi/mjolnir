@@ -166,3 +166,50 @@ pub fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         checkpoint: None,
     }
 }
+
+/// A bundle of one local repository.
+pub fn local_bundle(repository: &std::path::Path) -> mj_core::config::ProjectBundle {
+    mj_core::config::ProjectBundle {
+        primary_repo: "project".into(),
+        repositories: vec![mj_core::config::ProjectRepository {
+            id: "project".into(),
+            github: None,
+            local: Some(repository.to_path_buf()),
+            destination: std::path::PathBuf::from("project"),
+            git_ref: None,
+        }],
+    }
+}
+
+/// The recovery gate tests share for one data directory.
+pub fn worker_test_gate() -> std::sync::Arc<crate::recovery_gate::RecoveryGate> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GATES: OnceLock<
+        Mutex<
+            std::collections::BTreeMap<std::path::PathBuf, Arc<crate::recovery_gate::RecoveryGate>>,
+        >,
+    > = OnceLock::new();
+    GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(mj_core::config::data_dir())
+        .or_default()
+        .clone()
+}
+
+/// A worker permit for a test that stages or starts a worker without a daemon.
+pub fn worker_test_permit(
+    id: &str,
+    _reason: &'static str,
+) -> anyhow::Result<Option<crate::worker_lifecycle::WorkerPermit>> {
+    if let Some(owner) = crate::worker_lifecycle::current(id) {
+        return Ok(Some(owner));
+    }
+    let Ok(admission) =
+        worker_test_gate().try_start(id, crate::recovery_gate::BackgroundWork::WorkerReplacement)
+    else {
+        return Ok(None);
+    };
+    crate::worker_lifecycle::WorkerPermit::acquire(id, &admission).map(Some)
+}

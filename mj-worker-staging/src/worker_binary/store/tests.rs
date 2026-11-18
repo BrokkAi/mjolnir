@@ -106,7 +106,7 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
     )
     .unwrap();
     let owner =
-        crate::controller::test_support::worker_test_permit(first, "test current worker promotion")
+        crate::database::test_fixtures::worker_test_permit(first, "test current worker promotion")
             .unwrap()
             .unwrap();
     staged.install(&owner).unwrap();
@@ -922,7 +922,7 @@ fn killed_store_pins_are_swept_on_the_next_install_while_live_pins_survive() {
 // Hard-won: shared-store review: copying capacity was required even when a cached hard link needed no bytes.
 #[test]
 fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_copies_are_refused() {
-    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::test_isolation::{IsolatedTest, test_name};
     if std::env::var_os("MJ_WORKER_STORE_CAPACITY_CHILD").is_none() {
         let temp = tempfile::tempdir().unwrap();
         IsolatedTest::new(test_name(module_path!(), "cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_copies_are_refused"))

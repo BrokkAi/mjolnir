@@ -5,7 +5,7 @@ use mj_core::targets::SshTrafficClass;
 ///
 /// The script signals the worker's process group so a wedged ACP child dies
 /// with it. Checkpoint then restarts the daemon against the same relay root.
-pub(in crate::controller) fn stop_worker(
+pub fn stop_worker(
     owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -17,7 +17,7 @@ pub(in crate::controller) fn stop_worker(
 /// Kill a retired worker daemon at `worker_root` at once, without the TERM
 /// grace `stop_worker` allows. Only for retirement, where the root is removed
 /// next and nothing in it needs an orderly shutdown.
-pub(in crate::controller) fn kill_retired_worker(
+pub fn kill_retired_worker(
     owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -123,7 +123,7 @@ fn stage_control_worker(
 }
 
 /// Probe worker liveness, staging the control worker if the root needs it.
-pub(in crate::controller) fn probe_worker_liveness(
+pub fn probe_worker_liveness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -139,7 +139,7 @@ pub(in crate::controller) fn probe_worker_liveness(
 
 /// Restore a stopped Podman target before signaling its worker. Checkpoint
 /// recovery uses this instead of assuming every persisted target is running.
-pub(in crate::controller) fn stop_worker_after_target_recovery(
+pub fn stop_worker_after_target_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -152,7 +152,7 @@ pub(in crate::controller) fn stop_worker_after_target_recovery(
     stop_worker(&owner, executor, locator, worker_root)
 }
 
-pub(super) fn stop_worker_command(
+pub fn stop_worker_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> targets::ControlCommand {
@@ -167,7 +167,7 @@ pub(super) fn stop_worker_command(
     })
 }
 
-pub(in crate::controller) fn worker_liveness_command(
+pub fn worker_liveness_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> targets::ControlCommand {
@@ -184,7 +184,7 @@ pub(in crate::controller) fn worker_liveness_command(
 
 /// Whether a session's worker root holds anything a worker could recover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::controller) enum WorkerRecovery {
+pub enum WorkerRecovery {
     /// The root has relay state or a relay journal.
     Recoverable,
     /// The root is absent, or exists without relay state or a journal: no
@@ -200,15 +200,12 @@ pub(in crate::controller) enum WorkerRecovery {
 
 /// Reports `recoverable`, `nothing` (present without relay state), or `absent`.
 /// Lookup failures exit nonzero; Resume needs absence, not just no relay state.
-pub(in crate::controller) fn worker_recovery_command(
-    locator: &targets::TargetLocator,
-    worker_root: &str,
-) -> CommandSpec {
+pub fn worker_recovery_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
     directory_probe_command(locator, worker_root, true).purpose("probe Mjolnir worker root")
 }
 
 /// Positive directory presence/absence; lookup failures remain errors.
-pub(in crate::controller) fn directory_presence_command(
+pub fn directory_presence_command(
     locator: &targets::TargetLocator,
     directory: &str,
 ) -> CommandSpec {
@@ -282,7 +279,7 @@ MJ_ENTRIES
 /// empty root counts as nothing to recover only when no worker for it is
 /// running afterwards. Liveness is checked after the listing, so a worker that
 /// started in between is seen.
-pub(in crate::controller) fn worker_recovery(
+pub fn worker_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -327,7 +324,7 @@ pub(in crate::controller) fn worker_recovery(
 
 /// Print the worker's exit record, or nothing when it left none. Reads only,
 /// so it works on a target whose disk is full.
-pub(in crate::controller) fn worker_exit_record_command(
+pub fn worker_exit_record_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
@@ -364,7 +361,7 @@ pub fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
         })
 }
 
-pub(in crate::controller) fn start_worker(
+pub fn start_worker(
     owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -382,11 +379,7 @@ pub(in crate::controller) fn start_worker(
         .as_ref()
         .context("worker has no durable placement")?;
     ensure!(
-        super::super::backend::backend_locator(
-            target,
-            &session,
-            &mj_core::config::Config::load()?
-        )? == *locator,
+        backend_locator(target, &session, &mj_core::config::Config::load()?)? == *locator,
         "worker launch does not match its admitted placement"
     );
     crate::database::admit_environment_worker(owner.session_id(), target)?;
@@ -394,12 +387,7 @@ pub(in crate::controller) fn start_worker(
         let session = crate::database::read_durable_session_record(owner.session_id())?
             .context("session disappeared before installing its GitHub token")?;
         if !session.no_github_credentials {
-            super::super::github_app::install_configured_session_github_token(
-                github,
-                executor,
-                locator,
-                worker_root,
-            )?;
+            install_configured_session_github_token(github, executor, locator, worker_root)?;
         }
     }
     execute_checked(executor, start_worker_command(locator, worker_root))?;
@@ -408,7 +396,7 @@ pub(in crate::controller) fn start_worker(
 
 /// Every accepted boot is protected by the durable replacement state machine.
 /// This includes provisioning and resume, not just automatic upgrades.
-pub(in crate::controller) fn start_worker_durably(
+pub fn start_worker_durably(
     owner: &crate::worker_lifecycle::WorkerPermit,
     target: &mj_core::state::TargetLocator,
     executor: &impl CommandExecutor,
@@ -459,10 +447,7 @@ pub(in crate::controller) fn start_worker_durably(
     )
 }
 
-pub(super) fn start_worker_command(
-    locator: &targets::TargetLocator,
-    worker_root: &str,
-) -> CommandSpec {
+pub fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
     let binary = format!("{worker_root}/hel");
     let config = format!("{worker_root}/launch.json");
     // A launch attempt cannot touch the incumbent's diagnostics or socket.
@@ -586,7 +571,7 @@ pub(super) fn start_worker_command(
 /// directly in the target. This surfaces loader errors (for example a
 /// glibc-linked worker inside an older-glibc container) that a detached start
 /// swallows.
-pub(in crate::controller) fn worker_probe_diagnosis(
+pub fn worker_probe_diagnosis(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -604,7 +589,7 @@ pub(in crate::controller) fn worker_probe_diagnosis(
     }
 }
 
-pub(super) fn worker_binary_probe_failure(
+pub fn worker_binary_probe_failure(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -647,7 +632,7 @@ pub(super) fn worker_binary_probe_failure(
 /// three facts come from one command, because on a container or SSH target
 /// every probe costs a round trip.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub(in crate::controller) struct WorkerProbe {
+pub struct WorkerProbe {
     /// `worker-startup.json`, when the worker wrote one.
     pub startup: Option<WorkerStartupRecord>,
     /// `worker-exit.json`: the worker recorded its own death.
@@ -657,7 +642,7 @@ pub(in crate::controller) struct WorkerProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub(in crate::controller) struct WorkerStartupRecord {
+pub struct WorkerStartupRecord {
     /// The latest step the worker reached.
     pub step: String,
     /// Ordered startup history; older workers recorded only the latest step.
@@ -666,7 +651,7 @@ pub(in crate::controller) struct WorkerStartupRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub(in crate::controller) struct WorkerStartupStep {
+pub struct WorkerStartupStep {
     pub step: String,
 }
 
@@ -677,7 +662,7 @@ impl WorkerStartupRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub(in crate::controller) struct WorkerExitRecord {
+pub struct WorkerExitRecord {
     pub reason: String,
     /// A sentence the worker wrote for whoever asked, when it stopped on a
     /// precondition the caller can fix rather than on an internal failure.
@@ -751,7 +736,7 @@ impl std::fmt::Display for WorkerProbe {
 /// the control worker, so like every command that embeds it, it is a
 /// [`targets::WorkerControlPlan`] and installs that worker first. A diagnosis
 /// that only reports uses [`diagnose_worker_read_only`].
-pub(in crate::controller) fn probe_worker(
+pub fn probe_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -763,7 +748,7 @@ pub(in crate::controller) fn probe_worker(
         locator,
         session_id,
     )?
-    .execute(executor, &crate::controller::ControlWorker)
+    .execute(executor, &ControlWorker)
     .context("the worker probe failed")?
     .pop()
     .context("the worker probe produced no output")?;
@@ -773,7 +758,7 @@ pub(in crate::controller) fn probe_worker(
 /// [`probe_worker`] for a diagnosis that only reports: it never installs and
 /// never waits on the worker store. When nothing in the root serves the probe,
 /// the diagnosis says so as its finding.
-pub(in crate::controller) fn diagnose_worker_read_only(
+pub fn diagnose_worker_read_only(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -846,7 +831,7 @@ printf ']}}\n'
 /// A failure on one line, for a session's error field: the first line of each
 /// cause. A worker's exit reason can carry its bridge's stderr after the first
 /// line; the caller logs the full chain.
-pub(in crate::controller) fn failure_line(error: &anyhow::Error) -> String {
+pub fn failure_line(error: &anyhow::Error) -> String {
     error
         .chain()
         .map(|cause| {

@@ -20,18 +20,17 @@ pub enum WorkerBinaryAvailability {
 /// capture. Remote sources retain only their URL, digest, and target triple;
 /// the network fetch still happens when a target is provisioned.
 #[derive(Debug)]
-pub(super) struct WorkerBinarySourceSnapshot {
+pub struct WorkerBinarySourceSnapshot {
     cache_root: PathBuf,
-    pub(super) entries: HashMap<
+    pub entries: HashMap<
         (String, WorkerBinaryRequirement),
         std::result::Result<WorkerBinaryAvailability, String>,
     >,
 }
 
-pub(super) static PINNED_WORKER_BINARY_SOURCES: OnceLock<WorkerBinarySourceSnapshot> =
-    OnceLock::new();
+pub static PINNED_WORKER_BINARY_SOURCES: OnceLock<WorkerBinarySourceSnapshot> = OnceLock::new();
 
-pub(super) fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
+pub fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
     directory.join(format!("mj-worker-{triple}"))
 }
 
@@ -39,7 +38,7 @@ pub(super) fn packaged_worker_binary_path(directory: &Path, triple: &str) -> Pat
 /// ` (deleted)` suffix. `current_exe` preserves that suffix, but it is not
 /// part of the executable's real file name and must not leak into sibling
 /// lookup after `cargo` or a package upgrade replaces the controller.
-pub(super) fn running_executable_file_name(controller: &Path) -> Option<std::ffi::OsString> {
+pub fn running_executable_file_name(controller: &Path) -> Option<std::ffi::OsString> {
     let name = controller.file_name()?;
     #[cfg(target_os = "linux")]
     {
@@ -56,7 +55,7 @@ pub(super) fn running_executable_file_name(controller: &Path) -> Option<std::ffi
 /// in a development sibling directory. The controller's own file name comes
 /// first (after the 2.0 rename that is `mj`), then the legacy `hel` name that
 /// older packages shipped, so both resolve without hardcoding one.
-pub(super) fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString> {
+pub fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut names = Vec::new();
     if let Some(own) = running_executable_file_name(controller) {
@@ -72,7 +71,7 @@ pub(super) fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString>
 /// A local-bare session runs on the controller host, so it may use the native
 /// worker built or packaged beside `mj`. Managed targets never consider this
 /// name because a macOS or glibc binary is not portable into Linux targets.
-pub(super) fn select_native_worker(
+pub fn select_native_worker(
     controller: &Path,
     is_file: impl Fn(&Path) -> bool,
 ) -> Option<(PathBuf, &'static str)> {
@@ -93,7 +92,7 @@ pub(super) fn select_native_worker(
 /// the controller's own directory, because in a development checkout that
 /// same-directory candidate resolves to the controller itself, whose glibc may
 /// be newer than the target's.
-pub(super) fn select_sibling_worker(
+pub fn select_sibling_worker(
     controller: &Path,
     triple: &str,
     is_file: impl Fn(&Path) -> bool,
@@ -153,21 +152,21 @@ pub(super) fn select_sibling_worker(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum WorkerBinaryRequirement {
+pub enum WorkerBinaryRequirement {
     PortableLinux,
     Darwin,
     LocalHost,
 }
 
 impl WorkerBinaryRequirement {
-    pub(super) fn for_os(os: targets::TargetOs) -> Self {
+    pub fn for_os(os: targets::TargetOs) -> Self {
         match os {
             targets::TargetOs::Linux => Self::PortableLinux,
             targets::TargetOs::Darwin => Self::Darwin,
         }
     }
 
-    pub(super) fn triple(self, arch: &str) -> String {
+    pub fn triple(self, arch: &str) -> String {
         match self {
             Self::Darwin => format!("{arch}-apple-darwin"),
             Self::LocalHost if cfg!(target_os = "macos") => format!("{arch}-apple-darwin"),
@@ -182,7 +181,7 @@ impl WorkerBinarySourceSnapshot {
     /// Resolution runs per source on its own thread, and each distinct local
     /// file is pinned on its own thread, so one slow disk read does not queue
     /// the others behind it. `resolve` may therefore be called concurrently.
-    pub(super) fn capture<F>(cache_root: &Path, resolve: F) -> Self
+    pub fn capture<F>(cache_root: &Path, resolve: F) -> Self
     where
         F: Fn(&str, WorkerBinaryRequirement) -> Result<WorkerBinaryAvailability> + Sync,
     {
@@ -442,7 +441,7 @@ fn index_entry_path(cache_root: &Path, source: &Path) -> Option<PathBuf> {
 
 /// The pinned copy of `source` if the index says this exact file was already
 /// pinned and the copy is still present with the same length.
-pub(super) fn indexed_pinned_worker(cache_root: &Path, source: &Path) -> Option<PathBuf> {
+pub fn indexed_pinned_worker(cache_root: &Path, source: &Path) -> Option<PathBuf> {
     let entry = index_entry_path(cache_root, source)?;
     let digest = std::fs::read_to_string(entry).ok()?;
     let digest = digest.trim();
@@ -477,14 +476,14 @@ fn record_indexed_pin(cache_root: &Path, source: &Path, digest: &str) {
 /// `verify_worker_build`, skipped for a file the index already knows: the same
 /// path, size, mtime, inode and ctime were verified against this build and
 /// pinned before. Anything else is read and checked in full.
-pub(super) fn verify_worker_build_indexed(cache_root: &Path, path: &Path) -> Result<()> {
+pub fn verify_worker_build_indexed(cache_root: &Path, path: &Path) -> Result<()> {
     if indexed_pinned_worker(cache_root, path).is_some() {
         return Ok(());
     }
     verify_worker_build(path)
 }
 
-pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> Result<PathBuf> {
+pub fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> Result<PathBuf> {
     if let Some(pinned) = indexed_pinned_worker(cache_root, source) {
         return Ok(pinned);
     }
@@ -530,7 +529,7 @@ pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> R
 /// Publish one immutable cache artifact. persist_noclobber makes the final
 /// publication atomic and never replaces an artifact another daemon may have
 /// already captured.
-pub(super) fn publish_cached_worker(
+pub fn publish_cached_worker(
     temporary: tempfile::NamedTempFile,
     cache_root: &Path,
     digest: &str,
@@ -597,7 +596,7 @@ pub fn native_worker_binary_prerequisite() -> Result<WorkerBinaryAvailability> {
     worker_binary_for_arch(std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost)
 }
 
-pub(super) fn worker_binary_for_arch(
+pub fn worker_binary_for_arch(
     arch: &str,
     requirement: WorkerBinaryRequirement,
 ) -> Result<WorkerBinaryAvailability> {
@@ -622,7 +621,7 @@ pub(super) fn worker_binary_for_arch(
 /// A remote source is a URL and stays usable. A local one is a path, and a
 /// path can stop being a file after the daemon pinned it: a build directory a
 /// cache reaper removed is exactly #1068.
-pub(super) fn pinned_source_is_usable(
+pub fn pinned_source_is_usable(
     pinned: &Result<WorkerBinaryAvailability>,
     is_file: &dyn Fn(&Path) -> bool,
 ) -> bool {
@@ -670,7 +669,7 @@ fn resolve_worker_source_again(
 
 /// The lookup itself, with the controller's own path and the file probe passed
 /// in so both can be exercised without the machine they describe.
-pub(super) fn worker_binary_prerequisite_for_current(
+pub fn worker_binary_prerequisite_for_current(
     arch: &str,
     requirement: WorkerBinaryRequirement,
     current: &Path,
@@ -688,7 +687,7 @@ pub(super) fn worker_binary_prerequisite_for_current(
 /// The lookup with the build-stamp check passed in. Startup pinning passes a
 /// check that skips files it already verified; every other caller reads the
 /// file.
-pub(super) fn worker_binary_prerequisite_with_verifier(
+pub fn worker_binary_prerequisite_with_verifier(
     arch: &str,
     requirement: WorkerBinaryRequirement,
     current: &Path,
