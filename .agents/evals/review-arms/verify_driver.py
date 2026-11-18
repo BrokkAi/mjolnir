@@ -270,6 +270,9 @@ def run_unit(batch_path, judge=None):
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
         if (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
+            # Mark the unit ineligible so no invocation publishes an aggregate containing it.
+            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
+                                                                  "requested": [PROFILES, a.model]}})
             raise RuntimeError(f"unit {tag} already has output from {made_on}/{made_by}, not "
                                f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
                                f"sessions/batch-{tag}.json aside to rerun it")
@@ -408,7 +411,9 @@ if a.kind == "judge" and not failed:
     # read taken before another invocation's publication.
     with open(V / "workflow-out.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists() for b, j in both):
+        # Publish only when both sides have output and neither side is marked ineligible.
+        if all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+               and not (V / "out" / f"invalid-{b.stem.split('-')[1]}-{j}.json").exists() for b, j in both):
             verdicts = [{**v, "judge": j} for b, j in both
                         for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json")
                                             .read_text())["verdicts"]]

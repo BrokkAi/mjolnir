@@ -729,6 +729,12 @@ def noleak_check_collect(n):
     edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
     out_path = W / f"round-{n}" / "check-results.json"
     output = "fidelity.jsonl" if STRICT else "factcheck.jsonl"
+    if STRICT:
+        # The registered fidelity checker is Opus/high on claude7; check the producer of this output.
+        producer = json.loads((W / f"round-{n}" / "check" / "out" / "task-factcheck.json").read_text()).get("producer") or {}
+        if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+            raise SystemExit(f"round {n} fidelity output came from {producer.get('profile')}/"
+                             f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
     rows = [json.loads(line) for line in
             (W / f"round-{n}" / "check" / "factcheck" / output).read_text().splitlines() if line.strip()]
     if sorted(r.get("id") for r in rows) != sorted(edits):
@@ -840,8 +846,11 @@ def quotes_rationale(why, rationale):
     """The cause answer's reason must quote its own item's rationale: some quoted span of at least
     eight characters in `why` appears in that rationale (whitespace and case normalized)."""
     norm = lambda t: " ".join(t.split()).lower()
-    spans = re.findall(r'"([^"]{8,})"|\u201c([^\u201d]{8,})\u201d|\'([^\']{8,})\'', why)
-    return any(norm(s) in norm(rationale) for group in spans for s in group if s)
+    # At least eight characters, or the whole rationale when it is shorter than that.
+    shortest = min(8, len(norm(rationale)))
+    spans = re.findall(r'"([^"]+)"|\u201c([^\u201d]+)\u201d|\'([^\']+)\'', why)
+    return shortest > 0 and any(len(norm(s)) >= shortest and norm(s) in norm(rationale)
+                                for group in spans for s in group if s)
 
 
 def verdicts_fingerprint(leak_round):
