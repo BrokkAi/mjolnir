@@ -54,6 +54,9 @@ To see it working, use an isolated test instance named `snapshot-test`:
 - Observation: t3code is not a reference-only transcript design. It keeps a full copy of messages and turn items in its own SQLite projection, as Mjolnir does.
   Evidence: `~/Projects/t3code` at 856c84e4b, `ProjectionStore.ts` around lines 2921 and 2996.
 
+- Observation: `git stash create` returns nothing when the only change is a staged gitlink (submodule) update, even with `-c diff.ignoreSubmodules=none`.
+  Evidence: real-Git reproduction during Milestone 1. `git diff --cached --raw` shows `:160000 160000 <old> <new> M sub`, yet both `git stash create` calls print an empty line. The snapshot therefore records each submodule's index gitlink explicitly and restores it with `git update-index --cacheinfo`.
+
 - Observation: a harness context-compaction event does not mark an exact boundary of discarded context.
   Evidence: the pinned Claude bridge's compaction boundary can carry a preserved recent segment (`compactMetadata.preservedSegment`). The Claude and Codex bridges report compaction as tool cards whose `_meta.jetbrains.air.contextCompaction` has start and completion events, but no list of discarded items.
 
@@ -376,7 +379,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 4. Create every saved ref at its object ID.
 5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
 6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
-7. If there is a working-state commit, run `git stash apply --index <commit>`. Then run `git submodule update --init --recursive -- <paths>` for the submodules that were initialized at capture, and check out each one's recorded commit detached (`git -C <path> checkout --detach <commit>`), fetching it from the submodule's remote first if needed. Capture records each initialized submodule's actual checked-out commit, which can differ from both the committed and the staged gitlink, and the guard already ensured it is reachable from the submodule's remote. Initializing only after the index is applied keeps a staged submodule update from being undone.
+7. If there is a working-state commit, run `git stash apply --index <commit>`. Then set each recorded index gitlink with `git update-index --cacheinfo 160000,<sha>,<path>`. Do this for every initialized submodule, because `git stash create` omits a change that consists only of a staged gitlink update. Then run `git submodule update --init --recursive -- <paths>` for the submodules that were initialized at capture, and check out each one's recorded commit detached (`git -C <path> checkout --detach <commit>`), fetching it from the submodule's remote first if needed. Capture records each initialized submodule's actual checked-out commit, which can differ from both the committed and the staged gitlink, and the guard already ensured it is reachable from the submodule's remote. Initializing only after the index is applied keeps a staged submodule update from being undone.
 8. Recreate nested worktrees with `git worktree add` at their recorded relative paths. Position, reset and apply their working state the same way.
 
 When an object the snapshot names is missing, because neither the pack nor origin has it, fail with a message naming the ref and suggesting that origin may have rewritten history.
@@ -783,7 +786,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         pub working_state: Option<String>,         // `git stash create` commit
         pub working_state_skipped: bool,           // raw checkout with an operation in progress
         pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state, initialized submodules
-        pub submodules: Vec<(PathBuf, String)>,    // initialized submodules of the primary checkout, with their checked-out commits
+        pub submodules: Vec<SnapshotSubmodule>,    // initialized submodules of the primary checkout: path, index gitlink, checked-out commit
         pub remote_refs_stale: bool,
         pub pack: Option<PathBuf>,                  // non-thin pack of what origin lacks
     }
