@@ -1746,17 +1746,15 @@ impl ProfileCatalog {
             return None;
         }
         let identity = profile.capabilities_key(id);
-        if let Some(Entry::Ready(choices)) = inner
-            .entries
-            .get(&(identity.clone(), Some(model.to_owned())))
+        // The default entry is refreshed on its own, so for the default model
+        // it is newer than that model's separate copy.
+        if let Some(Entry::Ready(choices)) = inner.entries.get(&(identity.clone(), None))
+            && choices.model.as_deref() == Some(model)
         {
             return Some(choices.efforts.clone());
         }
-        // The default entry's efforts are those of the default model.
-        match inner.entries.get(&(identity, None)) {
-            Some(Entry::Ready(choices)) if choices.model.as_deref() == Some(model) => {
-                Some(choices.efforts.clone())
-            }
+        match inner.entries.get(&(identity, Some(model.to_owned()))) {
+            Some(Entry::Ready(choices)) => Some(choices.efforts.clone()),
             _ => None,
         }
     }
