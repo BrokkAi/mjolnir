@@ -1157,4 +1157,6 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
   supplying the whole neutral brief lifts reviewers, not which of its
   relations drove the catches, and not that Bifrost queries can find the
   fact. Six briefs passed the leak check only at low judge confidence;
-  without them ON − AF is +24.2 (+6.1 to +45.5), which reads Partly.
+  without them ON − AF is +24.2 (+6.1 to +45.5), still Facts carry. Those
+  six carry 11 of the 19 net extra catches, and on cpp-template both judges
+  said the brief lays out the cause.
