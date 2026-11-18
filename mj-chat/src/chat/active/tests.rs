@@ -800,10 +800,39 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         chat.has_pending_elicitation_input(),
         "accepted answer retains its result owner after the form closes"
     );
+    // Hard-won: f69edee: a failure for A lost its draft while reviewer B owned the dialog.
+    let review_a = chat.state.turn_review().unwrap().view.clone();
+    let mut review_b = review_a.clone();
+    let mut question_b = draft.request().clone();
+    question_b.id = "reviewer-b-question".into();
+    question_b.message = "Reviewer B question".into();
+    let mut role_b = review_b.roles[0].clone();
+    role_b.child_session_id = Some("reviewer-b".into());
+    review_b.roles.push(role_b);
+    review_b
+        .questions
+        .push(mj_client::review::ReviewerQuestion {
+            role: "reviewer-b".into(),
+            request: question_b.clone(),
+        });
+    chat.apply_review_view(Some(review_b));
+    assert_eq!(
+        chat.state.elicitation.as_ref().unwrap().request(),
+        &question_b
+    );
     chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
         draft: Some(Box::new(draft.clone())),
         result: Err("reviewer lookup failed".into()),
     });
+    assert_eq!(
+        chat.state.elicitation.as_ref().unwrap().request(),
+        &question_b
+    );
+    assert_eq!(chat.state.deferred_form_results.len(), 1);
+    // B is resolved elsewhere; the authoritative refresh reveals A again.
+    chat.apply_review_view(Some(review_a.clone()));
+    assert!(chat.state.deferred_form_results.is_empty());
+
     terminal
         .draw(|frame| {
             chat.draw_elicitation_in(frame, frame.area(), true);
@@ -819,6 +848,47 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     assert!(text.contains("reviewer lookup failed"));
     assert!(text.contains("kept reviewer answer"));
     assert!(!chat.has_pending_elicitation_input());
+    // Hard-won: f69edee: a standby composer consumed a reviewer failure without its review projection.
+    chat.handle_elicitation_event(Event::Key(key(KeyCode::Enter)));
+    let config: Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+    let mut standby = ChatState::standby(
+        "session-deferred-review",
+        &config,
+        SessionHeaderIdentity::default(),
+        Notices::default(),
+    );
+    standby.adopt_live_composer(chat.take_live_composer().unwrap());
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("parked reviewer failure".into()),
+    });
+    standby.drain_composer();
+    assert_eq!(standby.deferred_form_results.len(), 1);
+    assert!(standby.elicitation.is_none());
+    let mut replacement = clipboard_test_chat();
+    replacement.adopt_live_composer(standby.take_live_composer().unwrap());
+    assert_eq!(
+        replacement.state.deferred_form_results.len(),
+        1,
+        "the review projection is not known yet"
+    );
+    replacement.apply_review_view(Some(review_a));
+    assert!(replacement.state.deferred_form_results.is_empty());
+    terminal
+        .draw(|frame| {
+            replacement.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("parked reviewer failure"));
+    assert!(text.contains("kept reviewer answer"));
+    let mut chat = replacement;
     // Hard-won: 56747ef: a failed answer resurrected a question removed by the latest review projection.
     chat.apply_review_view(None);
     chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {

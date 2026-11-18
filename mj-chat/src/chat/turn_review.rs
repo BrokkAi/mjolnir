@@ -66,6 +66,7 @@ impl super::ChatState {
         self.turn_review.as_deref_mut()
     }
     pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
+        self.review_projection_known = true;
         match (view, self.turn_review.as_mut()) {
             (Some(view), Some(open)) => {
                 open.update(view);

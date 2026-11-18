@@ -25,10 +25,17 @@ fn reviewer_answer_key(role: Option<&str>, request: &ElicitationRequest) -> Stri
 }
 
 impl ChatState {
-    pub(super) fn has_pending_reviewer_answers(&self) -> bool {
+    pub(super) fn apply_deferred_form_results(&mut self) {
+        // One pass: a result waiting for another visible form is requeued.
+        for result in std::mem::take(&mut self.deferred_form_results) {
+            apply_chat_remote_result(self, result);
+        }
+    }
+
+    pub(super) fn has_pending_elicitation_answers(&self) -> bool {
         self.operation_feedback
             .keys()
-            .any(|key| key.starts_with("reviewer-answer:"))
+            .any(|key| key.starts_with("reviewer-answer:") || key.starts_with("answer:"))
     }
 
     pub(super) fn reviewer_answer_pending(
@@ -64,9 +71,12 @@ fn finish_reviewer_answer(
         }
         return;
     }
-    if let Some(draft) = draft {
-        chat.restore_failed_reviewer_elicitation(*draft, format!("Answer was not sent: {error}"));
+    if let Some(draft) = draft
+        && !chat.restore_failed_reviewer_elicitation(*draft, error.clone())
+    {
+        return;
     }
+    tracing::warn!(session_id = %chat.session_id, %error, "reviewer answer failed and was shown in the UI");
     chat.report_review_refusal(error);
 }
 
@@ -1137,6 +1147,19 @@ fn refused_slash_command<'a>(text: &'a str, images: &[PromptImage]) -> Option<&'
 }
 
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
+    // A parked composer owns delivery, but not the session/review projection.
+    // Keep projection-dependent results intact until a live view owns both.
+    if (chat.standby
+        && matches!(
+            &result,
+            ChatRemoteResult::RespondElicitation { .. } | ChatRemoteResult::ReviewerAnswer { .. }
+        ))
+        || (!chat.review_projection_known
+            && matches!(&result, ChatRemoteResult::ReviewerAnswer { .. }))
+    {
+        chat.deferred_form_results.push(result);
+        return;
+    }
     if let Some(key) = result.feedback_key()
         && !matches!(result, ChatRemoteResult::Cancel { result: Ok(()), .. })
     {
@@ -1144,7 +1167,11 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
     }
     // Keep diagnostics in the process log as well as in recoverable rows.
     // Publishing a conversation notice must never recursively publish failure.
-    if let Some(error) = result.failure_message() {
+    if let Some(error) = result.failure_message()
+        && !matches!(&result, ChatRemoteResult::ReviewerAnswer { .. })
+    {
+        // Reviewer recovery can wait for another form; it logs only when
+        // applied, rather than on each attempt to surface the saved result.
         tracing::warn!(
             session_id = %chat.session_id,
             %error,

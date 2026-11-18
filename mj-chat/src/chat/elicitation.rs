@@ -85,6 +85,8 @@ enum ElicitationControl {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ElicitationDraft {
     request: ElicitationRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     values: Vec<FieldValue>,
     option_cursors: Vec<usize>,
     active_custom_fields: BTreeSet<usize>,
@@ -408,6 +410,7 @@ impl ElicitationDialog {
         };
         ElicitationDraft {
             request: self.request.clone(),
+            error: self.error.clone(),
             values: self.values.clone(),
             option_cursors: self.option_cursors.clone(),
             active_custom_fields: self.active_custom_fields.clone(),
@@ -438,6 +441,7 @@ impl ElicitationDialog {
         let viewports = draft.viewports;
         let surface = draft.surface;
         let mut dialog = Self::new(request);
+        dialog.error = draft.error;
         dialog.values = draft.values;
         dialog.option_cursors = draft.option_cursors;
         dialog.active_custom_fields = draft.active_custom_fields;

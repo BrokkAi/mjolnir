@@ -564,6 +564,8 @@ pub struct ChatState {
     pending_elicitations: Vec<ElicitationRequest>,
     /// The daemon-owned review projected into prompt status and actions.
     turn_review: Option<Box<TurnReview>>,
+    // None becomes authoritative only after the host supplies its first projection.
+    review_projection_known: bool,
     /// What `[review]` says, mirrored from the config the TUI already drains,
     /// so `/review status` and the composer title can report it.
     review_config: mj_core::config::ReviewConfig,
@@ -617,6 +619,7 @@ pub struct ChatState {
     feedback: Notices,
     connection_feedback: Option<String>,
     operation_feedback: BTreeMap<String, String>,
+    deferred_form_results: Vec<remote::ChatRemoteResult>,
     conversation_notices: Vec<feedback::ConversationNotice>,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
@@ -759,6 +762,7 @@ impl ChatState {
             elicitation: None,
             pending_elicitations: Vec::new(),
             turn_review: None,
+            review_projection_known: false,
             review_config: mj_core::config::ReviewConfig::default(),
             session_review: None,
             review_unavailable: None,
@@ -797,6 +801,7 @@ impl ChatState {
             feedback: Notices::default(),
             connection_feedback: None,
             operation_feedback: BTreeMap::new(),
+            deferred_form_results: Vec::new(),
             conversation_notices: Vec::new(),
             voice_available: false,
             voice_active: false,
@@ -1316,21 +1321,37 @@ impl ChatState {
         true
     }
 
-    fn restore_failed_reviewer_elicitation(&mut self, draft: ChatElicitationDraft, error: String) {
+    fn restore_failed_reviewer_elicitation(
+        &mut self,
+        draft: ChatElicitationDraft,
+        error: String,
+    ) -> bool {
         if !self.pending_reviewer_matches(&draft) {
-            return;
+            return true;
         }
-        let request = draft.request().clone();
+        let matches = self.elicitation_source() == (true, draft.reviewer_role.as_deref())
+            && self
+                .elicitation
+                .as_ref()
+                .is_some_and(|dialog| dialog.request() == draft.request());
+        if self.elicitation.is_some() && !matches {
+            // Another form owns focus. Keep the whole result with its draft,
+            // rather than losing it or replacing the visible question.
+            self.deferred_form_results
+                .push(remote::ChatRemoteResult::ReviewerAnswer {
+                    draft: Some(Box::new(draft)),
+                    result: Err(error),
+                });
+            return false;
+        }
         if self.elicitation.is_none() {
-            self.show_review_role_elicitation(draft.reviewer_role.clone(), request.clone());
-            self.restore_elicitation_draft(draft.clone());
+            self.show_review_role_elicitation(draft.reviewer_role.clone(), draft.request().clone());
         }
-        if self.elicitation_source() == (true, draft.reviewer_role.as_deref())
-            && let Some(dialog) = self.elicitation.as_mut()
-            && dialog.request() == &request
-        {
-            dialog.set_response_error(error);
+        self.restore_elicitation_draft(draft);
+        if let Some(dialog) = self.elicitation.as_mut() {
+            dialog.set_response_error(format!("Answer was not sent: {error}"));
         }
+        true
     }
 
     fn restore_failed_elicitation(&mut self, request: ElicitationRequest, error: String) {

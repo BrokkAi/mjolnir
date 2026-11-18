@@ -44,7 +44,7 @@ impl ActiveChat {
     /// Accepted form input and answer delivery retain their result owner.
     pub fn has_pending_elicitation_input(&self) -> bool {
         (self.state.elicitation.is_some() && self.state.composer_runtime.paste_in_flight)
-            || self.state.has_pending_reviewer_answers()
+            || self.state.has_pending_elicitation_answers()
     }
 
     pub fn has_elicitation(&self) -> bool {

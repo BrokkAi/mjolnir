@@ -4182,8 +4182,11 @@ pub(crate) mod tests {
             }
         );
         assert!(!chats["child-session"].has_elicitation());
-        let (chat, mut rejected) =
-            form_chat_with_error("child-session", approval, Some("not permitted".into()));
+        let (chat, mut rejected) = form_chat_with_error(
+            "child-session",
+            approval.clone(),
+            Some("not permitted".into()),
+        );
         chats.insert("child-session".into(), chat);
         terminal
             .draw(|frame| {
@@ -4204,6 +4207,11 @@ pub(crate) mod tests {
             &mut chats,
             &crossterm::event::Event::Key(key(KeyCode::Enter)),
         );
+        // Hard-won: f69edee: minimizing a notification-only primary answer retired its result owner.
+        family.notifications.size = PaneSize::Minimized;
+        assert!(family.notification_form_session().is_none());
+        assert!(!chats["child-session"].has_elicitation());
+        assert!(chats["child-session"].has_pending_elicitation_input());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             rejected.recv().await.unwrap();
             while !chats["child-session"].has_elicitation() {
@@ -4212,6 +4220,14 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+        assert!(!chats["child-session"].has_pending_elicitation_input());
+        // Retirement after the callback saves drafts; their existing handoff
+        // format must carry the rejection when the form is reopened.
+        let drafts = serde_json::to_value(chats["child-session"].elicitation_drafts()).unwrap();
+        let (mut restored, _) = form_chat("child-session", approval);
+        restored.restore_elicitation_drafts(serde_json::from_value(drafts).unwrap());
+        chats.insert("child-session".into(), restored);
+        family.notifications.size = PaneSize::Maximized;
         terminal
             .draw(|frame| {
                 crate::combined::render_combined_for_test(

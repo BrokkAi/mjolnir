@@ -173,6 +173,7 @@ pub struct LiveComposer {
     submission_renders: Vec<(String, std::time::Instant)>,
     plan_command_pending: bool,
     operation_feedback: BTreeMap<String, String>,
+    deferred_form_results: Vec<remote::ChatRemoteResult>,
     conversation_notices: Vec<feedback::ConversationNotice>,
     pub(super) composer_runtime: ComposerRuntime,
 }
@@ -328,6 +329,7 @@ impl ChatState {
             submission_renders: std::mem::take(&mut self.submission_renders),
             plan_command_pending: std::mem::take(&mut self.plan_command_pending),
             operation_feedback: std::mem::take(&mut self.operation_feedback),
+            deferred_form_results: std::mem::take(&mut self.deferred_form_results),
             conversation_notices: std::mem::take(&mut self.conversation_notices),
             composer_runtime: std::mem::take(&mut self.composer_runtime),
         };
@@ -364,6 +366,7 @@ impl ChatState {
         self.submission_renders = composer.submission_renders;
         self.plan_command_pending = composer.plan_command_pending;
         self.operation_feedback = composer.operation_feedback;
+        self.deferred_form_results = composer.deferred_form_results;
         self.conversation_notices = composer.conversation_notices;
         self.composer_runtime = composer.composer_runtime;
         self.sync_inline_submissions();

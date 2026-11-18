@@ -20,10 +20,8 @@ impl ActiveChat {
                 if !owns_question {
                     let error = "The reviewer's question is no longer active".to_owned();
                     if let Some(draft) = draft {
-                        self.state.restore_failed_reviewer_elicitation(
-                            draft,
-                            format!("Answer was not sent: {error}"),
-                        );
+                        self.state
+                            .restore_failed_reviewer_elicitation(draft, error.clone());
                     }
                     self.report_review_refusal(error);
                     return;
@@ -33,10 +31,8 @@ impl ActiveChat {
             None => {
                 if let Some(draft) = draft {
                     let error = "The reviewer for this question is no longer available".to_owned();
-                    self.state.restore_failed_reviewer_elicitation(
-                        draft,
-                        format!("Answer was not sent: {error}"),
-                    );
+                    self.state
+                        .restore_failed_reviewer_elicitation(draft, error.clone());
                     self.report_review_refusal(error);
                 }
                 return;
@@ -90,12 +86,15 @@ impl ActiveChat {
                 continue;
             }
             if self.state.reviewer_elicitation_open() {
+                self.state.apply_deferred_form_results();
                 return;
             }
             if !self.state.show_review_role_elicitation(role, request) {
+                self.state.apply_deferred_form_results();
                 return;
             }
         }
         self.apply_deferred_elicitation_draft();
+        self.state.apply_deferred_form_results();
     }
 }
