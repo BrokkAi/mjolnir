@@ -83,13 +83,15 @@ pub struct Unhealthy {
 }
 
 impl Unhealthy {
-    /// "rate-limited until 14:05:00 UTC (exceeded retry limit, ...)".
+    /// "rate-limited until 2026-11-18 14:05:00 UTC (exceeded retry limit, ...)".
+    /// The date is always shown: a weekly reset days away must not read as a
+    /// time later today.
     pub fn describe(&self) -> String {
         let until = chrono::DateTime::<chrono::Utc>::from(self.until);
         format!(
             "{} until {} ({})",
             self.fault.describe(),
-            until.format("%H:%M:%S UTC"),
+            until.format("%Y-%m-%d %H:%M:%S UTC"),
             self.message
         )
     }

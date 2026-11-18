@@ -7265,7 +7265,7 @@ fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
     // is the only way it reaches a worker at all.
     let carried = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../mj-controller/src/controller/worker_binary/launch.rs"
+        "/../mj-worker-staging/src/worker_binary/launch.rs"
     ))
     .expect("read the launch configuration that carries the knob");
     assert!(
