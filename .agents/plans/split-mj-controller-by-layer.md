@@ -11,7 +11,8 @@ After this work the same code lives in three crates stacked by dependency: a sto
 ## Progress
 
 - [x] (2026-11-18 05:45Z) Measured the current build and the references that cross each proposed boundary (see Context and Surprises).
-- [ ] Milestone 1: cut every reference from lower modules up into the top layer, inside the existing crate, and add the check that keeps them cut.
+- [x] (2026-11-18 06:05Z) Added `scripts/check-controller-layers.py`, which lists the upward reference sites (not yet run in CI).
+- [ ] Milestone 1: cut every reference from lower modules up into the top layer, inside the existing crate, and enforce the check (completed: the pure helpers, `ProfileCatalog`, the startup-step types and the session predicates, 125 sites down to 54; remaining: the modules that take the daemon's `RuntimeState`, the HTTP API types named by lower code, and lower tests that drive top-layer code, listed under Surprises).
 - [ ] Milestone 2: move the top layer into `mj-daemon` (`brokk-mj-daemon`).
 - [ ] Milestone 3: cut every reference from the storage modules up into the rest, inside `mj-controller`.
 - [ ] Milestone 4: move the storage layer into `mj-store` (`brokk-mj-store`).
@@ -26,11 +27,16 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - Observation: 47 of the crate's 62 top-level modules form one dependency cycle (244k lines of code), so no module can move out until references are cut.
   Evidence: a strongly-connected-component pass over `crate::` paths, test files excluded.
 
+- Observation: the remaining upward references are not stray helpers. `github_watch::service`, `web_push::run`, `mailbox_outbox::run`, `controller::mbx::service`, `review_host::environment` and `worker_client::credential_sync` each hold or take the daemon's `RuntimeState`, so they are daemon services filed under lower modules. `credential_sync` asks it six questions (`credential_targets`, `credential_session_ended`, `credential_session_ids`, `credential_sync_skips`, `credential_target_is_current`, `credential_profile_source_is_current`). Each needs its service half moved up to the top layer and its types and notifications left below; `review_host` and `github_watch` have almost no lower users and can move up whole.
+  Evidence: `python3 scripts/check-controller-layers.py --all` and `grep -n RuntimeState` in those files.
+- Observation: a `crate::` path count understates the work, because a file that imports a name once and uses it fifty times counts as one site. The compiler is the real check once files move.
+  Evidence: `github_watch/service.rs` has one counted site and about 40 uses of `state`.
+
 ## Decision Log
 
 - Decision: split by layer into three crates, not by feature area.
   Rationale: the measured references run mostly downward already. About 100 reference sites point from lower modules into the top layer and about 45 from the storage modules into the rest, against thousands pointing down. A layered split needs only those cut. Feature areas (quota, GitHub, review) are small; the size is in `controller`, `daemon`, `database` and the two server modules.
-  Date/Author: 2026-11-18, Claude with Ryan Svihla.
+  Date/Author: 2026-11-18, Claude. Ryan Svihla asked for work on mj-controller's build cost; the crate boundaries are proposed here and not yet confirmed by him.
 - Decision: new crates are justified under the repository rule that a crate needs a compilation boundary.
   Rationale: the compile of this one unit is the measured bottleneck for CI, for local builds and for the macOS lane's memory. The rule forbids crates made only to reorganize code; this is the case it allows.
   Date/Author: 2026-11-18, Claude.
