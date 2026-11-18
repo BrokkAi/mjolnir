@@ -55,6 +55,7 @@ exceptions = [
     { crate = "brokk-mj-transcript", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-tui", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-voice-worker", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-build-id", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-worker-runtime", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-worker", allow = ["GPL-3.0-only"] },
     # The utility inference client is the sibling LGPL-covered Anvil library.

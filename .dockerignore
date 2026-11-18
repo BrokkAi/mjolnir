@@ -15,6 +15,7 @@
 !mj-review/
 !mj-checkpoint/
 !mj-transcript/
+!mj-build-id/
 !mj-worker/
 !mj-worker-bin/
 !mj-client/

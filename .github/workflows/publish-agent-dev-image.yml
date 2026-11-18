@@ -15,6 +15,7 @@ on:
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
+      - 'mj-build-id/**'
       - 'mj-checkpoint/**'
       - 'mj-core/**'
       - 'mj-review/**'

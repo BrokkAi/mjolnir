@@ -108,8 +108,6 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
 ] }
 
-[build-dependencies]
-serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

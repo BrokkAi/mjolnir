@@ -40,7 +40,6 @@ getrandom.workspace = true
 # persisted signing key); pairs with the existing `sha2`.
 hmac = "0.13"
 rustls.workspace = true
-sessionwiki.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true

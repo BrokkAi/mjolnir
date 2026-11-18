@@ -82,7 +82,7 @@ pub fn fake_command_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-command.sh")
 }
 
-/// A worker stand-in carrying the same build identity as this test process.
+/// A worker stand-in carrying the build identity a test binary reports.
 /// Built before tests start, so executing it cannot race a test's writer.
 #[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn fake_worker_dispatcher() -> std::path::PathBuf {
@@ -109,11 +109,25 @@ pub fn install_fake_command(directory: &std::path::Path, program: &str, script: 
     install_fake_with_dispatcher(fake_command_dispatcher(), directory, program, script);
 }
 
-/// Install a worker stand-in, like [`install_fake_command`], that carries this
-/// build's worker stamp so the controller accepts it as a matching worker.
+/// Install a worker stand-in, like [`install_fake_command`], that carries a
+/// test binary's worker stamp, so controller code running in a test accepts it
+/// as a matching worker.
 #[cfg(all(unix, any(test, feature = "test-hooks")))]
 pub fn install_fake_worker(directory: &std::path::Path, program: &str, script: &str) {
     install_fake_with_dispatcher(fake_worker_dispatcher(), directory, program, script);
+}
+
+/// Install a worker stand-in from `dispatcher`. A test in which a real program
+/// verifies the worker passes the stand-in stamped with that program's
+/// identity (`mj_build_id::fake_worker_dispatcher`).
+#[cfg(all(unix, any(test, feature = "test-hooks")))]
+pub fn install_fake_worker_from(
+    dispatcher: std::path::PathBuf,
+    directory: &std::path::Path,
+    program: &str,
+    script: &str,
+) {
+    install_fake_with_dispatcher(dispatcher, directory, program, script);
 }
 
 #[cfg(all(unix, any(test, feature = "test-hooks")))]

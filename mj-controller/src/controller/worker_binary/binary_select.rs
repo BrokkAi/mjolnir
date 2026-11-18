@@ -71,7 +71,7 @@ pub(super) fn preflight_architectures(
 /// published with this build's worker. Installation still asks the image's
 /// worker for its build before linking it (see [`WorkerInstall::for_target`]).
 pub(crate) fn release_image_supplies_worker(template: &mj_core::config::TargetTemplate) -> bool {
-    mj_core::config::RELEASE_IMAGE_CARRIES_WORKER
+    mj_core::worker_build::release_image_carries_worker()
         && template
             .container()
             .is_some_and(|container| container.image == mj_core::config::RELEASE_CONTAINER_IMAGE)

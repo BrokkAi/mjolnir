@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -35,6 +35,7 @@ mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", versi
 mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.71.0" }
 anvil-client = { package = "brokk-anvil-client", version = "0.28.6" }
 mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.71.0", default-features = false }
+mj-build-id = { path = "mj-build-id", package = "brokk-mj-build-id", version = "2.71.0" }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker-runtime", version = "2.71.0" }
 mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.71.0" }
 mj-targets = { path = "mj-targets", package = "brokk-mj-targets", version = "2.71.0" }

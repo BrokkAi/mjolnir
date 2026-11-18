@@ -3,6 +3,7 @@
 # input; the root files below control workspace dependency and toolchain choice.
 Cargo.lock
 Cargo.toml
+mj-build-id
 mj-checkpoint
 mj-core
 mj-review

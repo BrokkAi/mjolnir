@@ -13,8 +13,8 @@ After this work the stamp lives in one tiny crate that only the two programs, `m
 - [x] (2026-11-18) Confirmed the cause and that Cargo recompiles dependents even when a build script reruns with identical output (see Surprises).
 - [x] (2026-11-18) Milestone 1: library code reads the build identity through `mj_core::worker_build::{build_id, worker_build_id, commit_time, worker_build_stamp}`; `mj` and `mj-worker` install it first thing in `main`. Values still come from `mj-core`'s own constants, so behaviour is unchanged: `mj --version` prints the same, and the 23 tests of `mj-cli/tests/daemon_startup.rs` pass.
 - [x] (2026-11-18) Milestone 2: the worker program is package `brokk-mj-worker` in `mj-worker-bin/`; the library is package `brokk-mj-worker-runtime`, still in `mj-worker/` and still named `mj_worker` in code.
-- [ ] Milestone 3: the stamp and the script that computes it move to `mj-build-id`; `mj-core` no longer watches Git in a development build.
-- [ ] Milestone 4: measure an empty commit before and after; record it here.
+- [x] (2026-11-18) Milestone 3: the stamp and the Git half of the script are `mj-build-id` (`brokk-mj-build-id`), which only `mj` and `mj-worker` depend on. `mj-core/build.rs` reads no Git file in any build.
+- [x] (2026-11-18) Milestone 4: measured (see Outcomes).
 
 ## Surprises & Discoveries
 
@@ -48,7 +48,20 @@ After this work the stamp lives in one tiny crate that only the two programs, `m
 
 ## Outcomes & Retrospective
 
-Nothing shipped yet.
+Done 2026-11-18. On a 32-thread machine, with a real empty commit made and then removed:
+
+    after an empty commit                 before                         after
+    cargo build                           every brokk-mj-* crate, 83 s   brokk-mj-build-id, brokk-mjolnir, brokk-mj-worker: 12 s
+    cargo test --no-run (daemon,          full rebuild                   nothing compiled, 0.17 s
+      controller)
+
+`mj --version` prints the same string, the worker executable carries one stamp, and the 23 tests of `mj-cli/tests/daemon_startup.rs` pass.
+
+What differs from the plan as first written. `mj-core/build.rs` reads no Git even in a release build: the one value that needed it there, whether the release image carries its own worker, compares the worker digest with the commit, so it moved with them and is `worker_build::release_image_carries_worker()`. The helper `mj-core/worker_build_inputs.py` and the list `mj-core/worker-build-inputs.txt` stayed where they are, because the image and worker build scripts and two workflows run them from there; `mj-build-id/build.rs` runs the helper from `../mj-core`, which it reaches only in a Git checkout (a crates.io package returns the commit before that point).
+
+What a test binary now sees. Its identity is the package version plus forty zeros with an unknown commit time, not the real commit. Lib tests that hand a worker stand-in to controller code get one stamped with that identity from `mj-core`'s build script. The one test in which a real `mj` verifies a stand-in (`mj-cli/tests/termination_pty.rs`) takes the stand-in stamped with the real identity from `mj_build_id::fake_worker_dispatcher`.
+
+The rule this leaves behind: no library may depend on `mj-build-id`, and no build script below the programs may read Git. Either one brings the rebuild back. `CONTRIBUTING.md` says so in the crate list.
 
 ## Context and Orientation
 
@@ -68,7 +81,7 @@ Milestone 1 changes how the identity is read without changing where it comes fro
 
 Milestone 2 separates the worker program from its library. Create `mj-worker-bin/` as package `brokk-mj-worker` with `src/main.rs` and the integration tests that run the program, depending on the library; rename the package in `mj-worker/` to `brokk-mj-worker-runtime`, keeping the library name `mj_worker`. Every manifest that names `brokk-mj-worker` for its library names the runtime instead. Add the new directory to `mj-core/worker-build-inputs.txt`, to the lists that name crates (the same list as for any new crate: root `Cargo.toml`, `.dockerignore`, `containers/Containerfile.agent-dev`, `scripts/check-crate-boundaries.mjs`, `licenses/deny.toml`, the publication order in `.github/workflows/publish.yml`, the test matrix in `.github/workflows/ci.yml`, `CONTRIBUTING.md`), and register the name with `scripts/register-crate.py`. Acceptance: `cargo build -p brokk-mj-worker --bin mj-worker` produces the same program, `scripts/build-linux-worker.sh` is unchanged, and the worker's tests run from the runtime package.
 
-Milestone 3 moves the stamp. Create `mj-build-id/` (package `brokk-mj-build-id`) with a `build.rs` holding the Git logic from `mj-core/build.rs` (`git_revision`, `commit_time`, `worker_inputs_id`, with `worker_build_inputs.py` and `worker-build-inputs.txt` moving beside it) and a `lib.rs` exporting the three constants, `WORKER_BUILD_STAMP`, and `fn identity() -> mj_core::worker_build::BuildIdentity`. Only `mj-cli` and `mj-worker` depend on it; their `main` installs `mj_build_id::identity()`. `mj-core/build.rs` keeps the container image values and runs the Git logic only when the build is a release, where it needs the comparison and a rebuild per commit costs nothing; in a development build it prints the two fixed non-release values and watches no Git file. `mj-core`'s test identity becomes a fixed constant (the package version, `+`, forty zeros) and the fake worker fixture is stamped with it. `mj-cli/tests/daemon_startup.rs` reads the real values from `mj_build_id`. Acceptance is the empty-commit check in Purpose, and the isolated upgrade tests in `mj-cli/tests/daemon_startup.rs` pass.
+Milestone 3 moves the stamp. Create `mj-build-id/` (package `brokk-mj-build-id`) with a `build.rs` holding the Git logic from `mj-core/build.rs` (`git_revision`, `commit_time`, `worker_inputs_id`, which runs `mj-core/worker_build_inputs.py` in place) and a `lib.rs` exporting the three constants, `WORKER_BUILD_STAMP`, and `fn identity() -> mj_core::worker_build::BuildIdentity`. Only `mj-cli` and `mj-worker` depend on it; their `main` installs `mj_build_id::identity()`. `mj-core/build.rs` keeps the container image name and release flag, which depend on the release channel and not on the commit, and watches no Git file; the flag that says the release image carries its own worker moves into the identity. `mj-core`'s test identity becomes a fixed constant (the package version, `+`, forty zeros) and the fake worker fixture is stamped with it. `mj-cli/tests/daemon_startup.rs` reads the real values from `mj_build_id`. Acceptance is the empty-commit check in Purpose, and the isolated upgrade tests in `mj-cli/tests/daemon_startup.rs` pass.
 
 ## Concrete Steps
 

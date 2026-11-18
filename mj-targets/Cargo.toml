@@ -30,7 +30,6 @@ chrono.workspace = true
 getrandom.workspace = true
 hmac = "0.13"
 libc.workspace = true
-ring.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
@@ -41,7 +40,6 @@ toml.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["compat", "io"] }
 tracing.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }

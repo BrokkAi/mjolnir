@@ -614,6 +614,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-build-id"
+version = "2.71.0"
+dependencies = [
+ "brokk-mj-core",
+ "serde_json",
+]
+
+[[package]]
 name = "brokk-mj-chat"
 version = "2.71.0"
 dependencies = [
@@ -705,7 +713,6 @@ dependencies = [
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
- "brokk-mj-review",
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
@@ -718,7 +725,6 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "half",
- "hmac",
  "http-body-util",
  "libc",
  "libloading 0.9.0",
@@ -735,7 +741,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "signal-hook",
  "sysinfo",
  "tar",
  "tempfile",
@@ -799,7 +804,6 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
- "base64 0.22.1",
  "brokk-anvil-client",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
@@ -819,18 +823,14 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "toml",
- "tower",
- "tower-http",
  "tracing",
  "url",
 ]
@@ -859,7 +859,6 @@ dependencies = [
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",
- "brokk-sessionwiki",
  "chrono",
  "futures",
  "getrandom 0.3.4",
@@ -917,7 +916,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "libc",
- "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -928,7 +926,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -993,6 +990,7 @@ version = "2.71.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "brokk-mj-build-id",
  "brokk-mj-checkpoint",
  "brokk-mj-controller",
  "brokk-mj-core",
@@ -1054,6 +1052,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "brokk-mj-build-id",
  "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",

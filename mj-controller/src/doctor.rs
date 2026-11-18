@@ -1694,7 +1694,7 @@ fn image_worker_summary(inspection: &[u8]) -> String {
     match crate::controller::image_worker_label(inspection).as_deref() {
         Some(build)
             if build == mj_core::worker_build::worker_build_id()
-                && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER =>
+                && mj_core::worker_build::release_image_carries_worker() =>
         {
             format!(
                 " It carries this Mjolnir's worker (build {build}), which sessions run directly."
@@ -3532,7 +3532,7 @@ fn worker_binary_check_on(
     let title = format!("Container worker binary for target {id}");
     let image = container.image.as_str();
     let release_image = image == mj_core::config::RELEASE_CONTAINER_IMAGE;
-    if release_image && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+    if release_image && mj_core::worker_build::release_image_carries_worker() {
         return DoctorCheck::ready(
             format!("worker.{id}"),
             title,
@@ -3562,7 +3562,7 @@ fn worker_binary_check_on(
         "a configured image"
     };
     let build = mj_core::worker_build::worker_build_id();
-    let choice = if mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+    let choice = if mj_core::worker_build::release_image_carries_worker() {
         format!(
             "sessions run its worker when it is this Mjolnir's build ({build}), and otherwise install the host worker"
         )

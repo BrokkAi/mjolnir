@@ -32,6 +32,7 @@ COPY mj-core/ mj-core/
 COPY mj-review/ mj-review/
 COPY mj-checkpoint/ mj-checkpoint/
 COPY mj-transcript/ mj-transcript/
+COPY mj-build-id/ mj-build-id/
 COPY mj-worker/ mj-worker/
 COPY mj-worker-bin/ mj-worker-bin/
 COPY mj-client/ mj-client/

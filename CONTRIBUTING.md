@@ -105,6 +105,12 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
   their matching directories. They build on core and share review logic,
   archive handling, and transcript projection across the runtime branches.
+- `brokk-mj-build-id` (`mj-build-id/`, library `mj_build_id`) holds the build
+  identity: the commit, its time and the worker input digest, read by its build
+  script. Only the two programs depend on it, and they install it at startup
+  (`mj_core::worker_build::install`). It is rebuilt after every commit, so no
+  library may depend on it: that would make a commit recompile the library
+  and everything above it.
 - `brokk-mj-worker-runtime` (`mj-worker/`, library `mj_worker`) is the target
   side. It runs locally, in a container, or on an SSH/EC2 host and owns the
   harness, durable command queue, and relay journal.

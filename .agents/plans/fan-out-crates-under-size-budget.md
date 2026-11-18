@@ -19,7 +19,7 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [x] (2026-11-18) Milestone 2b: no test crosses those boundaries either (22 sites at the start). `test_name` and `IsolatedTest` are `test_isolation`, in the targets layer; the store's record fixtures are `database::test_fixtures`; two tests of controller functions left `targets/tests.rs` and the test that renders a stored window through `compaction` sits with `compaction`'s tests. The same 1,845 tests run.
 - [x] (2026-11-18) Milestone 2c, first half: the targets layer is `mj-targets` (`brokk-mj-targets`), 18,115 lines; `mj-controller` is 230,766. The same 1,845 tests run, 175 of them in `mj-targets`.
 - [x] (2026-11-18) Milestone 2c, second half: the store layer is `mj-store` (`brokk-mj-store`), 45,605 lines and under the budget; `mj-controller` is 185,161. The same 1,845 tests run: 175 in `mj-targets`, 302 in `mj-store`, 1,368 in `mj-controller`. `scripts/check-controller-layers.py` is deleted, since the compiler enforces both boundaries now.
-- [ ] Every commit recompiles the whole workspace because `mj-core` compiles in the commit hash: `.agents/plans/build-identity-off-the-compile-path.md`.
+- [x] (2026-11-18) A commit no longer recompiles the workspace: after an empty commit `cargo build` compiles three small units in 12 s where it compiled everything in 83 s (`.agents/plans/build-identity-off-the-compile-path.md`).
 - [ ] Milestone 2: the review host and the pollers leave `mj-daemon`.
 - [ ] Milestone 3: `mj-daemon`'s `daemon` and `server_runtime` modules are separated and the crate is under the budget.
 - [ ] Milestone 4: `mj-controller` fans out above the store (accounts, import, worker staging, session runtime); starts when the storage layer is its own crate.

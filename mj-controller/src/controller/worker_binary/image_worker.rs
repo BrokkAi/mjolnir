@@ -41,7 +41,7 @@ impl WorkerInstall {
         }
         let image_build = image_worker_build(locator, executor)?;
         let image_is_current = image_build.as_deref() == Some(worker_build_id());
-        if image_is_current && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
+        if image_is_current && mj_core::worker_build::release_image_carries_worker() {
             return Ok(Self::Image);
         }
         match worker_binary_for(locator, executor) {
