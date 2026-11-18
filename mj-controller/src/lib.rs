@@ -4,6 +4,7 @@
 mod antigravity_usage;
 mod aws_assume_role;
 mod aws_credentials;
+mod backoff;
 mod claude_login;
 mod claude_usage;
 mod codex_usage;
@@ -38,6 +39,7 @@ pub mod server;
 pub mod session_manager;
 pub mod sessionwiki;
 pub mod setup;
+pub(crate) mod signing_key;
 mod streamed_child;
 pub mod tailscale;
 pub mod utility_llm;

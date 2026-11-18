@@ -310,12 +310,15 @@ pub(crate) fn rate_limit_hold(retry_after: Option<Duration>) -> Duration {
         .clamp(Duration::from_secs(60), Duration::from_secs(6 * 3600))
 }
 
+/// How often each profile's quota is read again.
+pub const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
 /// For a check refused at `attempt`: when the provider's hold ends, and when
 /// the next check runs. A refused check does not shorten the regular cadence:
 /// the next one is an interval after this attempt, or the hold's end if later.
 pub(crate) fn refused_check_schedule(attempt: u64, retry_after: Option<Duration>) -> (u64, u64) {
     let until = attempt + rate_limit_hold(retry_after).as_secs();
-    let next_check = until.max(attempt + crate::pollers::QUOTA_REFRESH_INTERVAL.as_secs());
+    let next_check = until.max(attempt + QUOTA_REFRESH_INTERVAL.as_secs());
     (until, next_check)
 }
 

@@ -41,7 +41,7 @@ impl CloseAttempts {
         let report = self.last_failure.as_ref() != Some(&failure);
         self.last_failure = Some(failure);
         (
-            crate::recovery::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
+            crate::backoff::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
             report,
         )
     }
