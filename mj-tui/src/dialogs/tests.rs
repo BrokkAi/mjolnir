@@ -1245,7 +1245,8 @@ fn golden_dashboard_dialogs() {
             cost_usd_ticks: Err(UnknownCost),
         },
     ];
-    // Dollars per hour; the 20th bar also ran a model with no known rate.
+    // Dollars per hour; the 20th bar also ran a model with no known rate, and
+    // the 14th ran only such models.
     let hour_dollars = [
         0u64, 0, 3, 8, 5, 0, 0, 12, 30, 22, 18, 9, 4, 0, 0, 0, 6, 14, 26, 41, 35, 20, 11, 7,
     ];
@@ -1255,7 +1256,7 @@ fn golden_dashboard_dialogs() {
         .map(|(n, dollars)| HourlyUsage {
             start_ms: (490_000 + n as i64) * HOUR_MS,
             known_cost_usd_ticks: dollars * 10_000_000_000,
-            has_unknown_cost: n == 19,
+            has_unknown_cost: n == 19 || n == 13,
         })
         .collect();
     usage.apply_session_usage_result(first, Ok(report.clone()));

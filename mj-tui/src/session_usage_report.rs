@@ -262,8 +262,8 @@ pub(crate) fn render(
             };
             format!(
                 "{}–{}",
-                zone(ms).format("%a %b %-d %H:00"),
-                zone(ms + HOUR_MS).format("%H:00")
+                zone(ms).format("%a %b %-d %H:%M"),
+                zone(ms + HOUR_MS).format("%H:%M")
             )
         },
     );
@@ -491,7 +491,12 @@ fn axis_top_dollars(max_ticks: u64) -> f64 {
 }
 
 fn axis_label(dollars: f64) -> String {
-    let text = format!("{dollars:.3}");
+    if dollars <= 0.0 {
+        return "$0".to_owned();
+    }
+    // Keep two significant digits below a cent so tiny costs do not read $0.
+    let places = ((-dollars.log10()).ceil().max(0.0) as usize + 1).clamp(3, 12);
+    let text = format!("{dollars:.places$}");
     format!("${}", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
@@ -515,8 +520,9 @@ fn render_hour_chart(
     let labels = [axis_label(top), axis_label(top / 2.0), "$0".to_owned()];
     let gutter = labels.iter().map(String::len).max().unwrap_or(0) as u16 + 1;
     let available = area.width.saturating_sub(gutter);
-    // Draw the newest hours that fit, each with a one-cell gap.
-    let pitch = (available / dialog.hours.len().max(1) as u16).max(2);
+    // Draw the newest hours that fit. Bars have a one-cell gap when there is
+    // room; at 24 columns they touch, and only below that are hours dropped.
+    let pitch = (available / dialog.hours.len().max(1) as u16).max(1);
     let shown = dialog.hours.len().min(usize::from(available / pitch));
     let hidden = dialog.hours.len() - shown;
     dialog.hidden_hours.set(hidden);
@@ -528,13 +534,14 @@ fn render_hour_chart(
     let focused = form.is_focused(UsageControl::Hours);
     let eighths = |hour: &HourlyUsage| {
         if hour.known_cost_usd_ticks == 0 {
-            return 0;
+            // Usage with no known price still marks the hour.
+            return u16::from(hour.has_unknown_cost);
         }
         let full = f64::from(bar_rows) * 8.0;
         let scaled = hour.known_cost_usd_ticks as f64 / 10_000_000_000.0 / top * full;
         (scaled.round() as u16).clamp(1, bar_rows * 8)
     };
-    let bar_width = usize::from(pitch - 1);
+    let bar_width = usize::from(pitch.saturating_sub(1).max(1));
     let mut lines = Vec::new();
     for row in 0..bar_rows {
         let axis = match row {
@@ -565,12 +572,18 @@ fn render_hour_chart(
                 theme::actionable()
             };
             spans.push(Span::styled(glyph.to_string().repeat(bar_width), style));
-            spans.push(Span::raw(" "));
+            if pitch > 1 {
+                spans.push(Span::raw(" "));
+            }
         }
         lines.push(Line::from(spans));
     }
     // A two-digit hour needs two cells; with one-cell bars, label every other bar.
-    let stride = if bar_width >= 2 { 1 } else { 2 };
+    let stride = if bar_width >= 2 {
+        1
+    } else {
+        3usize.div_ceil(usize::from(pitch))
+    };
     let label_width = usize::from(pitch) * stride;
     let mut label_row = vec![Span::raw(" ".repeat(usize::from(gutter)))];
     for index in (0..hours.len()).step_by(stride) {
