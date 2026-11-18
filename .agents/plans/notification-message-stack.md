@@ -29,6 +29,7 @@ To see it working, in an isolated instance: run a session whose turn ends with a
 - [x] (2026-11-17) Milestone 4, push: compatible migration 138 with new entry and delivery tables, identity per entry, reconcile from the card map, startup-hold baseline (slice B).
 - [x] (2026-11-17) Milestone 5, surfaces: TUI pane and web screen with Previous, Next, position, per-entry text and Clear (slice C).
 - [x] (2026-11-17) Integration: merged in a detached worktree; integrated review clean after two fixes (distinct native request identities, review verdicts on cards) and two declined findings (one form per card; id-less text after a canonical restore). Workspace clippy, the core, client, worker, TUI, CLI dashboard and controller suites and the viewer tests pass, apart from failures that also occur on master or pass alone (the worker suite times out under host load average above 200 and passes with 16 test threads).
+- [x] (2026-11-17) Order cards by their oldest visible item (`since_ms`) and keep the reader's item when a new one arrives (user decision): timestamps 883d5133c and bf2b4a05f, web 3c4e3c1ce, TUI in the following commit. Skip is keyed by session and lasts until the card disappears, so new items in a skipped session do not bring it forward.
 - [ ] Install (ask the user first) and check live behavior in an isolated instance.
 
 
@@ -96,6 +97,12 @@ To see it working, in an isolated instance: run a session whose turn ends with a
   - The push cutover baseline is the first card map after the daemon's startup recovery hold is released; a worker that reattaches later may push its visible entries once.
   - An older worker's single-entry card and the seeded entry after its upgrade use the same EntryMessage, including None for an Important whose id is unknown, so a worker upgrade does not push again.
   - The client reads entry text through the daemon (`StoredAgentMessageThrough`), never from the daemon's store directly.
+- Decision (user, 2026-11-17): "group by session order by min(notifiaction_time) ... we can give up newest-first and ? ! subordering". The complaint: "i'll be reading one and then a new one arrives and now i can't see what i was in the middle of reading".
+  - Cards (one per session) are ordered by the time of their oldest visible item, oldest first, then session id. There is no `?`-before-`!` band and no newest-first order. A new item in a session already on screen does not move its card; a new session's card joins the back. Skip still moves a card to the back.
+  - The daemon owns the time: each stack entry records when its turn completed (stamped by the worker from the completion event, so replay gives the same value), a live form records when it was raised, and the card publishes `since_ms`, the earliest of its visible items. The TUI and the web sort by it and never derive it.
+  - Inside a card, the newest item is shown when the card first appears, as decided before. While the card stays on screen, a newly arrived item does not move the selection away from the item being read; "k of n" updates instead.
+  Rationale: the user's decision; the last point applies the same complaint inside a card (parent session's reading, stated to the user).
+  Date/Author: 2026-11-17, user and parent session.
 
 ## Outcomes & Retrospective
 
@@ -103,6 +110,7 @@ Known limitations accepted on 2026-11-17:
 - After a canonical restore into a fresh store (a move or a restore from a checkpoint), an unread entry without a message id keeps its identity but shows placeholder text, because the restored store has no turn-usage row to bound its text. Go to Session still opens the conversation.
 - One form per card: when several forms wait in one conversation, push and the surfaces show the selected one first; the next pushes when it becomes the card's form.
 - A worker that reattaches after the push cutover baseline may push its visible entries once, and an older worker whose Important id cannot be recovered may push once more at its upgrade.
+- A harness's own pending input has no recorded time of its own; its card time is the native projection's last recorded activity, which can advance while the same request stays pending and move that card. Entries from before this change without a recorded completion time use 0 and sort first.
 
 
 ## Context and Orientation

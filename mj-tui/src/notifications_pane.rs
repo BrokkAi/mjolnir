@@ -18,15 +18,14 @@ use crate::{AttentionLevel, DashboardAction, DashboardState, Focus, PaneSize, Su
 pub(crate) struct NotificationsPane {
     pub(crate) size: PaneSize,
     pub(crate) maximize_enabled: bool,
-    skipped: Vec<CardIdentity>,
+    skipped: Vec<SkippedCard>,
     pub(crate) errors: std::collections::BTreeMap<String, String>,
     pub(crate) gesture: Option<NotificationGesture>,
     pub(crate) controls: Vec<NotificationGesture>,
     pub(crate) message_read: Option<NotificationMessageRead>,
     replies: std::collections::BTreeMap<String, QuickReply>,
     scroll: u16,
-    /// The card whose message the scroll offset belongs to. A new question or
-    /// reply from the same session is a new card and opens at its beginning.
+    /// The last displayed card, used to match the selected item across publications.
     scroll_card: Option<CardIdentity>,
     selected_item: usize,
     selection_revision: u64,
@@ -119,6 +118,31 @@ struct CardIdentity {
     published: Option<std::sync::Arc<mj_client::runtime_feed::NotificationCard>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SkippedCard {
+    Published(String),
+    Legacy(crate::NotificationCard),
+}
+
+impl CardIdentity {
+    fn skip_identity(&self) -> SkippedCard {
+        if self.published.is_some() {
+            SkippedCard::Published(self.action.session_id.clone())
+        } else {
+            SkippedCard::Legacy(self.action.clone())
+        }
+    }
+}
+
+impl NotificationsPane {
+    pub(crate) fn prune_published_skips(&mut self, contains: impl Fn(&str) -> bool) {
+        self.skipped.retain(|card| match card {
+            SkippedCard::Published(session_id) => contains(session_id),
+            SkippedCard::Legacy(_) => true,
+        });
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct NotificationMessageRead {
     pub(crate) request: NotificationReadRequest,
@@ -165,6 +189,40 @@ impl NotificationEntry {
         self.session_id == card.action.session_id
             && self.target == card.action.target
             && self.published == card.published
+    }
+
+    fn matches_skip(&self, skipped: &SkippedCard) -> bool {
+        match skipped {
+            SkippedCard::Published(session_id) => {
+                self.published.is_some() && self.session_id == *session_id
+            }
+            SkippedCard::Legacy(card) => {
+                self.published.is_none()
+                    && self.session_id == card.session_id
+                    && self.target == card.target
+            }
+        }
+    }
+
+    fn retained_item_index(&self, previous: &CardIdentity, index: usize) -> Option<usize> {
+        if self.matches(previous) {
+            return Some(index);
+        }
+        if self.session_id != previous.action.session_id {
+            return None;
+        }
+        let card = self.published.as_ref()?;
+        let previous = previous.published.as_ref()?;
+        if let Some(item) = previous.entries.get(index) {
+            return card
+                .entries
+                .iter()
+                .position(|entry| entry.completed_ordinal == item.completed_ordinal);
+        }
+        let previous_form = previous.form.as_ref()?;
+        let form = card.form.as_ref()?;
+        (card.holder == previous.holder && form.request_id == previous_form.request_id)
+            .then_some(card.entries.len())
     }
 
     fn item_count(&self) -> usize {
@@ -423,18 +481,17 @@ impl DashboardState {
                 self.notifications
                     .skipped
                     .iter()
-                    .position(|card| entry.matches(card))
+                    .position(|card| entry.matches_skip(card))
             };
             rank(a)
-                .map(|n| n + 1)
-                .unwrap_or(0)
-                .cmp(&rank(b).map(|n| n + 1).unwrap_or(0))
-                .then_with(|| {
-                    (a.level == AttentionLevel::Important)
+                .cmp(&rank(b))
+                .then_with(|| match (&a.published, &b.published) {
+                    (Some(a), Some(b)) => a.since_ms.cmp(&b.since_ms),
+                    _ => (a.level == AttentionLevel::Important)
                         .cmp(&(b.level == AttentionLevel::Important))
+                        .then_with(|| b.recency.cmp(&a.recency))
+                        .then_with(|| a.title.cmp(&b.title)),
                 })
-                .then_with(|| b.recency.cmp(&a.recency))
-                .then_with(|| a.title.cmp(&b.title))
                 .then_with(|| a.session_id.cmp(&b.session_id))
         });
         entries
@@ -453,16 +510,20 @@ impl DashboardState {
             level,
             title: session.listed_title().to_owned(),
             project: session.project_name(&self.config),
-            recency: self
-                .session_details
-                .get(id)
-                .and_then(|detail| detail.last_activity_at_ms)
-                .filter(|millis| *millis > 0)
-                .or_else(|| {
-                    crate::render::session_updated_at_epoch_seconds(session)
-                        .map(|seconds| seconds.saturating_mul(1000))
-                })
-                .unwrap_or_default(),
+            recency: published.as_ref().map_or_else(
+                || {
+                    self.session_details
+                        .get(id)
+                        .and_then(|detail| detail.last_activity_at_ms)
+                        .filter(|millis| *millis > 0)
+                        .or_else(|| {
+                            crate::render::session_updated_at_epoch_seconds(session)
+                                .map(|seconds| seconds.saturating_mul(1000))
+                        })
+                        .unwrap_or_default()
+                },
+                |card| u64::try_from(card.since_ms).unwrap_or_default(),
+            ),
             target,
             published,
         })
@@ -492,10 +553,13 @@ impl DashboardState {
             (None, None) => false,
             _ => true,
         } {
+            let retained = entry.and_then(|entry| self.retained_notification_item(entry));
             self.notifications.scroll_card = entry.map(NotificationEntry::identity);
-            self.notifications.selected_item =
-                entry.map_or(0, |entry| entry.item_count().saturating_sub(1));
-            self.reset_notification_item();
+            self.notifications.selected_item = retained
+                .unwrap_or_else(|| entry.map_or(0, |entry| entry.item_count().saturating_sub(1)));
+            if retained.is_none() {
+                self.reset_notification_item();
+            }
         }
     }
 
@@ -508,17 +572,14 @@ impl DashboardState {
         })
     }
 
+    fn retained_notification_item(&self, entry: &NotificationEntry) -> Option<usize> {
+        let previous = self.notifications.scroll_card.as_ref()?;
+        entry.retained_item_index(previous, self.notifications.selected_item)
+    }
+
     fn selected_notification_item(&self, entry: &NotificationEntry) -> usize {
-        if self
-            .notifications
-            .scroll_card
-            .as_ref()
-            .is_some_and(|card| entry.matches(card))
-        {
-            self.notifications.selected_item
-        } else {
-            entry.item_count().saturating_sub(1)
-        }
+        self.retained_notification_item(entry)
+            .unwrap_or_else(|| entry.item_count().saturating_sub(1))
     }
 
     fn notification_item_in_direction(
@@ -858,11 +919,16 @@ impl DashboardState {
             }
             CommandId::NotificationSkip => {
                 let entries = self.notification_entries();
+                let skipped = identity.skip_identity();
                 self.notifications.skipped.retain(|previous| {
-                    previous != &identity && entries.iter().any(|entry| entry.matches(previous))
+                    previous != &skipped && entries.iter().any(|entry| entry.matches_skip(previous))
                 });
+                if !matches!(&skipped, SkippedCard::Published(_))
+                    || entries.iter().any(|entry| entry.matches_skip(&skipped))
+                {
+                    self.notifications.skipped.push(skipped);
+                }
                 let card = card.clone();
-                self.notifications.skipped.push(identity);
                 self.sync_notification_selection(self.notification_entries().first());
                 self.notifications.scroll = 0;
                 DashboardAction::NotificationSkip { card }
@@ -1483,10 +1549,10 @@ pub(crate) mod tests {
         let mut dashboard = dashboard();
         dashboard.set_notification_cards(Some([
             ("q1".into(), NotificationCard {
-                since_ms: 0,
+                since_ms: 20,
                 badge: NotificationKind::NeedsInput,
                 entries: vec![NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 20,
                     completed_ordinal: 4,
                     kind: NotificationKind::Important,
                     message: EntryMessage::Found("outside-tail".into()),
@@ -1494,16 +1560,16 @@ pub(crate) mod tests {
                 dismissal: Some(NotificationDismissal::Stack { revision: 50 }),
                 holder: Some("q2".into()),
                 form: Some(CardForm {
-                    raised_at_ms: 0,
+                    raised_at_ms: 60,
                     request_id: "request".into(),
                     message: "Which approach should we take?\nThe question stays here until you answer or clear it.".into(),
                 }),
             }),
             ("i1".into(), NotificationCard {
-                since_ms: 0,
+                since_ms: 10,
                 badge: NotificationKind::Important,
                 entries: vec![NotificationStackEntry {
-                    completed_at_ms: 0,
+                    completed_at_ms: 10,
                     completed_ordinal: 7,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
@@ -1524,9 +1590,10 @@ pub(crate) mod tests {
         let entries = dashboard.notification_entries();
         assert_eq!(entries.len(), 2, "q2 has attention but no published card");
         assert_eq!(
-            entries[0].session_id, "q1",
-            "questions sort before newer important cards"
+            entries[0].session_id, "i1",
+            "the older important card stays ahead of the newer question"
         );
+        dashboard.handle_key(alt(KeyCode::Char('s')));
         assert_eq!(
             dashboard.displayed_notification_session_id().as_deref(),
             Some("q2")
@@ -1578,8 +1645,36 @@ pub(crate) mod tests {
                 .iter()
                 .any(|line| line.contains("The earlier completed update"))
         );
+        let mut cards = dashboard.notification_cards.clone().unwrap();
+        let question = cards.get_mut("q1").unwrap();
+        let mut arrived = question.entries[0].clone();
+        arrived.completed_ordinal = 6;
+        arrived.completed_at_ms = 40;
+        arrived.message = EntryMessage::None;
+        question.entries.push(arrived);
+        question.dismissal = Some(NotificationDismissal::Stack { revision: 52 });
+
+        let skipped = cards.get_mut("i1").unwrap();
+        let mut arrived = skipped.entries[0].clone();
+        arrived.completed_ordinal = 8;
+        arrived.completed_at_ms = 45;
+        skipped.entries.push(arrived);
+        skipped.dismissal = Some(NotificationDismissal::ReadThrough(8));
+        dashboard.set_notification_cards(Some(cards));
+
+        let reading = drawn(&mut dashboard, 120, 44);
+        assert!(reading.iter().any(|line| line.contains("1 of 3")));
+        assert!(
+            reading
+                .iter()
+                .any(|line| line.contains("The earlier completed update"))
+        );
+        assert_eq!(dashboard.wanted_notification_message(), Some(item.clone()));
+
         dashboard.handle_key(alt(KeyCode::PageDown));
         assert!(!dashboard.notification_message_read_finished(&item, None));
+        dashboard.handle_key(alt(KeyCode::PageDown));
+        dashboard.handle_key(alt(KeyCode::PageUp));
         dashboard.handle_key(alt(KeyCode::PageUp));
         let returning = dashboard.wanted_notification_message().unwrap();
         assert_ne!(returning, item);
@@ -1587,24 +1682,23 @@ pub(crate) mod tests {
         assert!(!dashboard.notification_message_read_finished(&item, None));
 
         let mut cards = dashboard.notification_cards.clone().unwrap();
-        cards
-            .get_mut("q1")
-            .unwrap()
-            .form
-            .as_mut()
-            .unwrap()
-            .request_id = "replacement".into();
+        let replacement = cards.get_mut("q1").unwrap();
+        replacement.entries[0].completed_ordinal = 5;
+        replacement.entries[0].completed_at_ms = 25;
+        replacement.since_ms = 25;
+        replacement.form.as_mut().unwrap().request_id = "replacement".into();
         dashboard.set_notification_cards(Some(cards));
         assert!(!dashboard.notification_message_read_finished(&returning, None));
         assert!(
             drawn(&mut dashboard, 120, 44)
                 .iter()
-                .any(|line| line.contains("2 of 2"))
+                .any(|line| line.contains("3 of 3"))
         );
 
         let mut projection = materialized_session_for("q1", vec![stored.into()]);
-        projection.applied_event_ordinal = 4;
+        projection.applied_event_ordinal = 5;
         dashboard.apply_materialized_session(&projection);
+        dashboard.handle_key(alt(KeyCode::PageUp));
         dashboard.handle_key(alt(KeyCode::PageUp));
         assert!(dashboard.wanted_notification_message().is_none());
         assert!(
@@ -1622,7 +1716,7 @@ pub(crate) mod tests {
         dashboard.handle_key(alt(KeyCode::PageUp));
         let locating = dashboard.wanted_notification_message().unwrap();
         assert_eq!(locating.session_id, "q1");
-        assert_eq!(locating.source, NotificationReadSource::Through(4));
+        assert_eq!(locating.source, NotificationReadSource::Through(5));
 
         let mut cards = dashboard.notification_cards.clone().unwrap();
         cards.get_mut("q1").unwrap().entries.clear();
@@ -1637,34 +1731,35 @@ pub(crate) mod tests {
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('c'))),
             DashboardAction::DismissNotifications {
-                dismissals: vec![("i1".into(), NotificationDismissal::ReadThrough(7))],
+                dismissals: vec![("i1".into(), NotificationDismissal::ReadThrough(8))],
             }
         );
         assert!(dashboard.notification_dismissal_pending("i1"));
         dashboard.notifications_dismissed(vec![(
             "i1".into(),
-            NotificationDismissal::ReadThrough(7),
-            Ok(7),
+            NotificationDismissal::ReadThrough(8),
+            Ok(8),
         )]);
         assert!(!dashboard.notification_dismissal_pending("i1"));
         assert_eq!(
             dashboard.state.sessions["i1"].viewed_through_event_ordinal,
-            7
+            8
         );
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::DismissNotification {
                 session_id: "q1".into(),
-                target: NotificationDismissal::Stack { revision: 50 },
+                target: NotificationDismissal::Stack { revision: 52 },
             }
         );
         dashboard.handle_key(alt(KeyCode::Char('s')));
         let bounded = dashboard.wanted_notification_message().unwrap();
         assert_eq!(bounded.session_id, "i1");
-        assert_eq!(bounded.source, NotificationReadSource::Through(7));
+        assert_eq!(bounded.source, NotificationReadSource::Through(8));
 
         dashboard.set_notification_cards(Some(Default::default()));
         assert!(dashboard.notification_entries().is_empty());
+        assert!(dashboard.notifications.skipped.is_empty());
     }
 
     // Hard-won: 6597a0761: a new card from the same session kept the old scroll offset.
@@ -1787,7 +1882,7 @@ pub(crate) mod tests {
                         .insert("q1".into(), NotificationDismissal::ReadThrough(99));
                     race.set_question_message("q1", Some("new-question".into()), true);
                 } else {
-                    let skipped = race.notification_entries()[0].identity();
+                    let skipped = race.notification_entries()[0].identity().skip_identity();
                     race.notifications.skipped.push(skipped);
                 }
                 drawn(&mut race, 140, 50);
@@ -1824,10 +1919,10 @@ pub(crate) mod tests {
                         assert_eq!(card.session_id, "q1");
                         assert_eq!(card.target, target);
                         assert_eq!(
-                            race.notifications
-                                .skipped
-                                .last()
-                                .map(|card| card.action.session_id.as_str()),
+                            race.notifications.skipped.last().map(|card| match card {
+                                SkippedCard::Published(id) => id.as_str(),
+                                SkippedCard::Legacy(card) => card.session_id.as_str(),
+                            }),
                             Some("q1")
                         );
                         if replace_target {
@@ -1875,7 +1970,7 @@ pub(crate) mod tests {
             old.notification_message("q1", AttentionLevel::Waiting),
             "The buried question"
         );
-        let skipped = old.notification_entries()[0].identity();
+        let skipped = old.notification_entries()[0].identity().skip_identity();
         old.notifications.skipped.push(skipped);
         assert_ne!(old.wanted_notification_message(), wanted);
         old.sync_notification_message_read(None, false);

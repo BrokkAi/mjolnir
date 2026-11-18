@@ -562,6 +562,8 @@ impl DashboardState {
                 .errors
                 .retain(|id, _| previous.and_then(|cards| cards.get(id)) == cards.get(id));
         }
+        self.notifications
+            .prune_published_skips(|id| cards.as_ref().is_some_and(|cards| cards.contains_key(id)));
         self.notification_cards = cards;
     }
 
