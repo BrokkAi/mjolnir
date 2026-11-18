@@ -30,40 +30,97 @@ pub(super) fn reconnect_delay(failures: u32) -> Duration {
 pub(super) struct StartingSessions(BTreeMap<String, StartingSessionPhase>);
 
 enum StartingSessionPhase {
+    Guarded,
     AwaitingTarget,
     PublishedTarget,
 }
 
 impl StartingSessions {
     pub(super) fn reconcile(&mut self, targets: &BTreeMap<String, RelaySessionTarget>) {
-        self.0.retain(|id, targeted| {
-            if targets.contains_key(id) {
-                *targeted = StartingSessionPhase::PublishedTarget;
+        self.0.retain(|id, phase| {
+            if matches!(phase, StartingSessionPhase::Guarded) {
+                true
+            } else if targets.contains_key(id) {
+                *phase = StartingSessionPhase::PublishedTarget;
                 true
             } else {
-                matches!(targeted, StartingSessionPhase::AwaitingTarget)
+                matches!(phase, StartingSessionPhase::AwaitingTarget)
             }
         });
     }
 
-    pub(super) fn command(
+    pub(super) fn reconcile_committed(&mut self, state: &mj_core::state::State) {
+        self.0.retain(|id, phase| {
+            matches!(phase, StartingSessionPhase::Guarded)
+                || state
+                    .sessions
+                    .get(id)
+                    .is_some_and(|record| record.state.can_receive_child_work())
+        });
+    }
+
+    pub(super) fn event(
         &mut self,
-        command: ManagerCommand,
+        event: StartingEvent,
         view: Option<ManagedSessionView>,
-    ) -> Option<ManagerCommand> {
+        committed: Option<&crate::database::CommittedState>,
+    ) {
         use mj_client::session::ParentMessageRoute;
-        match command {
-            ManagerCommand::RegisterStarting { session_id, reply } => {
-                self.0
-                    .entry(session_id)
-                    .or_insert(StartingSessionPhase::AwaitingTarget);
-                let _ = reply.send(());
+        if let Some(committed) = committed {
+            self.reconcile_committed(&committed.state);
+        }
+        match event {
+            StartingEvent::Register {
+                session_id,
+                launches,
+                reply,
+            } => {
+                let result = if committed.is_none() {
+                    Err(anyhow::anyhow!(
+                        "launch registration requires the durable state feed"
+                    ))
+                } else if let std::collections::btree_map::Entry::Vacant(entry) =
+                    self.0.entry(session_id)
+                {
+                    let session_id = entry.key().clone();
+                    entry.insert(StartingSessionPhase::Guarded);
+                    // The reply owns the guard until the creator receives it.
+                    // Dropping either side releases an uncommitted entry.
+                    Ok(StartingSessionRegistration {
+                        session_id: Some(session_id),
+                        launches,
+                    })
+                } else {
+                    Err(anyhow::anyhow!("session launch is already registered"))
+                };
+                let _ = reply.send(result);
             }
-            ManagerCommand::ForgetStarting { session_id, reply } => {
-                self.0.remove(&session_id);
-                let _ = reply.send(());
+            StartingEvent::Published { session_id, reply } => {
+                let result = match (self.0.get_mut(&session_id), committed) {
+                    (Some(phase), Some(committed)) => {
+                        *phase = StartingSessionPhase::AwaitingTarget;
+                        // The writer publishes before replying to the commit. Read
+                        // its latest state here even if its watch coalesced failure
+                        // and removal before this handover reached the manager.
+                        self.reconcile_committed(&committed.state);
+                        Ok(())
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "session launch registration is unavailable"
+                    )),
+                };
+                let _ = reply.send(result);
             }
-            ManagerCommand::ParentMessageRoute { session_id, reply } => {
+            StartingEvent::Aborted { session_id } => {
+                if self
+                    .0
+                    .get(&session_id)
+                    .is_some_and(|phase| matches!(phase, StartingSessionPhase::Guarded))
+                {
+                    self.0.remove(&session_id);
+                }
+            }
+            StartingEvent::Route { session_id, reply } => {
                 let protocol = view
                     .as_ref()
                     .and_then(|view| view.snapshot.as_ref())
@@ -79,8 +136,6 @@ impl StartingSessions {
                 };
                 let _ = reply.send(route);
             }
-            other => return Some(other),
         }
-        None
     }
 }

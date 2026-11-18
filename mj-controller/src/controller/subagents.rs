@@ -479,19 +479,17 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
-        if let Some(manager) = manager {
-            manager.register_starting_blocking(&child_id)?;
-        }
-        if let Err(error) = crate::database::register_subagent_with_startup(
+        let registration = manager
+            .map(|manager| manager.register_starting_blocking(&child_id))
+            .transpose()?;
+        crate::database::register_subagent_with_startup(
             &session,
             &relation,
             startup,
             report_dir.as_deref(),
-        ) {
-            if let Some(manager) = manager {
-                manager.forget_starting_blocking(&child_id)?;
-            }
-            return Err(error);
+        )?;
+        if let Some(registration) = registration {
+            registration.publish()?;
         }
         self.state.sessions.insert(child_id, session);
         self.state

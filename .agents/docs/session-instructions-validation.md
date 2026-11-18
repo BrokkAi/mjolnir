@@ -131,3 +131,36 @@ Default delegation seed 1171 passed after the normal dev rebuild of the source c
 - The fixture cleaned up its processes; an explicit daemon stop using that runtime's private MJ_CONFIG_DIR/MJ_DATA_DIR and the same named instance confirmed it was already stopped. Log: `memory-instructions-routing-cleanup.log`.
 
 All affected checks now pass. Initial failures and their fixes remain documented above; diagnostic memory-*.log files are intentionally untracked. Relay revision 27, snapshot fields and RuntimeEvent serialization remain unchanged; the new registration/route query is in-process only. The AgentInitialized serializer continues preserving existing protocol-71 event digests. Formal re-review follows the documentation checkpoint. No default-instance operation, push or Milestone 3 live harness acceptance was performed.
+
+
+## Fourth review compatibility clarification
+
+A partial fourth-review finding proposed turn routing for a Starting child that later publishes a protocol below RELAY_STRUCTURED_MAILBOX_PROTOCOL. That launch is excluded by existing production ownership: Starting entries are installed only for fresh child registrations, and every fresh install uses this daemon's worker_build_id. `WorkerInstall::for_target` in `mj-worker-staging/src/worker_binary/image_worker.rs` checks the image build and selects a host replacement when needed; host selection's `worker_binary_prerequisite_with_verifier` in `binary_source.rs` rejects an explicit stale MJ_WORKER_BINARY instead of using it. Older running/retained sessions do not acquire fresh registration entries, and the passing protocol-33 message test preserves their turn route.
+
+The parent confirmed this invariant; the final review arrived and the finding was formally overridden before any new commit. A short comment at the Starting route names both enforcing launch functions; no runtime assertion, wait or compatibility probe is added. This comment/documentation change requires diff review only; the previously passing affected tests and full seed-1171 acceptance remain applicable. The comment is included with the fourth-review corrections below.
+
+
+## Fourth review failure-path corrections
+
+The same durable lifecycle transition now owns the failed-launch outcome. `insert_session_with_parent` and `update_lifecycle_fields` settle pending ParentMessages in the session-record transaction when the record becomes StartupCleanup or Error, preserving the stored startup error as the failure reason. Public enqueue holds a writer transaction and uses the same failure classifier, so a producer delayed after selecting the mailbox route cannot insert pending work after that transition. Existing outbox Failed/accepted_at fields represent this outcome; no migration or wire change is needed.
+
+The session manager subscribes to the existing committed-state feed and releases registrations for terminal/missing records, including children that never published a pollable target. Before commit, the manager's registration reply owns a guard; the creator then holds it across the write. Dropping either side releases that guarded entry. An explicit publish acknowledgement transfers ownership to the feed and reads its latest snapshot, handling coalesced failure/removal before handover. Drop and route use the same FIFO channel. Per-failure forget calls were removed.
+
+Initial mechanical checks found private guard-construction fields (fixed with module-local visibility; `memory-instructions-review4-failure-test.log`). The next fixture incorrectly chose a new route after failure while retaining an old Running export, and therefore waited in the existing turn path. Its test-owned child was stopped after the backtrace identified the wait; the fixture now models a producer already paused after its route decision by calling the actual enqueue boundary. Logs: `memory-instructions-review4-failure-fixed-test.log` and `memory-instructions-review4-hang-backtrace.log`. The corrected focused regressions pass:
+
+- `cargo test -p brokk-mj-daemon failed_startup_settles_queued_parent_messages_without_attachment`: 1 passed; atomic failure, late enqueue and parent-facing delivery annotations. Log: `memory-instructions-review4-failure-final-test.log`.
+- `cargo test -p brokk-mj-daemon launch_reservation_releases_on_precommit_abort_and_terminal_publication`: 1 passed; pre-commit guard drop, ordinary terminal feed update, and failure/removal coalesced before handover, without a target or actor. Log: `memory-instructions-review4-reservation-test.log`.
+- `cargo test -p brokk-mj-daemon send_to_registered_child_before_attachment_queues_mailbox_without_a_turn`: 1 passed with the guard handover. Log: `memory-instructions-review4-routing-test.log`.
+
+Additional affected checks passed on the dev profile outside the sandbox:
+
+- `cargo test -p brokk-mj-daemon a_failure_after_a_sub_agent_registers_moves_it_to_error`: 1 passed (`memory-instructions-review4-registration-failure-test.log`).
+- `cargo test -p brokk-mj-daemon outbox_`: 3 passed, including old-protocol failure reporting, stopped-child pruning and mailbox-aware parking (`memory-instructions-review4-outbox-tests.log`).
+- `cargo test -p brokk-mj-daemon send_message_`: 9 passed (`memory-instructions-review4-message-tests.log`).
+- `cargo test -p brokk-mj-controller session_adoption_deadline_also_bounds_an_unanswered_manager_request`: 1 passed (`memory-instructions-review4-manager-test.log`).
+- `cargo test -p brokk-mj-store database::mailbox::tests`: 4 passed (`memory-instructions-review4-store-tests.log`).
+- `cargo test -p brokk-mj-store single_session_read_includes_related_rows_and_ignores_unrelated_invalid_records`: 1 passed (`memory-instructions-review4-state-read-test.log`). The initial state_io::tests filter matched zero tests and was corrected (`memory-instructions-review4-state-tests.log`).
+- `cargo clippy -p brokk-mj-controller -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review4-clippy.log`).
+- Formatting and `git diff --check`: clean.
+
+A normal dev rebuild and full delegation seed 1171 will follow the source checkpoint. No Milestone 3 live acceptance or default-instance operation was performed.

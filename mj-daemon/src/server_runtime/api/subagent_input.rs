@@ -559,6 +559,10 @@ impl ApiBackend {
         // published protocol fact and compatibility check used by the outbox.
         let deliver_via_mailbox =
             match self.sessions.parent_message_route(child.to_owned()).await? {
+                // Fresh children use this daemon's mailbox-capable worker build.
+                // WorkerInstall::for_target (image_worker.rs) and
+                // worker_binary_prerequisite_with_verifier (binary_source.rs)
+                // enforce that identity, including explicit binary overrides.
                 mj_client::session::ParentMessageRoute::Starting => true,
                 mj_client::session::ParentMessageRoute::Published(protocol) => protocol
                     .is_some_and(|protocol| {

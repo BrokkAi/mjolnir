@@ -177,11 +177,6 @@ impl RuntimeState {
         child_session_id: &str,
         error: &anyhow::Error,
     ) {
-        let manager = self.session_manager.clone();
-        let id = child_session_id.to_owned();
-        if let Err(error) = blocking(move || manager.forget_starting_blocking(&id)).await {
-            tracing::warn!(child_session_id, %error, "could not release failed child launch registration");
-        }
         let cause = format!("sub-agent startup failed: {error:#}");
         let written = blocking({
             let child_session_id = child_session_id.to_owned();

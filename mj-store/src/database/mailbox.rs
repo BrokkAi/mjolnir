@@ -113,14 +113,17 @@ pub fn enqueue_mailbox_event(
     let target_session_id = target_session_id.to_owned();
     let event_json = event_json.to_owned();
     let inserted = submit_database_write("enqueue_mailbox_event", move |connection| {
-        enqueue_mailbox_event_with(
-            connection,
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = enqueue_mailbox_event_with(
+            &tx,
             &event_key,
             &target_session_id,
             &event_json,
             wake,
             unpark,
-        )
+        )?;
+        tx.commit()?;
+        Ok(result)
     })?;
     if inserted.inserted() {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
@@ -141,9 +144,30 @@ pub fn enqueue_mailbox_event_with(
         event.key == event_key && event.wake == wake,
         "mailbox event JSON does not match its outbox key and wake value"
     );
+    // The producer holds the writer transaction: a sender with an older
+    // runtime view cannot enqueue pending work after the durable failure.
+    let failure = if matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::ParentMessage { .. }
+    ) {
+        connection
+            .query_row(
+                "SELECT state, last_error FROM sessions WHERE session_id=?1",
+                [target_session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .and_then(|(state, error)| {
+                mj_core::state::SessionState::from_stored(&state)
+                    .and_then(|state| failed_parent_message_reason(state, error.as_deref()))
+            })
+    } else {
+        None
+    };
+    let now = Utc::now().to_rfc3339();
     connection.execute(
-        "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at, accepted_at, failure)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(event_key) DO NOTHING",
         params![
             event_key,
@@ -151,7 +175,9 @@ pub fn enqueue_mailbox_event_with(
             event_json,
             wake,
             unpark,
-            Utc::now().to_rfc3339()
+            now,
+            failure.as_ref().map(|_| &now),
+            failure,
         ],
     )?;
     let inserted = connection.changes() == 1;
@@ -253,6 +279,30 @@ pub fn subagent_mailbox_messages(parent_session_id: &str) -> Result<Vec<Subagent
         })?
         .map(|row| row.map_err(Into::into))
         .collect()
+}
+
+fn failed_parent_message_reason(state: SessionState, error: Option<&str>) -> Option<String> {
+    matches!(state, SessionState::Error | SessionState::StartupCleanup).then(|| match error {
+        Some(error) => format!("child startup failed: {error}"),
+        None => format!("child session is {state:?}; queued parent message was not delivered"),
+    })
+}
+
+/// The lifecycle record and its undeliverable parent messages commit together.
+pub(super) fn settle_failed_parent_messages_with(
+    connection: &Connection,
+    session: &SessionRecord,
+) -> Result<()> {
+    if let Some(reason) = failed_parent_message_reason(session.state, session.last_error.as_deref())
+    {
+        connection.execute(
+            "UPDATE mailbox_outbox SET accepted_at=?2, failure=?3
+             WHERE target_session_id=?1 AND accepted_at IS NULL AND failure IS NULL
+               AND json_extract(event_json, '$.body.type')='parent_message'",
+            params![session.id, Utc::now().to_rfc3339(), reason],
+        )?;
+    }
+    Ok(())
 }
 
 /// Permanently stop retrying a mailbox event that the published worker

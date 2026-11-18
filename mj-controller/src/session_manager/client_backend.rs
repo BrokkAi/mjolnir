@@ -156,9 +156,8 @@ impl mj_client::session::SessionControlBackend for ClientSessionControl {
         Box::pin(async move {
             let (reply, response) = oneshot::channel();
             self.0
-                .commands
-                .send(ManagerCommand::ParentMessageRoute { session_id, reply })
-                .await
+                .launches
+                .send(StartingEvent::Route { session_id, reply })
                 .context("session manager stopped")?;
             response.await.context("session manager stopped")
         })
@@ -195,26 +194,21 @@ impl mj_client::session::SessionControlBackend for ClientSessionControl {
 
 impl SessionManagerControl {
     /// Called off the runtime before committing a newly addressable child.
-    pub fn register_starting_blocking(&self, session_id: &str) -> Result<()> {
+    pub fn register_starting_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<StartingSessionRegistration> {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .blocking_send(ManagerCommand::RegisterStarting {
+        self.launches
+            .send(StartingEvent::Register {
                 session_id: session_id.into(),
+                launches: self.launches.clone(),
                 reply,
             })
             .context("session manager stopped")?;
-        response.blocking_recv().context("session manager stopped")
-    }
-
-    pub fn forget_starting_blocking(&self, session_id: &str) -> Result<()> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .blocking_send(ManagerCommand::ForgetStarting {
-                session_id: session_id.into(),
-                reply,
-            })
-            .context("session manager stopped")?;
-        response.blocking_recv().context("session manager stopped")
+        response
+            .blocking_recv()
+            .context("session manager stopped")?
     }
 
     /// Narrow this controller-owned manager to session lookup for a control surface.

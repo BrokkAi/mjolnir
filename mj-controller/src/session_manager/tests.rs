@@ -83,6 +83,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
         harness_failure: Default::default(),
         model_policies: watch::channel(BTreeMap::new()).0,
         commands,
+        launches: mpsc::unbounded_channel().0,
         session_cpu: watch::channel(SessionCpuTable::new()).1,
     };
     let request = tokio::spawn(async move {
@@ -90,9 +91,7 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
             .wait_for_session("muse", Duration::from_millis(20))
             .await
     });
-    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap() else {
-        panic!("expected session lookup")
-    };
+    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap();
     // Retain the reply without answering, like an unresponsive manager.
     let error = tokio::time::timeout(Duration::from_secs(1), request)
         .await

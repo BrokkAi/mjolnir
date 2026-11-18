@@ -1,21 +1,28 @@
 use super::*;
 
 pub(super) enum ManagerCommand {
-    RegisterStarting {
-        session_id: String,
-        reply: oneshot::Sender<()>,
-    },
-    ForgetStarting {
-        session_id: String,
-        reply: oneshot::Sender<()>,
-    },
-    ParentMessageRoute {
-        session_id: String,
-        reply: oneshot::Sender<mj_client::session::ParentMessageRoute>,
-    },
     Session {
         session_id: String,
         reply: oneshot::Sender<Option<ManagedSessionHandle>>,
+    },
+}
+
+pub(super) enum StartingEvent {
+    Register {
+        session_id: String,
+        launches: mpsc::UnboundedSender<StartingEvent>,
+        reply: oneshot::Sender<Result<StartingSessionRegistration>>,
+    },
+    Published {
+        session_id: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Aborted {
+        session_id: String,
+    },
+    Route {
+        session_id: String,
+        reply: oneshot::Sender<mj_client::session::ParentMessageRoute>,
     },
 }
 

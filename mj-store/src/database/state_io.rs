@@ -769,6 +769,7 @@ pub(super) fn insert_session_with_parent(
     replace_checkpoint(tx, session)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
     super::session_create::settle_create_intent(tx, session)?;
+    super::mailbox::settle_failed_parent_messages_with(tx, session)?;
     Ok(())
 }
 
@@ -894,6 +895,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     }
     super::events::record_session_fault_transition(tx, session, previous_error)?;
     super::session_create::settle_create_intent(tx, session)?;
+    super::mailbox::settle_failed_parent_messages_with(tx, session)?;
     replace_targets(tx, session)
 }
 

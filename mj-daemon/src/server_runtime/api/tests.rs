@@ -3679,13 +3679,18 @@ async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_tur
     let _writer = mj_controller::database::install_isolated_test_writer();
     let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
     let registration = manager.control.clone();
-    tokio::task::spawn_blocking(move || registration.register_starting_blocking("child-1"))
-        .await
-        .unwrap()
-        .unwrap();
+    let registration =
+        tokio::task::spawn_blocking(move || registration.register_starting_blocking("child-1"))
+            .await
+            .unwrap()
+            .unwrap();
     // Publish the child only after the manager owns its launch. No target or
     // actor is ever attached: this makes the startup window deterministic.
     store_parent_and_child("child-1");
+    tokio::task::spawn_blocking(move || registration.publish())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         manager
             .control
@@ -3729,6 +3734,199 @@ async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_tur
         .unwrap()
         .is_none()
     );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: 9674cd6aa: a launch that failed before attachment left acknowledged parent messages pending.
+#[tokio::test]
+async fn failed_startup_settles_queued_parent_messages_without_attachment() {
+    if !isolated_parked_test("failed_startup_settles_queued_parent_messages_without_attachment") {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    let owner = manager.control.clone();
+    let registration =
+        tokio::task::spawn_blocking(move || owner.register_starting_blocking("child-1"))
+            .await
+            .unwrap()
+            .unwrap();
+    store_parent_and_child("child-1");
+    tokio::task::spawn_blocking(move || registration.publish())
+        .await
+        .unwrap()
+        .unwrap();
+    let backend = ApiBackend::new(
+        manager.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    );
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "before-startup-failure".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "context during provisioning".into(),
+        },
+    };
+    backend
+        .deliver_subagent_input("child-1", "context during provisioning", &request)
+        .await
+        .unwrap();
+    let mut child = mj_controller::database::load_session_record("child-1")
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::StartupCleanup;
+    child.last_error = Some("fixture provisioning failed before the worker started".into());
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    let key = "subagent-message-before-startup-failure";
+    let expected = "child startup failed: fixture provisioning failed before the worker started";
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-1", key).unwrap(),
+        mj_controller::database::MailboxDeliveryState::Failed(expected.into())
+    );
+    assert!(
+        mj_controller::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    // A sender that still holds the old Running view cannot recreate pending
+    // work after failure, and retrying the original event preserves its reason.
+    child.state = SessionState::Error;
+    mj_controller::database::save_lifecycle_session(&child).unwrap();
+    // Model a producer paused after choosing mailbox delivery but before its
+    // writer transaction. A new route lookup would correctly refuse the child.
+    let late = mj_core::mailbox::MailboxEvent {
+        key: "subagent-message-after-startup-failure".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 2,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "late context".into(),
+        },
+    };
+    mj_controller::database::enqueue_mailbox_event(
+        &late.key,
+        "child-1",
+        &serde_json::to_string(&late).unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state(
+            "child-1",
+            "subagent-message-after-startup-failure"
+        )
+        .unwrap(),
+        mj_controller::database::MailboxDeliveryState::Failed(expected.into())
+    );
+    assert_eq!(
+        mj_controller::database::mailbox_delivery_state("child-1", key).unwrap(),
+        mj_controller::database::MailboxDeliveryState::Failed(expected.into())
+    );
+    let progress = backend.subagent_input_progress("parent-1").await.unwrap();
+    let mut entry = serde_json::json!({});
+    progress.annotate("child-1", &mut entry);
+    let reports = entry["message_deliveries"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    assert!(
+        reports
+            .iter()
+            .all(|report| report["status"] == "failed" && report["error"] == expected),
+        "{reports:?}"
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: 9674cd6aa: failed and removed children that never published a target leaked launch reservations.
+#[tokio::test]
+async fn launch_reservation_releases_on_precommit_abort_and_terminal_publication() {
+    if !isolated_parked_test(
+        "launch_reservation_releases_on_precommit_abort_and_terminal_publication",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    let owner = manager.control.clone();
+    let registration =
+        tokio::task::spawn_blocking(move || owner.register_starting_blocking("precommit-abort"))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        manager
+            .control
+            .client()
+            .parent_message_route("precommit-abort".into())
+            .await
+            .unwrap(),
+        mj_client::session::ParentMessageRoute::Starting
+    ));
+    // Drop and route share one FIFO channel: this needs no scheduling delay.
+    drop(registration);
+    assert!(matches!(
+        manager
+            .control
+            .client()
+            .parent_message_route("precommit-abort".into())
+            .await
+            .unwrap(),
+        mj_client::session::ParentMessageRoute::Unmanaged
+    ));
+    for (id, transition) in [
+        ("child-after-handover", "after"),
+        ("child-before-handover", "before"),
+        ("child-removed", "removed"),
+    ] {
+        let owner = manager.control.clone();
+        let mut registration = Some(
+            tokio::task::spawn_blocking(move || owner.register_starting_blocking(id))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        store_parent_and_child(id);
+        if transition == "after" {
+            let held = registration.take().unwrap();
+            tokio::task::spawn_blocking(move || held.publish())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        if transition == "removed" {
+            mj_controller::database::delete_session(id).unwrap();
+        } else {
+            let mut child = mj_controller::database::load_session_record(id)
+                .unwrap()
+                .unwrap();
+            child.state = SessionState::Error;
+            child.last_error = Some("launch never published a target".into());
+            mj_controller::database::save_lifecycle_session(&child).unwrap();
+        }
+        // Test both the ordinary feed transition and a delayed handover after
+        // the entire failed/removed lifetime has coalesced in the feed.
+        if let Some(held) = registration {
+            tokio::task::spawn_blocking(move || held.publish())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            matches!(
+                manager
+                    .control
+                    .client()
+                    .parent_message_route(id.into())
+                    .await
+                    .unwrap(),
+                mj_client::session::ParentMessageRoute::Unmanaged
+            ),
+            "{transition}"
+        );
+    }
     manager.shutdown.shutdown().await.unwrap();
 }
 

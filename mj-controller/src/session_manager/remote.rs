@@ -250,6 +250,12 @@ pub(super) fn spawn_remote_actor(
 pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
+    let (launches_tx, mut launches_rx) = mpsc::unbounded_channel();
+    let mut committed = if crate::database::database_writer_installed() {
+        Some(crate::database::subscribe_committed_state()?)
+    } else {
+        None
+    };
     let (updates_tx, updates_rx) = coalesced_update_channel();
     let session_gate = updates_tx.session_gate.clone();
     let (published_tx, mut published_rx) = mpsc::unbounded_channel();
@@ -297,14 +303,39 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         }
                     }
                 }
-                command = commands_rx.recv() => {
-                    let Some(command) = command else { break; };
-                    let view = match &command {
-                        ManagerCommand::ParentMessageRoute { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
+                event = launches_rx.recv() => {
+                    let Some(event) = event else { break; };
+                    let view = match &event {
+                        StartingEvent::Route { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
                         _ => None,
                     };
-                    let Some(command) = starting.command(command, view) else { continue; };
-                    let ManagerCommand::Session { session_id, reply } = command else { unreachable!() };
+                    let snapshot = committed.as_ref().map(|feed| feed.borrow().clone());
+                    match snapshot.as_ref() {
+                        Some(Ok(snapshot)) => starting.event(event, view, Some(snapshot)),
+                        None => starting.event(event, view, None),
+                        Some(Err(error)) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                changed = async {
+                    match &mut committed {
+                        Some(feed) => feed.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() { break; }
+                    match &*committed.as_mut().expect("feed changed").borrow_and_update() {
+                        Ok(snapshot) => starting.reconcile_committed(&snapshot.state),
+                        Err(error) => {
+                            tracing::error!(%error, "launch registration lost its durable state feed");
+                            break;
+                        }
+                    }
+                }
+                command = commands_rx.recv() => {
+                    let Some(ManagerCommand::Session { session_id, reply }) = command else { break; };
                     let handle = actors.get(&session_id).map(|actor| ManagedSessionHandle {
                         session_id: session_id.clone(),
                         commands: actor.commands.clone(),
@@ -346,6 +377,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
             harness_failure: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,
+            launches: launches_tx,
             session_cpu: watch::channel(SessionCpuTable::new()).1,
         },
         updates: updates_rx,
