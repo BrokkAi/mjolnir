@@ -7,7 +7,20 @@ ENV="$(python3 -c "import json,shlex;[print(f'export {k}={shlex.quote(str(v))}')
 [ -n "$ENV" ] || { echo "study environment is empty" >&2; exit 2; }
 eval "$ENV"
 export REVIEW_ARMS_QUOTA_FLOOR=codex=25
-until ./mjx quota --profile codex --json | python3 -c "import json,sys;r=json.load(sys.stdin)['profiles'][0]['report'];w=[x.get('remaining_percent') for x in r.get('windows') or []];sys.exit(0 if w and None not in w and min(w)>25 and not r.get('error') else 1)"; do sleep 300; done
+# Each wait logs its reason, so a failing quota lookup is distinguishable from a profile below the floor.
+until ./mjx quota --profile codex --json | python3 -c "
+import json,sys,datetime
+now=datetime.datetime.now(datetime.timezone.utc).strftime('%FT%TZ')
+try:
+    r=json.load(sys.stdin)['profiles'][0]['report']
+except Exception as e:
+    print(now,'quota lookup failed:',repr(e),file=sys.stderr); sys.exit(1)
+w=[x.get('remaining_percent') for x in r.get('windows') or []]
+if r.get('error') or not w or None in w:
+    print(now,'quota report unusable:',r.get('error') or w,file=sys.stderr); sys.exit(1)
+if min(w)<=25:
+    print(now,'codex at',min(w),'percent; waiting',file=sys.stderr); sys.exit(1)
+"; do sleep 300; done
 date -u +"codex above floor at %FT%TZ"
 git rev-parse HEAD
 python3 driver.py --jobs /mnt/optane/review-arms-bifrost-20261116/oracle-noleak-arm/jobs-on-af.json --concurrency 4 --stop-on-failure --same-image /mnt/optane/review-arms-bifrost-20261116/oracle-noleak-arm/image-pin.json
