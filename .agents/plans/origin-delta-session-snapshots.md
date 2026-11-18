@@ -381,7 +381,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 **Restore**, into a target directory:
 
 1. Establish the base clone. Restore takes a `RestoreBase`:
-   - `Clone { origin, seed }` clones origin with `--no-checkout`, runs `git fetch --tags origin` so every tag the exclusions relied on is present, and deletes every clone-created `refs/heads/*`. Otherwise a saved `refs/heads/release/hotfix` would conflict with a clone-created `release` that the session had deleted locally. Clone-created tags are kept, because a raw conversion keeps only changed tags and must not end up with fewer tags than a normal clone. A clone tag is removed only when a saved tag replaces it: the same name with a different value, or a directory/file name conflict such as origin's `release` against a saved `release/v2`.
+   - `Clone { origin, seed }` clones origin with `--no-checkout`, runs `git fetch --tags origin` so every tag the exclusions relied on is present, and deletes every clone-created `refs/heads/*`. Otherwise a saved `refs/heads/release/hotfix` would conflict with a clone-created `release` that the session had deleted locally. Clone-created tags are kept, because a raw conversion keeps only changed tags and must not end up with fewer tags than a normal clone. A clone tag is removed only when a saved tag replaces it: the same name with a different value, or a directory/file name conflict such as origin's `release` against a saved `release/v2`. When the snapshot holds the checkout's complete ref set (`refs_complete`: a managed checkout, or a raw checkout without a launch record), restore also removes clone-created tags absent from the snapshot, so the tag set matches exactly.
    - `Provisioned { allow_origin_fetch }` uses a clone the caller already prepared and skips both.
 
    History-cutoff workspaces (`--no-later-history`, see `HistoryCutoff` in `mj-core/src/targets.rs`) deliberately have no origin remote. Their resume already provisions and verifies the cutoff, so they restore with `Provisioned { allow_origin_fetch: false }`, capture with `origin_override`, and never fetch later history. Their capture uses `ExclusionSource::Commits(<cutoff base>)`: it excludes only what the provisioned base will contain, never origin's refs, so a session commit that was also published on origin is still packed. Keep the existing cutoff resume regression passing. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
@@ -659,6 +659,14 @@ Compaction no longer depends on a checkpoint holding a copy, so make sure Sessio
 4. Restore with the same code as resume.
 5. Wait for destination readiness, then retire the source.
 
+**Ownership of a new cross-target Move** is a durable phase in the `MoveOperation`. It is decided by one owner, the daemon's store transaction, using the same classification today's recovery applies to old records, which is extended to cover the new phases.
+- **Phases:** `Capturing` → `Transferring` → `Restoring` → `DestinationStarting` → `DestinationOwns` → `SourceRetired` → `QueueAdmitted`.
+- **The commit point** is the single transaction that moves the operation to `DestinationOwns`. It also sets the session's placement to the destination, after the destination's worker reports ready and before the destination agent is allowed to take queued work.
+- **Before that point the source owns the session.** Startup recovery and failure handling stop and dispose of any destination environment first, and only then restart the source agent in place. Two agents therefore never run at once: the source agent was stopped before capture, and is restarted only after the destination is torn down.
+- **From that point on the destination owns it.** Recovery finishes forward: retire the source if it is not already gone, then complete the exactly-once queue admission with the pinned command IDs from Milestone 4 (the worker-owned pins that survive journal pruning), then settle.
+
+Add upgrade-free crash regressions for a daemon exit just before and just after the commit point.
+
 The archive is not installed on the daemon as the session's checkpoint; the daemon copy remains whatever the last suspend produced. Delete `mj-worker/src/move_workspace.rs`, the untracked inventory, picker and exclusions in `mj-core/src/move_workspace.rs` and their UI, the daemon-side workspace staging under `data_dir()/moves`, the rsync legs in `transfer.rs`, and Move's separate handoff archive. A Move whose destination is the same target as its source is always in place. It never takes the current in-place path, which seals the relay, requires a handoff archive and runs `WorkerRootReset::InPlace`, stopping the worker and its whole process tree. Instead the worker stays up, keeping its relay, journal and identity, and restarts only the harness under the new launch configuration. That is the mechanism worker upgrades (`mj-controller/src/controller/worker_restart.rs`) and `SessionRestart::ReloadLogins` already use; the Milestone 4 investigation found no harness that needs an archive for a same-home restart. Processes the worker owns keep running. A process the harness itself takes down when it exits goes, as with any agent restart. A switch to a different harness or model service still needs the canonical conversation handed to the new harness, and that reads the durable canonical state directly, without an archive. Such a Move keeps the environment and checkout, swaps only the harness launch configuration, and never captures, transfers or stops writers. Some changes cannot be applied to a running environment, for example changed mounts, which need the container recreated. Those are not applied by the Move. The environment and its processes keep running, and the change is recorded on the session to take effect the next time its environment is created: at the next resume, or through the existing explicit `mj upgrade-container`. The Move's result says so: "<change> takes effect when this session's environment is next recreated". A same-target Move therefore never stops processes. Quota and login switches are the common case.
 
 **Transport.** Implement `mj-controller/src/controller/move_session/transport.rs` with one function that copies an archive file from a source target to a destination target and verifies its SHA-256 there. Choose the route in this order:
@@ -841,7 +849,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         runner: &dyn GitCommandRunner,
         repositories: &[RepositoryInput],
         consent: CaptureConsent,
-    ) -> Result<SessionSnapshot>;   // one WorkspaceSnapshot per repository; SnapshotRefused::{Untracked, OperationInProgress, DirtySubmodule, HiddenTrackedEdits}, keyed by repository and path
+    ) -> Result<SessionSnapshot>;   // precondition: the caller has stopped every writer to managed checkouts (Milestone 2), so the consent check and any abort run with exclusive ownership   // one WorkspaceSnapshot per repository; SnapshotRefused::{Untracked, OperationInProgress, DirtySubmodule, HiddenTrackedEdits}, keyed by repository and path
 
     pub enum RestoreBase { Clone { origin: String, seed: Option<PathBuf> }, Provisioned { allow_origin_fetch: bool } }
 
@@ -1099,3 +1107,11 @@ Revision note (2026-11-18, review 24):
 - The origin requirement is enforced at managed-session creation, with an in-surface alternative.
 - The preflight and request carry file identities and keep entries.
 - Override recorded: a harness change on a same-target Move takes the old harness's process group with it, as any agent restart does.
+
+Revision note (2026-11-18, review 25):
+- New cross-target Moves get durable phases with a single ownership commit point and defined recovery on each side of it.
+- Capture refuses unregistered nested repositories without consent, and tracked keep files.
+- Submodule availability uses heads and tags only.
+- Raw sessions capture all nested worktrees.
+- Legacy linked worktrees keep only their own refs.
+- Managed restores keep deleted tags deleted.
