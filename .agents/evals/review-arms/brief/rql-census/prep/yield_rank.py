@@ -87,12 +87,14 @@ def main():
     missing = current - present
     if missing:
         sys.exit(f"{len(missing)} planned draws have no trace record; finish the scan before ranking")
-    sample = collections.defaultdict(list)
-    errors = 0
+    latest = {}  # a resumed scan appends retries: the latest row per draw counts
     for l in open(scan / "blame.jsonl"):
         r = json.loads(l)
-        if f"{r['repo']} {r['hash']}" not in current:
-            continue
+        if f"{r['repo']} {r['hash']}" in current:
+            latest[(r["repo"], r["hash"])] = r
+    sample = collections.defaultdict(list)
+    errors = 0
+    for r in latest.values():
         errors += bool(r.get("error"))
         sample[(r["repo"], r["window"])].append(r)
 

@@ -9,6 +9,7 @@ import collections
 import concurrent.futures as cf
 import datetime as dt
 import json
+import os
 import pathlib
 import random
 import re
@@ -27,9 +28,13 @@ SEED = 20261118
 lock = threading.Lock()
 
 
+# The corpus clones are read only: never lazily fetch a missing object into them.
+GIT_ENV = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+
+
 def git(repo, *args, stdin=None, timeout=300):
     r = subprocess.run(["git", "--no-optional-locks", "-C", str(CLONES / repo), *args],
-                       input=stdin, capture_output=True, text=True, timeout=timeout)
+                       input=stdin, capture_output=True, text=True, timeout=timeout, env=GIT_ENV)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -293,7 +298,13 @@ def main():
     sample.extend(pre[:PRE2024_GLOBAL])
 
     out = OUT / "blame.jsonl"
-    done = {(json.loads(l)["repo"], json.loads(l)["hash"]) for l in open(out)} if out.exists() else set()
+    # A draw is done once its latest row is a clean trace; failed or incomplete draws are retried.
+    latest = {}
+    if out.exists():
+        for l in open(out):
+            r = json.loads(l)
+            latest[(r["repo"], r["hash"])] = r
+    done = {k for k, r in latest.items() if not r.get("error") and r.get("trace_complete") is not False}
     todo = [c for c in sample if (c["repo"], c["hash"]) not in done]
     json.dump({"candidates": len(cands), "dated": sum(1 for c in cands if c["window"]),
                "sample": len(sample), "todo": len(todo),
