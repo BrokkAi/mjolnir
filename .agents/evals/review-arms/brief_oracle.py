@@ -502,6 +502,13 @@ def noleak_ids():
     return [j["bug"] for j in jobs]
 
 
+def noleak_require_scope():
+    """Every step after the first editor build uses the census and jobs frozen there."""
+    path = task_work() / "settings.json"
+    if not path.is_file() or json.loads(path.read_text()) != task_scope():
+        raise SystemExit(f"{path}: census/jobs/name differ from the frozen no-leak scope")
+
+
 def noleak_record(bug):
     path = ROOT / "briefs" / f"{TASK_NAME}-leak-records" / bug / "blind-leak.json"
     return json.loads(path.read_text()) if path.exists() else {"rounds": []}
@@ -528,6 +535,8 @@ def noleak_state(bug, upto):
             previous = {"kind": "fact check rejected the last edit", "why": decision["why"]}
             continue
         text = (W / "texts" / bug / f"round-{n}.md").read_text()
+        if hashlib.sha256(text.encode()).hexdigest() != decision["brief_sha256"]:
+            raise SystemExit(f"{bug}: round-{n}.md is not the text the fact checker accepted")
         leak = rounds.get(n)
         if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
             raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
@@ -563,11 +572,14 @@ def noleak_edit_build(n):
     if base.exists():
         raise SystemExit(f"{base} exists; refusing to rebuild a round's editor units")
     scope_path = W / "settings.json"
-    if scope_path.exists() and json.loads(scope_path.read_text()) != task_scope():
-        raise SystemExit(f"{scope_path}: scope differs from saved settings")
+    if scope_path.exists():
+        noleak_require_scope()
+    elif n != 1:
+        raise SystemExit("round 1 freezes the scope; it has not been built")
+    # Decide every diff's state before creating anything, so a refusal leaves no partial round.
+    states = [(bug, *noleak_state(bug, n - 1)) for bug in noleak_ids()]
     made = []
-    for bug in noleak_ids():
-        passed, source, previous = noleak_state(bug, n - 1)
+    for bug, passed, source, previous in states:
         if passed:
             continue
         census = census_rows[bug]
@@ -626,6 +638,7 @@ def noleak_validate(bug, item, raw):
 
 def noleak_edit_collect(n):
     W = task_work()
+    noleak_require_scope()
     base = W / f"round-{n}" / "edit"
     units = json.loads((base.parent / "edit-build.json").read_text())["units"]
     out_path = base.parent / "edit-results.json"
@@ -646,6 +659,7 @@ def noleak_edit_collect(n):
 
 def noleak_check_build(n):
     W = task_work()
+    noleak_require_scope()
     edits = json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
     census_rows, _ = load_task_inputs()
     corpus = driver.CORPUS
@@ -670,6 +684,7 @@ def noleak_check_build(n):
 
 def noleak_check_collect(n):
     W = task_work()
+    noleak_require_scope()
     edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
     out_path = W / f"round-{n}" / "check-results.json"
     if out_path.exists():
@@ -703,6 +718,7 @@ def noleak_check_collect(n):
 
 def noleak_publish(jobs_out):
     W = task_work()
+    noleak_require_scope()
     done = max((n for n in range(1, NOLEAK_ROUNDS + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
     retained, excluded = [], []
     for bug in noleak_ids():
@@ -721,8 +737,13 @@ def noleak_publish(jobs_out):
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(text)
     save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": "ON"} for r in retained])
-    save(W / "publication.json", {"retained": retained, "excluded": excluded, "jobs": str(jobs_out)})
-    print(json.dumps({"retained": len(retained), "excluded": [e["bug"] for e in excluded]}))
+    # Registered: fewer than 8 retained diffs reads Inconclusive whatever the scores. With none
+    # retained there is nothing to review or score, so the outcome is recorded here.
+    outcome = "Inconclusive (fewer than 8 retained diffs)" if len(retained) < 8 else None
+    save(W / "publication.json", {"retained": retained, "excluded": excluded, "jobs": str(jobs_out),
+                                  "registered_outcome_from_retention": outcome})
+    print(json.dumps({"retained": len(retained), "excluded": [e["bug"] for e in excluded],
+                      "registered_outcome_from_retention": outcome}))
 
 
 if __name__ == "__main__":
