@@ -136,8 +136,7 @@ impl StandaloneSession {
                     if relay_desynchronized(&error)
                         && protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL =>
                 {
-                    let (snapshot, _native_use_evidence) =
-                        connection.client.adoption_snapshot().await?;
+                    let (snapshot, queue) = connection.read_adoption_queue().await?;
                     ensure!(
                         snapshot.session_id == target.session_id,
                         "adoption snapshot belongs to another session"
@@ -177,25 +176,13 @@ impl StandaloneSession {
                             steered_into: None,
                         }
                     });
-                    projection.queued_prompts = snapshot
-                        .queued_prompts
-                        .iter()
-                        .map(|queued| mj_core::state::MaterializedQueuedPrompt {
-                            command_id: queued.command_id.clone(),
-                            kind: mj_core::state::QueuedCommandKind::Prompt,
-                            content: vec![serde_json::json!({
-                                "type": "text",
-                                "text": "queued prompt (text not recoverable after store loss)"
-                            })],
-                            queued_at_ms: queued.created_at_ms,
-                            accepted_ordinal: None,
-                        })
-                        .collect();
+                    projection.queued_prompts = queue;
                     // Save the notice and seed atomically. A crash cannot
                     // advance the projection past an unprojected warning.
                     let adopted_at = mj_core::clock::epoch_millis();
+                    projection.last_activity_at_ms = Some(adopted_at);
                     projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
-                        stable_id: "system:adoption-history-unavailable".into(),
+                        stable_id: mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID.into(),
                         position: snapshot.latest_ordinal,
                         latest_content_event_ordinal: None,
                         created_at_ms: adopted_at,
@@ -215,6 +202,65 @@ impl StandaloneSession {
         }
         connection.sync_in_place().await?;
         Ok(connection)
+    }
+
+    async fn read_adoption_queue(
+        &mut self,
+    ) -> Result<(
+        RelayOperationalState,
+        Vec<mj_core::state::MaterializedQueuedPrompt>,
+    )> {
+        loop {
+            let (state, _native_use_evidence) = self.client.adoption_snapshot().await?;
+            let mut queue = Vec::with_capacity(state.queued_prompts.len());
+            for identity in &state.queued_prompts {
+                let (command, accepted_ordinal) = self
+                    .client
+                    .read_queued_command(identity.command_id.clone())
+                    .await?;
+                let (kind, content) = match command {
+                    Some(RelayCommand::SetConfig { key, value }) => {
+                        let content = vec![serde_json::json!({
+                            "type": "text", "text": mj_core::state::config_command_text(&key, &value)
+                        })];
+                        (
+                            mj_core::state::QueuedCommandKind::SetConfig { key, value },
+                            content,
+                        )
+                    }
+                    None => break, // It completed between the snapshot and read.
+                    Some(command) => {
+                        let prompt = command
+                            .prompt_blocks()
+                            .context("worker returned a non-queue command during adoption")?;
+                        (
+                            mj_core::state::QueuedCommandKind::Prompt,
+                            prompt
+                                .iter()
+                                .map(serde_json::to_value)
+                                .collect::<serde_json::Result<Vec<_>>>()?,
+                        )
+                    }
+                };
+                queue.push(mj_core::state::MaterializedQueuedPrompt {
+                    command_id: identity.command_id.clone(),
+                    kind,
+                    content,
+                    queued_at_ms: identity.created_at_ms,
+                    accepted_ordinal,
+                });
+            }
+            let current = self.client.status().await?;
+            if current.queued_prompts == state.queued_prompts
+                && current.active_prompt == state.active_prompt
+                && queue.len() == state.queued_prompts.len()
+            {
+                return Ok((state, queue));
+            }
+            // Queue mutation ended this attempt. Reuse the reconnect cadence
+            // before reading another snapshot; never hold or stop the worker.
+            tokio::time::sleep(RECONNECT_INTERVAL).await;
+        }
     }
 
     pub(crate) async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {

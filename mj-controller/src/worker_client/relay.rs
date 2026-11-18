@@ -888,6 +888,22 @@ impl RelayClient {
         }
     }
 
+    pub async fn read_queued_command(
+        &mut self,
+        command_id: String,
+    ) -> Result<(Option<RelayCommand>, Option<u64>)> {
+        match self
+            .call(RelayRequest::ReadQueuedCommand { command_id })
+            .await?
+        {
+            RelayResponsePayload::QueuedCommand {
+                command,
+                accepted_ordinal,
+            } => Ok((command, accepted_ordinal)),
+            _ => bail!("relay returned an unexpected queued command response"),
+        }
+    }
+
     pub async fn adoption_snapshot(
         &mut self,
     ) -> Result<(

@@ -250,15 +250,23 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             replaced_unused_native_session_id: None,
         })
         .unwrap();
-    for command_id in ["active-before-loss", "surviving-queue"] {
+    for command_id in ["active-before-loss", "surviving-queue", "surviving-config"] {
+        let command = if command_id == "surviving-config" {
+            RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "original-model".into(),
+            }
+        } else {
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("work survives".repeat(6000))],
+            }
+        };
         relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: command_id.into(),
             protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
             request: RelayRequest::Submit {
                 command_id: command_id.into(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::from("work survives")],
-                },
+                command,
             },
         });
     }
@@ -283,15 +291,17 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    let projection = runtime.block_on(async {
         let connection = crate::session_manager::StandaloneSession::connect_adopting(&spec, MOVE_QUEUE_SESSION_ID).await.unwrap();
         assert_eq!(connection.operational().native_session_id.as_deref(), Some("surviving-native-conversation"));
         let projection = connection.snapshot().materialized;
         assert!(projection.applied_event_ordinal >= frontier);
         assert_eq!(projection.queued_prompts[0].command_id, "surviving-queue");
-        assert_eq!(projection.queued_prompts[0].content[0]["text"], "queued prompt (text not recoverable after store loss)");
+        assert_eq!(projection.queued_prompts[0].content[0]["text"], "work survives".repeat(6000));
+        assert_eq!(projection.queued_prompts[1].kind, QueuedCommandKind::SetConfig { key: "model".into(), value: "original-model".into() });
         assert_eq!(projection.active_turn.as_ref().unwrap().command_id, "active-before-loss");
         assert!(serde_json::to_string(&projection).unwrap().contains("Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact."));
+        projection
     });
     let snapshot_after: mj_core::relay::RelaySnapshot =
         serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
@@ -299,6 +309,71 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     assert_eq!(
         snapshot_before.native_use_evidence,
         snapshot_after.native_use_evidence
+    );
+    // Exercise the suspend archive / resume restore boundary: neither a queue
+    // prompt nor a typed configuration command may come from a display label.
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        MOVE_QUEUE_SESSION_ID,
+        projection.applied_event_ordinal,
+        Vec::new(),
+        Vec::new(),
+    );
+    input.canonical_session =
+        mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
+    // Suspend seals only after stopping the active turn. This integration
+    // starts at that idle cut and checks the independently persisted queue.
+    input.canonical_session.session.execution = CanonicalExecutionState::Idle;
+    let archive = directory.path().join("adopted-suspend.hel.zip");
+    write_archive_atomic(&archive, &input).unwrap();
+    let restored_root = directory.path().join("resumed-worker");
+    fs::create_dir_all(directory.path().join("resumed-workspace")).unwrap();
+    mj_checkpoint::checkpoint::restore_checkpoint(
+        &mj_checkpoint::checkpoint::CheckpointRestoreSpec {
+            archive_path: archive,
+            workspace_root: directory.path().join("resumed-workspace"),
+            report_root: None,
+            relay_root: restored_root.clone(),
+            harness_home: directory.path().join("resumed-native"),
+            restore_repositories: false,
+            restore_native: false,
+            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &mj_checkpoint::archive::SystemGit,
+    )
+    .unwrap();
+    let mut resumed = DurableRelay::open(&restored_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
+    let prompts = resumed.claim_pending_commands(true).unwrap();
+    assert!(
+        prompts
+            .iter()
+            .any(|claimed| claimed.command_id == "surviving-queue"
+                && claimed.command
+                    == RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from("work survives".repeat(6000))],
+                    })
+    );
+    resumed
+        .record_command_completed(
+            "surviving-queue",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    let controls = resumed.claim_pending_commands(true).unwrap();
+    assert!(
+        controls
+            .iter()
+            .any(|claimed| claimed.command_id == "surviving-config"
+                && claimed.command
+                    == RelayCommand::SetConfig {
+                        key: "model".into(),
+                        value: "original-model".into(),
+                    })
     );
 }
 

@@ -141,7 +141,10 @@ pub(crate) fn open_relay_journal(
         .iter()
         .map(|file| file.file_last_ordinal)
         .max()
-        .unwrap_or(retained_through);
+        .unwrap_or(retained_through)
+        // A crash can leave old sealed files after the durable ACK and the
+        // replacement active file were installed. They cannot lower the cut.
+        .max(retained_through);
     let mut previous_ordinal = retained_through;
     let mut spans = Vec::new();
 

@@ -109,6 +109,21 @@ impl DurableRelay {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
+            RelayRequest::ReadQueuedCommand { command_id } => RelayResponsePayload::QueuedCommand {
+                // One admitted command is bounded by RELAY_COMMAND_BYTE_BUDGET,
+                // independently of the total size of the durable queue.
+                command: self
+                    .snapshot
+                    .dispatches
+                    .get(command_id)
+                    .filter(|dispatch| dispatch.command.is_queue_entry())
+                    .map(|dispatch| dispatch.command.clone()),
+                accepted_ordinal: self
+                    .snapshot
+                    .handled_commands
+                    .get(command_id)
+                    .map(|handled| handled.accepted_ordinal),
+            },
             RelayRequest::AdoptionSnapshot => RelayResponsePayload::AdoptionSnapshot {
                 state: self.operational_state(),
                 native_use_evidence: self.snapshot.native_use_evidence.clone(),
