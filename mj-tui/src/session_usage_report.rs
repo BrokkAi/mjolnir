@@ -123,6 +123,9 @@ impl DashboardState {
         event: Event,
         mut dialog: SessionUsageDialog,
     ) -> DashboardAction {
+        // Arrow keys at either end of the graph repeat the selected hour; only a
+        // click on the selected bar goes back to all hours.
+        let clicked = matches!(event, Event::Mouse(_));
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let action = dialog.combo.route(result.action);
@@ -148,11 +151,11 @@ impl DashboardState {
                     .cloned();
                 reload = true;
             }
-            // Choosing the hour that is already shown goes back to all hours.
+            // Clicking the hour that is already shown goes back to all hours.
             Some(Interaction::Select(UsageControl::Hours, index)) => {
                 if let Some(bar) = dialog.hours.get(dialog.hidden_hours.get() + index) {
                     let hour = Some(bar.start_ms);
-                    dialog.query.hour_start_ms = if dialog.query.hour_start_ms == hour {
+                    dialog.query.hour_start_ms = if clicked && dialog.query.hour_start_ms == hour {
                         None
                     } else {
                         hour
@@ -219,7 +222,7 @@ pub(crate) fn render(
         true,
     );
     frame.render_widget(theme::modal().title(title), popup);
-    if inner.height < 14 {
+    if inner.height < 9 {
         form.end_frame(UsageControl::Close);
         return;
     }
@@ -267,16 +270,22 @@ pub(crate) fn render(
             )
         },
     );
-    let bar_rows = if inner.height >= 24 { 5 } else { 2 };
-    let chart_y = inner.y + 5;
-    render_hour_chart(
-        frame,
-        Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
-        dialog,
-        bar_rows,
-        &mut form,
-    );
-    let rows_y = chart_y + bar_rows + 2;
+    // A short terminal keeps the rows and drops the graph.
+    let graph = inner.height >= 14;
+    let rows_y = if graph {
+        let bar_rows = if inner.height >= 24 { 5 } else { 2 };
+        let chart_y = inner.y + 5;
+        render_hour_chart(
+            frame,
+            Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
+            dialog,
+            bar_rows,
+            &mut form,
+        );
+        chart_y + bar_rows + 2
+    } else {
+        inner.y + 6
+    };
     let rows_area = Rect::new(
         inner.x,
         rows_y,
@@ -425,16 +434,14 @@ pub(crate) fn render(
             }
         }
     }
-    for (row, hint) in [
+    let hints = [
         "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
         "Sub-agents included · profile filters turns · + partial · base rates",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    for (row, hint) in hints[usize::from(!graph)..].iter().rev().enumerate() {
         frame.render_widget(
-            Paragraph::new(hint).style(theme::muted()),
-            Rect::new(inner.x, inner.bottom() - 3 + row as u16, inner.width, 1),
+            Paragraph::new(*hint).style(theme::muted()),
+            Rect::new(inner.x, inner.bottom() - 2 - row as u16, inner.width, 1),
         );
     }
     Dialog::render_actions(

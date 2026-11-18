@@ -168,6 +168,8 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
     for path in [
         "/api/v1/usage/report",
         "/api/v1/usage/report?profile=account%2Bapi&hour_start_ms=7200000&include_suspended=true",
+        // A client from before the hour graph still sends a period.
+        "/api/v1/usage/report?period=daily",
     ] {
         let response = app
             .clone()
@@ -195,7 +197,8 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
                 profile: Some("account+api".into()),
                 hour_start_ms: Some(7_200_000),
                 include_suspended: true
-            }
+            },
+            mj_core::usage::SessionUsageQuery::default(),
         ]
     );
 }

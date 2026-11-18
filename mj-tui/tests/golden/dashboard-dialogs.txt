@@ -874,6 +874,25 @@ Ent
 ╰──                                                                                                                  ──╯
 Ent
 
+=== Usage short terminal (70x17) ===
+
+
+   ╭ × Usage by session ──────────────────────────────────────────╮
+   │Profile codex ▾                                               │
+   │                                                              │
+   │☒ Include suspended sessions                                  │
+   │                                                              │
+   │Total ? · last 24 hours · estimated API USD                   │
+   │                                                              │
+   │Primary agents  $1.000                                        │
+   │  gpt-6.1-terra  $1.000                                       │
+   │                                                              │
+   │Sub-agents included · profile filters turns · + partial · base│
+   │  Refresh     Close                                           │
+   ╰──────────────────────────────────────────────────────────────╯
+
+
+
 === Usage report failure (120x36) ===
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │

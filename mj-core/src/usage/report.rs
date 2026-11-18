@@ -16,8 +16,9 @@ pub const fn graph_start_ms(now_ms: i64) -> i64 {
     hour_start_ms(now_ms) - (USAGE_GRAPH_HOURS - 1) * HOUR_MS
 }
 
+/// Unknown fields are ignored: a client from before the hour graph still sends
+/// `period`, and the report it gets back is the graph's 24 hours.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionUsageQuery {
     /// Counts only turns recorded on this profile, anywhere in a parent's
     /// sub-agent tree; None counts every turn. Rows remain whole parents.

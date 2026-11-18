@@ -1384,6 +1384,14 @@ fn golden_dashboard_dialogs() {
         usage.session_usage_request().unwrap().1.hour_start_ms,
         Some((490_000 + 1) * HOUR_MS)
     );
+    // Holding an arrow past the oldest hour stays on it instead of clearing the choice.
+    for _ in 0..30 {
+        usage.handle_key(key(KeyCode::Left));
+    }
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.hour_start_ms,
+        Some(490_000 * HOUR_MS)
+    );
     usage.handle_key(key(KeyCode::Enter));
     let (_, query) = usage.session_usage_request().unwrap();
     assert_eq!(query.hour_start_ms, None);
@@ -1401,6 +1409,14 @@ fn golden_dashboard_dialogs() {
         120,
         36,
         &drawn(&mut usage, 120, 36),
+    );
+    // A short terminal drops the graph and keeps the rows.
+    append_dialog_render(
+        &mut output,
+        "Usage short terminal",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
     );
     usage.apply_session_usage_result(weekly_request, Err("test store unavailable".into()));
     append_dialog_render(
