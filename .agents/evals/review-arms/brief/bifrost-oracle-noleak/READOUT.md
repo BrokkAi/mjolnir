@@ -15,7 +15,7 @@ Terra/high reviewers, 3 per arm per diff, on all 17 bifrost-dev relation diffs; 
 
 - **Primary, ON − AF: +37.3 points (+17.6 to +58.8). Facts carry:** the estimate is at least 17 and the lower bound is above 0.
 - ON − A (stored): +27.5 (+9.8 to +47.1).
-- ON − OT: 0.0 (−11.8 to +11.8). Removing the leaking wording took nothing away from round L's lift. This contrast spans two review windows and two images, so it measures wording plus any window, cohort or image difference, not wording alone.
+- ON − OT: 0.0 (−11.8 to +11.8). The point estimates match, but this does not establish that the leak had no effect. The interval allows a change of about 12 points either way, and the contrast spans two review windows and two images, so it measures wording plus any window, cohort or image difference.
 - AF − A, the image and cohort effect: −9.8 (−19.6 to −2.0). The fresh no-brief cohort on the current image caught less than the stored no-brief cohort. Measured against the same-window control, ON's lift is larger than it is against stored A.
 
 What this shows and what it doesn't: when the decisive fact is stated neutrally, so that leak judges of both models read the brief as `missed`, Terra/high reviewers on bifrost-dev catch far more of these relation bugs than a same-window, same-image no-brief control. It does not show that Bifrost's value-flow queries can find that fact for a blind writer. Query reach is unmeasured and is milestone 5's question.
@@ -23,6 +23,12 @@ What this shows and what it doesn't: when the decisive fact is stated neutrally,
 ## No-leak construction
 
 - **Round 1:** one Opus/high editor per diff on claude7 reworded the carrying or cited items of the final OT brief. The edits were wording only: same lines, same anchors, lint clean, and each declared change reviewed by the parent (`round-1/scope-review.json`). One blind Opus/high fact checker accepted all 17 as still carrying the census fact, each quoting its carrying line verbatim and bound to the brief's hash. Both Opus/high leak judges said `missed` on all 17, so no second or third round was needed, and none were excluded.
+- **What the rewording removed.** The plan registers wording-only edits that keep every relation. In practice, 13 of the 17 edits removed explicit absence, order or contrast clauses ("without", "not", "before", "after", "only", "even when", "instead") and replaced them with literal descriptions of what the code does. That is how the leaks were removed, and it also makes some relations less explicit. Examples:
+  - java-static-getter: the item no longer says that owner, static and namespace matching precede `found_alias`.
+  - retained-fill: the item describes the memo's insert and hit paths, but no longer says they skip a completion check and do not replay build gaps.
+  - go-receiver: the item gives the inventory key tuple, but no longer names the omitted `has_receiver`.
+  - unproven-override: the item no longer says that both empty-vector routes enter the same arm.
+  The blind fact checker judged that every carrying item still states the decisive census fact, and the parent accepted the scope. Even so, ON measures a fact stated literally and less explicitly than in OT, not one restated word for word (`published/<diff>/edit.json` holds every before/after pair).
 - **Diagnostic 1:** the same two Opus judges flag 15 of the 17 unedited OT briefs (11 caught, 4 partial). These are the same 15 the Sol judges flagged, and Opus is stricter on three of them. So the clean round 1 result reflects the rewording, not lenient judges.
 - **Diagnostic 2:** two Sol/high judges, round L's leak-judge model, say `missed` on all 17 published ON briefs. The secondary reading that excludes Sol-flagged diffs is therefore empty.
 
@@ -86,5 +92,6 @@ These are recorded API-equivalent estimates at 10^10 ticks per dollar, not subsc
 - 17 diffs give wide intervals. The lower bound of the primary contrast is +17.6 points.
 - The leak rule depends on the judges. The diagnostics show that both judge models pass the ON briefs and flag the OT briefs, but a stronger or differently prompted judge could still find hints.
 - AF is a single fresh cohort. Its 7.8% is below stored A's 17.6%, a cohort and image effect that this design measures but cannot explain.
+- Some edits made relations less explicit (see "What the rewording removed"). The registered wording-only scope was judged per edit by the fact checker and the parent, not verified mechanically.
 - Exact agreement with round L's labels is partly by construction, through the parent precedent; the sensitivity run shows the outcome does not depend on it.
 - Reviewer tool audits and latency are unavailable, because reviewer sessions are destroyed at role end.

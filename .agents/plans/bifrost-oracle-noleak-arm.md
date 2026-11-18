@@ -54,4 +54,4 @@ Each build step refuses to overwrite an existing round directory, and each colle
 
 ## Outcomes & Retrospective
 
-Facts carry: ON 45.1%, AF 7.8%, A 17.6%, OT 45.1%. Round L's lift survives removing the leak. The same-window control matters, because the fresh no-brief cohort caught 9.8 points less than the stored one. Readout: `.agents/evals/review-arms/brief/bifrost-oracle-noleak/READOUT.md`.
+Facts carry: ON 45.1%, AF 7.8%, A 17.6%, OT 45.1%. ON matches round L's leaking OT in point estimate (ON − OT 0.0, −11.8 to +11.8, across windows and images), which is consistent with, but does not prove, a lift independent of the leak. The same-window control matters, because the fresh no-brief cohort caught 9.8 points less than the stored one. Readout: `.agents/evals/review-arms/brief/bifrost-oracle-noleak/READOUT.md`.
