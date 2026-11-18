@@ -358,13 +358,15 @@ test('golden_viewer_dashboard', async ({ context }) => {
       })(),
     })),
   })));
-  Object.assign(compactState.snapshot.sessions.find(row => row.id === 'attention-input'), {
+  const attentionInput = compactState.snapshot.sessions.find(row => row.id === 'attention-input');
+  Object.assign(attentionInput, {
     detail: false,
     notification_card: {
       badge: 'needs_input', holder: null, form: null, dismissal: { stack: { revision: 12 } },
+      since_ms: SERVER_TIME_MS - 2000,
       entries: [
-        { completed_ordinal: 5, kind: 'important', message: 'none' },
-        { completed_ordinal: 10, kind: 'needs_input', message: { found: 'agent:10' } },
+        { completed_ordinal: 5, completed_at_ms: SERVER_TIME_MS - 2000, kind: 'important', message: 'none' },
+        { completed_ordinal: 10, completed_at_ms: SERVER_TIME_MS - 1000, kind: 'needs_input', message: { found: 'agent:10' } },
       ],
     },
   });
@@ -379,6 +381,12 @@ test('golden_viewer_dashboard', async ({ context }) => {
   await captureGoldenState(output, compactPage, 'notifications screen on first visit');
   await messageArea.getByRole('button', { name: 'Previous', exact: true }).click();
   await expect(messageArea).toContainText('1 of 2');
+  attentionInput.notification_card.entries.push({
+    completed_ordinal: 13, completed_at_ms: SERVER_TIME_MS, kind: 'important', message: 'none',
+  });
+  attentionInput.notification_card.dismissal = { stack: { revision: 14 } };
+  await refresh(compactPage, compactState);
+  await expect(messageArea).toContainText('1 of 3');
   // The launch failure is a card of its own, after the ? and ! cards.
   await expect(compactPage.locator('#launch-failures')).toBeEmpty();
   await expect(compactPage.locator('#notifications-badge')).toBeHidden();
@@ -1119,31 +1127,31 @@ test('the notifications screen clears and skips one card at a time and Clear all
   const state = await mount(page, [q, i1, i2, broken]);
   q.notification_card = {
     badge: 'needs_input', holder: null, form: null, dismissal: { stack: { revision: 10 } },
-    entries: [{ completed_ordinal: 7, kind: 'needs_input', message: { found: 'agent:7' } }],
+    since_ms: SERVER_TIME_MS - 1000,
+    entries: [{ completed_ordinal: 7, completed_at_ms: SERVER_TIME_MS - 1000, kind: 'needs_input', message: { found: 'agent:7' } }],
   };
   i1.notification_dismissal = { read_through: 4 };
   i2.notification_card = {
     badge: 'important', holder: null, form: null, dismissal: { read_through: 5 },
-    entries: [{ completed_ordinal: 5, kind: 'important', message: 'none' }],
+    since_ms: SERVER_TIME_MS - 3000,
+    entries: [{ completed_ordinal: 5, completed_at_ms: SERVER_TIME_MS - 3000, kind: 'important', message: 'none' }],
   };
   broken.notification_card = null;
   broken.notification_dismissal = { failure: { generation: 1, state: 'error', last_error: null } };
   await refresh(page, state);
   await page.locator('#notifications-badge').click();
   await expect(page).toHaveURL(/#notifications$/);
-  const header = page.locator('.inbox-header-text');
-  await expect(header).toContainText('A');
-  await expect(page.locator('.inbox-message')).toContainText('The full message from card-q.');
+  const skip = page.getByRole('button', { name: 'Skip', exact: true });
+  const message = page.locator('.inbox-message');
+  await expect(message).toContainText('card-i2');
   await expect(page.getByRole('button', { name: 'Clear all ! (2)' })).toBeVisible();
 
-  // Skip sends the card to the back; the question comes round again.
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-message')).toContainText('card-i2');
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-message')).toHaveText('Failed');
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-message')).toContainText('card-q');
+  // The older Important card comes first, even though its session posted output more recently.
+  // Skipping rotates each card to the back.
+  for (const body of ['card-q', 'card-i1', 'Failed', 'card-i2', 'card-q']) {
+    await skip.click();
+    await expect(message).toContainText(body);
+  }
 
   // A refusal stays on the card.
   state.failAction = { action: 'dismiss-notification', error: 'notification target is stale' };

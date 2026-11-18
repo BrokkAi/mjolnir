@@ -133,9 +133,41 @@ const row = (id, attention, at, extra = {}) => ({
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-const message = (completed_ordinal, kind, message) => ({ completed_ordinal, kind, message });
+const message = (completed_ordinal, kind, message, completed_at_ms = completed_ordinal) => ({
+  completed_ordinal, completed_at_ms, kind, message,
+});
 const stack = (badge, revision, entries, extra = {}) => ({
-  badge, entries, dismissal: { stack: { revision } }, holder: null, form: null, ...extra,
+  badge, since_ms: entries[0]?.completed_at_ms ?? 0,
+  entries, dismissal: { stack: { revision } }, holder: null, form: null, ...extra,
+});
+
+test('published cards sort by oldest visible item and a skipped session stays skipped until its card disappears', () => {
+  const oldest = row('a', 'important', 1, {
+    title: 'Zebra',
+    notification_card: stack('important', 10, [message(10, 'important', 'none')]),
+  });
+  const tied = row('b', 'important', 2, {
+    title: 'Aardvark',
+    notification_card: stack('important', 20, [message(20, 'important', 'none', 10)]),
+  });
+  const newer = row('c', 'needs_input', 90, {
+    notification_card: stack('needs_input', 30, [message(3, 'needs_input', 'none', 30)]),
+  });
+  const view = screen([newer, tied, oldest]);
+  assert.deepEqual(view.ids(), ['a', 'b', 'c'], 'published time and session id order the cards');
+  view.nodes.skip.onclick();
+  assert.deepEqual(view.ids(), ['b', 'c', 'a']);
+
+  const replacement = stack('needs_input', 40, [...oldest.notification_card.entries, message(40, 'needs_input', 'none')]);
+  oldest.notification_card = replacement;
+  view.render();
+  assert.deepEqual(view.ids(), ['b', 'c', 'a'], 'new input cannot undo Skip');
+  oldest.notification_card = null;
+  view.render();
+  oldest.notification_card = replacement;
+  view.render();
+  assert.deepEqual(view.ids(), ['a', 'b', 'c'], 'a card that reappears starts in time order');
+  assert.equal(view.nodes.position.textContent, '2 of 2', 'a different card starts at its newest entry');
 });
 
 test('published stacks own visibility, paging, and whole-stack Clear', async () => {
@@ -174,8 +206,14 @@ test('published stacks own visibility, paging, and whole-stack Clear', async () 
   previous.onclick();
   session.notification_card = stack('needs_input', 40, [first, second, message(36, 'needs_input', 'locating')]);
   view.render();
+  assert.equal(position.textContent, '1 of 3', 'appending keeps the selected entry');
+  assert.equal(body.textContent, '11');
+  const readsBeforePaging = view.requests.length;
+  next.onclick();
+  next.onclick();
   assert.equal(position.textContent, '3 of 3');
   await settle();
+  assert.equal(view.requests.length, readsBeforePaging + 1, 'the new item is fetched only when shown');
   assert.equal(view.requests.at(-1).url, `${path}?through=36`);
   previous.onclick();
   clear.onclick();
@@ -404,7 +442,7 @@ test('quick reply builds the composer\'s own action: ! runs a shell command and 
 test('Go to Session opens a pending form\'s holder and returns here on Back', () => {
   const view = screen([row('parent', 'needs_input', 3, {
     notification_card: stack('needs_input', 4, [message(2, 'important', 'none')], {
-      holder: 'child', form: { request_id: 'r1', message: 'Pick an option' }, dismissal: null,
+      holder: 'child', form: { request_id: 'r1', message: 'Pick an option', raised_at_ms: 3 }, dismissal: null,
     }),
   }),
     row('child', 'working', 1, { subagent_parent_id: 'parent' })]);

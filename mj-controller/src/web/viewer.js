@@ -394,6 +394,7 @@ function applyRoute() {
   route = parseRoute(location.hash);
   // Coming back to the screen tries a failed message read again.
   if (route.name !== 'notifications') inboxShownKey = null;
+  if (previousRoute.name !== 'notifications') inboxSelection = null;
   if (routeHash(previousRoute) !== routeHash(route)) {
     resumeRouteVisit += 1;
     if (previousRoute.name === 'resume' && !previousRoute.sessionId && !previousRoute.wikiId && snapshot) {
@@ -1241,14 +1242,11 @@ function liveSessions() {
 // The notifications screen
 // ---------------------------------------------------------------------------
 //
-// The daemon publishes the message stacks, shown one card at a time with
-// `?` before `!` and newest first within each band. Launch failures and
-// sessions with `×` follow.
+// The daemon publishes the message stacks, shown one card at a time starting
+// with the oldest waiting session. Launch failures and sessions with `×` follow.
 
-/// Cards the person skipped, oldest skip first, by card identity: the session
-/// and the notification it shows. Skipping rotates a card to the back, so a key
-/// is in the list at most once, and a new notification from a skipped session is
-/// a new card that is not deferred.
+/// Skip rotates a card to the back. A skipped stack stays there while that
+/// session has a card, even as its messages change.
 const inboxSkipped = [];
 const LAUNCH_FAILURE_TEXT = 'A session could not be started. Check the project and target, then retry. Details are in the daemon logs.';
 
@@ -1279,8 +1277,7 @@ function inboxDestination(entry) {
   return holder && sessionById(holder) ? holder : entry.id;
 }
 
-/// Skip, message selection and captured gestures share the card's identity.
-/// A change to the visible messages or the live request starts a new card.
+/// Captured actions name the exact card and dismissal the person saw.
 function inboxKey(entry) {
   if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
   const stack = entry.notification_card;
@@ -1289,6 +1286,10 @@ function inboxKey(entry) {
   const identity = inboxTextIdentity(entry);
   return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
     JSON.stringify(entry.notification_dismissal ?? null), entry.last_message_at_ms || ''].join('|');
+}
+
+function inboxSkipKey(entry) {
+  return entry.notification_card ? `stack|${entry.id}` : inboxKey(entry);
 }
 
 function inboxBadge(entry) {
@@ -1301,6 +1302,7 @@ function inboxCard(entry) {
   const stack = entry.notification_card;
   return {
     key: inboxKey(entry),
+    skipKey: inboxSkipKey(entry),
     id: entry.id,
     destination: inboxDestination(entry),
     dismissal: publishedNotificationDismissal(entry),
@@ -1325,12 +1327,17 @@ function inboxEntries() {
     const badge = inboxBadge(row);
     return badge === 'needs_input' ? 0 : badge === 'important' ? 1 : row.launchFailure ? 2 : 3;
   };
-  const all = [...rows, ...launchFailureEntries()].sort((left, right) =>
-    band(left) - band(right)
-    || sessionMessageMs(right) - sessionMessageMs(left)
-    || String(left.title || '').localeCompare(String(right.title || ''))
-    || left.id.localeCompare(right.id));
-  const byKey = new Map(all.map(entry => [inboxKey(entry), entry]));
+  const all = [...rows, ...launchFailureEntries()].sort((left, right) => {
+    const leftCard = left.notification_card;
+    const rightCard = right.notification_card;
+    if (leftCard && rightCard) return leftCard.since_ms - rightCard.since_ms || left.id.localeCompare(right.id);
+    if (leftCard || rightCard) return leftCard ? -1 : 1;
+    return band(left) - band(right)
+      || sessionMessageMs(right) - sessionMessageMs(left)
+      || String(left.title || '').localeCompare(String(right.title || ''))
+      || left.id.localeCompare(right.id);
+  });
+  const byKey = new Map(all.map(entry => [inboxSkipKey(entry), entry]));
   for (let index = inboxSkipped.length - 1; index >= 0; index -= 1) {
     if (!byKey.has(inboxSkipped[index])) inboxSkipped.splice(index, 1);
   }
@@ -1407,7 +1414,7 @@ let inboxError = null; // { key | destination, text }: the refusal the card show
 let inboxBusy = false;
 let inboxShown = null; // the destination the quick-reply line currently holds
 let inboxShownKey = null; // the text key last rendered, to retry a failed read
-let inboxSelection = null; // { key, index } for the displayed stack
+let inboxSelection = null; // { sessionId, itemId } for the displayed stack
 
 const inboxNodes = (() => {
   const container = document.querySelector('#inbox');
@@ -1529,10 +1536,11 @@ async function inboxClearAll(cards) {
 
 /// Rotate a card to the back of the stack.
 function inboxSkip(card) {
-  if (inboxEntries().length < 2) return;
-  const at = inboxSkipped.indexOf(card.key);
+  const entries = inboxEntries();
+  if (entries.length < 2 || !entries.some(entry => inboxSkipKey(entry) === card.skipKey)) return;
+  const at = inboxSkipped.indexOf(card.skipKey);
   if (at >= 0) inboxSkipped.splice(at, 1);
-  inboxSkipped.push(card.key);
+  inboxSkipped.push(card.skipKey);
   renderInbox();
 }
 
@@ -1770,13 +1778,15 @@ bindInboxControl(inboxNodes.retry, key => {
   inboxTexts.delete(key);
   renderInbox();
 });
-function moveInboxSelection(selection, offset) {
-  if (selection !== inboxSelection) return;
-  inboxSelection = { key: selection.key, index: selection.index + offset };
-  renderInbox();
+function bindInboxPager(control) {
+  bindInboxControl(control, ({ selection, itemId }) => {
+    if (selection !== inboxSelection || itemId !== control._binding?.itemId) return;
+    inboxSelection = { sessionId: selection.sessionId, itemId };
+    renderInbox();
+  });
 }
-bindInboxControl(inboxNodes.previous, selection => moveInboxSelection(selection, -1));
-bindInboxControl(inboxNodes.next, selection => moveInboxSelection(selection, 1));
+bindInboxPager(inboxNodes.previous);
+bindInboxPager(inboxNodes.next);
 // Send and Enter in the line are one gesture on the card the form showed. An
 // empty line is Go to Session.
 bindInboxControl(inboxNodes.send, inboxSend);
@@ -1823,16 +1833,19 @@ function renderInbox() {
     .filter(Boolean).join(' · '));
   const stack = entry.notification_card;
   // The live form stays in front of completed messages when both are present.
-  const count = stack ? stack.entries.length + Number(Boolean(stack.form)) : 0;
+  const itemIds = stack?.entries.map(item => item.completed_ordinal) ?? [];
+  if (stack?.form) itemIds.push(JSON.stringify([card.destination, stack.form.request_id]));
+  const retained = inboxSelection?.sessionId === entry.id ? itemIds.indexOf(inboxSelection.itemId) : -1;
+  const count = itemIds.length;
+  const index = retained >= 0 ? retained : count - 1;
   if (!count) inboxSelection = null;
-  else if (inboxSelection?.key !== card.key) inboxSelection = { key: card.key, index: count - 1 };
-  const index = inboxSelection?.index;
+  else if (retained < 0) inboxSelection = { sessionId: entry.id, itemId: itemIds[index] };
   nodes.pager.hidden = !count;
   setInboxText(nodes.position, count ? `${index + 1} of ${count}` : '');
-  nodes.previous.disabled = !count || index === 0;
-  nodes.next.disabled = !count || index === count - 1;
-  nodes.previous._binding = nodes.previous.disabled ? null : inboxSelection;
-  nodes.next._binding = nodes.next.disabled ? null : inboxSelection;
+  nodes.previous.disabled = index <= 0;
+  nodes.next.disabled = index === count - 1;
+  nodes.previous._binding = nodes.previous.disabled ? null : { selection: inboxSelection, itemId: itemIds[index - 1] };
+  nodes.next._binding = nodes.next.disabled ? null : { selection: inboxSelection, itemId: itemIds[index + 1] };
 
   let retryable = false;
   const item = stack?.entries[index];
