@@ -62,8 +62,10 @@ The script reserves the name with a `0.0.0` placeholder, adds the standard
 owners, configures Trusted Publishing for `publish.yml`, and then restricts the
 crate to Trusted Publishing. It needs a crates.io token with the scopes
 `publish-new`, `change-owners` and `trusted-publishing`, and it is safe to run
-again. `--check` reports the state of a crate without changing it. Then add the
-crate to the publication order in `.github/workflows/publish.yml`.
+again. Invited owners must accept at crates.io before they count; until then
+the script reports them as pending. `--check` reports the state of a crate
+without changing it. Then add the crate to the publication order in
+`.github/workflows/publish.yml`.
 
 ## Nightly release
 

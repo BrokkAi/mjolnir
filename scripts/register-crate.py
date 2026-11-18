@@ -7,7 +7,8 @@ Publishing, which can only be configured on a crate that already exists. This
 script does the one-time setup, in this order:
 
 1. publishes a `0.0.0` name-reservation crate when the name is free;
-2. adds the standard owners that are missing;
+2. adds the standard owners that are missing (a user is only invited, and
+   is reported as pending until they accept);
 3. adds the Trusted Publishing configuration for `publish.yml`;
 4. restricts the crate to Trusted Publishing, which is why it comes last: the
    placeholder is the only release ever published with a personal token.
@@ -193,11 +194,25 @@ def main():
             sys.exit(f'{name} is already on crates.io and owned by {", ".join(owners)}: choose another name')
         step(True, f'{name} exists on crates.io', None)
 
-    # 2. Owners. The publisher of the placeholder already is one.
+    # 2. Owners. The publisher of the placeholder already is one. A user
+    # becomes an owner only on accepting the invitation, and crates.io lists
+    # pending invitations only on its website, not to a token. So `--check`
+    # cannot tell "never invited" from "has not accepted yet"; inviting again
+    # is harmless and the reply says which it was.
     absent = [o for o in OWNERS if owner_key(o) not in owners]
-    def add_owners():
+    if not absent:
+        print('ok       standard owners')
+    elif args.check:
+        print(f'MISSING  standard owners: {", ".join(absent)} (not invited, or invited and not accepted yet)')
+        missing.append('standard owners')
+    else:
         print('         ' + request('PUT', f'/crates/{name}/owners', token, {'owners': absent})['msg'])
-    step(not absent, 'standard owners' + (f' (to add: {", ".join(absent)})' if absent else ''), add_owners)
+        owners = current_owners(name)
+        waiting = [o for o in absent if owner_key(o) not in owners]
+        if waiting:
+            print(f'PENDING  standard owners: {", ".join(waiting)} must accept the invitation at https://crates.io/me/pending-invites')
+        else:
+            print('done     standard owners')
 
     # 3. Trusted Publishing configuration. Listing it needs a token, so
     # without one the state is unknown, which is not the same as absent.
