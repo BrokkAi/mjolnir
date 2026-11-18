@@ -12,11 +12,16 @@ on:
 permissions:
   contents: read
 
-# In a call from release.yml, github.workflow is the caller's name and the ref
-# is the tag, so this group is per release and does not cancel branch CI.
+# A pull request keeps only the run for its newest commit. Every pushed commit
+# gets its own group and runs to completion: master receives pushes more often
+# than a run takes, so cancelling superseded runs left no commit with a result,
+# and nightly.yml releases only a commit whose push run succeeded. The group
+# must name the commit, because a shared group also cancels its pending runs.
+# In a call from release.yml, github.workflow is the caller's name, so a
+# release never shares a group with branch CI.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   formatting:
@@ -131,8 +136,10 @@ jobs:
         # every other crate depends on an unpublished path dependency.
         cargo package --locked -p brokk-mj-core
 
-  mjolnir:
-    name: mjolnir (x86_64-unknown-linux-gnu)
+  # Clippy and the tests are separate jobs: neither reuses the other's build
+  # output, so running them in sequence only added clippy's time to the wait.
+  clippy:
+    name: Clippy (x86_64-unknown-linux-gnu)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -149,24 +156,84 @@ jobs:
         components: clippy
         targets: x86_64-unknown-linux-gnu
 
-    - uses: ./.github/actions/cache-rust
+    - uses: ./.github/actions/cache-rust-dependencies
       with:
-        lane: cli-tests-x86_64-unknown-linux-gnu
-        build-paths: |
-          target/debug
-          target/release
-          target/x86_64-unknown-linux-gnu/debug
-          target/x86_64-unknown-linux-gnu/release
+        lane: clippy
 
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
 
-    # The runtime suite exercises Unix target paths, directory fsync, and Git
-    # worktree byte preservation. Linux executes the suite here and
-    # .github/workflows/macos.yml runs it on macOS; .github/workflows/windows.yml
-    # runs the controller-side suites on Windows.
+  # The workspace tests, split so that no runner compiles everything. Building
+  # is most of the wait, and mj-controller's test build is most of the
+  # building: one compiler process, largely single-threaded. Measured cold on
+  # four threads: 717s for the whole workspace in one job; 468s, 471s and 270s
+  # for the shards below.
+  #
+  # Together the shards run exactly what `cargo test` runs at the workspace
+  # root. `libraries` takes every member the other two do not name, so a new
+  # crate is tested without an edit here. Cargo resolves features for the
+  # selected packages only, so a shard must enable any feature its tests need
+  # and another shard's crate used to turn on: see `libraries`.
+  #
+  # The runtime suite exercises Unix target paths, directory fsync, and Git
+  # worktree byte preservation. Linux executes the suite here and
+  # .github/workflows/macos.yml runs it on macOS; .github/workflows/windows.yml
+  # runs the controller-side suites on Windows.
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # `--tests` leaves out the doc tests, which need a second, plain build
+        # of the crate; `worker-cli` builds that anyway and runs them.
+        - name: controller
+          lane: tests-controller
+          tests: -p brokk-mj-controller --tests
+        - name: worker-cli
+          lane: tests-worker-cli
+          tests: -p brokk-mj-worker -p brokk-mjolnir
+          doc-tests: -p brokk-mj-controller
+        # mj-core has tests behind `test-hooks`, which only the crates in the
+        # other shards enable.
+        - name: libraries
+          lane: tests-libraries
+          tests: >-
+            --workspace --exclude brokk-mj-controller --exclude brokk-mj-worker
+            --exclude brokk-mjolnir --exclude brokk-mj-voice-worker
+            --features brokk-mj-core/test-hooks
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.99.1
+      with:
+        targets: x86_64-unknown-linux-gnu
+
+    - uses: ./.github/actions/cache-rust-dependencies
+      with:
+        lane: ${{ matrix.lane }}
+
+    # A separate step, so the log shows how the wait divides between building
+    # and running.
+    - name: Build tests
+      run: cargo test --no-run ${{ matrix.tests }}
+
+    # `--no-fail-fast` reports every failing test binary: one failure used to
+    # hide the binaries after it.
     - name: Run tests
-      run: cargo test
+      run: cargo test --no-fail-fast ${{ matrix.tests }}
+
+    - name: Run doc tests
+      if: ${{ matrix.doc-tests }}
+      run: cargo test --doc ${{ matrix.doc-tests }}
 
   # Check-ins run Linux only. macOS and Windows run nightly in nightly.yml,
   # and here only when release.yml calls this workflow for a tag, so a release
