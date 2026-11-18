@@ -17,6 +17,8 @@ Terra/high reviewers, 3 per diff on the 17 bifrost-dev relation diffs. Catch rat
 
 **Leak caveat. Read this result as an upper bound.** After one wording-only rewrite and a recheck, the paired Sol/high leak judges still rate 15 of the 17 oracle briefs as pointing at the defect when the brief is read as a review output: 8 caught and 7 partial. The registered rule keeps them, so part of the lift may come from the brief naming the bug rather than from a supplied relation that the reviewer acted on. Only 2 briefs read as missed, and neither lifted the reviewers.
 
+**Image caveat.** All 17 OT carriers ran on a different Podman image (`89128665…`) from the stored A and BT carriers (`0a614615…`; A on unproven-override-family-certifies-empty used `cd7e9788…`). The pins, intro/base commits and inventories match, but the brief and the reviewer image changed together across the whole OT cohort, so the paired bootstrap cannot separate their effects. The registered outcome stands as computed, and the lift is an observed cohort difference whose attribution to the brief rests on the image change being immaterial (`/mnt/optane/review-arms-bifrost-20261116/oracle-arm/review-driver/audit-report.md`).
+
 What this shows and what it doesn't: reviewers on bifrost-dev benefit when the decisive fact is supplied. It does not show that Bifrost's value-flow queries can find that fact for a blind writer. Query reach is unmeasured and is milestone 5's question.
 
 ## Per diff (catches of 3)
@@ -54,7 +56,7 @@ Nine diffs show no lift: 3 of the 8 caught-leak diffs, 4 of the 7 partial-leak d
 
 ## Leak rate compared with stage A's mjolnir oracle
 
-On the 18 primary mjolnir diffs, stage A flagged 10 briefs (1 caught, 9 partial) and left 8 missed. Here 15 of 17 are flagged (8 caught, 7 partial) and 2 are missed. The bifrost-dev briefs leak more, and far more of them leak fully. The judging differs, though. Stage A used one Opus oracle leak judge, while bifrost-dev used two paired Sol/high judges with the either-judge rule. That rule flags more than a single judge would, so the comparison is descriptive. Stage A's lift on its 8 missed-leak diffs (+29.2 points) has no counterpart here, because only 2 diffs are missed and neither moved.
+On the 18 primary mjolnir diffs, stage A flagged 10 briefs (1 caught, 9 partial) and left 8 missed. Here 15 of 17 are flagged (8 caught, 7 partial) and 2 are missed. The bifrost-dev briefs leak more, and far more of them leak fully. The judging differs, though. Stage A used one Opus oracle leak judge, while bifrost-dev used two paired Sol/high judges with the either-judge rule. Here the two Sol judges gave the same final label on all 17 briefs, so either judge alone would have produced the same 15 flags, and the either-judge rule doesn't explain the gap. The difference in judge model and corpus still makes the comparison descriptive. Stage A's lift on its 8 missed-leak diffs (+29.2 points) has no counterpart here, because only 2 diffs are missed and neither moved.
 
 ## Round L judging and label consistency
 
@@ -67,16 +69,16 @@ The parent overrode the assessor on three rows, all in retained-fill-java-memo-l
 
 ## Cost
 
-These are estimated API-equivalent costs at 10^10 ticks per dollar, not subscription spend.
+These are recorded API-equivalent estimates at 10^10 ticks per dollar, not subscription spend. The total is a recorded subtotal, and the full cost is unknown. The carrier records hold 3 missing usage reports and 9 unfinished turns across 8 of the 17 carriers, so those carriers' costs are incomplete.
 
 | Stage | Estimate |
 |---|---:|
 | Editors, two leak rounds and the wording pass (Sol/high, codex4) | $3.54 |
 | OT reviewers, 51 Terra/high sessions | $2.28 |
-| OT carriers, 17 sessions; three carrier turns have partial report coverage | $1.13 |
+| OT carriers, 17 sessions; recorded subtotal, coverage incomplete for 8 carriers | $1.13+ |
 | Round L judges, 6 Opus/high sessions on claude7 | $2.91 |
 | Round L hand check, 1 Opus/high session on claude7 | $0.69 |
-| **Total** | **$10.56** |
+| **Recorded subtotal** | **$10.56+** |
 
 claude7 had 93% of its week left before round L. A and BT reused stored outputs, so they cost nothing new.
 
@@ -85,4 +87,5 @@ claude7 had 93% of its week left before round L. A and BT reused stored outputs,
 - 15 of 17 briefs leak, so the result is an upper bound. With only 2 missed-leak diffs, the data can't separate supplied relations from named defects.
 - With 17 diffs the interval is wide: the lower bound is +11.8 points.
 - Round L used Opus judges, not the registered Sol, because of the amendment. The two Opus judges reproduced the stored judges' raw A and BT labels. After hand check, the Opus assessor alone differs from the stored final labels by 3.9 points on A, through two retained-fill rows, and the parent's precedent-based decisions remove that difference. Either way it is below the 10-point caveat, and the outcome is unchanged.
+- The OT carriers ran on a different Podman image from the stored A and BT carriers (see the image caveat).
 - Reviewer tool audits and latency are unavailable, because reviewer sessions are destroyed at role end (#1554/#1559).

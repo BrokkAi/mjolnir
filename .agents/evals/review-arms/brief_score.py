@@ -465,6 +465,9 @@ if __name__ == "__main__":
         if bool(a.reading) != bool(a.reference_round):
             raise SystemExit("--reading and --reference-round must be supplied together")
         READING, REFERENCE_ROUND = a.reading, a.reference_round
+        if REFERENCE_ROUND is not None and REFERENCE_ROUND == a.name:
+            # The consistency check compares against a separate stored round, never this one.
+            raise SystemExit("--reference-round must name a different, already judged round")
         if READING and (tuple(a.arms.split(",")) != ("OT", "BT") or
                         SELECTED_MODELS != ("gpt-6.1-terra",) or len(scoped_sets().get("P", [])) != 17):
             raise SystemExit("bifrost-oracle build requires --arms OT,BT, Terra only, and 17 P diffs")
