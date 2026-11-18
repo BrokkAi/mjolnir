@@ -4,7 +4,7 @@ const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
 const { viewerWireSnapshot } = require('./lab-env');
 
-const WEB_ROOT = path.resolve(__dirname, '../../../mj-controller/src/web');
+const WEB_ROOT = path.resolve(__dirname, '../../../mj-server/src/web');
 // The daemon's answers to these exact requests, recorded by the Rust test
 // `settings_routes_hide_literal_secrets_and_save_through_the_shared_model`.
 // Replaying them ties the page to what the daemon really sends, and a

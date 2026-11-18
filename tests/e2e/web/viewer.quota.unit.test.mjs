@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../../../mj-controller/src/web/viewer.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../../../mj-server/src/web/viewer.js', import.meta.url), 'utf8');
 const helpers = source.slice(source.indexOf('function formatQuotaReset('), source.indexOf('function renderQuota('));
 const cases = JSON.parse(readFileSync(new URL('../../../mj-client/src/quota/reset_display_cases.json', import.meta.url), 'utf8'));
 

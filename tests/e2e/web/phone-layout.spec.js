@@ -11,7 +11,7 @@ test.use({
   serviceWorkers: 'block',
 });
 
-const WEB_ROOT = path.resolve(__dirname, '../../../mj-controller/src/web');
+const WEB_ROOT = path.resolve(__dirname, '../../../mj-server/src/web');
 const WORKSPACE_ID = 'workspace-phone';
 const SERVER_TIME_MS = Date.parse('2030-06-15T15:00:00Z');
 const ASSETS = new Set([

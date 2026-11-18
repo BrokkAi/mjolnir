@@ -95,7 +95,7 @@ function snapshot() {
 }
 
 async function mockViewer(page, uploadHandler) {
-  const root = path.resolve(__dirname, '../../../mj-controller/src/web');
+  const root = path.resolve(__dirname, '../../../mj-server/src/web');
   await page.route('**/*', route => {
     const pathname = new URL(route.request().url()).pathname;
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);

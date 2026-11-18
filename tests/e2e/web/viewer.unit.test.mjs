@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const webRoot = new URL('../../../mj-controller/src/web/', import.meta.url);
+const webRoot = new URL('../../../mj-server/src/web/', import.meta.url);
 const viewerPath = new URL('viewer.js', webRoot);
 const serviceWorkerPath = new URL('service-worker.js', webRoot);
 const viewerSource = readFileSync(viewerPath, 'utf8');

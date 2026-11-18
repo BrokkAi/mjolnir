@@ -4,7 +4,7 @@ const { viewerWireSnapshot } = require('./lab-env');
 
 test.use({ serviceWorkers: 'block' });
 
-const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
+const webRoot = path.resolve(__dirname, '../../../mj-server/src/web');
 const snapshot = {
   revision: 1,
   generated_at: '2026-10-08T00:00:00Z',
