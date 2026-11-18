@@ -1159,6 +1159,7 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
   fact. Six briefs passed the leak check only at low judge confidence;
   without them ON − AF is +24.2 (+6.1 to +45.5), still Facts carry. Those
   six carry 11 of the 19 net extra catches, and on cpp-template both judges
-  said the brief lays out the cause. Excluding those six and the three
-  briefs whose edits dropped a stated rule leaves 9 diffs at +18.5
-  (0.0 to +37.0), which is Inconclusive.
+  said the brief lays out the cause. Excluding those six and the briefs
+  whose edits dropped a stated relation leaves 8 or 9 diffs, where the
+  classification turns on single diffs: Inconclusive at 9 (+18.5, 0.0 to
+  +37.0) and Facts carry at 8 (+20.8, +4.2 to +41.7).
