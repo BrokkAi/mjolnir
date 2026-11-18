@@ -87,7 +87,7 @@ It reports:
 - **R:** mocked-RQL writer, which keeps grep and the list.
 - **R0:** the same mocked engine with today's documented steps only (no added steps), keeping grep and the list. R − R0 is the added steps' own contribution, and R0 − G is what complete answers from today's steps add.
 - **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine. Its token budget equals all the engine model tokens spent answering R's queries on that diff, counted once per diff. That includes precomputed hops and classifications behind those answers, and rejected candidates, rejected hops and other work that produced no rows. A costly empty answer is still information R received. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
-- **D (conditional):** R with answers degraded at random to the owner's realistic recall.
+- **D (conditional):** R with recall degraded inside the engine, not on its final answers. Each mechanical candidate and each value-flow hop edge is dropped independently at the owner's per-step realistic recall, before composition. A path that needs two hops at 75% then survives about 56% of the time, as it would in a real engine. Dropped elements are drawn once per diff and seeded, so repeated queries agree.
 
 **Leak audit.** Each brief's exact text, bound to its hash, gets the blind `judge/SPEC.md` check (one Opus/high) as if it were a review output. Briefs are not rewritten: a blind writer that states the defect from accurate rows is the product working. The readout reports, per arm, the share of briefs that state the defect. A secondary R − G excluding diffs where any arm's brief states it is descriptive only. That exclusion conditions on an outcome of the treatments, so it describes a selected subset and can't cleanly separate writer-found defects from reviewer reasoning.
 
@@ -98,7 +98,8 @@ It reports:
 
 **Reviewers and judging.**
 - Terra/high reviewers. Each brief arm gets 2 briefs per diff with 2 reviewers per brief. N gets 4 reviewers per diff.
-- One Opus/high judge per output, plus a hand check of every caught or partial verdict and of a random 20% of misses per arm.
+- One Opus/high judge per output, plus a hand check of every caught or partial verdict and of a seeded random 20% of misses per arm.
+- **Missed catches in the estimate:** the checked misses give each arm's false-miss rate (the share of judge misses the hand check upgrades). Each unchecked miss counts as a catch with probability equal to its arm's rate, by inverse-probability weighting within arm and repo. The repo-level interval comes from a bootstrap that also resamples which misses were checked, so the correction's uncertainty is in the interval. Raw corrected labels without the weighting are a sensitivity check, and per-arm false-miss rates are reported.
 - Harm controls: the non-relation census bugs and the existing ordinary-diff controls, for R against G (retention of confirmed findings), plus brief size per arm.
 
 ## Pilot, then test
