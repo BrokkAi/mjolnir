@@ -236,15 +236,16 @@ def finish_set_aside(d):
     marker = d / "rejected-pending.json"
     rec = json.loads(marker.read_text())
     tag, sid = rec["tag"], rec["session_id"]
-    if not (d / f"{tag}-suspend.json").exists():
-        if session(sid).get("lifecycle") not in ("suspended", "closed"):
-            save(d / f"{tag}-suspend.json",
-                 mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
-        else:
-            save(d / f"{tag}-suspend.json", {"already": session(sid).get("lifecycle")})
-    # Suspend is accepted asynchronously; retire the launch records only once it has taken effect,
-    # otherwise leave the marker so the next start retries the cleanup.
+    # Suspend is accepted asynchronously and can fail after acceptance; request it again whenever the
+    # carrier is not yet suspended, and retire the launch records only once it has taken effect.
+    # Otherwise the marker stays and the next start retries.
     state = session(sid).get("lifecycle")
+    if state not in ("suspended", "closed"):
+        with (d / f"{tag}-suspend.jsonl").open("a") as f:
+            f.write(json.dumps({"time_ns": time.time_ns(), "state": state,
+                                "response": mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
+                                               timeout=900)}) + "\n")
+        state = session(sid).get("lifecycle")
     if state not in ("suspended", "closed"):
         raise RuntimeError(f"rejected carrier {sid} is {state}, not suspended yet; set-aside will be retried")
     for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
@@ -260,8 +261,8 @@ def record_runtimes(d, children):
         if not path.exists():
             try:
                 runtime = reviewer_runtime(child, carrier)
-            except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
-                # Sampling is evidence, not the review: record the failure and retry next poll.
+            except Exception as e:  # noqa: BLE001 - any probe failure (podman, mj sessions, a reviewer
+                # already destroyed) is evidence lost, never a failed review: record it, retry next poll.
                 with (d / "runtime-errors.jsonl").open("a") as f:
                     f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
                 continue
