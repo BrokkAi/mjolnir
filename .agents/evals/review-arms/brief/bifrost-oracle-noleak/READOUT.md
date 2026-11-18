@@ -42,8 +42,9 @@ What this shows and what it doesn't: when the decisive fact is stated neutrally,
 - **Strict subsets are fragile.** Excluding the six low-confidence passes and the scope deviations leaves very few diffs, and the classification then turns on single diffs:
   - Excluding the three deviations first identified (java-static and the two Python edits) leaves 9 diffs: +18.5 points (0.0 to +37.0), Inconclusive.
   - Also excluding mcp-default leaves 8 diffs: +20.8 (+4.2 to +41.7), Facts carry. Its edit names the `on_inconclusive` constructor default but no longer gives its value, `Pass`. It caught nothing in either arm, so removing it raises the estimate.
+  - Also excluding the three inferred fact checks, so that every documented concern is applied together, leaves 5 diffs: +26.7 (0.0 to +53.3). That reads Inconclusive, because 5 is below the registered minimum of 8 diffs and the lower bound is not above zero.
 
-  The registered reading covers the briefs that actually ran, and it reads Facts carry. On the strictest subsets the data is too thin to classify robustly, so the positive result depends materially on briefs that passed the leak rule narrowly or that dropped a stated relation.
+  The registered reading covers the briefs that actually ran, and it reads Facts carry. No subset that removes every documented concern supports a classification, so the positive result depends materially on briefs that passed the leak rule narrowly or that dropped a stated relation.
 - **Order of the diagnostics.** The diagnostic amendment held reviewers until the supervisor had seen both diagnostics. After diagnostic 1, the supervisor lifted the hold for diagnostic 2 and directed that the reviewers and diagnostic 2 start together when `codex` reset. The first ON review therefore started at 05:28:31Z, eleven seconds before the Sol verdicts were written at 05:28:42Z. Diagnostic 2 is a retrospective check, not a gate.
 - **Diagnostic 2:** two Sol/high judges, round L's leak-judge model, say `missed` on all 17 published ON briefs. The secondary reading that excludes Sol-flagged diffs is therefore empty.
 
