@@ -4033,6 +4033,14 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn cached_model_efforts(
+        &self,
+        profile: &str,
+        model: &str,
+    ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
+        self.profile_catalog.cached_model_efforts(profile, model)
+    }
+
     fn reviewer_ready_candidates(
         &self,
         _model: String,

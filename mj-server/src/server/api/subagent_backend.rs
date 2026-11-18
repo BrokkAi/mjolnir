@@ -145,6 +145,15 @@ pub trait SubagentBackend: Send + Sync {
     fn reviewer_autoconfigure_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         self.reviewer_candidates()
     }
+    /// The efforts `profile` offers for `model` from completed discovery,
+    /// without starting a probe; `None` is unknown.
+    fn cached_model_efforts(
+        &self,
+        _profile: &str,
+        _model: &str,
+    ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
+        None
+    }
     fn reviewer_ready_candidates(
         &self,
         _model: String,

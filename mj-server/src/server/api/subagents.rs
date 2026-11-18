@@ -528,16 +528,22 @@ async fn resolve_model_profile_selection_from(
         if reviewer_source {
             let effort = match requirement {
                 EffortRequirement::Exact(requested) => {
-                    let known = &candidate.candidate.choices;
-                    if known.model.as_deref() == Some(&candidate.model.value)
-                        && !known.efforts.is_empty()
-                        && !known.efforts.iter().any(|choice| choice.value == requested)
+                    let choices = &candidate.candidate.choices;
+                    let known = if choices.model.as_deref() == Some(&candidate.model.value)
+                        && !choices.efforts.is_empty()
+                    {
+                        Some(choices.efforts.clone())
+                    } else {
+                        backend.cached_model_efforts(&candidate.profile_id, &candidate.model.value)
+                    };
+                    if let Some(known) = known
+                        && !known.iter().any(|choice| choice.value == requested)
                     {
                         offered_any_effort = true;
                         selection_errors.push(format!(
                             "{} offers efforts: {}",
                             candidate.profile_id,
-                            effort_names(&known.efforts)
+                            effort_names(&known)
                         ));
                         continue;
                     }
@@ -1497,6 +1503,20 @@ mod tests {
     }
 
     impl SubagentBackend for FakeSelectionBackend {
+        fn cached_model_efforts(
+            &self,
+            profile: &str,
+            _model: &str,
+        ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
+            profile.starts_with("cached-low").then(|| {
+                vec![mj_core::acp::SessionConfigChoice {
+                    value: "low".into(),
+                    name: "Low".into(),
+                    description: None,
+                }]
+            })
+        }
+
         fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
             Box::pin(async { Ok(self.config.clone()) })
         }
@@ -1885,36 +1905,46 @@ mod tests {
         }
 
         // A preferred profile known not to offer the configured effort yields
-        // the slot to one whose efforts are unknown, still without probing.
+        // the slot to one whose efforts are unknown, still without probing,
+        // whether the efforts are known from its default model or from a
+        // completed discovery of this model.
         let mut low_only = candidate("low-only", Some(90), &["fixed"]);
         low_only.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
             value: "low".into(),
             name: "Low".into(),
             description: None,
         }];
+        let cached_low = candidate("cached-low", Some(80), &["other", "fixed"]);
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
             staged: None,
             discovery_fails: false,
             config: Default::default(),
             candidates: SubagentCandidates {
-                offered: vec![low_only, candidate("unknown", Some(10), &["fixed"])],
+                offered: vec![
+                    low_only,
+                    cached_low,
+                    candidate("unknown", Some(10), &["fixed"]),
+                ],
                 unavailable: Vec::new(),
             },
         });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected.profile_id, "unknown");
-        assert_eq!(tokio::time::Instant::now(), start);
+        // The draw is random; repeat so a profile wrongly kept is drawn.
+        for _ in 0..24 {
+            let start = tokio::time::Instant::now();
+            let selected = resolve_model_profile_selection_matching(
+                &backend,
+                None,
+                "fixed",
+                EffortRequirement::Exact("high"),
+                None,
+                ModelProfileCandidateSource::ReviewersReady,
+            )
+            .await
+            .unwrap();
+            assert_eq!(selected.profile_id, "unknown");
+            assert_eq!(tokio::time::Instant::now(), start);
+        }
     }
 
     #[tokio::test]

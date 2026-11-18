@@ -1729,6 +1729,28 @@ impl ProfileCatalog {
             .unwrap_or_default()
     }
 
+    /// The efforts profile `id` offers for `model` when a completed discovery
+    /// already holds them; `None` is unknown. Never starts a probe.
+    pub fn cached_model_efforts(
+        &self,
+        id: &str,
+        model: &str,
+    ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
+        let inner = self.lock();
+        let identity = inner
+            .live
+            .as_ref()?
+            .named_profile(id)
+            .ok()?
+            .capabilities_key(id);
+        match inner.entries.get(&(identity, Some(model.to_owned()))) {
+            Some(Entry::Ready(choices)) if !choices.efforts.is_empty() => {
+                Some(choices.efforts.clone())
+            }
+            _ => None,
+        }
+    }
+
     pub fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
