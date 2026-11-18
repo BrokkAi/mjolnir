@@ -240,7 +240,8 @@ Creates and verifies a recovery copy for an active session. It waits for a safe 
 
 ```text
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
-        [--queue discard|start] [--clear-resources] [--yes] [--json]
+        [--cpus <n> --memory-gib <gib>] [--clear-resources]
+        [--queue discard|start] [--yes] [--json]
         [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
         [--subagents native|mjolnir|none]
         [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
@@ -252,15 +253,29 @@ mj move-sources --session <id> [--cleanup <operation-id> --yes]
 
 Move keeps the logical session, workspace, transcript, and recoverable
 repository state while rebuilding its execution environment. At least one of
-`--target` or `--profile` is required; an omitted selector keeps its current
-value. The destination must satisfy the same compatibility checks as resume.
+`--target`, `--profile`, or the container size is required; an omitted selector
+keeps its current value. The destination must satisfy the same compatibility
+checks as resume.
 Moving between harnesses creates a bounded transcript handoff rather than
 copying harness-private process state.
 
 Move inherits the source resource sizing and attached directories by default.
-`--clear-resources` explicitly removes inherited sizing so the destination
-uses its configured defaults; attached directories remain part of the fixed
-workspace selection.
+Attached directories stay part of the fixed workspace selection, and
+`--clear-resources` drops the inherited sizing instead of keeping it.
+
+A destination container's size comes from, in order: `--cpus N --memory-gib G`
+(both are required together), the source's size, or the destination host's
+remembered size, else the same 4 CPUs and 8 GiB `mj new` starts from. A source
+with no size — a bare session moved into a container — therefore gets a sized
+container without any flags, and `--clear-resources` on a container
+destination means that same default. The confirmation prints the destination
+size, so a size the Move chose is readable before it runs. A fixed (bare) host
+keeps its own CPU and memory, so the size flags are refused there, and
+`--clear-resources` is what lets a sized session move onto one.
+
+The size flags alone are a Move: `mj move --session <id> --cpus 8 --memory-gib
+16` resizes the container on the target the session already names, without
+naming a profile or a target again.
 
 `--subagents native` switches to harness delegation; `--subagents mjolnir`
 uses the global task choices in `[subagents.straightforward]` and, when

@@ -877,12 +877,6 @@ impl ExportRuntime for NoExports {
 
 /// A connected view whose harness is ready and offers one model.
 fn ready_view(model: &str) -> ManagedSessionView {
-    ready_view_waiting(model, None)
-}
-
-/// [`ready_view`] whose worker publishes that it is waiting to resubmit a turn
-/// that failed on the access token with this hash.
-fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let option: agent_client_protocol::v1::schema::SessionConfigOption =
         serde_json::from_value(serde_json::json!({
@@ -919,8 +913,9 @@ fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionVie
         goal: Default::default(),
         capacity_retry: None,
         retry_assessment_pending: false,
-        authentication_retry_waiting: waiting,
+        authentication_retry_waiting: None,
         held_login_fingerprint: None,
+        authentication_retry_intent: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,
@@ -2247,56 +2242,14 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
-    {
-        let mut rejected = fixture.rejected.lock().unwrap();
-        rejected.accept("helper", fixture.result.trigger.as_ref().unwrap());
-        rejected.observe(&fixture.result, &fixture.profile);
-    }
-
-    let waiting = fixture.backend(
-        fixture
-            .result
-            .trigger
-            .as_ref()
-            .unwrap()
-            .login_fingerprint
-            .clone(),
-    );
-    assert!(matches!(
-        waiting
-            .reconcile_child_report("parent-1", "child-1", 9)
-            .await
-            .unwrap(),
-        ChildReport::NotFinished
-    ));
-
-    let backend = fixture.backend(None);
-    let target = mj_core::credentials::CredentialSyncTarget {
-        session_id: "child-1".into(),
-        profile_id: "helper".into(),
-        harness: fixture.profile.kind,
-        profile_home: fixture.profile.home.clone(),
-        aws_credentials: None,
-        skips_login_file_sync: false,
-        sync_github_token: false,
-        github: Default::default(),
-        skills_scope: mj_core::skills::SkillsScope::Localhost,
-        spec: mj_core::targets::CommandSpec::new("unused", Vec::<String>::new()),
-    };
-    let Some(mj_core::credentials::LoginFingerprint::AccessToken(renewed)) =
-        mj_core::credentials::LoginFingerprint::read_file(
-            fixture.profile.kind,
-            &fixture.profile.authentication_marker(),
-        )
-        .unwrap()
-    else {
-        panic!("expected the fixture to have a renewed login");
-    };
+    fixture.conclude_failure();
+    let backend = fixture.backend();
+    let renewed = fixture.renewed_token();
     fixture
         .rejected
         .lock()
         .unwrap()
-        .start_delivery(&target, &renewed);
+        .start_delivery(&fixture.target(), &renewed);
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
@@ -2304,11 +2257,15 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
             .unwrap(),
         ChildReport::NotFinished
     ));
-    fixture
-        .rejected
-        .lock()
-        .unwrap()
-        .observe_held_login("helper", "child-1", Some(&renewed));
+    fixture.rejected.lock().unwrap().observe_worker(
+        "helper",
+        "child-1",
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some(&renewed),
+            None,
+            9,
+        )),
+    );
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
@@ -2325,6 +2282,192 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
         output.contains("helper") && output.contains("login was renewed"),
         "{output}"
     );
+}
+
+// Hard-won: #1581: a checkpoint barrier dropped the worker's retry publication and the parent was told the child failed seconds before the retry was submitted.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_login_renewed_during_a_checkpoint_barrier_never_reports_the_child() {
+    if !isolated_parked_test("a_login_renewed_during_a_checkpoint_barrier_never_reports_the_child")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    let backend = fixture.backend();
+    let failed = fixture.failed_token();
+    let renewed = fixture.renewed_token();
+    let not_told = || async {
+        assert!(matches!(
+            backend
+                .reconcile_child_report("parent-1", "child-1", 9)
+                .await
+                .unwrap(),
+            ChildReport::NotFinished
+        ));
+        assert!(
+            crate::database::pending_mailbox_events(10)
+                .unwrap()
+                .is_empty()
+        );
+    };
+    // The turn failed on the old token and the renewed login is on its way.
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .start_delivery(&fixture.target(), &renewed);
+    fixture.publish_worker(Some(&failed), Some(&failed));
+    not_told().await;
+    // The checkpoint barrier begins and the new login is installed during it.
+    // The worker keeps publishing its intent; only its submit waits.
+    fixture.rejected.lock().unwrap().observe_worker(
+        "helper",
+        "child-1",
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some(&renewed),
+            None,
+            9,
+        )),
+    );
+    fixture.publish_worker(Some(&failed), Some(&renewed));
+    not_told().await;
+    // Releasing the barrier lets the worker submit its retry, which starts a
+    // turn; the worker's own test covers that step.
+}
+
+// Hard-won: #1581: a child whose worker owed a retry that could never be delivered was held as running forever.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_retry_owed_but_never_delivered_is_reported_not_held() {
+    if !isolated_parked_test("a_retry_owed_but_never_delivered_is_reported_not_held") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    let backend = fixture.backend();
+    let failed = fixture.failed_token();
+    fixture.rejected.lock().unwrap().record_delivery(
+        &fixture.target(),
+        &fixture.renewed_token(),
+        mj_core::credentials::LoginDeliveryState::Concluded {
+            reason: "relay connection is leased".into(),
+        },
+        None,
+    );
+    fixture.publish_worker(Some(&failed), Some(&failed));
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert!(report.failure.is_none(), "{report:?}");
+    assert_eq!(report.promptable, Some(true));
+    let output = report.output.unwrap();
+    assert!(output.contains("relay connection is leased"), "{output}");
+}
+
+// Hard-won: c30d42961: a connected worker without a held-login fingerprint was held as Deciding forever
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_connected_worker_publishing_no_login_is_reported_once_reconciled() {
+    if !isolated_parked_test("a_connected_worker_publishing_no_login_is_reported_once_reconciled") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    // A worker older than protocol 69, or one whose credential read failed,
+    // publishes views with no login. No delivery can be pending for it.
+    fixture.publish_worker(None, None);
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert_eq!(report.promptable, Some(true));
+}
+
+// Hard-won: c8d6236b7: a child moved to another profile after its failure was held as Deciding forever
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_child_moved_to_another_profile_is_reported_once_reconciled() {
+    if !isolated_parked_test("a_child_moved_to_another_profile_is_reported_once_reconciled") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    // The failed turn ran on `helper`; the session then moved to another
+    // profile, so its worker publishes under that one.
+    fixture
+        .published
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.rejected.lock().unwrap().observe_worker(
+        "other",
+        "child-1",
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some("other-login"),
+            None,
+            9,
+        )),
+    );
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert_eq!(report.promptable, Some(true));
+}
+
+// Hard-won: #1581: a worker that withdrew its retry (a question or paused goal waits on a person) still looked busy to the parent.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_withdrawn_retry_intent_does_not_hold_the_child() {
+    if !isolated_parked_test("a_withdrawn_retry_intent_does_not_hold_the_child") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    let backend = fixture.backend();
+    let renewed = fixture.renewed_token();
+    fixture.rejected.lock().unwrap().record_delivery(
+        &fixture.target(),
+        &fixture.renewed_token(),
+        mj_core::credentials::LoginDeliveryState::Concluded {
+            reason: "worker reports holding the current login".into(),
+        },
+        None,
+    );
+    // The worker holds the renewed login but no longer owes a retry.
+    fixture.publish_worker(None, Some(&renewed));
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.promptable, Some(true));
+    assert!(report.failure.is_none(), "{report:?}");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2361,7 +2504,7 @@ async fn pending_child_login_reconciliation_blocks_reporting_until_current_login
         std::time::Instant::now(),
     );
     assert_eq!(queued.try_recv().unwrap().cause.as_ref(), Some(cause));
-    let backend = fixture.backend(None);
+    let backend = fixture.backend();
     let (_, children) = backend.notification_children("parent-1").await.unwrap();
     assert_eq!(children[0].state, "running");
     assert!(matches!(
@@ -2426,7 +2569,7 @@ async fn failed_wake_requires_typed_evidence_for_the_current_login() {
     let _writer = crate::database::install_isolated_test_writer();
     let fixture = ChildLoginReportFixture::new("current", "older").await;
     fixture.exports.set_child_state(SessionState::Parked);
-    let backend = fixture.backend(None);
+    let backend = fixture.backend();
     let detail = "login_invalid: workspace routing discovery unauthorized (401)";
     let current = LoginFingerprint::read_file(
         HarnessKind::Claude,
@@ -2501,6 +2644,8 @@ struct ChildLoginReportFixture {
     catalog: Arc<ProfileCatalog>,
     conversation: mj_core::state::MaterializedSession,
     exports: Arc<ParkingExports>,
+    /// Whether the test has published a worker view itself.
+    published: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2568,11 +2713,76 @@ impl ChildLoginReportFixture {
             rejected: Default::default(),
             conversation,
             exports: ParkingExports::new(SessionState::Running, None),
+            published: Default::default(),
         }
     }
 
-    fn backend(&self, waiting: Option<String>) -> ApiBackend {
-        let mut view = ready_view_waiting("m", waiting);
+    /// The sync reached the child and the profile's login had been renewed.
+    fn conclude_failure(&self) {
+        let mut rejected = self.rejected.lock().unwrap();
+        rejected.accept("helper", self.result.trigger.as_ref().unwrap());
+        rejected.observe(&self.result, &self.profile);
+    }
+
+    fn failed_token(&self) -> String {
+        self.result
+            .trigger
+            .as_ref()
+            .unwrap()
+            .login_fingerprint
+            .clone()
+            .unwrap()
+    }
+
+    fn renewed_token(&self) -> String {
+        let Some(mj_core::credentials::LoginFingerprint::AccessToken(renewed)) =
+            mj_core::credentials::LoginFingerprint::read_file(
+                self.profile.kind,
+                &self.profile.authentication_marker(),
+            )
+            .unwrap()
+        else {
+            panic!("expected the fixture to have a renewed login");
+        };
+        renewed
+    }
+
+    fn target(&self) -> mj_core::credentials::CredentialSyncTarget {
+        mj_core::credentials::CredentialSyncTarget {
+            session_id: "child-1".into(),
+            profile_id: "helper".into(),
+            harness: self.profile.kind,
+            profile_home: self.profile.home.clone(),
+            aws_credentials: None,
+            skips_login_file_sync: false,
+            sync_github_token: false,
+            github: Default::default(),
+            skills_scope: mj_core::skills::SkillsScope::Localhost,
+            spec: mj_core::targets::CommandSpec::new("unused", Vec::<String>::new()),
+        }
+    }
+
+    /// What the connected worker's published view says about the retry,
+    /// recorded as the daemon records it when it publishes the view.
+    fn publish_worker(&self, intent: Option<&str>, held: Option<&str>) {
+        self.published
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.rejected.lock().unwrap().observe_worker(
+            "helper",
+            "child-1",
+            Some(mj_core::credentials::WorkerPublication::new(
+                held, intent, 9,
+            )),
+        );
+    }
+
+    fn backend(&self) -> ApiBackend {
+        // The connected worker's first publication: it still holds the failed
+        // login and owes no retry. Tests change it with `publish_worker`.
+        if !self.published.load(std::sync::atomic::Ordering::SeqCst) {
+            self.publish_worker(None, Some(&self.failed_token()));
+        }
+        let mut view = ready_view("m");
         view.snapshot.as_mut().unwrap().materialized = self.conversation.clone();
         self.backend_with_view(Some(view))
     }

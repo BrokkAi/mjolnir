@@ -978,16 +978,17 @@ impl DurableRelay {
         state.task_settled_at_ms = facts.task_settled_at_ms;
         state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
-        // The worker alone decides whether it will resubmit a failed turn once
-        // its login changes; the daemon only reads the answer.
+        // The worker alone decides whether it still owes a retry of a failed
+        // turn (the durable intent, apart from its submit gate); the daemon
+        // only reads the answer. `authentication_retry_waiting` is retired.
         state.held_login_fingerprint =
             if self.verdict_harness == Some(mj_core::config::HarnessKind::Claude) {
                 self.login_identity.snapshot().1
             } else {
                 self.login_identity.file_fingerprint()
             };
-        state.authentication_retry_waiting = self
-            .authentication_retry_identity()
+        state.authentication_retry_intent = self
+            .authentication_retry_intent()
             .map(|(_, rejected)| rejected.to_owned());
         state
     }

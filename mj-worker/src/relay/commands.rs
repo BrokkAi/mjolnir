@@ -1672,9 +1672,16 @@ impl DurableRelay {
     /// One owner decides whether the interrupted turn still belongs to us.
     /// The completion and its login evidence are durable; a newer prompt,
     /// cancellation or another driver always wins over credential recovery.
+    ///
+    /// This is the durable intent: what the session still owes, whether or not
+    /// it can submit this instant. Every term here either waits on a person
+    /// or on a later decision about the work (so a child holding it must not
+    /// look busy), or means the session is ending. Terms that clear by
+    /// themselves belong to [`Self::authentication_retry_gate_open`].
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
-    pub(crate) fn authentication_retry_identity(&self) -> Option<(u64, &str)> {
-        let facts = self.activity_facts();
+    pub(crate) fn authentication_retry_intent(&self) -> Option<(u64, &str)> {
+        // Waits on a person (assessment questions, a paused or budget-limited
+        // goal) or ends the session (close barrier): withdrawn, not delayed.
         if self.verdict_harness != Some(mj_core::config::HarnessKind::Claude)
             || !self.snapshot.assessment_questions.is_empty()
             || self.snapshot.goal.budget_limited()
@@ -1684,9 +1691,6 @@ impl DurableRelay {
                 .snapshot
                 .as_ref()
                 .is_some_and(|g| g.status == "paused")
-            || !mj_core::activity::can_submit(&facts)
-            || mj_core::activity::driver_present(&facts)
-            || self.pending_checkpoint_barrier()
             || self.pending_close_barrier_id().is_some()
         {
             return None;
@@ -1724,16 +1728,28 @@ impl DurableRelay {
             .then_some((ordinal, diagnostic.login_fingerprint.as_deref()?))
     }
 
+    /// The submit gate: whether a prompt could start now. Every term clears by
+    /// itself (a checkpoint barrier ends, a tool or command finishes, a
+    /// driver such as an active goal or running background work stops), so
+    /// none of them withdraws the intent; they only delay the submit.
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    fn authentication_retry_gate_open(&self) -> bool {
+        let facts = self.activity_facts();
+        mj_core::activity::can_submit(&facts)
+            && !mj_core::activity::driver_present(&facts)
+            && !self.pending_checkpoint_barrier()
+    }
+
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) fn submit_authentication_retry(
         &mut self,
         expected: u64,
         login: &str,
     ) -> Result<bool> {
-        let Some((ordinal, rejected)) = self.authentication_retry_identity() else {
+        let Some((ordinal, rejected)) = self.authentication_retry_intent() else {
             return Ok(false);
         };
-        if ordinal != expected || rejected == login {
+        if ordinal != expected || rejected == login || !self.authentication_retry_gate_open() {
             return Ok(false);
         }
         let id = mj_core::continuation::GeneratedPrompt::AuthenticationRetry.command_id(ordinal);

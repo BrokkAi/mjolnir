@@ -2765,6 +2765,7 @@ mod tests {
                 resource_allocation: None,
                 clear_resource_allocation: false,
             },
+            sized_by_destination_default: false,
             source_profile_id: "codex-1".into(),
             source_target_template_id: "podman".into(),
             cross_harness: false,

@@ -747,6 +747,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         retry_assessment_pending: false,
         authentication_retry_waiting: None,
         held_login_fingerprint: None,
+        authentication_retry_intent: None,
         activity_turn_started_at_ms: None,
         session_id: "session-1".into(),
         store_id: None,

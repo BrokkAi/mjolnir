@@ -3403,6 +3403,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         source_unavailable: false,
         conversion: None,
         selection,
+        sized_by_destination_default: false,
         source_profile_id: "codex-1".into(),
         source_target_template_id: "podman".into(),
         cross_harness: false,

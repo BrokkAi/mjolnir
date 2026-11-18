@@ -23,7 +23,7 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - [x] (2026-11-17) Milestone 2 delivery. Concurrent per-session delivery and worker read-back publication implemented. Targeted controller and worker tests passed, as did clippy and formatting.
 - [x] (2026-11-17) Isolated Claude acceptance passed. Both workers received the replacement login and both transfers appeared at INFO. The workers were destroyed and the `t1581` daemon stopped.
 - [x] (2026-11-17) Validated the combined Milestone 1 and 2 path. Seven focused tests passed, including the test where the auth decision is settled and delivery remains pending until the worker reports the held login. Core and controller clippy passed.
-- [ ] Milestone 3: the hold. Worker publishes retry intent separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present.
+- [x] (2026-11-17) Milestone 3: the hold. Worker publishes retry intent (`authentication_retry_intent`, relay protocol 70) separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present. Worker, controller API and incident tests pass. Review fix: a published view with no login resolves to the established verdict; `Deciding` for a missing view lasts only until the first publication after connect.
 - [ ] Integrated review, merge, push; close #1581.
 
 
@@ -46,6 +46,9 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - Observation: the wake staging path can read the identity of the exact temporary login copy it installs, including the file copied from the Keychain for Claude. Local bare Codex links to the profile login instead of installing a fixed copy, so a failed wake through that link has no staged identity to attest. The failure is retryable.
   Evidence: `controller/worker_binary/launch.rs` and `controller/worker_binary/install.rs` distinguish staged copies from live links.
 
+
+- Observation: a connected worker that publishes no held login (older than protocol 69, or a failed credential read) was held as `Deciding` forever, because removing the evidence on an absent fingerprint made "published without a login" look like "nothing published yet". Found by all three M3 reviewers.
+  Evidence: `observe_held_login` removed the entry when `held_login_fingerprint` was `None`, and `failure_verdict` returned `Deciding` for a connected actor with no entry. Fix: the registry keeps a `WorkerView` entry exactly while the worker is connected and has published (`held: Option`), `observe_worker(profile, session, Option<WorkerPublication>)` removes it only on disconnect or retirement. Test: `a_connected_worker_publishing_no_login_is_reported_once_reconciled`.
 
 ## Decision Log
 
@@ -105,6 +108,14 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Rationale: two turns can fail on the same token, and later warning events can follow a failed turn. Neither can use that turn's pending decision or conclusion.
   Date/Author: 2026-11-17, Milestone 1 implementation.
 
+
+- Decision: intent versus gate, term by term. Intent (withdraws): non-Claude harness, assessment questions, budget-limited or paused goal, close barrier, no auth-failed completion with a fingerprint, continuation withdrawn at or after the failed prompt's acceptance, a newer accepted prompt, a later harness turn. Gate (delays only): `can_submit` (execution, running prompt or harness turn, tools, queued commands, user shells, checkpoint barrier, checkpoint-only, ACP not ready, goal resume or decision pending), `driver_present`, pending checkpoint barrier. Submit requires both.
+  Rationale: gate terms clear by themselves; intent terms wait on a person or end the session.
+  Date/Author: 2026-11-17, Milestone 3 implementation.
+
+- Decision: the hold's three inputs (the worker's held login, its retry intent, and the delivery state) all live in the refusal registry. `publish_session` records the held login, `authentication_retry_intent` and the view's applied ordinal with one `observe_held_login` call under the registry lock (lock order runtime owner, then registry), and `failure_verdict` reads all three from the registry under one guard, so a delivery conclusion cannot be paired with an older view. A view that applied fewer events than the failed turn's ordinal, or a connected actor that has published nothing yet, is `Deciding`; no evidence at all (disconnect, old worker) is unknown and never a hold.
+  Rationale: one decision point; mixing cannot be expressed. Suggested by the planning session.
+  Date/Author: 2026-11-17, Milestone 3 implementation.
 
 ## Outcomes & Retrospective
 
@@ -212,3 +223,7 @@ Diagnosis reports (planning clone): `.mj/agents/83a843526c1f475b63ad2f3d6e7c028b
 No new crates or libraries. New public surface: in `mj_core::credentials`, the per-failure verdict API on the refusal owner (Milestone 1) and delivery-state queries (Milestone 2); in `mj_core::relay::snapshot` operational state, a held-login fingerprint field (Milestone 2) and an authentication-retry-intent field (Milestone 3), both `Option`, both defaulting to `None` so older peers decode them. The daemon API `list_agents` / wait output keeps its JSON shape; only which children carry `failure.kind == "login_invalid"` changes.
 
 Milestone 2 update, 2026-11-17. Recorded the delivery ownership, event sources and worker read-back behavior so the classification and hold milestones can consume one result. Updated Cargo package names to match this checkout.
+
+Milestone 3 update, 2026-11-17. `authentication_retry_waiting` is retired (always `None`, no reader); `authentication_retry_intent` carries the rejected fingerprint at relay protocol 70.
+
+Whole-plan retrospective: a parent is told `login_invalid` only when the refusal owner says the current login was refused; renewed logins are delivered per session; a worker that owes a retry holds its child through checkpoint barriers while the login is coming or present, and a stuck delivery is reported as a retryable failure with its reason. Full-suite runs were not made; only targeted tests. Builds took about eight minutes each.

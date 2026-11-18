@@ -858,7 +858,7 @@ mod tests {
             );
             let mut registry = rejected.lock().unwrap();
             assert_eq!(
-                registry.failure_verdict("helper", &cause, Some(&current)),
+                registry.failure_verdict("helper", &cause, Some(&current), false),
                 LoginFailureVerdict::Deciding
             );
             let first = queued.try_recv().unwrap();
@@ -890,7 +890,7 @@ mod tests {
                 &profile,
             );
             assert_eq!(
-                registry.failure_verdict("helper", &cause, Some(&current)),
+                registry.failure_verdict("helper", &cause, Some(&current), false),
                 LoginFailureVerdict::Refused
             );
             drop(registry);

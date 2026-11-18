@@ -169,8 +169,12 @@ pub const RELAY_WORK_LIVENESS_PROTOCOL: u32 = 67;
 pub const RELAY_HARNESS_TURN_FACTS_PROTOCOL: u32 = 68;
 /// The worker publishes the fingerprint of its held harness login.
 pub const RELAY_HELD_LOGIN_PROTOCOL: u32 = 69;
-/// 70 reports the notification stack and accepts exact Clear and read pruning.
-pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 70;
+/// The worker publishes the failed login it still owes a retry for
+/// (`authentication_retry_intent`), separate from whether it can submit now.
+/// It no longer sets `authentication_retry_waiting`.
+pub const RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL: u32 = 70;
+/// 71 reports the notification stack and accepts exact Clear and read pruning.
+pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NOTIFICATION_STACK_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
