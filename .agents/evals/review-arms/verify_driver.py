@@ -317,6 +317,10 @@ def run_unit(batch_path, judge=None):
                     time.sleep(10)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == a.model and cfg.get("effort") == "high", cfg
+        # Record the model before sending the prompt: a turn accepted before an interruption keeps
+        # its true model, and the resume guard above then compares against it.
+        rec = {**rec, "config": cfg}
+        save(rec_path, rec)
         upload_inputs(sid, batch_path)
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
@@ -324,7 +328,7 @@ def run_unit(batch_path, judge=None):
         if len(cid) > 64:  # mj accepts 1-64 characters (mj-core config::loading::validate_id)
             cid = f"review-arms-{hashlib.sha256(cid.encode()).hexdigest()[:24]}-{sid[:12]}"
         mj("message", "--session", sid, "--command-id", cid, "--prompt-file", prompt)
-        rec = {**rec, "config": cfg, "prompted": time.time_ns()}
+        rec = {**rec, "prompted": time.time_ns()}
         save(rec_path, rec)
         time.sleep(30)
     while True:

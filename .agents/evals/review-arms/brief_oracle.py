@@ -799,6 +799,11 @@ def strict_fidelity_decision(r, e):
                 + [f"added: {a}" for a in added])
     quote = r.get("carrying_item")
     whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
+    if r["decision"] == "pass" and (uncovered or not whole_line):
+        # The checker claims a pass but left lines unassessed or quoted no valid line: fidelity was not
+        # assessed, so rerun the checker rather than charge the edit with a failure.
+        raise SystemExit(f"{r['id']}: fidelity pass with unassessed pairs {uncovered} or an invalid quote; "
+                         "rerun the fidelity check")
     ok = r["decision"] == "pass" and not not_kept and not r["fact_inferred"] and whole_line
     return {"id": r["id"], "brief_sha256": r["brief_sha256"], "decision": "carries" if ok else "does not carry",
             "item": quote if whole_line else None, "why": r.get("why"), "elements_not_kept": not_kept,
@@ -870,9 +875,11 @@ def noleak_gate_build(n):
         if r is None:
             raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
         require_strict_judges(n, bug, r["verdicts"])
-        if r["label"] == "missed" and any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
+        if r["label"] == "missed" and any(not (v.get("rationale") or "").strip()
+                                          or (v.get("confidence") or "").lower() not in ("high", "medium", "low")
+                                          for v in r["verdicts"]):
             # Malformed, not evidence: the verdict must be rejudged before the gate can run.
-            raise SystemExit(f"{bug}: a round {n} missed verdict has no rationale; rejudge it")
+            raise SystemExit(f"{bug}: a round {n} missed verdict lacks a rationale or a valid confidence; rejudge it")
         records[bug] = r
     for bug, r in records.items():
         if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
@@ -926,8 +933,9 @@ def noleak_gate_collect(n):
         r = next(x for x in noleak_record(bug)["rounds"] if x["round"] == n)
         if r["label"] != "missed":
             results[bug] = {"pass": False, "gate": "leak", "why": f"leak label {r['label']}"}
-        elif any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
-            raise SystemExit(f"{bug}: a round {n} missed verdict has no rationale; rejudge it")
+        elif any(not (v.get("rationale") or "").strip()
+                 or (v.get("confidence") or "").lower() not in ("high", "medium", "low") for v in r["verdicts"]):
+            raise SystemExit(f"{bug}: a round {n} missed verdict lacks a rationale or a valid confidence; rejudge it")
         elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             results[bug] = {"pass": False, "gate": "leak", "why": "a missed verdict below high confidence: " +
                             ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
