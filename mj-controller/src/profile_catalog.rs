@@ -1730,7 +1730,8 @@ impl ProfileCatalog {
     }
 
     /// The efforts profile `id` offers for `model` when a completed discovery
-    /// already holds them, including a confirmed empty list; `None` is
+    /// of that model, or of the default model it is, already holds them,
+    /// including a confirmed empty list; `None` is
     /// unknown. Never starts a probe. Muse is always unknown: its catalogue is
     /// read live because the service changes it, so a retained answer can be
     /// stale.
@@ -1744,11 +1745,18 @@ impl ProfileCatalog {
         if profile.kind == HarnessKind::Muse {
             return None;
         }
-        match inner
+        let identity = profile.capabilities_key(id);
+        if let Some(Entry::Ready(choices)) = inner
             .entries
-            .get(&(profile.capabilities_key(id), Some(model.to_owned())))
+            .get(&(identity.clone(), Some(model.to_owned())))
         {
-            Some(Entry::Ready(choices)) => Some(choices.efforts.clone()),
+            return Some(choices.efforts.clone());
+        }
+        // The default entry's efforts are those of the default model.
+        match inner.entries.get(&(identity, None)) {
+            Some(Entry::Ready(choices)) if choices.model.as_deref() == Some(model) => {
+                Some(choices.efforts.clone())
+            }
             _ => None,
         }
     }

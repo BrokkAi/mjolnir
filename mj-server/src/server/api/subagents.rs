@@ -528,14 +528,8 @@ async fn resolve_model_profile_selection_from(
         if reviewer_source {
             let effort = match requirement {
                 EffortRequirement::Exact(requested) => {
-                    let choices = &candidate.candidate.choices;
-                    let known = if choices.model.as_deref() == Some(&candidate.model.value)
-                        && !choices.efforts.is_empty()
-                    {
-                        Some(choices.efforts.clone())
-                    } else {
-                        backend.cached_model_efforts(&candidate.profile_id, &candidate.model.value)
-                    };
+                    let known =
+                        backend.cached_model_efforts(&candidate.profile_id, &candidate.model.value);
                     if let Some(known) = known
                         && !known.iter().any(|choice| choice.value == requested)
                     {
@@ -1506,7 +1500,7 @@ mod tests {
         fn cached_model_efforts(
             &self,
             profile: &str,
-            _model: &str,
+            model: &str,
         ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
             match profile {
                 "cached-low" => Some(vec![mj_core::acp::SessionConfigChoice {
@@ -1516,7 +1510,16 @@ mod tests {
                 }]),
                 // A completed discovery that found no effort choices.
                 "cached-none" => Some(Vec::new()),
-                _ => None,
+                _ => self
+                    .candidates
+                    .offered
+                    .iter()
+                    .find(|candidate| candidate.profile_id == profile)
+                    .map(|candidate| &candidate.choices)
+                    .filter(|choices| {
+                        choices.model.as_deref() == Some(model) && !choices.efforts.is_empty()
+                    })
+                    .map(|choices| choices.efforts.clone()),
             }
         }
 
