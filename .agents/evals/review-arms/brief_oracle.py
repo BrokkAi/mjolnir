@@ -572,6 +572,7 @@ def noleak_state(bug, upto):
             if gate["pass"]:
                 return n, source, None
             previous = {"kind": "strict leak gate", "gate": gate.get("gate"), "why": gate["why"],
+                        "answers": gate.get("answers"),
                         "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale"),
                                      "confidence": v.get("confidence")} for v in leak["verdicts"]]}
             continue
@@ -677,6 +678,13 @@ def noleak_edit_collect(n):
     out_path = base.parent / "edit-results.json"
     if out_path.exists():
         raise SystemExit(f"{out_path} exists")
+    if STRICT:
+        # The registered strict editor is Opus/high on claude7; check each edit's producer.
+        for u in units:
+            producer = json.loads((base / "out" / f"task-{u['id']}.json").read_text()).get("producer") or {}
+            if (producer.get("profile"), (producer.get("config") or {}).get("model")) != ("claude7", "opus"):
+                raise SystemExit(f"{u['id']}: round {n} edit came from {producer.get('profile')}/"
+                                 f"{(producer.get('config') or {}).get('model')}, not claude7/opus")
     # Validate every unit before writing anything, so a failure leaves nothing half collected.
     recs = []
     for u in units:
@@ -955,6 +963,7 @@ def noleak_gate_collect(n):
             flagged = [causes[f"{bug}-{v['judge']}"] for v in r["verdicts"]
                        if causes[f"{bug}-{v['judge']}"].get("answer") != "no"]
             results[bug] = {"pass": not flagged, "gate": "cause",
+                            "answers": [causes[f"{bug}-{v['judge']}"].get("answer") for v in r["verdicts"]],
                             "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
         results[bug]["verdicts_sha256"] = verdicts_fingerprint(r)
     record = {"round": n, "results": results}
@@ -983,7 +992,16 @@ def noleak_publish(jobs_out):
             if "fidelity" in kind or "fact check" in kind:
                 cause = "fidelity (editor failure)"
             elif kind == "strict leak gate":
-                cause = previous.get("gate", "leak")
+                # Unresolved judgments fail retention but are not evidence that the complete fact
+                # cannot be stated without leaking; keep them apart from affirmative ones.
+                gate = previous.get("gate", "leak")
+                why = previous.get("why", "")
+                if gate == "leak" and why.startswith("a missed verdict below high confidence"):
+                    cause = "leak (unresolved: missed below high confidence)"
+                elif gate == "cause" and "yes" not in (previous.get("answers") or []):
+                    cause = "cause (unresolved: unclear answer)"
+                else:
+                    cause = gate
             else:
                 cause = "leak"
             excluded.append({"bug": bug, "after_round": done, "cause": cause, "last_check": previous})

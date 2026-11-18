@@ -281,6 +281,8 @@ def run_unit(batch_path, judge=None):
             raise RuntimeError(f"unit {tag} already has output from {made_on}/{made_by}, not "
                                f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
                                f"sessions/batch-{tag}.json aside to rerun it")
+        # The cached output matches this invocation, so any earlier invalid marker for it is stale.
+        (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
         return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
