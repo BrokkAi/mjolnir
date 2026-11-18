@@ -1658,7 +1658,7 @@ set -euxo pipefail
 {sysctl_setup}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates mold xfsprogs {packages}
+apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates xfsprogs {packages}
 {ebs_setup}
 {storage_setup}
 loginctl enable-linger ubuntu

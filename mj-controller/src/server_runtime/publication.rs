@@ -207,6 +207,7 @@ impl ViewerPublication {
             Some(ViewerRecordSelection {
                 ids: &self.dirty,
                 children: &self.children,
+                failed_launch_retries: &self.runtime.metadata.failed_launch_retries,
             }),
             &mut self.engines,
         );

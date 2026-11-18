@@ -128,14 +128,16 @@ mkdir -p -- "$directory"
 exec 9>"$directory/.mj-apply.lock"
 flock -w 5 9
 file="$directory/config.toml"
-actual=missing
-if [ -f "$file" ]; then actual=$(sha256sum -- "$file"); actual=${actual%% *}; fi
-[ "$actual" = "$expected" ] || exit 75
 temporary=$(mktemp "$directory/.config.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 cat > "$temporary"
 chmod 600 "$temporary"
+# Another launch may have applied this same policy since our inspection; the
+# outcome is already what we want, so that is not a conflict.
 if [ -f "$file" ] && cmp -s -- "$temporary" "$file"; then exit 0; fi
+actual=missing
+if [ -f "$file" ]; then actual=$(sha256sum -- "$file"); actual=${actual%% *}; fi
+[ "$actual" = "$expected" ] || exit 75
 mv -f -- "$temporary" "$file"
 "#;
 
@@ -312,5 +314,21 @@ mod tests {
             std::fs::read_to_string(first.config_directory.join("config.toml")).unwrap(),
             first.config_file.unwrap()
         );
+    }
+
+    // Hard-won: #1580: concurrent launches applying the same policy from one inspection failed the loser
+    #[test]
+    fn launches_applying_the_same_policy_from_one_inspection_both_succeed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executor = targets::ProcessExecutor;
+        let policy = "[gc]\nmax_total_size = '500GiB'\n".to_owned();
+        let file = shared_directory(temporary.path()).join("config.toml");
+        // Both launches inspected the host before either applied.
+        let inspection = cache(temporary.path(), None, policy.clone());
+        assert!(apply(&CacheHost::Local, &inspection, &executor).unwrap());
+        let inode = std::fs::metadata(&file).unwrap().ino();
+        assert!(apply(&CacheHost::Local, &inspection, &executor).unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), policy);
+        assert_eq!(std::fs::metadata(&file).unwrap().ino(), inode);
     }
 }

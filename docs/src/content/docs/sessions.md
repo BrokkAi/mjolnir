@@ -343,6 +343,8 @@ resume wizard, which lets you:
 
 Resume provisions a fresh target and restores the verified archive; it does not revive a stale container or instance in place. The wizard checks target compatibility before provisioning.
 
+A resumed container session runs on the image the destination target would give a new session of its project today: the project's image for that platform when one is assigned, otherwise the target's `image`, otherwise the default session image. It does not keep the image it was created with, even on the same target. Tools a project needs come from its [recipe](/project-environments/), which runs again on whatever image the session lands on; anything installed by hand inside the old container is not carried over.
+
 Cross-harness resume is supported. When the new profile uses a different harness, Mjolnir condenses the canonical transcript into a size-bounded handoff. The repository state and visible conversation survive, but harness-private implementation details do not become portable history.
 
 ### Resume from a script

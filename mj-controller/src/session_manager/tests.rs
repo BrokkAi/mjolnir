@@ -1380,7 +1380,7 @@ const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
 const FULL_DISK_RECOVERY_TEST_CHILD: &str = "MJ_TEST_FULL_DISK_RECOVERY_CHILD";
 pub(crate) const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 /// File in the relay root where the stdio relay child logs each request.
-const RELAY_REQUEST_LOG: &str = "requests.log";
+pub(super) const RELAY_REQUEST_LOG: &str = "requests.log";
 /// Makes the stdio relay child report an open harness session.
 const RELAY_SESSION_CONFIGURED: &str = "MJ_TEST_RELAY_SESSION_CONFIGURED";
 const CLEAR_MAILBOX_CONTROL: &str = "MJ_TEST_CLEAR_MAILBOX_CONTROL";
@@ -1437,6 +1437,11 @@ fn leased_relay_child_serves_stdio() {
             if PathBuf::from(&root).join("worker-unreachable").exists() {
                 return;
             }
+            if request.request.method_name() == "project_memory_transfer"
+                && PathBuf::from(&root).join("drop-project-memory").exists()
+            {
+                return;
+            }
             if matches!(
                 &request.request,
                 RelayRequest::Submit {
@@ -1486,6 +1491,13 @@ fn leased_relay_child_serves_stdio() {
                 state_digest,
             } = &request.request
             {
+                let blocked = PathBuf::from(&root).join("block-change-wait");
+                while blocked.exists() {
+                    if PathBuf::from(&root).join("worker-unreachable").exists() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 // Each connection to this fake is its own process, and only the
                 // session's own connection may open the relay journal. So this
                 // wait reports the relay as the controller named it and holds,
@@ -2067,6 +2079,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
 
     let result = connection
         .sync_project_memory(
+            &target.spec,
             &mj_core::config::Config::default(),
             tokio_util::sync::CancellationToken::new(),
         )
@@ -2098,6 +2111,21 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
                 .filter(|method| method.contains("project_memory"))
                 .collect::<Vec<_>>(),
             ["project_memory_transfer"]
+        );
+
+        // Hard-won: #1580: closing an abandoned memory connection panicked the checkpoint
+        std::fs::write(relay_root.path().join("drop-project-memory"), b"").unwrap();
+        connection
+            .sync_project_memory(
+                &target.spec,
+                &mj_core::config::Config::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("a memory connection lost mid-transfer is reported");
+        assert!(
+            connection.project_memory.is_some(),
+            "a lost memory connection must not disable memory"
         );
     }
 }
