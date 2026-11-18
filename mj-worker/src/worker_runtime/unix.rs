@@ -340,6 +340,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         .clone()
         .map(|policy| crate::observe::PolicyClient::new(policy, config.session_id.clone()))
         .transpose()?;
+    let instruction_role = crate::acp::InstructionRole::from_launch(&config);
     let acp_spec = LaunchSpec {
         operator_away,
         imported_logins: None,
@@ -377,6 +378,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             config.subagents.clone()
         },
         managed_subagent,
+        instruction_role,
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
@@ -2050,49 +2052,6 @@ async fn prepare_and_start_harness(
             relay.set_mailbox_delivery_mode(mode);
         }
     }
-    if config.project_memory.is_some()
-        && resume_session.is_none()
-        && config.harness != HarnessKind::Claude
-    {
-        let budget = preparation_step(
-            root,
-            status,
-            "project-memory",
-            LOCAL_PREPARATION_STEP_TIMEOUT,
-            cancel,
-        )
-        .await?;
-        let memory = config.project_memory.clone();
-        let relay = relay.clone();
-        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-            if step_cancel.is_cancelled() {
-                bail!("preparation cancelled before loading project memory");
-            }
-            let should_install = relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .operational_state()
-                .native_session_id
-                .is_none();
-            if should_install && let Some(memory) = memory {
-                let store = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
-                let text = mj_core::project_memory::startup_prompt_context(
-                    &store,
-                    &memory.repository_roots,
-                )?;
-                if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before installing project memory");
-                }
-                relay
-                    .lock()
-                    .expect("relay state lock poisoned")
-                    .install_prompt_context(text)?;
-            }
-            Ok(())
-        })
-        .await?;
-    }
-
     if config.prepares_review() {
         let budget = preparation_step(
             root,

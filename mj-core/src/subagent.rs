@@ -1106,6 +1106,12 @@ pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// Per-task directory note; the standing role contract travels separately.
+#[must_use]
+pub fn report_directory_note(report_dir: &str) -> String {
+    format!("Your report directory is {report_dir}.")
+}
+
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
 /// showed children skipping it. `report_dir` is the directory Mjolnir created
@@ -1720,6 +1726,12 @@ const HANDBACK_NOTE_OPENING: &str = "You are a Mjolnir sub-agent. ";
 #[must_use]
 pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<String> {
     let mut task = initial_prompt;
+    if let Some(rest) = report_dir.and_then(|directory| {
+        task.strip_prefix(report_directory_note(directory).as_str())
+            .and_then(|rest| rest.strip_prefix("\n\n"))
+    }) {
+        task = rest;
+    }
     if let Some(rest) = report_dir.and_then(|directory| {
         task.strip_prefix(handback_prompt_note(directory).as_str())
             .and_then(|rest| rest.strip_prefix("\n\n"))
@@ -2823,6 +2835,14 @@ mod tests {
         );
         assert_eq!(
             task_summary(&prompt, Some(report_dir)).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        let assignment = format!(
+            "{}\n\nFix the parser.\nKeep the tests green.\n\n<parent_context>\nprivate\n</parent_context>",
+            report_directory_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&assignment, Some(report_dir)).as_deref(),
             Some("Fix the parser. Keep the tests green.")
         );
         // Without the recorded directory the note is still recognised.

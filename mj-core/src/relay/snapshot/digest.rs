@@ -324,6 +324,11 @@ mod outcome_tests {
     // Preserve the exact historical wire names independently of the new enum.
     #[allow(clippy::enum_variant_names)]
     enum OldObservation {
+        AgentInitialized {
+            protocol_version: agent_client_protocol::schema::ProtocolVersion,
+            capabilities: Box<agent_client_protocol::v1::schema::AgentCapabilities>,
+            agent_info: Option<agent_client_protocol::v1::schema::Implementation>,
+        },
         HarnessTurnSettled {
             origin: Option<String>,
             prompt_in_flight: bool,
@@ -353,6 +358,11 @@ mod outcome_tests {
     fn pre_classification_journals_keep_their_original_digest_in_both_formats() {
         for format in [RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2] {
             for old in [
+                OldObservation::AgentInitialized {
+                    protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
+                    capabilities: Box::default(),
+                    agent_info: None,
+                },
                 OldObservation::HarnessTurnSettled {
                     origin: None,
                     prompt_in_flight: false,
@@ -390,6 +400,12 @@ mod outcome_tests {
                     command_id: Some("opaque".into()),
                     observation: serde_json::from_str(&raw).unwrap(),
                 };
+                // Hard-won: ef6c07081: a new ACP capability changed protocol-71 event digests.
+                if let RelayObservation::AgentInitialized { capabilities, .. } =
+                    &mut event.observation
+                {
+                    capabilities.session_capabilities.system_prompt = Some(Default::default());
+                }
                 event.digest = relay_event_digest_over(&event, &old).unwrap();
                 assert_eq!(serde_json::to_string(&event.observation).unwrap(), raw);
                 validate_relay_event_self(&event).unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use agent_client_protocol::v1::schema::SystemPrompt;
 use std::path::Path;
 
 /// One observed identity shared by credential installation and prompt dispatch.
@@ -69,29 +70,36 @@ impl ClaudeLoginIdentity {
     }
 }
 
-#[cfg(unix)]
-pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
+/// A canceled filesystem operation must not hold Tokio shutdown.
+pub(super) async fn file_read_off_runtime<T: Send + 'static>(
+    name: &'static str,
+    read: impl FnOnce() -> Result<T> + Send + std::panic::UnwindSafe + 'static,
+) -> Result<T> {
     let (completed, result) = oneshot::channel();
-    // A cancelled file read cannot be interrupted. Keep this read-only thread
-    // outside Tokio's pool, whose shutdown waits for even cancelled blocking
-    // jobs. Dropping its handle lets the worker exit if the filesystem stalls.
+    // Dropping this handle deliberately does not join a stalled filesystem.
+    // Results and panics are reported even if the async caller has stopped.
     let _reader = std::thread::Builder::new()
-        .name("claude-login-read".into())
+        .name(name.into())
         .spawn(move || {
-            let read = std::panic::catch_unwind(|| {
-                let (_, bytes) =
-                    mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
-                Ok(mj_core::credentials::claude_access_token_fingerprint(
-                    &bytes,
-                ))
-            });
-            let read = read.unwrap_or_else(|_| Err(anyhow!("Claude login reader panicked")));
+            let read =
+                std::panic::catch_unwind(read).unwrap_or_else(|_| Err(anyhow!("{name} panicked")));
             if let Err(Err(error)) = completed.send(read) {
-                tracing::warn!(%error, "Claude login read failed after its caller stopped");
+                tracing::warn!(%error, reader = name, "filesystem operation failed after its caller stopped");
             }
         })
-        .context("start Claude login reader")?;
-    result.await.context("read Claude login identity")?
+        .with_context(|| format!("start {name}"))?;
+    result.await.with_context(|| format!("receive {name}"))?
+}
+
+#[cfg(unix)]
+pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
+    file_read_off_runtime("claude-login-read", move || {
+        let (_, bytes) = mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
+        Ok(mj_core::credentials::claude_access_token_fingerprint(
+            &bytes,
+        ))
+    })
+    .await
 }
 
 /// The worker's sub-agent socket and the `mj-agents` role it backs: a parent
@@ -144,6 +152,7 @@ pub struct LaunchSpec {
     pub subagent_policy: mj_core::subagent::SubagentPolicy,
     /// This session belongs to another Mjolnir session, independently of its MCP role.
     pub managed_subagent: bool,
+    pub instruction_role: Option<InstructionRole>,
     /// Private Mjolnir socket: parent delegation or child handback.
     pub subagent_mcp_socket: Option<SubagentMcpSocket>,
     /// The supervisor spec the bridge command reads, when this launch has
@@ -732,14 +741,51 @@ impl SessionDirectories {
     }
 }
 
+/// Keep vendor prompt shapes at the ACP request boundary.
+#[derive(Clone)]
+pub(super) enum SystemPromptAppend {
+    Standard(SystemPrompt),
+    Antigravity(String),
+}
+
+fn system_prompt_parameters(
+    mut meta: Option<serde_json::Map<String, serde_json::Value>>,
+    prompt: Option<SystemPromptAppend>,
+) -> (
+    Option<serde_json::Map<String, serde_json::Value>>,
+    Option<SystemPrompt>,
+) {
+    match prompt {
+        Some(SystemPromptAppend::Standard(prompt)) => (meta, Some(prompt)),
+        Some(SystemPromptAppend::Antigravity(text)) => {
+            let vendor = meta
+                .get_or_insert_with(Default::default)
+                .entry("antigravity")
+                .or_insert_with(|| serde_json::json!({}));
+            vendor
+                .as_object_mut()
+                .expect("Antigravity metadata must be an object")
+                .insert("systemPrompt".into(), serde_json::json!({"append":text}));
+            (meta, None)
+        }
+        None => (meta, None),
+    }
+}
+
 pub(super) fn new_session_request(
     spec: &LaunchSpec,
     directories: &[PathBuf],
     include_history_tools: bool,
+    system_prompt: Option<SystemPromptAppend>,
 ) -> NewSessionRequest {
+    let (meta, system_prompt) = system_prompt_parameters(
+        session_request_meta(spec, include_history_tools),
+        system_prompt,
+    );
     let request = NewSessionRequest::new(spec.cwd.clone())
+        .system_prompt(system_prompt)
         .additional_directories(directories.to_vec())
-        .meta(session_request_meta(spec, include_history_tools));
+        .meta(meta);
     request.mcp_servers(session_mcp(spec, include_history_tools))
 }
 
@@ -747,8 +793,12 @@ pub(super) fn load_session_request(
     spec: &LaunchSpec,
     directories: &[PathBuf],
     session_id: SessionId,
+    system_prompt: Option<SystemPromptAppend>,
 ) -> LoadSessionRequest {
+    let (meta, system_prompt) =
+        system_prompt_parameters(session_request_meta(spec, true), system_prompt);
     LoadSessionRequest::new(session_id, spec.cwd.clone())
+        .system_prompt(system_prompt)
         .additional_directories(directories.to_vec())
         // The servers Mjolnir owns travel on every launch, because a bridge
         // that opens the session again is a new harness process: Codex builds
@@ -756,18 +806,22 @@ pub(super) fn load_session_request(
         // it was not given (#1085). Replay filtering belongs to the notification
         // handler; omitting history here removes its tools after restart.
         .mcp_servers(session_mcp(spec, true))
-        .meta(session_request_meta(spec, true))
+        .meta(meta)
 }
 
 pub(super) fn resume_session_request(
     spec: &LaunchSpec,
     directories: &[PathBuf],
     session_id: SessionId,
+    system_prompt: Option<SystemPromptAppend>,
 ) -> ResumeSessionRequest {
+    let (meta, system_prompt) =
+        system_prompt_parameters(session_request_meta(spec, true), system_prompt);
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
+        .system_prompt(system_prompt)
         .additional_directories(directories.to_vec())
         .mcp_servers(session_mcp(spec, true))
-        .meta(session_request_meta(spec, true))
+        .meta(meta)
 }
 
 /// Settings captured from the old native conversation before retiring it.

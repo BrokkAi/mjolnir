@@ -6,21 +6,6 @@ the repository, of the kind a code-graph tool computes. The reviewer will
 judge the change; your job is to give them facts they would otherwise have to
 look up.
 
-## The change
-
-The repository in your working directory holds the change. Each repository's
-captured change is the difference between two Git trees. Read it with the
-exact command given for that repository, and read the rest of the repository
-as you need:
-
-{diff_commands}
-
-The request that led to the change, from the person who made it:
-
-<user_task>
-{task}
-</user_task>
-
 ## What to write
 
 Hand back the brief as the complete text of a single handback call, in this

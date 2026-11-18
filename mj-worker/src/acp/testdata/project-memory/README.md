@@ -1,0 +1,3 @@
+Recorded pinned-adapter initialize, session/new and session/resume responses from the live compaction probes. Reused from the superseded memory worktree; no compaction notifications or re-send implementation is included. Versions are recorded in each initialize response.
+
+Claude is source-derived, not a live recording: @agentclientprotocol/claude-agent-acp 0.108.0 dist/v1/acp-agent.js:525–575 advertises standard systemPrompt; dist/client-system-prompt.js:15–39 validates append text and maps it to the Claude Code preset append. Open replies are minimal schema-valid lifecycle responses with the auto/default permission modes. Live Claude marker acceptance remains parent-owned Milestone 3.

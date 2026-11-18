@@ -10,10 +10,6 @@ use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, SessionState, new_session_id};
 use mj_core::subagent::SubagentRecord;
 
-/// What the oracle is told before its first question. The handback variant
-/// names the tool only for a harness that gives it to children.
-pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to another coding agent, the primary, which works in this workspace. The primary consults you before decisions it is unsure about. Each question includes the decision, the options and the evidence.\n\nDo not change anything. Do not edit, create or delete files in the workspace, do not change git state, and do not run builds, tests, installs or other commands that write files. Read files, search, and run read-only commands such as git log, git show, git diff and grep. You may write notes only in your report directory.\n\nCheck the primary's claims against the code. Answer with: your recommendation; the requirements the choice must satisfy and whether each option meets them; the evidence, with file:line references; what would fail if your recommendation were wrong; and what you could not verify. Say \"confirmed\", \"likely\" or \"unknown\" according to the evidence. Disagree with the primary when the evidence points the other way. If the question lacks what you need, say what is missing.\n\nSend each answer with the handback tool; Mjolnir delivers it to the primary. Later questions arrive as messages in this conversation, so you keep your earlier context.";
-
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
     pub no_github_credentials: bool,
@@ -427,38 +423,15 @@ impl Controller {
             .report_root
             .as_deref()
             .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
-        // The first prompt names the tool only when the child will have it.
-        let initial_prompt = match (handback_tool, &report_dir) {
-            (true, Some(report_dir)) if reviewer => format!(
-                "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
-                mj_core::subagent::SubagentKind::Reviewer.max_handback_chars(),
-                request.initial_prompt
-            ),
-            (_, report_dir) if oracle => {
-                let instructions = if handback_tool {
-                    ORACLE_INSTRUCTIONS.to_owned()
-                } else {
-                    ORACLE_INSTRUCTIONS.replace(
-                        "Send each answer with the handback tool; Mjolnir delivers it to the primary.",
-                        "Send each answer as your last message; Mjolnir delivers it to the primary.",
-                    )
-                };
-                let directory_note = report_dir
-                    .as_ref()
-                    .map(|dir| format!("Your report directory is {dir}.\n\n"))
-                    .unwrap_or_default();
-                format!(
-                    "{directory_note}{instructions} Your answer may contain up to {} characters.\n\n{}",
-                    mj_core::subagent::SubagentKind::Oracle.max_handback_chars(),
-                    request.initial_prompt
-                )
-            }
-            (true, Some(report_dir)) => format!(
+        // The assignment and directory are per-task data; standing role policy
+        // is composed by the worker from the durable subagent record.
+        let initial_prompt = match &report_dir {
+            Some(report_dir) => format!(
                 "{}\n\n{}",
-                mj_core::subagent::handback_prompt_note(report_dir),
+                mj_core::subagent::report_directory_note(report_dir),
                 request.initial_prompt
             ),
-            _ => request.initial_prompt,
+            None => request.initial_prompt,
         };
         let relation = SubagentRecord {
             kind: request.kind,

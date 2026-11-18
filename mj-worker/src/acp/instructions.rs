@@ -1,0 +1,385 @@
+//! Standing session instructions, composed once and delivered before every native open.
+use super::*;
+use agent_client_protocol::v1::schema::SystemPrompt;
+use std::path::Path;
+
+#[derive(Debug, Clone, Copy)]
+pub enum InstructionRole {
+    Worker,
+    Oracle,
+    Reviewer,
+    BriefWriter,
+}
+
+impl InstructionRole {
+    pub(crate) fn from_launch(config: &mj_core::worker_launch::WorkerLaunchConfig) -> Option<Self> {
+        use mj_core::{subagent::SubagentKind, worker_launch::ReviewChildRole};
+        config.subagent_kind.map(|kind| match kind {
+            SubagentKind::Worker => Self::Worker,
+            SubagentKind::Oracle => Self::Oracle,
+            SubagentKind::Reviewer => {
+                match config.reviewer_launch.as_ref().map(|review| review.role) {
+                    Some(ReviewChildRole::BriefWriter) => Self::BriefWriter,
+                    _ => Self::Reviewer,
+                }
+            }
+        })
+    }
+}
+
+pub(super) async fn compose(
+    spec: &LaunchSpec,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<String> {
+    let mut sections = Vec::new();
+    if spec.harness != HarnessKind::Claude
+        && let Some(memory) = spec.project_memory.clone()
+    {
+        let root = memory.root.clone();
+        let index = file_read_off_runtime("project-memory-read", move || {
+            mj_core::project_memory::ProjectMemoryStore::new(root).startup_index()
+        })
+        .await;
+        let index = index
+            .map(|contents| contents.unwrap_or_default())
+            .map_err(|error| format!("{error:#}"));
+        if let Err(reason) = &index {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::Warning {
+                    message: format!(
+                        "Project memory index {} unavailable: {reason}",
+                        memory
+                            .root
+                            .join(mj_core::project_memory::MEMORY_INDEX)
+                            .display()
+                    ),
+                },
+            )
+            .await?;
+        }
+        sections.push(mj_core::project_memory::compose_startup_prompt_context(
+            &memory.root,
+            &memory.repository_roots,
+            index.as_deref().map_err(String::as_str),
+        ));
+    }
+    if let Some(socket) = &spec.subagent_mcp_socket {
+        let review_role = match spec.instruction_role {
+            Some(InstructionRole::Reviewer) => {
+                Some(mj_core::worker_launch::ReviewChildRole::Reviewer)
+            }
+            Some(InstructionRole::BriefWriter) => {
+                Some(mj_core::worker_launch::ReviewChildRole::BriefWriter)
+            }
+            _ => None,
+        };
+        sections.push(
+            crate::subagent_mcp::standing_instructions(socket.role, spec.harness, review_role)
+                .to_owned(),
+        );
+        if socket.review_tools {
+            sections.push(crate::subagent_mcp::review_instructions(socket.role).to_owned());
+        }
+    }
+    if spec
+        .project_memory
+        .as_ref()
+        .is_some_and(|memory| memory.history_socket.is_some())
+    {
+        sections.push(crate::memory_mcp::GUIDANCE.to_owned());
+    }
+    match spec.instruction_role {
+        Some(InstructionRole::Worker) => {
+            let has_handback = spec
+                .subagent_mcp_socket
+                .as_ref()
+                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child);
+            sections.push("When your assignment needs the result of a build, test or other long command, wait for it to finish: a long wait is not a reason to hand back.".into());
+            if !has_handback {
+                sections.push(format!(
+                    "Finish every task with your full report as your last message. {}",
+                    mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
+                ));
+            }
+        }
+        Some(InstructionRole::Oracle) => {
+            let instructions = if spec
+                .subagent_mcp_socket
+                .as_ref()
+                .is_some_and(|socket| socket.role == mj_core::subagent::SubagentMcpRole::Child)
+            {
+                ORACLE_INSTRUCTIONS.to_owned()
+            } else {
+                ORACLE_INSTRUCTIONS.replace(
+                    "Send each answer with the handback tool; Mjolnir delivers it to the primary.",
+                    "Send each answer as your last message; Mjolnir delivers it to the primary.",
+                )
+            };
+            sections.push(format!(
+                "{instructions} Your answer may contain up to {} characters.",
+                mj_core::subagent::SubagentKind::Oracle.max_handback_chars()
+            ));
+        }
+        Some(InstructionRole::Reviewer) => {
+            sections.push(mj_review::lanes::CODEX_REVIEW_RUBRIC.to_owned())
+        }
+        Some(InstructionRole::BriefWriter) => {
+            sections.push(mj_review::lanes::BRIEF_WRITER_INSTRUCTIONS.to_owned())
+        }
+        None => {}
+    }
+    if let Some(directory) = spec
+        .environment
+        .get(mj_core::subagent::CHILD_REPORT_DIR_ENV)
+    {
+        sections.push(mj_core::subagent::report_directory_note(directory));
+    }
+    Ok(sections.join("\n\n"))
+}
+
+pub(super) async fn deliver(
+    spec: &LaunchSpec,
+    capabilities: &agent_client_protocol::v1::schema::AgentCapabilities,
+    adapter_version: Option<&str>,
+    text: String,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<Option<SystemPromptAppend>> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let native_file = matches!(
+        spec.harness,
+        HarnessKind::Kimi | HarnessKind::OpenCode | HarnessKind::Grok
+    );
+    if !native_file && capabilities.session_capabilities.system_prompt.is_some() {
+        return Ok(Some(SystemPromptAppend::Standard(SystemPrompt::new(vec![
+            ContentBlock::from(text),
+        ]))));
+    }
+    if spec.harness == HarnessKind::Antigravity
+        && capabilities
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("antigravity"))
+            .and_then(|meta| meta.pointer("/systemPrompt/append"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Ok(Some(SystemPromptAppend::Antigravity(text)));
+    }
+    if !native_file {
+        emit_runtime_event(events, RuntimeEvent::Warning {
+            message: format!("{} adapter {} does not advertise a persistent instruction channel. Mjolnir's standing instructions and project memory could not be delivered. Updating the adapter fixes this.", spec.harness.display_name(), adapter_version.unwrap_or("(unknown version)")),
+        }).await?;
+        return Ok(None);
+    }
+    // No user-home fallback: this explicit environment names the session's staged copy.
+    let variable = spec.harness.home_env();
+    let home = spec
+        .environment
+        .get(variable)
+        .with_context(|| format!("session instruction delivery requires staged {variable}"))?;
+    let path = spec
+        .harness
+        .home_from_environment(home)
+        .join(spec.harness.agent_instructions_file());
+    // One worker owns one staged instruction file. Move the write lease into
+    // the I/O thread so a canceled open cannot let a replacement overtake it.
+    let lease = NATIVE_FILE_WRITE.clone().lock_owned().await;
+    file_read_off_runtime(
+        "session-instructions-write",
+        std::panic::AssertUnwindSafe(move || {
+            let _lease = lease;
+            replace_native_section(&path, &text)
+        }),
+    )
+    .await?;
+    Ok(None)
+}
+
+static NATIVE_FILE_WRITE: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+const SECTION_START: &[u8] = b"\n<!-- mj-session-instructions:start -->\n";
+const SECTION_END: &[u8] = b"\n<!-- mj-session-instructions:end -->\n";
+
+fn marker(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn replace_native_section(path: &Path, text: &str) -> Result<()> {
+    // Staging dereferences profile links. Refuse an unexpected link instead of
+    // modifying a file outside the session home.
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "staged instruction file {} is a symlink",
+            path.display()
+        );
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read staged instructions {}", path.display()));
+        }
+    };
+    let (before, after) = match (marker(&bytes, SECTION_START), marker(&bytes, SECTION_END)) {
+        (None, None) => (bytes.as_slice(), &[][..]),
+        (Some(start), Some(end)) if end >= start + SECTION_START.len() => {
+            let after = &bytes[end + SECTION_END.len()..];
+            ensure!(
+                marker(after, SECTION_START).is_none() && marker(after, SECTION_END).is_none(),
+                "multiple Mjolnir instruction sections in {}",
+                path.display()
+            );
+            (&bytes[..start], after)
+        }
+        _ => bail!(
+            "incomplete Mjolnir instruction section in {}",
+            path.display()
+        ),
+    };
+    let parent = path
+        .parent()
+        .context("staged instruction file has no directory")?;
+    let mut replacement =
+        tempfile::NamedTempFile::new_in(parent).context("stage session instructions")?;
+    use std::io::Write;
+    replacement.write_all(before)?;
+    replacement.write_all(SECTION_START)?;
+    replacement.write_all(text.as_bytes())?;
+    replacement.write_all(SECTION_END)?;
+    replacement.write_all(after)?;
+    replacement
+        .persist(path)
+        .with_context(|| format!("install staged instructions {}", path.display()))?;
+    Ok(())
+}
+
+/// What the oracle is told before its first question. The handback variant
+/// names the tool only for a harness that gives it to children.
+const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only advisor to another coding agent, the primary, which works in this workspace. The primary consults you before decisions it is unsure about. Each question includes the decision, the options and the evidence.\n\nDo not change anything. Do not edit, create or delete files in the workspace, do not change git state, and do not run builds, tests, installs or other commands that write files. Read files, search, and run read-only commands such as git log, git show, git diff and grep. You may write notes only in your report directory.\n\nCheck the primary's claims against the code. Answer with: your recommendation; the requirements the choice must satisfy and whether each option meets them; the evidence, with file:line references; what would fail if your recommendation were wrong; and what you could not verify. Say \"confirmed\", \"likely\" or \"unknown\" according to the evidence. Disagree with the primary when the evidence points the other way. If the question lacks what you need, say what is missing.\n\nSend each answer with the handback tool; Mjolnir delivers it to the primary. Later questions arrive as messages in this conversation, so you keep your earlier context.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_core::subagent::SubagentMcpRole;
+
+    #[tokio::test]
+    async fn session_instructions_native_files_replace_only_the_owned_section() {
+        for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
+            let temp = tempfile::tempdir().unwrap();
+            let (events, _rx) = mpsc::channel(256);
+            let mut spec = super::super::tests::reload_fallback_spec(harness);
+            let home = harness.home_from_environment(temp.path());
+            std::fs::create_dir_all(&home).unwrap();
+            spec.environment.insert(
+                harness.home_env().into(),
+                temp.path().to_string_lossy().into(),
+            );
+            let path = home.join(harness.agent_instructions_file());
+            // Arbitrary pre-existing bytes, including non-UTF-8 and large profiles,
+            // belong to the user and must survive both installation and replacement.
+            let mut prefix = vec![b'x'; 70_000];
+            prefix.extend_from_slice(b"\r\nuser instructions\xff");
+            std::fs::write(&path, &prefix).unwrap();
+            deliver(
+                &spec,
+                &Default::default(),
+                None,
+                "first index".into(),
+                &events,
+            )
+            .await
+            .unwrap();
+            let mut first = prefix.clone();
+            first.extend_from_slice(SECTION_START);
+            first.extend_from_slice(b"first index");
+            first.extend_from_slice(SECTION_END);
+            assert_eq!(std::fs::read(&path).unwrap(), first);
+            let suffix = b"user additions\r\n\xfe";
+            first.extend_from_slice(suffix);
+            std::fs::write(&path, &first).unwrap();
+            deliver(
+                &spec,
+                &Default::default(),
+                None,
+                "updated index".into(),
+                &events,
+            )
+            .await
+            .unwrap();
+            let mut expected = prefix;
+            expected.extend_from_slice(SECTION_START);
+            expected.extend_from_slice(b"updated index");
+            expected.extend_from_slice(SECTION_END);
+            expected.extend_from_slice(suffix);
+            assert_eq!(std::fs::read(&path).unwrap(), expected, "{harness:?}");
+            deliver(
+                &spec,
+                &Default::default(),
+                None,
+                "updated index".into(),
+                &events,
+            )
+            .await
+            .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), expected, "{harness:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn golden_session_instructions_by_durable_role() {
+        for (name, role) in [
+            ("parent", None),
+            ("child", Some(InstructionRole::Worker)),
+            ("reviewer", Some(InstructionRole::Reviewer)),
+            ("brief-writer", Some(InstructionRole::BriefWriter)),
+            ("oracle", Some(InstructionRole::Oracle)),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                temp.path().join("MEMORY.md"),
+                "# Memory index\n- build.md — build notes\n",
+            )
+            .unwrap();
+            let mut spec = super::super::tests::reload_fallback_spec(HarnessKind::Codex);
+            spec.instruction_role = role;
+            spec.project_memory = Some(ProjectMemoryLaunchConfig {
+                root: temp.path().into(),
+                baseline_root: "/baseline".into(),
+                project_key: "golden".into(),
+                repository_roots: BTreeMap::new(),
+                history_socket: Some("/worker/history.sock".into()),
+                mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+            });
+            spec.subagent_mcp_socket = Some(SubagentMcpSocket {
+                path: "/worker/subagents.sock".into(),
+                role: if role.is_none() {
+                    SubagentMcpRole::Parent
+                } else {
+                    SubagentMcpRole::Child
+                },
+                agent_mailboxes_enabled: true,
+                subtle_subagents: true,
+                review_tools: matches!(role, None | Some(InstructionRole::Worker)),
+                profile_registration: false,
+            });
+            let (events, _rx) = mpsc::channel(256);
+            let text = compose(&spec, &events)
+                .await
+                .unwrap()
+                .replace(&*temp.path().to_string_lossy(), "/memory");
+            mj_core::golden::assert_golden(
+                env!("CARGO_MANIFEST_DIR"),
+                &format!("session-instructions-{name}"),
+                &text,
+            );
+        }
+    }
+}

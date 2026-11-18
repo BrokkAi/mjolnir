@@ -696,6 +696,7 @@ impl PlanProbe {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,

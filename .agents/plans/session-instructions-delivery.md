@@ -14,14 +14,25 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-18) Saved superseded implementation as local reference `a77d745ae`; committed this plan first at `aa5c0fa00`. The old worktree is read-only.
+- [x] (2026-11-18) Verified per-session native file copies and existing durable role facts before implementing.
+- [x] (2026-11-18) Implemented unified composition, standard/vendor append, native owned-section replacement, and removal of startup/clear user-memory installation; targeted tests passed.
+- [x] (2026-11-18) Routed MCP/role/rubric guidance through composition and removed it from MCP initialization and assignment prefixes; targeted tests passed.
+
 - [x] (2026-11-18) Reconnaissance, live harness traces and an instruction audit (evidence summarised in Context and Orientation; full reports are listed in Artifacts and Notes).
 - [x] (2026-11-18) Design decisions taken with the user (Decision Log).
-- [ ] Milestone 1: composer and delivery owner, with project memory as the first section; remove the first-prompt memory block.
-- [ ] Milestone 2: move the MCP servers' guidance and the standing parts of sub-agent first prompts into the composer.
+- [x] (2026-11-18) Milestone 1: composer and delivery owner, with project memory as the first section; remove the first-prompt memory block.
+- [x] (2026-11-18) Milestone 2: move the MCP servers' guidance and the standing parts of sub-agent first prompts into the composer.
 - [ ] Milestone 3: live acceptance on every harness in an isolated instance.
 
 
 ## Surprises & Discoveries
+
+- Moving first-prompt prefixes also affects persisted child task summaries. Their reader now strips the shared directory-only note while retaining historical prefix support; the existing summary regression and isolated controller registration test pass.
+- Native instruction replacement is mutating I/O, unlike the reused memory/login reader. A worker-owned async write lease moves into the off-runtime thread and survives cancellation until atomic replacement finishes, preventing an older canceled open from overtaking a replacement.
+
+- Verified: all three native instruction files are session-owned copies. `stage_profile` includes `agent_instructions_file()` and `copy_profile_entry_within` follows source symlinks into copied bytes. `target_profile_home` is session-specific; `install_local_profile_stage` removes legacy profile symlinks and copies the stage. `shared_profile_login` links only the credential file. The worker resolves OpenCode's XDG parent using `home_from_environment`, and Kimi/Grok's direct homes from the explicit launch environment.
+- Verified: `WorkerLaunchConfig.subagent_kind` and `reviewer_launch.role` already carry durable child/oracle/reviewer/brief-writer facts at every launch. No new persisted role field is needed.
 
 - Observation: an earlier attempt (detached worktree `~/Projects/mjolnir-wt/memory-compaction`, commits `ef6c07081` and `cd79f2d22`, never pushed) re-sent the memory block as a user message after detecting each compaction for Kimi, OpenCode and Grok. It needed a durable relay slot, a relay snapshot revision bump, per-harness compaction recognisers and a background refresher. A later check showed all three harnesses keep their native instruction file through compaction, which makes all of that unnecessary. Reuse that worktree's system-prompt plumbing, recorded ACP fixtures and tests, and none of its re-send machinery.
   Evidence: Kimi 2.6.3 copies `AGENTS.md` into its system prompt when a session binds and supplies it separately from history on every provider request. OpenCode 2.2.7 renders its instruction baseline into a system part on every request (`session/model-request.ts:114–141`, `session/instruction-state.ts:159–168`) and advances that baseline when a compaction ends (`session/projector.ts:1118–1122`). Grok Build 1.0.89 re-inserts the initial native instruction snapshot after compaction: a marker that existed only in the staged `AGENTS.md` survived two real automatic compactions (27693→18824 and 40208→15415 tokens).
@@ -31,7 +42,18 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Decision Log
 
-- Decision: delivery channel per harness, decided once per session open from what the harness advertises: the standard ACP `sessionCapabilities.systemPrompt` (Claude, Codex, Muse, DSH); otherwise Antigravity's vendor capability `agentCapabilities._meta.antigravity.systemPrompt = {append: true}`, which takes a string at `_meta.antigravity.systemPrompt.append` on the open request; otherwise the harness's native instruction file (Kimi, OpenCode, Grok).
+- Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
+  Rationale: legacy shared Codex homes remain supported by `subagent_acp_mcp`; a capability-only file fallback could mutate shared files. Missing capabilities in older adapters must not prevent otherwise working sessions from opening.
+  Date/Author: 2026-11-18, parent agent after implementation safety check.
+
+- Decision: derive the worker's instruction role from existing `subagent_kind` and `reviewer_launch.role`; retain `ContextCleared.memory` and its historical reader while new workers always produce `None`; serialize `AgentInitialized` without the feature-gated capability to preserve protocol-71 digests.
+  Rationale: these existing launch facts already survive resume/move, and historical wire shapes must remain readable and hash-identical. No persisted field or relay revision changes are needed.
+  Date/Author: 2026-11-18, implementation following the settled compatibility constraints.
+- Decision: Claude lifecycle fixture is source-derived from the pinned 0.108.0 bridge rather than a live recording. The prepared probe remains at `/tmp/claude-session-instructions-probe.py` for the parent.
+  Rationale: automatic approval review rejected the credential-backed probe under the original no-Milestone-3 constraint. Parent explicitly directed source-derived coverage and reserved live Claude checking for Milestone 3.
+  Date/Author: 2026-11-18, parent agent.
+
+- Decision: Kimi, OpenCode and Grok use their session-owned native file. For the other five, select once per session open from what the harness advertises: the standard ACP `sessionCapabilities.systemPrompt` (Claude, Codex, Muse, DSH); otherwise Antigravity's vendor capability `agentCapabilities._meta.antigravity.systemPrompt = {append: true}`, which takes a string at `_meta.antigravity.systemPrompt.append` on the open request. An older adapter advertising neither receives the visible warning described above and opens without the composed instructions.
   Rationale: each channel was verified live to keep its content through compaction. Each harness has exactly one path.
   Date/Author: 2026-11-18, user ("Persistent where offered"; "Staged file; check memory too") and parent agent.
 - Decision: no compaction detection, no re-sending, no relay snapshot change.
@@ -53,18 +75,20 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Outcomes & Retrospective
 
-Not started.
+Milestones 1 and 2 are implemented. Recorded/source-derived ACP lifecycle coverage, native-file replacement, five role goldens, unavailable-index and shutdown regressions, MCP contracts, isolated controller registration, task-summary compatibility and relay digest checks pass. The four edited crates pass clippy; the worker-only final follow-up also passed and is recorded in `.agents/docs/session-instructions-validation.md`. The default instance was untouched. Milestone 3 remains parent-owned and unstarted; Claude live marker acceptance and Kimi quota-limited acceptance remain pending there.
 
 
 ## Context and Orientation
 
+Current implementation: `mj-worker/src/acp/instructions.rs` owns composition and delivery before `serve_session` opens a native session. It derives roles from existing durable launch facts, composes memory via `compose_startup_prompt_context`, and installs append text or a marked native-file section. `subagent_mcp` exposes guidance to that composer; the shared MCP transport no longer has an initialization-instructions field. `mj-review::lanes` exports the standing rubric/brief text and renders only task-specific packets. The paragraphs below describe the starting code and explain what was replaced.
+
 Terms. ACP (Agent Client Protocol) is the JSON-RPC protocol Mjolnir uses to drive every harness over stdio: `initialize` (the agent replies with its capabilities), then `session/new`, `session/load` (reopen with replay) or `session/resume` (reopen without replay), then `session/prompt` per user turn, with `session/update` notifications streaming back. The worker (`mj-worker`) is the per-session process that runs the harness; its ACP code is in `mj-worker/src/acp/`. The controller (`mj-controller`) prepares and launches workers. The "staged profile" is the per-session copy of the harness's home/config directory that the controller prepares at each worker launch; the harness's native instruction file in it is named by `HarnessKind::agent_instructions_file()` (`mj-core/src/config/harness.rs`, around line 776: `CLAUDE.md` for Claude, `AGENTS.md` for the others). The controller writes Mjolnir's environment and delegation text into it through `append_staged_instructions` (`mj-worker-staging/src/worker_binary/install.rs:125`), called from `mj-controller/src/controller/worker_launch.rs:267–286`.
 
-Project memory today. `mj_core::project_memory::startup_prompt_context` (`mj-core/src/project_memory.rs`, around line 1080) builds the block: a wrapper `<mj-project-memory>`, the guidance constant `MEMORY_GUIDANCE`, the memory directory path, root lines for multi-repository bundles, and the `MEMORY.md` index (capped by existing code at 200 lines / 25 KiB). `mj-worker/src/worker_runtime/unix.rs` (around lines 2053–2090) installs it as hidden context before the harness starts, for non-Claude sessions that are not resumed; `/clear` rebuilds it in `mj-worker/src/acp/session.rs` (around 724–746) and carries it in `RuntimeEvent::ContextCleared { memory }`, applied in `mj-core/src/relay/snapshot/apply.rs` around 1278. The hidden context goes out with the first prompt (`mj-worker/src/relay/commands.rs` around 1262; `mj-worker/src/worker_runtime/unix/dispatch.rs` around 1537; `mj-worker/src/acp.rs:125–177`).
+Project memory before implementation. `mj_core::project_memory::startup_prompt_context` (`mj-core/src/project_memory.rs`, around line 1080) builds the block: a wrapper `<mj-project-memory>`, the guidance constant `MEMORY_GUIDANCE`, the memory directory path, root lines for multi-repository bundles, and the `MEMORY.md` index (capped by existing code at 200 lines / 25 KiB). `mj-worker/src/worker_runtime/unix.rs` (around lines 2053–2090) installs it as hidden context before the harness starts, for non-Claude sessions that are not resumed; `/clear` rebuilds it in `mj-worker/src/acp/session.rs` (around 724–746) and carries it in `RuntimeEvent::ContextCleared { memory }`, applied in `mj-core/src/relay/snapshot/apply.rs` around 1278. The hidden context goes out with the first prompt (`mj-worker/src/relay/commands.rs` around 1262; `mj-worker/src/worker_runtime/unix/dispatch.rs` around 1537; `mj-worker/src/acp.rs:125–177`).
 
-MCP guidance today. `mj-worker/src/mcp_stdio.rs:129–135` returns `instructions` on MCP initialize. The texts: parent delegation and mailbox policy `SERVER_INSTRUCTIONS` and the Codex discovery suffix (`mj-worker/src/subagent_mcp.rs:16–37`), child instructions (`:39–44`, built from `HANDBACK_REPORT_RULES` in `mj-core/src/subagent.rs:1098–1120`), reviewer and brief-writer variants (`subagent_mcp.rs:442–489`), message-only and fetch-only variants (`:458–475`), review procedure (`:47–52`, `:1123–1144`), and history-search guidance (`mj-worker/src/memory_mcp/history.rs:12`, selected in `mj-worker/src/memory_mcp.rs:27`).
+MCP guidance before implementation. `mj-worker/src/mcp_stdio.rs:129–135` returns `instructions` on MCP initialize. The texts: parent delegation and mailbox policy `SERVER_INSTRUCTIONS` and the Codex discovery suffix (`mj-worker/src/subagent_mcp.rs:16–37`), child instructions (`:39–44`, built from `HANDBACK_REPORT_RULES` in `mj-core/src/subagent.rs:1098–1120`), reviewer and brief-writer variants (`subagent_mcp.rs:442–489`), message-only and fetch-only variants (`:458–475`), review procedure (`:47–52`, `:1123–1144`), and history-search guidance (`mj-worker/src/memory_mcp/history.rs:12`, selected in `mj-worker/src/memory_mcp.rs:27`).
 
-Sub-agent first prompts today. `mj-controller/src/controller/subagents.rs`: oracle role constant at line 15 and prompt at 437–453; reviewer prefix at 432–435; child prefix at 456–459. Review lanes build their prompt from `mj-review/templates/review_rubric.md`, `templates/brief_writer.md` and the packet in `mj-review/src/lanes.rs:154–194`. The reviewer first prefix asks for one output format and the reviewer MCP text for another; whichever the review consumer actually parses is correct, and the composed text must say only that.
+Sub-agent first prompts before implementation. `mj-controller/src/controller/subagents.rs`: oracle role constant at line 15 and prompt at 437–453; reviewer prefix at 432–435; child prefix at 456–459. Review lanes build their prompt from `mj-review/templates/review_rubric.md`, `templates/brief_writer.md` and the packet in `mj-review/src/lanes.rs:154–194`. The reviewer first prefix asks for one output format and the reviewer MCP text for another; whichever the review consumer actually parses is correct, and the composed text must say only that.
 
 ACP session opening. `mj-worker/src/acp/session.rs:160–360` sends `initialize` and opens the session through `new_session_request`, `load_session_request`, `resume_session_request` in `mj-worker/src/acp/launch.rs` (around 735–772). Resume is used when the agent advertises `sessionCapabilities.resume` and the session has no native sub-agents; otherwise load. A cleared session is opened through the same path.
 

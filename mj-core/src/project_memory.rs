@@ -1074,6 +1074,9 @@ pub fn truncate_startup_index(content: &str) -> String {
     output
 }
 
+pub const PROJECT_MEMORY_CONTEXT_START: &str = "<mj-project-memory>";
+pub const PROJECT_MEMORY_CONTEXT_END: &str = "</mj-project-memory>";
+
 pub const MEMORY_GUIDANCE: &str = "Persistent project memory is background context; verify it against current instructions and code. Keep one fact per Markdown file with frontmatter for name, description, and metadata.type. Add a one-line pointer to each file in MEMORY.md, update existing notes instead of duplicating them, and delete notes that are wrong.";
 
 pub fn startup_prompt_context(
@@ -1081,10 +1084,24 @@ pub fn startup_prompt_context(
     repository_roots: &BTreeMap<String, PathBuf>,
 ) -> Result<String> {
     let index = store.startup_index()?.unwrap_or_default();
+    Ok(compose_startup_prompt_context(
+        store.root(),
+        repository_roots,
+        Ok(&index),
+    ))
+}
+
+/// Compose guidance for both available and explicitly unavailable indexes.
+/// Reading the index belongs to the caller, never this formatter.
+pub fn compose_startup_prompt_context(
+    root: &Path,
+    repository_roots: &BTreeMap<String, PathBuf>,
+    index: std::result::Result<&str, &str>,
+) -> String {
     let mut context = vec![
-        "<mj-project-memory>".to_owned(),
+        PROJECT_MEMORY_CONTEXT_START.to_owned(),
         MEMORY_GUIDANCE.to_owned(),
-        format!("Project memory directory: {}", store.root().display()),
+        format!("Project memory directory: {}", root.display()),
     ];
     if repository_roots.len() > 1 {
         context.push("For this multi-root project, keep bundle-wide memories at the memory directory root and intentionally repository-specific notes under roots/<repository-id>/. Workspace roots:".into());
@@ -1095,14 +1112,14 @@ pub fn startup_prompt_context(
         );
     }
     context.push("<memory-index path=\"MEMORY.md\">".into());
-    if index.is_empty() {
-        context.push("(empty)".into());
-    } else {
-        context.push(index);
-    }
+    context.push(match index {
+        Ok("") => "(empty)".into(),
+        Ok(contents) => contents.to_owned(),
+        Err(reason) => format!("index unavailable: {reason}"),
+    });
     context.push("</memory-index>".into());
-    context.push("</mj-project-memory>".into());
-    Ok(context.join("\n"))
+    context.push(PROJECT_MEMORY_CONTEXT_END.into());
+    context.join("\n")
 }
 
 fn floor_char_boundary(text: &str, maximum: usize) -> usize {

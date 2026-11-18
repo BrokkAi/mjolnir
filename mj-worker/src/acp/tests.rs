@@ -58,6 +58,7 @@ for line in sys.stdin:
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
+                instruction_role: None,
                 subagent_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
@@ -185,6 +186,7 @@ for line in sys.stdin:
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
+                instruction_role: None,
                 subagent_mcp_socket: None,
                 clear_context_request: None,
                 context_restore: None,
@@ -337,6 +339,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -367,6 +370,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         &spec,
         &spec.additional_directories,
         true,
+        None,
     ))
     .unwrap();
     assert_eq!(
@@ -379,12 +383,14 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             &spec,
             &spec.additional_directories,
             SessionId::from("native"),
+            None,
         ))
         .unwrap(),
         serde_json::to_value(load_session_request(
             &spec,
             &spec.additional_directories,
             SessionId::from("native"),
+            None,
         ))
         .unwrap(),
     ] {
@@ -426,18 +432,21 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap(),
                 serde_json::to_value(resume_session_request(
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
                 serde_json::to_value(load_session_request(
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ] {
@@ -704,18 +713,21 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         &spec,
                         &spec.additional_directories,
                         true,
+                        None,
                     ))
                     .unwrap(),
                     serde_json::to_value(load_session_request(
                         &spec,
                         &spec.additional_directories,
                         SessionId::from("native"),
+                        None,
                     ))
                     .unwrap(),
                     serde_json::to_value(resume_session_request(
                         &spec,
                         &spec.additional_directories,
                         SessionId::from("native"),
+                        None,
                     ))
                     .unwrap(),
                 ] {
@@ -863,6 +875,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     false,
+                    None,
                 ))
                 .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
@@ -880,6 +893,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
@@ -908,6 +922,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     true,
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -917,6 +932,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -926,6 +942,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     &spec,
                     &spec.additional_directories,
                     SessionId::from("native"),
+                    None,
                 ))
                 .unwrap(),
             ),
@@ -1275,6 +1292,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -1365,6 +1383,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -1415,6 +1434,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         &spec,
         &spec.additional_directories,
         true,
+        None,
     ))
     .unwrap();
     assert_eq!(
@@ -1478,6 +1498,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
         clear_context_request: None,
         context_restore: None,
@@ -1627,6 +1648,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             stall_policy: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -2677,6 +2699,7 @@ async fn answer_to_ext_request(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -2883,6 +2906,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -3404,6 +3428,7 @@ async fn policy_is_enforced_before_session_is_reported(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -3684,6 +3709,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: plan.then(|| crate::acp::ContextReset {
@@ -3757,6 +3783,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -4040,6 +4067,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -4462,6 +4490,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5050,6 +5079,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5385,6 +5415,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5528,6 +5559,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -5625,6 +5657,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -5964,6 +5997,7 @@ mod terminals {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -6405,6 +6439,7 @@ for line in sys.stdin:
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -6587,6 +6622,7 @@ for line in sys.stdin:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
@@ -6753,6 +6789,7 @@ while True:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -6904,6 +6941,7 @@ while True:
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7014,6 +7052,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7099,6 +7138,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -7340,7 +7380,7 @@ async fn session_reload_rejecting_bridge(
     }
 }
 
-fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
+pub(super) fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
@@ -7348,6 +7388,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7434,6 +7475,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -7592,6 +7634,7 @@ fn missing_native_session_spec(
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -7981,6 +8024,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             stall_policy: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
+            instruction_role: None,
             subagent_mcp_socket: None,
             clear_context_request: None,
             context_restore: None,
@@ -8435,6 +8479,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -8844,6 +8889,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
+        instruction_role: None,
         subagent_mcp_socket: None,
         clear_context_request: None,
         context_restore: None,
@@ -9366,4 +9412,315 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
     }
     assert!(finished, "the turn finished before the reload");
     bridge.abort();
+}
+
+/// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.
+#[tokio::test]
+async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for (harness, recording) in [
+        (
+            HarnessKind::Kimi,
+            include_str!("testdata/project-memory/kimi-opens.jsonl"),
+        ),
+        (
+            HarnessKind::OpenCode,
+            include_str!("testdata/project-memory/opencode-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Grok,
+            include_str!("testdata/project-memory/grok-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Claude,
+            include_str!("testdata/project-memory/claude-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Codex,
+            include_str!("testdata/project-memory/codex-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Muse,
+            include_str!("testdata/project-memory/muse-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Dsh,
+            include_str!("testdata/project-memory/dsh-opens.jsonl"),
+        ),
+        (
+            HarnessKind::Antigravity,
+            include_str!("testdata/project-memory/antigravity-opens.jsonl"),
+        ),
+    ] {
+        let replies: BTreeMap<String, serde_json::Value> = recording
+            .lines()
+            .map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                (
+                    value["method"].as_str().unwrap().into(),
+                    value["result"].clone(),
+                )
+            })
+            .collect();
+        for phase in ["new", "load", "resume", "clear", "unreadable-load"] {
+            let resumed = matches!(
+                phase,
+                "load" | "resume" | "unreadable-load" | "unsupported-adapter"
+            );
+            let temp = tempfile::tempdir().unwrap();
+            let native_file = matches!(
+                harness,
+                HarnessKind::Kimi | HarnessKind::OpenCode | HarnessKind::Grok
+            );
+            if native_file && phase == "unsupported-adapter" {
+                continue;
+            }
+            let staged_home = harness.home_from_environment(temp.path().join("profile"));
+            std::fs::create_dir_all(&staged_home).unwrap();
+            let native_path = staged_home.join(harness.agent_instructions_file());
+            std::fs::write(&native_path, "user profile instructions\r\n").unwrap();
+            let mut spec = reload_fallback_spec(harness);
+            spec.environment.insert(
+                harness.home_env().into(),
+                temp.path().join("profile").to_string_lossy().into(),
+            );
+            spec.resume_session = resumed.then(|| "native".into());
+            spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::MessageOnly));
+            spec.project_memory = Some(ProjectMemoryLaunchConfig {
+                history_socket: None,
+                project_key: "test".into(),
+                root: temp.path().join("memory"),
+                baseline_root: temp.path().join("baseline"),
+                repository_roots: BTreeMap::new(),
+                mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+            });
+            let index = spec
+                .project_memory
+                .as_ref()
+                .unwrap()
+                .root
+                .join(mj_core::project_memory::MEMORY_INDEX);
+            if phase == "unreadable-load" {
+                std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+                std::fs::write(&index, [0xff]).unwrap();
+            }
+            let (expected_events, _rx) = mpsc::channel(256);
+            let expected = instructions::compose(&spec, &expected_events)
+                .await
+                .unwrap();
+            if phase == "clear" {
+                spec.clear_context_request = Some(ContextReset {
+                    request_id: "clear".into(),
+                    selectors: vec![],
+                    mode: None,
+                });
+            }
+            let mut replies = replies.clone();
+            if matches!(phase, "load" | "unreadable-load") {
+                replies.get_mut("initialize").unwrap()["agentCapabilities"]["sessionCapabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("resume");
+            } else if phase == "resume"
+                && matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
+            {
+                // Isolate the resume builder from Codex's native-child replay policy.
+                replies.get_mut("initialize").unwrap()["_meta"]["jetbrains"]["air"]["capabilities"] =
+                    serde_json::json!([]);
+            }
+
+            if phase == "unsupported-adapter" {
+                let capabilities = &mut replies.get_mut("initialize").unwrap()["agentCapabilities"];
+                capabilities["sessionCapabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("systemPrompt");
+                if let Some(meta) = capabilities
+                    .get_mut("_meta")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    meta.remove("antigravity");
+                }
+            }
+            let adapter_version = replies["initialize"]["agentInfo"]["version"]
+                .as_str()
+                .unwrap_or("(unknown version)")
+                .to_owned();
+            let (client, peer) = tokio::io::duplex(64 * 1024);
+            let bridge = tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(peer);
+                let mut lines = BufReader::new(read).lines();
+                let mut saw_open = false;
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    let Some(id) = request.get("id") else {
+                        continue;
+                    };
+                    let mut result = replies
+                        .get(if method == "session/load" {
+                            "session/resume"
+                        } else {
+                            method
+                        })
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+                    if method == "session/set_config_option" {
+                        let mut options = replies["session/new"]["configOptions"].clone();
+                        for option in options.as_array_mut().unwrap() {
+                            if option["id"] == request["params"]["configId"] {
+                                option["currentValue"] = request["params"]["value"].clone();
+                            }
+                        }
+                        result = serde_json::json!({"configOptions": options});
+                    }
+                    if method.starts_with("session/")
+                        && matches!(method, "session/new" | "session/resume" | "session/load")
+                    {
+                        if phase == "unsupported-adapter" {
+                            assert!(request["params"]["systemPrompt"].is_null());
+                            assert!(
+                                request["params"]["_meta"]["antigravity"]["systemPrompt"].is_null()
+                            );
+                            assert_eq!(
+                                std::fs::read_to_string(&native_path).unwrap(),
+                                "user profile instructions\r\n"
+                            );
+                        } else if native_file {
+                            assert!(request["params"]["systemPrompt"].is_null());
+                            let file = std::fs::read_to_string(&native_path).unwrap();
+                            assert!(file.starts_with("user profile instructions\r\n"));
+                            assert!(file.contains(&expected));
+                        } else if harness == HarnessKind::Antigravity {
+                            assert_eq!(
+                                request["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
+                                expected
+                            );
+                            assert!(request["params"]["systemPrompt"].is_null());
+                        } else {
+                            assert_eq!(
+                                request["params"]["systemPrompt"],
+                                serde_json::json!({
+                                    "mode":"append", "content":[{"type":"text", "text":expected}]
+                                }),
+                                "{harness:?} {method}"
+                            );
+                        }
+                        saw_open = true;
+                    }
+                    let reply = serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result});
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                assert!(saw_open);
+            });
+            let (read, write) = tokio::io::split(client);
+            let transport = ByteStreams::new(write.compat_write(), read.compat());
+            let (tx, mut rx) = mpsc::channel(4);
+            let (events_tx, mut events) = mpsc::channel(256);
+            let driver = tokio::spawn(async move {
+                drive(
+                    transport,
+                    spec,
+                    &mut rx,
+                    events_tx,
+                    Arc::new(Mutex::new(None)),
+                    false,
+                )
+                .await
+            });
+            let mut index_warning = false;
+            let mut delivery_warning = false;
+            loop {
+                let event = tokio::time::timeout(crate::test_support::IO_TIMEOUT, events.recv())
+                    .await
+                    .unwrap();
+                let Some(event) = event else {
+                    panic!("{harness:?} {phase}: {:?}", driver.await);
+                };
+                if let RuntimeEvent::Warning { message } = &event {
+                    if message
+                        .contains("standing instructions and project memory could not be delivered")
+                    {
+                        assert!(message.contains(harness.display_name()));
+                        assert!(message.contains(&adapter_version));
+                        assert!(message.contains("Updating the adapter"));
+                        delivery_warning = true;
+                    }
+                    if message.contains("Project memory index") && message.contains("unavailable") {
+                        assert!(message.contains(index.to_str().unwrap()));
+                        assert!(message.contains("UTF-8"));
+                        index_warning = true;
+                    }
+                }
+                if let RuntimeEvent::ContextCleared { memory, .. } = &event {
+                    assert!(memory.is_none());
+                }
+                if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+                    break;
+                }
+            }
+            assert_eq!(
+                index_warning,
+                phase == "unreadable-load" && harness != HarnessKind::Claude,
+                "{harness:?} {phase}"
+            );
+            assert_eq!(
+                delivery_warning,
+                phase == "unsupported-adapter",
+                "{harness:?} {phase}"
+            );
+            drop(tx);
+            while events.recv().await.is_some() {}
+            driver.await.unwrap().unwrap();
+            bridge.await.unwrap();
+        }
+    }
+}
+
+// Hard-won: cd79f2d22: canceled Tokio blocking reads still held runtime shutdown open.
+#[cfg(unix)]
+#[test]
+fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let memory_root = temp.path().join("memory");
+    std::fs::create_dir_all(&memory_root).unwrap();
+    let index = memory_root.join("MEMORY.md");
+    let fifo = std::ffi::CString::new(index.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "test".into(),
+        root: memory_root,
+        baseline_root: temp.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let (cancel, canceled) = oneshot::channel();
+    let (runtime_exited, exited) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            tokio::select! {
+                result = async { let mut spec = reload_fallback_spec(HarnessKind::Kimi); spec.project_memory = Some(memory); let (events, _rx) = mpsc::channel(256); instructions::compose(&spec, &events).await } => panic!("FIFO read ended before cancellation: {result:?}"),
+                _ = canceled => {}
+            }
+        });
+        drop(runtime);
+        runtime_exited.send(()).unwrap();
+    });
+    // Writer open proves the reader is inside the real filesystem call.
+    // Hold it open without bytes until after the runtime has exited.
+    let writer = std::fs::OpenOptions::new().write(true).open(index).unwrap();
+    cancel.send(()).unwrap();
+    let shutdown = exited.recv_timeout(crate::test_support::IO_TIMEOUT);
+    drop(writer);
+    shutdown.expect("the runtime exits without waiting for the memory reader");
+    runtime_thread.join().unwrap();
 }

@@ -22,7 +22,6 @@ pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct McpServer<F> {
     pub name: &'static str,
-    pub instructions: &'static str,
     pub tools: Vec<Value>,
     /// How often an in-flight call may report progress. Tests shorten it; in
     /// production it is [`PROGRESS_INTERVAL`].
@@ -131,8 +130,7 @@ where
                 json!({
                     "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
                     "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": server.name, "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": server.instructions
+                    "serverInfo": {"name": server.name, "version": env!("CARGO_PKG_VERSION")}
                 }),
             ),
             "ping" => rpc_result(id, json!({})),
@@ -350,7 +348,6 @@ mod tests {
             SharedWriter(Arc::clone(&buffer)),
             McpServer {
                 name: "test",
-                instructions: "test",
                 tools: vec![json!({"name": "slow", "inputSchema": {"type": "object"}})],
                 progress_interval: interval,
                 call: move |_params: Option<&Value>, progress: &Progress| {
