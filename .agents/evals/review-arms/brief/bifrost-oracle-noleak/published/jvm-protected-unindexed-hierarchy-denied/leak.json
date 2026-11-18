@@ -1,0 +1,28 @@
+{
+  "id": "jvm-protected-unindexed-hierarchy-denied",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "f536568e78894fa6f419a191193baa714d36f5cbca4485736c822894355758fc",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It notes that jvm_type_is_subtype returns Some(false) when supertype reads return no edges, but it does not connect this to protected access falsely denying a selected declaration when hierarchy evidence is missing.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims. It notes that jvm_type_is_subtype returns Some(false) when the supertype read has no edges and that Scala protected access reaches it, but never says the access consumer turns an unproven hierarchy into Denied.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

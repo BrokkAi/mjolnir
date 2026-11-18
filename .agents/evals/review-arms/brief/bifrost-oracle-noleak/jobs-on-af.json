@@ -1,0 +1,138 @@
+[
+  {
+    "bug": "python-filescope-enclosing-tie",
+    "arm": "ON"
+  },
+  {
+    "bug": "python-filescope-enclosing-tie",
+    "arm": "AF"
+  },
+  {
+    "bug": "cpp-template-inherited-base-signature",
+    "arm": "ON"
+  },
+  {
+    "bug": "cpp-template-inherited-base-signature",
+    "arm": "AF"
+  },
+  {
+    "bug": "incompatible-semantic-bundle-late-gate",
+    "arm": "ON"
+  },
+  {
+    "bug": "incompatible-semantic-bundle-late-gate",
+    "arm": "AF"
+  },
+  {
+    "bug": "retained-fill-java-memo-loses-gap",
+    "arm": "ON"
+  },
+  {
+    "bug": "retained-fill-java-memo-loses-gap",
+    "arm": "AF"
+  },
+  {
+    "bug": "kotlin-source-constructor-steals-class-header-comment",
+    "arm": "ON"
+  },
+  {
+    "bug": "kotlin-source-constructor-steals-class-header-comment",
+    "arm": "AF"
+  },
+  {
+    "bug": "mcp-default-advisory-reported-clean",
+    "arm": "ON"
+  },
+  {
+    "bug": "mcp-default-advisory-reported-clean",
+    "arm": "AF"
+  },
+  {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "arm": "ON"
+  },
+  {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "arm": "AF"
+  },
+  {
+    "bug": "python-module-binding-representative-after-event",
+    "arm": "ON"
+  },
+  {
+    "bug": "python-module-binding-representative-after-event",
+    "arm": "AF"
+  },
+  {
+    "bug": "jvm-protected-unindexed-hierarchy-denied",
+    "arm": "ON"
+  },
+  {
+    "bug": "jvm-protected-unindexed-hierarchy-denied",
+    "arm": "AF"
+  },
+  {
+    "bug": "python-module-mutation-repeated-scan-budget",
+    "arm": "ON"
+  },
+  {
+    "bug": "python-module-mutation-repeated-scan-budget",
+    "arm": "AF"
+  },
+  {
+    "bug": "dependency-failure-drops-independent-model-evidence",
+    "arm": "ON"
+  },
+  {
+    "bug": "dependency-failure-drops-independent-model-evidence",
+    "arm": "AF"
+  },
+  {
+    "bug": "php-indexed-write-reenters-current-rhs",
+    "arm": "ON"
+  },
+  {
+    "bug": "php-indexed-write-reenters-current-rhs",
+    "arm": "AF"
+  },
+  {
+    "bug": "kotlin-value-class-this-loses-underlying-projection",
+    "arm": "ON"
+  },
+  {
+    "bug": "kotlin-value-class-this-loses-underlying-projection",
+    "arm": "AF"
+  },
+  {
+    "bug": "go-nilness-ignores-modeled-nonreturn",
+    "arm": "ON"
+  },
+  {
+    "bug": "go-nilness-ignores-modeled-nonreturn",
+    "arm": "AF"
+  },
+  {
+    "bug": "java-static-getter-drops-incomplete-route",
+    "arm": "ON"
+  },
+  {
+    "bug": "java-static-getter-drops-incomplete-route",
+    "arm": "AF"
+  },
+  {
+    "bug": "unproven-override-family-certifies-empty",
+    "arm": "ON"
+  },
+  {
+    "bug": "unproven-override-family-certifies-empty",
+    "arm": "AF"
+  },
+  {
+    "bug": "js-synthetic-owner-leaks-file-summary",
+    "arm": "ON"
+  },
+  {
+    "bug": "js-synthetic-owner-leaks-file-summary",
+    "arm": "AF"
+  }
+]

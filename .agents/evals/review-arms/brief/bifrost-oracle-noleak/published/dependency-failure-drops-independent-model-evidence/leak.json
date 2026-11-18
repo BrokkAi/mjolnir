@@ -1,0 +1,28 @@
+{
+  "id": "dependency-failure-drops-independent-model-evidence",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "abef8135eb25900ff904adceb2aba8f71a20055c75fb5bf077ec4a215d4af5a9",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It only notes that the lifecycle clones the caller's activation request. Nothing about the Go discovery failure returning runtime=None before independent evidence can activate.",
+          "confidence": "high"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": null,
+          "rationale": "The output is neutral context with no defect claims, and nothing in it concerns activate_dependency_packs returning runtime=None on a Go discovery failure before activating the caller's independent evidence.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

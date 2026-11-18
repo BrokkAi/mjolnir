@@ -1,0 +1,28 @@
+{
+  "id": "unproven-override-family-certifies-empty",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 1,
+      "label": "missed",
+      "brief_sha256": "8eed200a60ba3d53106b6df55ca68c8323802cdb66eab9ba311b222b02689421",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-noleak-leak-1",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "missed",
+          "matching_finding": "builds targets ... when is_proven() holds and as Vec::new() otherwise, then returns Some(targets). The concrete branch matches ... Some(overrides) if overrides.is_empty()",
+          "rationale": "The output is a neutral context map (affected callers, paths, value flow) that asserts no defect, so it contains no finding. It sets the unproven-gives-Some(empty) behavior right next to the caller's empty-means-no-overrides arm, which is the defect's mismatch. But it never claims this discharges the dispatch gap unsoundly.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "missed",
+          "matching_finding": "The hierarchy helper builds `targets` ... as `Vec::new()` otherwise, then returns `Some(targets)`... The concrete branch matches that return value against the arms `Some(overrides) if overrides.is_empty()`",
+          "rationale": "The output juxtaposes the helper turning an unproven family into Some(empty) with the concrete branch's empty-means-absent arm, which is the mechanism. It is presented as neutral value flow, with no claim that this unsoundly discharges the dispatch gap, so there is no finding. Picked the lower label.",
+          "confidence": "low"
+        }
+      ]
+    }
+  ]
+}

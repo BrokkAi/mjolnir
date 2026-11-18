@@ -1,0 +1,7 @@
+{
+  "census": "/mnt/optane/review-arms-bifrost-20261116/census-results/missing-facts.jsonl",
+  "census_sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+  "jobs": "/mnt/optane/review-arms-bifrost-20261116/oracle-arm/jobs-ot.json",
+  "jobs_sha256": "8b1efbdbb4e2549ba2a895c3931c29b0d9bcf1e4f1b34d813bd7a45fb385b946",
+  "name": "bifrost-oracle-noleak"
+}
