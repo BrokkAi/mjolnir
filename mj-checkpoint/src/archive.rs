@@ -2670,7 +2670,7 @@ pub use fetch::{
 mod file_input;
 pub use file_input::{read_session_file_input, write_session_file};
 
-mod git;
+pub(crate) mod git;
 
 pub(crate) use git::linked_worktree_directories;
 #[cfg(test)]

@@ -2001,11 +2001,11 @@ fn collect_git_contents(
 /// A linked worktree of the captured repository that lives inside the
 /// captured checkout.
 #[derive(Clone)]
-struct LinkedWorktreeDirectory {
+pub(crate) struct LinkedWorktreeDirectory {
     /// The directory below the checkout's top level.
-    relative: PathBuf,
+    pub(crate) relative: PathBuf,
     /// The directory, with symbolic links resolved.
-    directory: PathBuf,
+    pub(crate) directory: PathBuf,
 }
 
 /// A linked worktree whose state has been read and whose commits are held by
@@ -2026,7 +2026,7 @@ struct PreparedWorktree {
 /// A registered worktree outside the checkout, or whose directory is gone,
 /// holds nothing this checkout's session owns and is left out; this never
 /// prunes a registration.
-fn discover_linked_worktrees(
+pub(crate) fn discover_linked_worktrees(
     runner: &dyn GitCommandRunner,
     repository: &Path,
 ) -> Result<Vec<LinkedWorktreeDirectory>> {
@@ -3077,7 +3077,7 @@ fn checkout_advice(snapshot: &RepositorySnapshot) -> String {
     }
 }
 
-fn run_git<const N: usize>(
+pub(crate) fn run_git<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3104,7 +3104,7 @@ fn git_success(
     Ok(output.stdout)
 }
 
-fn git_bytes<const N: usize>(
+pub(crate) fn git_bytes<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3134,7 +3134,7 @@ fn git_bytes_owned(
     Ok(output.stdout)
 }
 
-fn git_text<const N: usize>(
+pub(crate) fn git_text<const N: usize>(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     arguments: [&str; N],
@@ -3155,7 +3155,7 @@ fn trim_output(output: &[u8], action: &str) -> Result<String> {
         .to_string())
 }
 
-fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
+pub(crate) fn git_failure(action: &str, output: &GitOutput) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow!(
         "{action} failed with status {}: {}",
