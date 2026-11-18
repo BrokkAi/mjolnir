@@ -188,11 +188,17 @@ impl ConfinedDir {
     }
 
     /// Read the file `name` in this directory. Returns `None` when it does not
-    /// exist; refuses a link.
+    /// exist; refuses links and non-regular files.
     pub fn read_to_string(&self, name: &OsStr) -> Result<Option<String>> {
         let path = self.path.join(name);
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            // A FIFO must not wait for a writer before its descriptor can be checked.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
         let file = match self.dir.open_with(name, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -201,6 +207,13 @@ impl ConfinedDir {
                     .with_context(|| format!("open {} without following a link", path.display()));
             }
         };
+        if !file
+            .metadata()
+            .with_context(|| format!("inspect {}", path.display()))?
+            .is_file()
+        {
+            bail!("{} is not a regular file", path.display());
+        }
         let mut content = String::new();
         file.into_std()
             .read_to_string(&mut content)

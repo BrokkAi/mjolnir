@@ -743,11 +743,11 @@ impl ProjectMemoryStore {
     }
 
     pub fn startup_index(&self) -> Result<Option<String>> {
-        let path = self.root.join(MEMORY_INDEX);
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(root) = ConfinedDir::open_root(&self.root)? else {
+            return Ok(None);
+        };
+        let Some(content) = root.read_to_string(OsStr::new(MEMORY_INDEX))? else {
+            return Ok(None);
         };
         Ok(Some(truncate_startup_index(&content)))
     }

@@ -6782,6 +6782,8 @@ while True:
 
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
+    let profile = temp.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
@@ -6796,7 +6798,10 @@ while True:
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
-        environment: BTreeMap::new(),
+        environment: BTreeMap::from([(
+            "KIMI_CODE_HOME".into(),
+            profile.to_string_lossy().into_owned(),
+        )]),
         cwd: temp.path().to_path_buf(),
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
@@ -9415,6 +9420,7 @@ async fn opencode_reloads_its_session_for_changed_logins_only_between_turns() {
 }
 
 /// Replay pinned-adapter lifecycle replies (Claude source-derived) against real driver requests.
+// Hard-won: 621276a78: the unsupported-adapter branch had no phase that reached it.
 #[tokio::test]
 async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -9462,10 +9468,22 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 )
             })
             .collect();
-        for phase in ["new", "load", "resume", "clear", "unreadable-load"] {
+        for phase in [
+            "new",
+            "load",
+            "resume",
+            "clear",
+            "unreadable-load",
+            "fifo-load",
+            "unsupported-adapter",
+        ] {
+            #[cfg(not(unix))]
+            if phase == "fifo-load" {
+                continue;
+            }
             let resumed = matches!(
                 phase,
-                "load" | "resume" | "unreadable-load" | "unsupported-adapter"
+                "load" | "resume" | "unreadable-load" | "fifo-load" | "unsupported-adapter"
             );
             let temp = tempfile::tempdir().unwrap();
             let native_file = matches!(
@@ -9504,6 +9522,13 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 std::fs::create_dir_all(index.parent().unwrap()).unwrap();
                 std::fs::write(&index, [0xff]).unwrap();
             }
+            #[cfg(unix)]
+            if phase == "fifo-load" {
+                use std::os::unix::ffi::OsStrExt;
+                std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+                let fifo = std::ffi::CString::new(index.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            }
             let (expected_events, _rx) = mpsc::channel(256);
             let expected = instructions::compose(&spec, &expected_events)
                 .await
@@ -9516,7 +9541,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 });
             }
             let mut replies = replies.clone();
-            if matches!(phase, "load" | "unreadable-load") {
+            if matches!(phase, "load" | "unreadable-load" | "fifo-load") {
                 replies.get_mut("initialize").unwrap()["agentCapabilities"]["sessionCapabilities"]
                     .as_object_mut()
                     .unwrap()
@@ -9651,7 +9676,11 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                     }
                     if message.contains("Project memory index") && message.contains("unavailable") {
                         assert!(message.contains(index.to_str().unwrap()));
-                        assert!(message.contains("UTF-8"));
+                        assert!(message.contains(if phase == "fifo-load" {
+                            "regular file"
+                        } else {
+                            "UTF-8"
+                        }));
                         index_warning = true;
                     }
                 }
@@ -9664,7 +9693,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             }
             assert_eq!(
                 index_warning,
-                phase == "unreadable-load" && harness != HarnessKind::Claude,
+                matches!(phase, "unreadable-load" | "fifo-load") && harness != HarnessKind::Claude,
                 "{harness:?} {phase}"
             );
             assert_eq!(
@@ -9691,14 +9720,7 @@ fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
     let index = memory_root.join("MEMORY.md");
     let fifo = std::ffi::CString::new(index.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    let memory = ProjectMemoryLaunchConfig {
-        history_socket: None,
-        project_key: "test".into(),
-        root: memory_root,
-        baseline_root: temp.path().join("baseline"),
-        repository_roots: BTreeMap::new(),
-        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
-    };
+    let reader_index = index.clone();
     let (cancel, canceled) = oneshot::channel();
     let (runtime_exited, exited) = std::sync::mpsc::channel();
     let runtime_thread = std::thread::spawn(move || {
@@ -9708,7 +9730,11 @@ fn session_instructions_stalled_read_does_not_hold_runtime_shutdown() {
             .unwrap();
         runtime.block_on(async move {
             tokio::select! {
-                result = async { let mut spec = reload_fallback_spec(HarnessKind::Kimi); spec.project_memory = Some(memory); let (events, _rx) = mpsc::channel(256); instructions::compose(&spec, &events).await } => panic!("FIFO read ended before cancellation: {result:?}"),
+                result = file_read_off_runtime("stalled-filesystem-test", move || {
+                    // The store rejects FIFOs; here one simulates a hung regular-file read
+                    // inside the same off-runtime reader used for valid indexes.
+                    std::fs::read_to_string(reader_index).context("read stalled filesystem")
+                }) => panic!("FIFO read ended before cancellation: {result:?}"),
                 _ = canceled => {}
             }
         });

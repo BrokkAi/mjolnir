@@ -425,13 +425,22 @@ impl Controller {
             .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
         // The assignment and directory are per-task data; standing role policy
         // is composed by the worker from the durable subagent record.
+        let assignment = if oracle {
+            format!(
+                "{}\n\n{}",
+                mj_core::subagent::READ_ONLY_TASK_SCOPE,
+                request.initial_prompt
+            )
+        } else {
+            request.initial_prompt
+        };
         let initial_prompt = match &report_dir {
             Some(report_dir) => format!(
                 "{}\n\n{}",
                 mj_core::subagent::report_directory_note(report_dir),
-                request.initial_prompt
+                assignment
             ),
-            None => request.initial_prompt,
+            None => assignment,
         };
         let relation = SubagentRecord {
             kind: request.kind,

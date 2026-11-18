@@ -3260,8 +3260,9 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(
         oracle.initial_prompt,
         format!(
-            "Your report directory is /reports/{}.\n\nQuestion:\nWhich option?",
+            "Your report directory is /reports/{}.\n\n{}\n\nQuestion:\nWhich option?",
             oracle.child_session_id,
+            mj_core::subagent::READ_ONLY_TASK_SCOPE,
         )
     );
     assert_eq!(oracle.model.as_deref(), Some("oracle-model"));

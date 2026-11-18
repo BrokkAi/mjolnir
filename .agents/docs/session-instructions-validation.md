@@ -8,7 +8,7 @@ Each ACP open composes project memory (except Claude), offered MCP guidance, and
 
 An unavailable index emits a visible warning with path and cause and supplies the guidance/path block with an explicit unavailable line. Older non-native-file adapters without either append capability open with a visible harness/version warning; they receive no file or user-message fallback. An advertised append is never silently retried without instructions.
 
-MCP initialize replies no longer contain `instructions`. Tool descriptions remain, including specialized reviewer and brief-writer handback descriptions. Child, reviewer and oracle assignments retain task-specific input and the report directory; standing authority and review rubric travel through composition. Reviewer output is plain text, matching the existing consumer. Existing `subagent_kind` and `reviewer_launch.role` launch fields provide roles on new/resumed/moved launches. Task-summary readers accept both historical handback prefixes and the new directory-only note.
+MCP initialize replies no longer contain `instructions`. Tool descriptions remain, including specialized reviewer and brief-writer handback descriptions. Child, reviewer and oracle assignments retain task-specific input and the report directory; oracle and brief-writer packets also retain one read-only task-scope sentence because their execution policy does not enforce read-only access. All other standing authority and the review rubric travel through composition. Reviewer output is plain text, matching the existing consumer. Existing `subagent_kind` and `reviewer_launch.role` launch fields provide roles on new/resumed/moved launches. Task-summary readers accept both historical handback prefixes and the new directory-only note.
 
 ## Compatibility
 
@@ -22,7 +22,7 @@ All Cargo commands ran outside the sandbox, on the dev profile, in this worktree
 
 - `cargo test -p brokk-mj-core relay::snapshot`: 9 passed, including the two-format legacy digest regression. Log: `memory-instructions-snapshot-tests.log`.
 - `cargo test -p brokk-mj-core a_task_summary_is_one_line_of_the_parents_own_instructions`: 1 passed. Log: `memory-instructions-task-summary-tests.log`.
-- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed. Recorded lifecycle coverage uses all eight harnesses, new/load/resume/clear, unavailable indexes, and older-adapter warnings without fallback. Native-file preservation covers repeated replacement and non-UTF-8 user bytes. The FIFO regression proves canceled reads do not hold Tokio shutdown open. Five role goldens compare with checked-in text. Final log: `memory-instructions-worker-final-tests.log`.
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed. The original run used all eight harnesses, new/load/resume/clear and unavailable indexes. Review later found that the older-adapter branch had no phase in the loop; that coverage defect was corrected and verified in the review round below. Native-file preservation covers repeated replacement and non-UTF-8 user bytes. The FIFO regression proves canceled reads do not hold Tokio shutdown open. Five role goldens compare with checked-in text. Final log: `memory-instructions-worker-final-tests.log`.
 - `cargo test -p brokk-mj-worker-runtime subagent_mcp::tests`: 39 passed. Log: `memory-instructions-mcp-tests.log`.
 - `cargo test -p brokk-mj-worker-runtime memory_mcp::tests`: 1 passed, through the real socket transport. Log: `memory-instructions-history-tests.log`.
 - `MJ_UPDATE_GOLDEN=1 cargo test -p brokk-mj-review lanes::tests`: 3 passed, one obsolete assertion failed because it expected the moved rubric in the packet. Updated that assertion to require its absence; reran only `review_prompt_contains_tree_ids_and_diff_command_without_standing_rubric`: 1 passed. Logs: `memory-instructions-review-tests.log`, `memory-instructions-review-fix.log`.
@@ -39,3 +39,27 @@ Initial compilation exposed the missing ACP schema import and new role-field val
 Milestone 3 has not been started. Claude's fixture is explicitly source-derived from pinned bridge 0.108.0; the other harness lifecycle fixtures are recorded. Automatic approval review rejected the proposed live Claude probe under the original no-Milestone-3 scope, and the parent directed source-derived coverage instead. The prepared, unexecuted script is `/tmp/claude-session-instructions-probe.py` for parent-owned live acceptance. No credentials appear in fixtures or repository files.
 
 Known live behavior from the approved plan remains: Codex accepts a changed append on reopen but may keep the original thread's instructions. The implementation supplies current text on every open without claiming the provider updates its stored baseline. Kimi live acceptance remains subject to its weekly quota. All `memory-*.log` files are intentionally untracked.
+
+
+## First review corrections
+
+Review of `903cac6..621276a` identified six defects plus the stalled-index concern. Oracle and brief-writer launches inherit the parent's execution policy rather than an enforced read-only mode (`controller/reviewer.rs`, `controller/subagents.rs`); their assignment packets now retain one shared `READ_ONLY_TASK_SCOPE` sentence on every adapter. Task summaries strip that safety prefix while retaining the actual question. The rest of the role remains exclusively in the composed section.
+
+The Kimi recovery fixture now supplies an isolated staged home; the Muse MCP-grant fixture advertises standard append support; the daemon brief-writer expectation now checks the task packet and its read-only scope instead of the moved standing heading. The native writer escapes only its delimiter strings inside the payload, preventing an index quotation from closing the managed section. Its existing repeated-replacement test now quotes both markers and preserves unrelated tags and all user bytes outside the managed section. The lifecycle phase list now actually includes the unsupported-adapter case.
+
+`ProjectMemoryStore::startup_index` now uses the existing confined reader. That shared reader opens Unix files nonblocking, checks the opened descriptor is regular, and refuses links, so a FIFO cannot wait for a writer. FIFO indexes open with the explicit unavailable section and warning. No read deadline was added for a hung regular-file filesystem: the parent explicitly declined that demand, and the generic-stall portion was recorded through `override_review` before committing fixes. A FIFO still simulates an uninterruptible syscall inside the shared off-runtime reader in the cancellation/shutdown test; the store itself now rejects special files.
+
+All affected checks ran outside the sandbox on the dev profile, with no still-failing tests:
+
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed, now exercising FIFO unavailability, unsupported-adapter warnings, delimiter escaping, role goldens and cancellation-safe runtime shutdown. Log: `memory-instructions-review-worker-tests.log`.
+- `cargo test -p brokk-mj-worker-runtime dead_bridge_after_session_start_reloads_the_native_session`: 1 passed, reaching bridge exit and reload. Log: `memory-instructions-review-recovery-test.log`.
+- `cargo test -p brokk-mj-worker-runtime muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them`: 1 passed. Log: `memory-instructions-review-muse-test.log`.
+- `cargo test -p brokk-mj-daemon a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reaches_the_reviewer`: 1 passed, reaching handback and reviewer startup. Log: `memory-instructions-review-daemon-test.log`.
+- `cargo test -p brokk-mj-core confined_path::tests`: 1 passed. Log: `memory-instructions-review-confined-tests.log`.
+- `cargo test -p brokk-mj-core project_memory::tests`: 12 passed. Log: `memory-instructions-review-store-tests.log`.
+- `cargo test -p brokk-mj-core a_task_summary_is_one_line_of_the_parents_own_instructions`: 1 passed. Log: `memory-instructions-review-summary-test.log`.
+- `cargo test -p brokk-mj-controller reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity`: 1 passed. Log: `memory-instructions-review-controller-test.log`.
+- `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime -p brokk-mj-controller -p brokk-mj-review -p brokk-mj-daemon --all-targets -- -D warnings`: passed. Log: `memory-instructions-review-clippy.log`.
+- `cargo fmt --all` and `git diff --check`: clean.
+
+No live acceptance, default-instance operation or push was performed. Review corrections are submitted for another formal review after commit; diagnostic logs remain untracked.

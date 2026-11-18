@@ -166,7 +166,7 @@ for line in sys.stdin:
     if method == 'initialize':
         # muse-acp advertises HTTP MCP exactly when its host granted sessionMcp.
         reply = {'result': {'protocolVersion': 1, 'agentCapabilities': {
-            'mcpCapabilities': {'http': host == 'granted'}}}}
+            'mcpCapabilities': {'http': host == 'granted'}, 'sessionCapabilities': {'systemPrompt': {}}}}}
     elif method == 'session/new':
         with open(log, 'a') as out:
             out.write(json.dumps([s['name'] for s in params.get('mcpServers', [])]) + '\n')

@@ -185,7 +185,8 @@ pub const BRIEF_WRITER_INSTRUCTIONS: &str = include_str!("../templates/brief_wri
 #[must_use]
 pub fn brief_writer_prompt(job: &ReviewJob) -> String {
     format!(
-        "## The change\n\nRead each repository's captured change with its exact command:\n\n{}\n\n<user_task>\n{}\n</user_task>",
+        "{}\n\n## The change\n\nRead each repository's captured change with its exact command:\n\n{}\n\n<user_task>\n{}\n</user_task>",
+        mj_core::subagent::READ_ONLY_TASK_SCOPE,
         repositories_section(job),
         bound_review_section(&job.task, USER_MESSAGES_LIMIT, "task"),
     )

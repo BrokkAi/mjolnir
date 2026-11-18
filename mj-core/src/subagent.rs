@@ -1106,6 +1106,10 @@ pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// Assignment safety scope also applies when an adapter cannot receive standing instructions.
+pub const READ_ONLY_TASK_SCOPE: &str =
+    "This is a read-only consultation: do not edit files, build, or run tests.";
+
 /// Per-task directory note; the standing role contract travels separately.
 #[must_use]
 pub fn report_directory_note(report_dir: &str) -> String {
@@ -1739,6 +1743,12 @@ pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<St
         task = rest;
     } else if task.starts_with(HANDBACK_NOTE_OPENING)
         && let Some((_, rest)) = task.split_once("\n\n")
+    {
+        task = rest;
+    }
+    if let Some(rest) = task
+        .strip_prefix(READ_ONLY_TASK_SCOPE)
+        .and_then(|rest| rest.strip_prefix("\n\n"))
     {
         task = rest;
     }
@@ -2844,6 +2854,14 @@ mod tests {
         assert_eq!(
             task_summary(&assignment, Some(report_dir)).as_deref(),
             Some("Fix the parser. Keep the tests green.")
+        );
+        let consultation = format!(
+            "{}\n\n{READ_ONLY_TASK_SCOPE}\n\nWhich option?",
+            report_directory_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&consultation, Some(report_dir)).as_deref(),
+            Some("Which option?")
         );
         // Without the recorded directory the note is still recognised.
         assert_eq!(

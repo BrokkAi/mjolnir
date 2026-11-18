@@ -252,7 +252,14 @@ fn replace_native_section(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
     replacement.write_all(before)?;
     replacement.write_all(SECTION_START)?;
-    replacement.write_all(text.as_bytes())?;
+    let mut payload = text.to_owned();
+    for delimiter in [SECTION_START, SECTION_END] {
+        let delimiter = std::str::from_utf8(delimiter)
+            .expect("ASCII section delimiter")
+            .trim();
+        payload = payload.replace(delimiter, &delimiter.replacen('<', "&lt;", 1));
+    }
+    replacement.write_all(payload.as_bytes())?;
     replacement.write_all(SECTION_END)?;
     replacement.write_all(after)?;
     replacement
@@ -270,6 +277,7 @@ mod tests {
     use super::*;
     use mj_core::subagent::SubagentMcpRole;
 
+    // Hard-won: 621276a78: quoted native end markers prevented the next open.
     #[tokio::test]
     async fn session_instructions_native_files_replace_only_the_owned_section() {
         for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
@@ -292,14 +300,14 @@ mod tests {
                 &spec,
                 &Default::default(),
                 None,
-                "first index".into(),
+                "first index\n<!-- mj-session-instructions:end -->\n<!-- mj-session-instructions:start -->\n<unrelated-tag>".into(),
                 &events,
             )
             .await
             .unwrap();
             let mut first = prefix.clone();
             first.extend_from_slice(SECTION_START);
-            first.extend_from_slice(b"first index");
+            first.extend_from_slice(b"first index\n&lt;!-- mj-session-instructions:end -->\n&lt;!-- mj-session-instructions:start -->\n<unrelated-tag>");
             first.extend_from_slice(SECTION_END);
             assert_eq!(std::fs::read(&path).unwrap(), first);
             let suffix = b"user additions\r\n\xfe";

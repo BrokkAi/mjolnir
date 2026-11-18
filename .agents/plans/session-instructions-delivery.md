@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-18) Corrected first-review defects in `621276a78`: read-only task scope, native marker escaping, non-regular indexes, Kimi/Muse fixtures, daemon packet expectation and unsupported-adapter coverage. All affected tests and five-crate clippy passed. Generic hung-filesystem deadline finding overridden per parent ruling; fixes proceed to formal re-review.
+
 - [x] (2026-11-18) Saved superseded implementation as local reference `a77d745ae`; committed this plan first at `aa5c0fa00`. The old worktree is read-only.
 - [x] (2026-11-18) Verified per-session native file copies and existing durable role facts before implementing.
 - [x] (2026-11-18) Implemented unified composition, standard/vendor append, native owned-section replacement, and removal of startup/clear user-memory installation; targeted tests passed.
@@ -28,6 +30,10 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Surprises & Discoveries
 
+- First review found that read-only oracle/brief-writer behavior was prose, not enforced: `controller/reviewer.rs` inherits the parent target's execution policy and `subagents.rs` borrows its workspace. Their first prompts now retain one shared task-scope sentence, independently of standing-role delivery.
+- `ProjectMemoryStore::startup_index` previously bypassed the existing `ConfinedDir` reader. It now uses that reader, which refuses links and non-regular descriptors and opens Unix files nonblocking before checking their type. FIFO indexes therefore become an unavailable warning rather than waiting for a writer.
+- Quoted native section delimiters in an index previously corrupted the next replacement. The native writer now entity-escapes only its own delimiter strings inside the managed payload; user bytes outside the section remain exact.
+
 - Moving first-prompt prefixes also affects persisted child task summaries. Their reader now strips the shared directory-only note while retaining historical prefix support; the existing summary regression and isolated controller registration test pass.
 - Native instruction replacement is mutating I/O, unlike the reused memory/login reader. A worker-owned async write lease moves into the off-runtime thread and survives cancellation until atomic replacement finishes, preventing an older canceled open from overtaking a replacement.
 
@@ -41,6 +47,13 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Decision Log
+
+- Decision: retain the single `READ_ONLY_TASK_SCOPE` sentence in every oracle assignment and brief-writer packet, while all other standing role text stays composed.
+  Rationale: launch inspection confirmed that read-only behavior is prose-only; an older adapter without append support must still receive the assignment's safety scope. This is task data, not a user-message fallback for standing guidance.
+  Date/Author: 2026-11-18, parent ruling after first review.
+- Decision: `MEMORY.md` must be a regular file. Reject non-regular indexes through the existing confined reader, warn and compose unavailable guidance. Do not introduce a read deadline for regular files on hung filesystems; require cancellation-safe session stop/close and runtime shutdown instead.
+  Rationale: parent explicitly chose special-file rejection only. A hung filesystem is its own failure; speculative deadlines contradict the repository rule. The generic-stall portion of the review finding was formally overridden before committing fixes.
+  Date/Author: 2026-11-18, parent ruling after first review.
 
 - Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
   Rationale: legacy shared Codex homes remain supported by `subagent_acp_mcp`; a capability-only file fallback could mutate shared files. Missing capabilities in older adapters must not prevent otherwise working sessions from opening.
@@ -75,7 +88,7 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Outcomes & Retrospective
 
-Milestones 1 and 2 are implemented. Recorded/source-derived ACP lifecycle coverage, native-file replacement, five role goldens, unavailable-index and shutdown regressions, MCP contracts, isolated controller registration, task-summary compatibility and relay digest checks pass. The four edited crates pass clippy; the worker-only final follow-up also passed and is recorded in `.agents/docs/session-instructions-validation.md`. The default instance was untouched. Milestone 3 remains parent-owned and unstarted; Claude live marker acceptance and Kimi quota-limited acceptance remain pending there.
+Milestones 1 and 2 are implemented. First-review corrections and their passing targeted checks are recorded in `.agents/docs/session-instructions-validation.md`; the generic hung-filesystem deadline demand was declined according to the parent's explicit special-file-only ruling. Recorded/source-derived ACP lifecycle coverage, native-file replacement, five role goldens, unavailable-index and shutdown regressions, MCP contracts, isolated controller registration, task-summary compatibility and relay digest checks pass. The four edited crates pass clippy; the worker-only final follow-up also passed and is recorded in `.agents/docs/session-instructions-validation.md`. The default instance was untouched. Milestone 3 remains parent-owned and unstarted; Claude live marker acceptance and Kimi quota-limited acceptance remain pending there.
 
 
 ## Context and Orientation

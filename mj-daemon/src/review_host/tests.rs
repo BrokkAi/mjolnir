@@ -1007,7 +1007,13 @@ async fn a_brief_writer_hands_back_before_any_reviewer_starts_and_its_brief_reac
         assert_eq!(children.len(), 1, "no reviewer starts before the brief");
         assert_eq!(children[0].1.profile, "writer");
         assert_eq!(children[0].1.main.effort.as_deref(), Some("high"));
-        assert!(children[0].2.contains("Relation brief for a code change"));
+        assert!(!children[0].2.contains("Relation brief for a code change"));
+        assert!(
+            children[0]
+                .2
+                .starts_with(mj_core::subagent::READ_ONLY_TASK_SCOPE)
+        );
+        assert!(children[0].2.contains("## The change"));
         assert!(children[0].2.contains(
             "git -C /workspace/app diff --no-ext-diff --ignore-submodules=none base new"
         ));
