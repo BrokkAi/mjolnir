@@ -26,12 +26,13 @@ pub struct TargetRuntimeSettings {
 }
 
 impl TargetRuntimeSettings {
-    /// Whether this recorded runtime is an SSH bare target with
-    /// `permissions = "yolo"`. The recorded kind and policy are used instead
-    /// of the template so a session keeps the mode it was launched with.
-    /// Containers are unconstrained too, but their kind is never `ssh-bare`.
+    /// Whether the harness runs without approvals here: the recorded
+    /// execution policy the worker launch enforces, so containers and SSH
+    /// bare targets with `permissions = "yolo"` both qualify. The recorded
+    /// policy is used instead of the template so a session keeps the mode
+    /// it was launched with.
     pub fn is_yolo(&self) -> bool {
-        self.kind == "ssh-bare" && self.execution_policy == ExecutionPolicy::Unconstrained
+        self.execution_policy == ExecutionPolicy::Unconstrained
     }
 }
 

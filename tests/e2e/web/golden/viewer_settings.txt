@@ -170,7 +170,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -214,7 +214,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -262,7 +262,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 Unsaved changes. Save writes them to the configuration file.
 
@@ -311,7 +311,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 [subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both
 
@@ -366,7 +366,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 YOLO TARGET SUBAGENTS
 Straightforward model
@@ -442,7 +442,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 YOLO TARGET SUBAGENTS
 Straightforward model
@@ -515,7 +515,7 @@ opus
 sonnet
 Use the same subagents on all targets
 
-Leave checked to use these choices on every target. Uncheck to give targets with `permissions = "yolo"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
+Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = "yolo"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices.
 
 YOLO TARGET SUBAGENTS
 Straightforward model
