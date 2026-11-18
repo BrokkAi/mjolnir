@@ -376,19 +376,19 @@ impl RuntimeState {
             let fingerprint = operational.and_then(|state| state.held_login_fingerprint.as_deref());
             let retry_intent =
                 operational.and_then(|state| state.authentication_retry_intent.as_deref());
-            let observed_through = published.map_or(0, |view| view.projection_ordinal);
+            let publication = published.zip(operational).map(|(view, _)| {
+                mj_core::credentials::WorkerPublication::new(
+                    fingerprint,
+                    retry_intent,
+                    view.projection_ordinal,
+                )
+            });
             // The runtime owner serializes view publication and retirement.
             // The registry serializes this observation with delivery starts.
             self.rejected_logins
                 .lock()
                 .expect("rejected logins poisoned")
-                .observe_held_login(
-                    profile_id,
-                    &session_id,
-                    fingerprint,
-                    retry_intent,
-                    observed_through,
-                );
+                .observe_worker(profile_id, &session_id, publication);
             recovered_failure
         };
         if let Some(recorded_error) = recovered_failure {

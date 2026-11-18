@@ -23,7 +23,7 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - [x] (2026-11-17) Milestone 2 delivery. Concurrent per-session delivery and worker read-back publication implemented. Targeted controller and worker tests passed, as did clippy and formatting.
 - [x] (2026-11-17) Isolated Claude acceptance passed. Both workers received the replacement login and both transfers appeared at INFO. The workers were destroyed and the `t1581` daemon stopped.
 - [x] (2026-11-17) Validated the combined Milestone 1 and 2 path. Seven focused tests passed, including the test where the auth decision is settled and delivery remains pending until the worker reports the held login. Core and controller clippy passed.
-- [x] (2026-11-17) Milestone 3: the hold. Worker publishes retry intent (`authentication_retry_intent`, relay protocol 70) separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present. Worker, controller API and incident tests pass.
+- [x] (2026-11-17) Milestone 3: the hold. Worker publishes retry intent (`authentication_retry_intent`, relay protocol 70) separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present. Worker, controller API and incident tests pass. Review fix: a published view with no login resolves to the established verdict; `Deciding` for a missing view lasts only until the first publication after connect.
 - [ ] Integrated review, merge, push; close #1581.
 
 
@@ -46,6 +46,9 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - Observation: the wake staging path can read the identity of the exact temporary login copy it installs, including the file copied from the Keychain for Claude. Local bare Codex links to the profile login instead of installing a fixed copy, so a failed wake through that link has no staged identity to attest. The failure is retryable.
   Evidence: `controller/worker_binary/launch.rs` and `controller/worker_binary/install.rs` distinguish staged copies from live links.
 
+
+- Observation: a connected worker that publishes no held login (older than protocol 69, or a failed credential read) was held as `Deciding` forever, because removing the evidence on an absent fingerprint made "published without a login" look like "nothing published yet". Found by all three M3 reviewers.
+  Evidence: `observe_held_login` removed the entry when `held_login_fingerprint` was `None`, and `failure_verdict` returned `Deciding` for a connected actor with no entry. Fix: the registry keeps a `WorkerView` entry exactly while the worker is connected and has published (`held: Option`), `observe_worker(profile, session, Option<WorkerPublication>)` removes it only on disconnect or retirement. Test: `a_connected_worker_publishing_no_login_is_reported_once_reconciled`.
 
 ## Decision Log
 

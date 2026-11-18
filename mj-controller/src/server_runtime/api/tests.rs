@@ -2254,12 +2254,14 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
             .unwrap(),
         ChildReport::NotFinished
     ));
-    fixture.rejected.lock().unwrap().observe_held_login(
+    fixture.rejected.lock().unwrap().observe_worker(
         "helper",
         "child-1",
-        Some(&renewed),
-        None,
-        9,
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some(&renewed),
+            None,
+            9,
+        )),
     );
     assert!(matches!(
         backend
@@ -2317,12 +2319,14 @@ async fn a_login_renewed_during_a_checkpoint_barrier_never_reports_the_child() {
     not_told().await;
     // The checkpoint barrier begins and the new login is installed during it.
     // The worker keeps publishing its intent; only its submit waits.
-    fixture.rejected.lock().unwrap().observe_held_login(
+    fixture.rejected.lock().unwrap().observe_worker(
         "helper",
         "child-1",
-        Some(&renewed),
-        None,
-        9,
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some(&renewed),
+            None,
+            9,
+        )),
     );
     fixture.publish_worker(Some(&failed), Some(&renewed));
     not_told().await;
@@ -2364,6 +2368,32 @@ async fn a_retry_owed_but_never_delivered_is_reported_not_held() {
     assert_eq!(report.promptable, Some(true));
     let output = report.output.unwrap();
     assert!(output.contains("relay connection is leased"), "{output}");
+}
+
+// Hard-won: c30d42961: a connected worker without a held-login fingerprint was held as Deciding forever
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_connected_worker_publishing_no_login_is_reported_once_reconciled() {
+    if !isolated_parked_test("a_connected_worker_publishing_no_login_is_reported_once_reconciled") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    // A worker older than protocol 69, or one whose credential read failed,
+    // publishes views with no login. No delivery can be pending for it.
+    fixture.publish_worker(None, None);
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert_eq!(report.promptable, Some(true));
 }
 
 // Hard-won: #1581: a worker that withdrew its retry (a question or paused goal waits on a person) still looked busy to the parent.
@@ -2574,6 +2604,8 @@ struct ChildLoginReportFixture {
     catalog: Arc<ProfileCatalog>,
     conversation: mj_core::state::MaterializedSession,
     exports: Arc<ParkingExports>,
+    /// Whether the test has published a worker view itself.
+    published: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2641,6 +2673,7 @@ impl ChildLoginReportFixture {
             rejected: Default::default(),
             conversation,
             exports: ParkingExports::new(SessionState::Running, None),
+            published: Default::default(),
         }
     }
 
@@ -2692,22 +2725,21 @@ impl ChildLoginReportFixture {
     /// What the connected worker's published view says about the retry,
     /// recorded as the daemon records it when it publishes the view.
     fn publish_worker(&self, intent: Option<&str>, held: Option<&str>) {
-        self.rejected
-            .lock()
-            .unwrap()
-            .observe_held_login("helper", "child-1", held, intent, 9);
+        self.published
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.rejected.lock().unwrap().observe_worker(
+            "helper",
+            "child-1",
+            Some(mj_core::credentials::WorkerPublication::new(
+                held, intent, 9,
+            )),
+        );
     }
 
     fn backend(&self) -> ApiBackend {
         // The connected worker's first publication: it still holds the failed
         // login and owes no retry. Tests change it with `publish_worker`.
-        if self
-            .rejected
-            .lock()
-            .unwrap()
-            .held_login_fingerprint("helper", "child-1")
-            .is_none()
-        {
+        if !self.published.load(std::sync::atomic::Ordering::SeqCst) {
             self.publish_worker(None, Some(&self.failed_token()));
         }
         let mut view = ready_view("m");
