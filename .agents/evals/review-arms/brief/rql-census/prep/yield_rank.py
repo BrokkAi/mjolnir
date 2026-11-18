@@ -55,8 +55,8 @@ def main():
     undatable, date_ok, date_err = {}, set(), {}
     for l in open(scan / "dates.jsonl"):
         x = json.loads(l)
-        if x.get("error"):
-            date_err[x["repo"]] = x["error"]
+        if x.get("error") is not None:
+            date_err[x["repo"]] = x["error"] or "empty error"
             continue
         date_ok.add(x["repo"])
         undatable.update({f"{x['repo']} {h}": e for h, e in (x.get("undatable") or {}).items()})
@@ -125,8 +125,8 @@ def main():
     root_ok, root_err = set(), {}
     for l in open(scan / "roots.jsonl"):
         x = json.loads(l)
-        if x.get("error"):
-            root_err[x["repo"]] = x["error"]
+        if x.get("error") is not None:
+            root_err[x["repo"]] = x["error"] or "empty error"
             continue
         root_ok.add(x["repo"])
         for root in x["roots"]:

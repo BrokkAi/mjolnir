@@ -69,13 +69,15 @@ def stage_roots(repos):
     out = OUT / "roots.jsonl"
     have = set()
     if out.exists():
-        have = {r["repo"] for r in map(json.loads, open(out)) if not r.get("error")}
+        have = {r["repo"] for r in map(json.loads, open(out)) if r.get("error") is None}
 
     def one(repo):
         if repo in have:
             return
         rc, so, se = git(repo, "rev-list", "--max-parents=0", "--all", timeout=600)
-        emit(out, {"repo": repo, "roots": sorted(set(so.split())), "error": se.strip()[-300:] if rc else None})
+        # A killed git can exit nonzero with no stderr: the error must still be non-empty.
+        emit(out, {"repo": repo, "roots": sorted(set(so.split())),
+                   "error": (se.strip()[-300:] or f"git rev-list exited {rc}") if rc else None})
 
     with cf.ThreadPoolExecutor(JOBS) as ex:
         list(ex.map(one, sorted(repos)))
