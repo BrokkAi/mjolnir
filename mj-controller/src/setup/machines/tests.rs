@@ -271,7 +271,7 @@ fn a_linux_machine_is_never_asked_for_apple_container() {
 /// connectivity check always classified it.
 #[test]
 fn a_machine_whose_ssh_fails_is_unreachable_with_the_ssh_error() {
-    struct Refused;
+    struct Refused(Option<&'static str>);
     impl CommandExecutor for Refused {
         fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
             mj_core::targets::DeadlinePause::none()
@@ -297,16 +297,49 @@ fn a_machine_whose_ssh_fails_is_unreachable_with_the_ssh_error() {
         }
 
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
-            Ok(CommandOutput {
-                status: 255,
-                stdout: vec![],
-                stderr: b"ssh: connect to host nas port 22: Connection refused\n".to_vec(),
-            })
+            match self.0 {
+                Some(stderr) => Ok(CommandOutput {
+                    status: 255,
+                    stdout: vec![],
+                    stderr: stderr.as_bytes().to_vec(),
+                }),
+                None => Err(anyhow::Error::new(mj_core::targets::CommandTimedOut {
+                    program: "ssh".into(),
+                    purpose: "verify SSH connectivity".into(),
+                    timeout: std::time::Duration::from_secs(15),
+                })),
+            }
         }
     }
-    let probe = probe_machine("nas", &ssh_machine("nas"), &Refused).unwrap();
-    let MachineProbeOutcome::Unreachable { detail, .. } = probe.outcome else {
-        panic!("{:?}", probe.outcome);
-    };
-    assert!(detail.contains("Connection refused"), "{detail}");
+    for (stderr, expected_detail, expected_answered_nothing) in [
+        (
+            Some("ssh: connect to host nas port 22: Connection refused\n"),
+            "Connection refused",
+            false,
+        ),
+        (
+            Some("Permission denied (publickey)."),
+            "Permission denied",
+            false,
+        ),
+        (
+            Some("Host key verification failed."),
+            "Host key verification failed",
+            false,
+        ),
+        (Some("Connection timed out"), "Connection timed out", true),
+        (None, "did not answer within 15 seconds", true),
+    ] {
+        let probe = probe_machine("nas", &ssh_machine("nas"), &Refused(stderr)).unwrap();
+        let MachineProbeOutcome::Unreachable {
+            detail,
+            answered_nothing,
+            ..
+        } = probe.outcome
+        else {
+            panic!("{:?}", probe.outcome);
+        };
+        assert!(detail.contains(expected_detail), "{detail}");
+        assert_eq!(answered_nothing, expected_answered_nothing, "{detail}");
+    }
 }

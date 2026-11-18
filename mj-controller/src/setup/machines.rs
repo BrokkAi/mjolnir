@@ -46,9 +46,13 @@ pub struct MachineProbe {
 pub enum MachineProbeOutcome {
     /// The machine answered: each runtime it could run, usable or not.
     Answered(Vec<RuntimeProbe>),
-    /// The machine did not answer over SSH, so nothing is known about what
-    /// it runs.
-    Unreachable { detail: String, remediation: String },
+    /// The SSH check failed, so nothing is known about what it runs.
+    Unreachable {
+        detail: String,
+        remediation: String,
+        /// True only when the host answered nothing at all.
+        answered_nothing: bool,
+    },
 }
 
 impl MachineProbe {
@@ -325,11 +329,13 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        answered_nothing,
     } = ssh_connectivity(&target, executor)
     {
         return MachineProbeOutcome::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         };
     }
     let destination = &target.destination;

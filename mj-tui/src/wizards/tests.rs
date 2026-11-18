@@ -4455,6 +4455,7 @@ fn bare_ssh_machine() -> mj_core::config::Machine {
 /// whose engine was never installed is left out without a word; a runtime
 /// whose host did not answer is left out and named under the list with the
 /// reason. The step shows the same rows for New, Resume and Move.
+// Hard-won: 2c467ecc9: an SSH auth or host-key failure was muted as "did not answer" in the target picker
 #[test]
 fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
     for flow in ["New session", "Resume", "Move"] {
@@ -4527,6 +4528,41 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
             !text.contains("Docker is not installed"),
             "{flow}: nor is its reason: {text}"
         );
+
+        dashboard.want_availability_check();
+        crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+            let mut answer =
+                crate::test_support::availability_answer(dashboard, &["docker"], &["machine"]);
+            // Older daemons omit the flag: default false must keep the fix visible.
+            answer.machines[0].finding = serde_json::from_value(serde_json::json!({
+                "Unreachable": {
+                    "detail": "Permission denied (publickey).",
+                    "remediation": "Install your public key with `ssh-copy-id dev@machine`."
+                }
+            }))
+            .unwrap();
+            answer
+        });
+        let lines = dashboard.missing_target_lines();
+        assert_eq!(lines.len(), 1, "{flow}: {lines:?}");
+        assert!(!lines[0].routine, "{flow}: {lines:?}");
+        assert!(
+            lines[0]
+                .text
+                .contains("SSH to machine failed; not listing machine, machine-podman.")
+        );
+        assert!(lines[0].full.contains("Permission denied"));
+        assert!(
+            !dashboard
+                .target_missing_line("machine")
+                .unwrap()
+                .contains("did not answer")
+        );
+        let text = captured_drawn(&mut dashboard, 160, 40).join("\n");
+        assert!(text.contains("podman"), "{flow}: {text}");
+        assert!(text.contains("Permission denied"), "{flow}: {text}");
+        assert!(text.contains("ssh-copy-id dev@machine"), "{flow}: {text}");
+        assert!(!text.contains("did not answer"), "{flow}: {text}");
     }
 }
 

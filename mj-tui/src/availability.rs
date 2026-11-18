@@ -60,15 +60,27 @@ impl Default for Availability {
 pub(crate) enum Missing {
     /// The picker shows `reason`; blocking notices show `reason` and `fix`.
     Named { reason: String, fix: Option<String> },
-    /// Its machine did not answer. Routine (a sleeping laptop), so the list
-    /// names the machine once, however many runtimes it hides.
+    /// Its SSH check failed. The list names the machine once, however many
+    /// runtimes it hides; only a host that answered nothing is routine.
     Unreachable {
         machine: String,
         detail: String,
         remediation: String,
+        answered_nothing: bool,
     },
     /// A standard runtime whose engine was never installed here.
     Silent,
+}
+
+impl Missing {
+    fn ssh_failure(machine: Option<&str>, answered_nothing: bool) -> String {
+        match (machine, answered_nothing) {
+            (Some(machine), true) => format!("{machine} did not answer"),
+            (Some(machine), false) => format!("SSH to {machine} failed"),
+            (None, true) => "it did not answer".into(),
+            (None, false) => "its SSH check failed".into(),
+        }
+    }
 }
 
 /// One line under the target list. A `routine` line (a machine that did not
@@ -228,7 +240,7 @@ impl DashboardState {
     /// runtime it hides; then one for each machine that runs nothing yet.
     pub(crate) fn missing_target_lines(&self) -> Vec<MissingTargetLine> {
         let mut lines = Vec::new();
-        let mut unreachable_machines: Vec<(String, Vec<&str>, String, String)> = Vec::new();
+        let mut unreachable_machines: Vec<(Missing, Vec<&str>)> = Vec::new();
         for id in self.config.targets.keys() {
             if self.config.enabled_target(id).is_none() {
                 continue;
@@ -242,39 +254,44 @@ impl DashboardState {
                     ),
                     routine: false,
                 }),
-                Some(Missing::Unreachable {
-                    machine,
-                    detail,
-                    remediation,
-                }) => {
+                Some(missing @ Missing::Unreachable { .. }) => {
                     match unreachable_machines
                         .iter_mut()
-                        .find(|(m, _, _, _)| *m == machine)
+                        .find(|(found, _)| *found == missing)
                     {
-                        Some((_, ids, _, _)) => ids.push(id),
-                        None => unreachable_machines.push((machine, vec![id], detail, remediation)),
+                        Some((_, ids)) => ids.push(id),
+                        None => unreachable_machines.push((missing, vec![id])),
                     }
                 }
                 Some(Missing::Silent) | None => {}
             }
         }
-        lines.extend(unreachable_machines.into_iter().map(
-            |(machine, ids, detail, remediation)| {
-                let full = sentence(
-                    &format!(
-                        "{machine} did not answer; not listing {}. {}",
-                        ids.join(", "),
-                        detail.trim()
-                    ),
-                    &remediation,
-                );
-                MissingTargetLine {
-                    text: format!("{machine} did not answer; not listing {}.", ids.join(", ")),
-                    full,
-                    routine: true,
-                }
-            },
-        ));
+        lines.extend(unreachable_machines.into_iter().map(|(missing, ids)| {
+            let Missing::Unreachable {
+                machine,
+                detail,
+                remediation,
+                answered_nothing,
+            } = missing
+            else {
+                unreachable!("only SSH failures are grouped");
+            };
+            let brief = format!(
+                "{}; not listing {}.",
+                Missing::ssh_failure(Some(&machine), answered_nothing),
+                ids.join(", ")
+            );
+            let full = sentence(&format!("{brief} {}", detail.trim()), &remediation);
+            MissingTargetLine {
+                text: if answered_nothing {
+                    brief
+                } else {
+                    full.clone()
+                },
+                full,
+                routine: answered_nothing,
+            }
+        }));
         lines.extend(self.machines_without_runtime_lines());
         lines
     }
@@ -341,10 +358,12 @@ impl DashboardState {
                     MachineFinding::Unreachable {
                         detail,
                         remediation,
+                        answered_nothing,
                     } => Some(Missing::Unreachable {
                         machine: machine_id.to_owned(),
                         detail: detail.clone(),
                         remediation: remediation.clone(),
+                        answered_nothing: *answered_nothing,
                     }),
                     MachineFinding::Answered { runtimes, rejected } => {
                         if runtimes
@@ -377,8 +396,13 @@ impl DashboardState {
                 machine,
                 detail,
                 remediation,
+                answered_nothing,
             } => Some(sentence(
-                &format!("{machine} did not answer. {}", detail.trim()),
+                &format!(
+                    "{}. {}",
+                    Missing::ssh_failure(Some(&machine), answered_nothing),
+                    detail.trim()
+                ),
                 &remediation,
             )),
             Missing::Silent => None,
@@ -522,7 +546,10 @@ impl DashboardState {
                     .get(id)
                     .filter(|probe| probe.machine == *machine)?;
                 Some(match &probe.finding {
-                    MachineFinding::Unreachable { .. } => MissingTargetLine {
+                    MachineFinding::Unreachable {
+                        answered_nothing: true,
+                        ..
+                    } => MissingTargetLine {
                         text: format!("{id} did not answer."),
                         full: format!("{id}: {}", finding_reason(&probe.finding)),
                         routine: true,
@@ -569,8 +596,13 @@ pub(crate) fn finding_reason(finding: &MachineFinding) -> String {
         MachineFinding::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         } => sentence(
-            &format!("it did not answer. {}", detail.trim()),
+            &format!(
+                "{}. {}",
+                Missing::ssh_failure(None, *answered_nothing),
+                detail.trim()
+            ),
             remediation,
         ),
         MachineFinding::Answered { runtimes, rejected } if runtimes.is_empty() => {

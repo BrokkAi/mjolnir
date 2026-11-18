@@ -830,6 +830,7 @@ fn golden_machines_without_runtimes() {
                     machine_id: "nas".into(),
                     machine: machines[1].1.clone(),
                     finding: crate::MachineFinding::Unreachable {
+                        answered_nothing: true,
                         detail: "`ssh dev@nas.example.test true` failed: Connection timed out"
                             .into(),
                         remediation: "Check that nas.example.test is up.".into(),
