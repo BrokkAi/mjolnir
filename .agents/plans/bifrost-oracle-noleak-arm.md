@@ -42,7 +42,7 @@ For N in 1..3, with `T="--census ROOT/census-results/missing-facts.jsonl --bugs-
 
 Then `brief_oracle.py noleak-publish $T --jobs-out ROOT/oracle-noleak-arm/jobs-on-af.json` (ON and AF interleaved per diff), then `driver.py --jobs` on that file with `--same-image ROOT/oracle-noleak-arm/image-pin.json`, then round M with `brief_score.py build --arms ON,AF,OT --models gpt-6.1-terra --bugs-from <jobs-on-af> --reading bifrost-oracle-noleak --reference-round bifrost-judge-l`.
 
-ON − OT measures leaking wording only if ON ran on the OT carriers' image (`89128665…`). If the pinned ON/AF image differs, the readout reports ON − OT as wording plus image, not as wording alone.
+ON − OT is a historical comparison: ON and OT ran in different review windows, and only ON has a same-window control (AF). The readout reports ON − OT as wording plus any window or cohort difference, and plus image if the pinned ON/AF image differs from the OT carriers' (`89128665…`), never as wording alone.
 
 ## Validation and Acceptance
 

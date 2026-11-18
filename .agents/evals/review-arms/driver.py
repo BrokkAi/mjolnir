@@ -181,7 +181,12 @@ def reviewer_runtime(child, carrier):
     ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={child}",
                                    "--format", "{{.ID}}"]).decode().split()
     source = "reviewer"
+    child_state = {k: session(child).get(k) for k in ("lifecycle", "is_idle", "activity_state")}
     if not ids:
+        # Only a live reviewer without a container of its own is known to run in the carrier's; a
+        # finished one may have had its own, now gone, so it stays unobserved rather than inferred.
+        if child_state.get("lifecycle") != "live":
+            return None
         ids, source = [carrier], "carrier"
     if len(ids) != 1:
         return None
@@ -193,9 +198,8 @@ def reviewer_runtime(child, carrier):
     # check=True: a failed probe raises, is logged by record_runtimes and retried at the next poll.
     processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
                                text=True, timeout=60, check=True).stdout.splitlines()
-    # The image is the container the reviewer runs in; the process list is evidence of its worker and
-    # harness only while the reviewer's own session is live, so record that state beside it.
-    child_state = {k: session(child).get(k) for k in ("lifecycle", "is_idle", "activity_state")}
+    # The process list is evidence of the reviewer's worker and harness only while its session is
+    # live, so its state at the probe is recorded beside it.
     return {"container": ids[0], "container_source": source, "image": info["Image"],
             "reviewer_state_at_probe": child_state,
             "image_digest": image.get("Digest"),
@@ -245,7 +249,11 @@ def finish_set_aside(d):
             f.write(json.dumps({"time_ns": time.time_ns(), "state": state,
                                 "response": mj("suspend", "--session", sid, "--acknowledge-unpublished-work",
                                                timeout=900)}) + "\n")
-        state = session(sid).get("lifecycle")
+        # The request is accepted before checkpoint and teardown finish; wait for them within the
+        # same bound the suspend call itself allows.
+        end = time.monotonic() + 900
+        while (state := session(sid).get("lifecycle")) not in ("suspended", "closed") and time.monotonic() < end:
+            time.sleep(5)
     if state not in ("suspended", "closed"):
         raise RuntimeError(f"rejected carrier {sid} is {state}, not suspended yet; set-aside will be retried")
     for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
