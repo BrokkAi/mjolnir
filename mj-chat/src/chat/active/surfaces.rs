@@ -45,6 +45,17 @@ impl ActiveChat {
         self.state.elicitation.is_some()
     }
 
+    /// Eligibility follows the dialog's rendered interior, across surfaces.
+    pub fn elicitation_input_available_in(
+        &self,
+        surface: super::super::ElicitationSurface,
+    ) -> bool {
+        self.state
+            .elicitation
+            .as_ref()
+            .is_some_and(|dialog| dialog.was_rendered_in(surface))
+    }
+
     pub fn elicitation_component_handles_mouse_in(
         &self,
         surface: super::super::ElicitationSurface,

@@ -384,6 +384,9 @@ impl DashboardContext {
         self.draw()?;
         let extracted = match surface {
             SurfaceId::NotificationText(generation) => {
+                if !self.dashboard.notification_selection_is_current(generation) {
+                    return Ok(());
+                }
                 if let Some(session) = self.dashboard.notification_form_session()
                     && let Some(chat) = self.chats.get_mut(&session)
                     && chat.has_elicitation()

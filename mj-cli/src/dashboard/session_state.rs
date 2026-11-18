@@ -275,10 +275,7 @@ impl DashboardContext {
             .filter(|chat| {
                 chat.has_live_composer()
                     && chat_is_visible(opening, chat.session_id())
-                    && dashboard.transition_kind(chat.session_id()).is_none()
-                    && dashboard
-                        .transition_failure_kind(chat.session_id())
-                        .is_none()
+                    && dashboard.chat_input_available(chat.session_id())
             })
     }
 
@@ -305,10 +302,7 @@ impl DashboardContext {
         {
             return None;
         }
-        if !chat_is_visible(opening, session_id)
-            || dashboard.transition_kind(session_id).is_some()
-            || dashboard.transition_failure_kind(session_id).is_some()
-        {
+        if !chat_is_visible(opening, session_id) || !dashboard.chat_input_available(session_id) {
             return None;
         }
         chats

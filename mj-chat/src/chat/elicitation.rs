@@ -1608,30 +1608,32 @@ fn render_elicitation_body(
     let button_rows = if inner.height <= 4 { 1 } else { 2 };
     // With only two content rows, preserve the question and answer control.
     // Enter and Esc still use the ordinary dialog handlers without a button bar.
-    let buttons_height = if inner.height < 3 {
-        0
-    } else {
-        inner.height.saturating_sub(footer_height).min(button_rows)
-    };
+    let buttons_height =
+        if inner.height < 3 && !dialog.display_fields.is_empty() && !dialog.confirming_unanswered {
+            0
+        } else {
+            inner.height.saturating_sub(footer_height).min(button_rows)
+        };
     let body_height = inner.height.saturating_sub(footer_height + buttons_height);
-    let (message_height, focus_height) = if dialog.confirming_unanswered {
-        (body_height, 0)
-    } else if dialog.is_plan_review() {
-        let focus_height = natural_focus_height
-            .min(body_height.saturating_sub(1).max(1))
-            .min(body_height);
-        (body_height.saturating_sub(focus_height), focus_height)
-    } else {
-        let minimum_answer = natural_focus_height.min(2);
-        let message_height = natural_message_height
-            .min(
-                body_height
-                    .saturating_sub(minimum_answer)
-                    .max(body_height / 2),
-            )
-            .min(body_height.saturating_sub(1));
-        (message_height, body_height.saturating_sub(message_height))
-    };
+    let (message_height, focus_height) =
+        if dialog.confirming_unanswered || dialog.display_fields.is_empty() {
+            (body_height, 0)
+        } else if dialog.is_plan_review() {
+            let focus_height = natural_focus_height
+                .min(body_height.saturating_sub(1).max(1))
+                .min(body_height);
+            (body_height.saturating_sub(focus_height), focus_height)
+        } else {
+            let minimum_answer = natural_focus_height.min(2);
+            let message_height = natural_message_height
+                .min(
+                    body_height
+                        .saturating_sub(minimum_answer)
+                        .max(body_height / 2),
+                )
+                .min(body_height.saturating_sub(1));
+            (message_height, body_height.saturating_sub(message_height))
+        };
     let constraints = [
         Constraint::Length(message_height),
         Constraint::Length(focus_height),

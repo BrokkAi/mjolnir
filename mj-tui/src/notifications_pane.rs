@@ -653,7 +653,11 @@ impl DashboardState {
     }
 
     pub fn notification_form_owns_keyboard(&self) -> bool {
-        self.focus == Focus::Notifications && self.notifications.form_area.is_some()
+        self.focus == Focus::Notifications
+            && self.notifications.form_area.is_some()
+            && self
+                .notification_form_session()
+                .is_some_and(|session| self.chat_input_available(&session))
     }
 
     /// Pointer capture remains with its owning conversation across sessions.
@@ -715,6 +719,12 @@ impl DashboardState {
             return None;
         }
         let session = self.notification_form_session()?;
+        if !self.chat_input_available(&session) {
+            if let Some(chat) = chats.get_mut(&session) {
+                chat.cancel_component_pointer();
+            }
+            return None;
+        }
         let chat = chats.get_mut(&session)?;
         if !chat.has_elicitation() {
             return None;
@@ -1165,16 +1175,20 @@ impl DashboardState {
     }
 
     /// Text copying uses the exact row space registered by the last render.
+    pub fn notification_selection_is_current(&self, generation: u64) -> bool {
+        self.notifications.text_generation == generation
+            && self
+                .frame_surfaces
+                .surface(mj_chat::selection::SurfaceId::NotificationText(generation))
+                .is_some()
+    }
+
     pub fn notification_selection_text(
         &self,
         generation: u64,
         range: &mj_chat::selection::SelectionRange,
     ) -> Option<String> {
-        (self
-            .frame_surfaces
-            .surface(mj_chat::selection::SurfaceId::NotificationText(generation))
-            .is_some()
-            && self.notifications.text_generation == generation)
+        self.notification_selection_is_current(generation)
             .then(|| {
                 self.notifications
                     .text_rows
@@ -1348,7 +1362,6 @@ pub(crate) fn render(
             .saturating_sub(if form_requested { 2 } else { 6 }),
     );
     if inline_form {
-        dashboard.notifications.form_area = (body.width > 0 && body.height > 0).then_some(body);
         let pane = &mut dashboard.notifications;
         let form_text = chat
             .as_ref()
@@ -1360,11 +1373,20 @@ pub(crate) fn render(
             pane.form_text = form_text;
         }
         pane.text_rows = None;
+        if !dashboard.chat_input_available(&session_id) {
+            chat.as_mut().unwrap().cancel_component_pointer();
+        }
         let surfaces = chat.as_mut().unwrap().draw_elicitation_in(
             frame,
             body,
             focused && !dashboard.modal_open(),
         );
+        dashboard.notifications.form_area = (dashboard.chat_input_available(&session_id)
+            && chat
+                .as_ref()
+                .unwrap()
+                .elicitation_input_available_in(mj_chat::chat::ElicitationSurface::Notification))
+        .then_some(body);
         for (source, target) in [
             (
                 mj_chat::selection::SurfaceId::ElicitationMessage,
@@ -1870,6 +1892,55 @@ pub(crate) mod tests {
                         .consumed
                 );
             }
+            // Hard-won: 9739e9996: lifecycle-owned chats still accepted inline answers before redraw.
+            dashboard.begin_session_operation(
+                "session-1".into(),
+                crate::SessionOperationKind::Moving,
+                None,
+            );
+            for code in [KeyCode::Enter, KeyCode::Esc] {
+                assert!(
+                    dashboard
+                        .handle_notification_form_event(&mut chats, &Event::Key(key(code)))
+                        .is_none()
+                );
+            }
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            assert!(!dashboard.notification_form_owns_keyboard());
+            dashboard.finish_session_operation("session-1");
+            // Hard-won: 9739e9996: border-only forms claimed Esc while rejecting it themselves.
+            dashboard.notifications.size = PaneSize::Standard;
+            let mut border_only =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 19)).unwrap();
+            border_only
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            assert!(dashboard.notifications_area.is_some());
+            assert!(!dashboard.notification_form_owns_keyboard());
+            assert!(
+                !chats["session-1"].elicitation_input_available_in(
+                    mj_chat::chat::ElicitationSurface::Notification
+                )
+            );
+            dashboard.notifications.size = PaneSize::Maximized;
             let mut tiny =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 5)).unwrap();
             tiny.draw(|frame| {
@@ -2086,6 +2157,38 @@ pub(crate) mod tests {
                 .conversation_form_pointer_session(&chats)
                 .is_none()
         );
+        // Hard-won: 9739e9996: global commands left a different session's notification button armed.
+        let card = dashboard.notifications_area.unwrap();
+        let (x, y) = point(
+            &lines[usize::from(card.y)..usize::from(card.bottom())],
+            "Answer & Next",
+        );
+        let press = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: card.y + y,
+            modifiers: KeyModifiers::NONE,
+        };
+        dashboard
+            .handle_notification_form_event(&mut chats, &Event::Mouse(press))
+            .unwrap();
+        assert_eq!(
+            chats["session-1"].elicitation_pointer_surface(),
+            Some(mj_chat::chat::ElicitationSurface::Notification)
+        );
+        dashboard.cancel_all_component_pointers(&mut chats);
+        dashboard.focus = Focus::Sessions;
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+        dashboard
+            .handle_notification_form_event(
+                &mut chats,
+                &Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..press
+                }),
+            )
+            .unwrap();
+        assert!(chats["session-1"].has_elicitation());
     }
 
     pub(crate) fn dashboard() -> DashboardState {
@@ -2739,6 +2842,7 @@ pub(crate) mod tests {
         dashboard.notifications.size = PaneSize::Maximized;
         dashboard.focus = Focus::Notifications;
         let mut chats = std::collections::BTreeMap::new();
+        let mut previous_generation = None;
         for stage in 0..3 {
             terminal
                 .draw(|frame| {
@@ -2751,6 +2855,11 @@ pub(crate) mod tests {
                     );
                 })
                 .unwrap();
+            // Hard-won: 9739e9996: copy after redraw applied a stale range to the new form.
+            if let Some(generation) = previous_generation {
+                assert!(!dashboard.notification_selection_is_current(generation));
+            }
+            previous_generation = Some(dashboard.notifications.text_generation);
             selection.reconcile_surfaces(dashboard.frame_surfaces());
             assert!(
                 selection.active_surface().is_none(),

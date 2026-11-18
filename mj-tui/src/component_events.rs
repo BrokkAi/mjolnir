@@ -5,6 +5,18 @@ use crossterm::event::{Event, MouseEvent};
 use crate::{DashboardAction, DashboardState, Mode};
 
 impl DashboardState {
+    /// Global commands disarm every chat presentation, including warm forms
+    /// whose session differs from the focused conversation.
+    pub fn cancel_all_component_pointers(
+        &mut self,
+        chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) {
+        self.cancel_component_pointer();
+        for chat in chats.values_mut() {
+            chat.cancel_component_pointer();
+        }
+    }
+
     pub(crate) fn dialog_layer_key(&self) -> String {
         let detail = self
             .active_modal()

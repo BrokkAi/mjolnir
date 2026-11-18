@@ -127,7 +127,7 @@ impl SessionAttachment {
         let changed = self
             .assignments
             .get(&pane)
-            .is_some_and(|interest| interest.assignment() != assignment);
+            .is_none_or(|interest| interest.assignment() != assignment);
         if changed && self.pending() && !self.has_surface_interest(dashboard, session) {
             self.cancel();
             self.selection = None;
@@ -192,7 +192,7 @@ impl SessionAttachment {
     /// Access follows this assignment's interest, even if another surface
     /// completed the session's shared attach after this pane cancelled.
     pub(super) fn pane_can_show(&self, dashboard: &mj_tui::DashboardState, pane: PaneId) -> bool {
-        self.assignments.get(&pane).is_none_or(|interest| {
+        self.assignments.get(&pane).is_some_and(|interest| {
             matches!(interest, PaneInterest::Requested(assignment)
                 if dashboard.pane_assignment(pane) == Some(*assignment))
         })

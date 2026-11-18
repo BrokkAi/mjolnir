@@ -1475,8 +1475,7 @@ fn focused_chat_on_screen(
         .is_some_and(|chat| chat.has_live_composer())
         && (access.can_show)(pane, session_id)
         && chat_shows_in_pane(opening, session_id)
-        && dashboard.transition_kind(session_id).is_none()
-        && dashboard.transition_failure_kind(session_id).is_none())
+        && dashboard.chat_input_available(session_id))
     .then(|| session_id.to_owned())
 }
 

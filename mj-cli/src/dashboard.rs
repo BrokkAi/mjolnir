@@ -853,8 +853,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                         route => route,
                     };
                     let (consumed, batched) = if let KeyRoute::Command { id, index } = route {
-                        context.dashboard.cancel_component_pointer();
-                        if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
+                        context.dashboard.cancel_all_component_pointers(&mut context.chats);
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.

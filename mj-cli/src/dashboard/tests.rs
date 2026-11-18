@@ -298,6 +298,11 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let restored = dashboard.pane_assignment(pane).unwrap();
     dashboard.close_pane(pane);
     assert!(!attachment.accepts_pane_result(generation, restored, &dashboard, pane, "session-1"));
+    // Hard-won: 9739e9996: a queued result joined a restored pane that had never bound an interest.
+    dashboard.set_pane_session(other, Some("session-1"));
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    attachment.observe_pane(&dashboard, other, "session-1");
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
 }
 
 // Hard-won: a882023b6: Esc on a pane cancelled the notification's shared attachment and left its form loading forever.

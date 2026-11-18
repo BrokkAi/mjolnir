@@ -53,6 +53,12 @@ impl DashboardState {
         self.current_session_id()
     }
 
+    /// Lifecycle ownership excludes input on every live chat presentation.
+    pub fn chat_input_available(&self, session_id: &str) -> bool {
+        self.transition_kind(session_id).is_none()
+            && self.transition_failure_kind(session_id).is_none()
+    }
+
     /// The operation that owns a session's conversation, if any. A local or
     /// daemon operation wins over the durable record; the state fallback keeps
     /// a recovering provisioning/closing/destroying record hidden until its

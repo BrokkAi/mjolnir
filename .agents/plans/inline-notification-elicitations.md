@@ -73,3 +73,12 @@ Fix four confirmed transitions. Navigation leaves the composer and its clipboard
 Extend the existing interaction regression with a one-row text editor and two-session capture/release. Extend the existing text-selection regression through loading, attachment, and question-page changes. Validate these focused transitions, the unchanged golden, clipboard regressions, and affected-crate clippy.
 
 Fourth follow-up checks pass: extended compact-input and cross-session-capture regression, loading/page selection invalidation, existing clipboard target regression, unchanged dashboard golden, all-targets clippy with the same five-package selection, and formatting. Fixture-only failures (field id spelling and click/search coordinates) were corrected and only the affected tests rerun. The checkpoint awaits mandatory review; no push.
+
+
+## Fifth review follow-up
+
+Fix all six findings. The shared lifecycle input decision now gates both conversation and notification input; lifecycle-blocked form renders and input also disarm pending pointers. Global commands cancel capture on every warm chat, including a different session's inline form. Attachment acceptance requires an explicitly bound current pane interest, and reconciliation cannot adopt old work into a previously unbound assignment after all original interests disappeared. Copying a notification selection validates its generation after the redraw, using the same row-space validation as plain notification text. Keyboard ownership uses the dialog's actual rendered-interior eligibility, so border-only forms do not swallow attachment-cancel Esc. Compact fieldless and confirmation forms reserve their clickable action row and use remaining space for the question.
+
+Extend the existing interaction regression through Moving, border-only rendering, and global-command capture cancellation. Extend the layout-restore regression to reject a queued completion both before and after binding a previously unobserved destination pane. Extend existing fieldless/confirmation tests through compact mouse submission and the selection regression through post-redraw generation checks. Targeted input, fieldless, confirmation, layout-restore and selection tests pass; the broader attachment filter (28 tests) and unchanged dashboard golden pass. All-targets clippy and formatting are the final checks for this checkpoint.
+
+Fifth follow-up all-targets clippy across the same five affected packages, formatting and diff checks pass. Ready for required review; no push.

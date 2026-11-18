@@ -1330,6 +1330,24 @@ fn false_is_an_answer_but_optional_whitespace_is_not() {
 fn empty_forms_still_submit_and_button_focus_keeps_the_question_visible() {
     let mut empty = paired_request(0, false);
     empty.message = "Continue?".into();
+    // Hard-won: 9739e9996: compact fieldless and confirmation forms lost their clickable action row.
+    for height in [3, 4] {
+        let mut dialog = ElicitationDialog::new(empty.clone());
+        let buffer = rendered_in_pane(&dialog, 100, height);
+        let (column, row) = (0..height)
+            .find_map(|row| {
+                let line = buffer_row(&buffer, row, 0, 100);
+                line.find("Answer & Next")
+                    .map(|byte| (line[..byte].chars().count() as u16, row))
+            })
+            .expect("compact action button remains visible");
+        assert_eq!(
+            click_cell_at(&mut dialog, column, row, std::time::Instant::now()),
+            Some(ElicitationResponse::Accept {
+                content: BTreeMap::new()
+            })
+        );
+    }
     let mut dialog = ElicitationDialog::new(empty);
     assert!(buffer_text(&rendered_in_pane(&dialog, 60, 4)).contains("Continue?"));
     assert_eq!(
@@ -1435,8 +1453,17 @@ fn mouse_navigation_and_submission_share_the_keyboard_confirmation_rules() {
     assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
     assert_eq!(click_question_button(&mut dialog, "Answer & Next"), None);
     assert!(dialog.confirming_unanswered);
+    // Hard-won: 9739e9996: compact confirmations had no mouse action to finish the answer.
+    let buffer = rendered_in_pane(&dialog, 100, 4);
+    let (column, row) = (0..4)
+        .find_map(|row| {
+            let line = buffer_row(&buffer, row, 0, 100);
+            line.find("Answer & Next")
+                .map(|byte| (line[..byte].chars().count() as u16, row))
+        })
+        .expect("confirmation action remains visible");
     assert_eq!(
-        click_question_button(&mut dialog, "Answer & Next"),
+        click_cell_at(&mut dialog, column, row, std::time::Instant::now()),
         Some(ElicitationResponse::Accept {
             content: BTreeMap::from([(
                 "question_1".into(),
