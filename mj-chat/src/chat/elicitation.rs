@@ -88,6 +88,8 @@ pub struct ElicitationDraft {
     values: Vec<FieldValue>,
     option_cursors: Vec<usize>,
     active_custom_fields: BTreeSet<usize>,
+    #[serde(default, skip_serializing_if = "ElicitationSurface::is_conversation")]
+    surface: ElicitationSurface,
     focus: usize,
     message_scroll: u16,
     /// `(source line, grapheme offset)` at the top of the viewport. Both
@@ -134,10 +136,18 @@ pub(super) struct ElicitationDialog {
 }
 
 /// Independent presentation geometry for the two hosts of one logical form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ElicitationSurface {
+    #[default]
     Conversation,
     Notification,
+}
+
+impl ElicitationSurface {
+    fn is_conversation(&self) -> bool {
+        *self == Self::Conversation
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +282,10 @@ impl ElicitationDialog {
         self.focus.set(focus);
     }
 
+    pub(super) fn set_response_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+
     pub(super) fn is_notification_surface(&self) -> bool {
         self.surface == ElicitationSurface::Notification
     }
@@ -298,6 +312,17 @@ impl ElicitationDialog {
     ///
     /// Prompts use their complete wrapped height, capped by the caller to
     /// the available pane. Overflow scrolls independently of the controls.
+    pub(super) fn minimum_height(&self, width: u16) -> u16 {
+        // Match render_elicitation_body: two borders, footer, two button
+        // rows, one readable message row, and the focused label/control.
+        2 + 1
+            + 2
+            + 1
+            + focus_content(self)
+                .wrapped_height(width.saturating_sub(2).max(1))
+                .min(2)
+    }
+
     pub(super) fn natural_height(&self, width: u16) -> u16 {
         let content_width = width.saturating_sub(2).max(1);
         let focus_rows = focus_content(self).wrapped_height(content_width);
@@ -324,6 +349,7 @@ impl ElicitationDialog {
             values: self.values.clone(),
             option_cursors: self.option_cursors.clone(),
             active_custom_fields: self.active_custom_fields.clone(),
+            surface: self.surface,
             focus: self.focus_index(),
             message_scroll: self.view.message_scroll.get(),
             message_anchor: self.view.message_anchor.get(),
@@ -356,6 +382,7 @@ impl ElicitationDialog {
             .collect();
         dialog.reset_controls();
         dialog.focus_control(draft.focus.min(dialog.display_fields.len() + 2));
+        dialog.select_surface(draft.surface);
         dialog.view.message_scroll = Cell::new(draft.message_scroll);
         dialog.view.message_anchor = Cell::new(draft.message_anchor);
         dialog.view.message_anchor_width = Cell::new(draft.message_anchor_width);
@@ -1758,7 +1785,7 @@ fn render_elicitation_body(
         "Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions".to_owned()
     };
     frame.render_widget(
-        Paragraph::new(if focused {
+        Paragraph::new(if focused || dialog.error.is_some() {
             footer.as_str()
         } else {
             "Click to answer"

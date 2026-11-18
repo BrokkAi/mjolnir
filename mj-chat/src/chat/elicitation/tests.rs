@@ -1571,6 +1571,17 @@ fn simultaneous_surfaces_keep_hitboxes_capture_and_scroll_independent() {
     assert!(matches!(dialog.values[0], FieldValue::Boolean(false)));
     dialog.select_surface(ElicitationSurface::Notification);
     assert_eq!(dialog.view.message_scroll.get(), notification_scroll);
+    // Hard-won: a882023b6: a notification-only draft restored its scroll into the conversation slot.
+    let stored = serde_json::to_string(&dialog.draft()).unwrap();
+    let mut restored = ElicitationDialog::from_draft(
+        dialog.request().clone(),
+        serde_json::from_str(&stored).unwrap(),
+    )
+    .unwrap();
+    restored.select_surface(ElicitationSurface::Notification);
+    assert_eq!(restored.view.message_scroll.get(), notification_scroll);
+    restored.select_surface(ElicitationSurface::Conversation);
+    assert_eq!(restored.view.message_scroll.get(), 0);
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {

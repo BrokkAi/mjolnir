@@ -558,6 +558,7 @@ impl DashboardState {
     fn reset_notification_item(&mut self) {
         let pane = &mut self.notifications;
         pane.scroll = 0;
+        pane.text_generation = pane.text_generation.wrapping_add(1);
         pane.text_rows = None;
         pane.message_read = None;
         pane.selection_revision = pane.selection_revision.wrapping_add(1);
@@ -625,11 +626,13 @@ impl DashboardState {
     pub fn notification_form_session(&self) -> Option<String> {
         let entries = self.notification_entries();
         let entry = entries.first()?;
-        let form_selected = entry.published.as_ref().is_none_or(|card| {
-            card.form.is_some() && self.selected_notification_item(entry) == card.entries.len()
-        });
+        let form_selected = entry
+            .published
+            .as_ref()
+            .map_or(entry.target.is_none(), |card| {
+                card.form.is_some() && self.selected_notification_item(entry) == card.entries.len()
+            });
         (entry.level == AttentionLevel::Waiting
-            && entry.target.is_none()
             && form_selected
             && self.notifications.size != PaneSize::Minimized)
             .then(|| self.notification_destination(entry))
@@ -1291,9 +1294,31 @@ pub(crate) fn render(
     );
     if inline_form {
         dashboard.notifications.form_area = Some(body);
-        chat.as_mut()
-            .unwrap()
-            .draw_elicitation_in(frame, body, focused && !dashboard.modal_open());
+        dashboard.notifications.text_rows = None;
+        let surfaces = chat.as_mut().unwrap().draw_elicitation_in(
+            frame,
+            body,
+            focused && !dashboard.modal_open(),
+        );
+        for (source, target) in [
+            (
+                mj_chat::selection::SurfaceId::ElicitationMessage,
+                mj_chat::selection::SurfaceId::NotificationText(
+                    dashboard.notifications.text_generation,
+                ),
+            ),
+            (
+                mj_chat::selection::SurfaceId::ModalBody,
+                mj_chat::selection::SurfaceId::NotificationFormBody(
+                    dashboard.notifications.text_generation,
+                ),
+            ),
+        ] {
+            if let Some(mut surface) = surfaces.surface(source).copied() {
+                surface.id = target;
+                dashboard.frame_surfaces.push(surface);
+            }
+        }
     } else {
         let pane = &mut dashboard.notifications;
         if pane
@@ -1536,6 +1561,7 @@ pub(crate) mod tests {
         inner: SessionHandle,
         form_view: Option<ManagedSessionView>,
         responses: Option<tokio::sync::mpsc::UnboundedSender<(String, ElicitationResponse)>>,
+        response_error: Option<String>,
         listings: tokio::sync::mpsc::UnboundedSender<String>,
         requests: tokio::sync::mpsc::UnboundedSender<(
             String,
@@ -1623,7 +1649,14 @@ pub(crate) mod tests {
                 .as_ref()
                 .expect("form response observer")
                 .send((id, response));
-            Box::pin(async move { sent.map_err(Into::into) })
+            let error = self.response_error.clone();
+            Box::pin(async move {
+                sent?;
+                if let Some(error) = error {
+                    anyhow::bail!(error);
+                }
+                Ok(())
+            })
         }
         fn stop_background_task(&self, _: String) -> BoxFuture<'_, anyhow::Result<()>> {
             Box::pin(async { anyhow::bail!("unexpected stop") })
@@ -1640,6 +1673,17 @@ pub(crate) mod tests {
     pub(crate) fn form_chat(
         session: &str,
         request: mj_core::elicitation::ElicitationRequest,
+    ) -> (
+        mj_chat::chat::ActiveChat,
+        tokio::sync::mpsc::UnboundedReceiver<(String, ElicitationResponse)>,
+    ) {
+        form_chat_with_error(session, request, None)
+    }
+
+    fn form_chat_with_error(
+        session: &str,
+        request: mj_core::elicitation::ElicitationRequest,
+        response_error: Option<String>,
     ) -> (
         mj_chat::chat::ActiveChat,
         tokio::sync::mpsc::UnboundedReceiver<(String, ElicitationResponse)>,
@@ -1670,6 +1714,7 @@ pub(crate) mod tests {
             inner: fixture.stopped,
             form_view: Some(view),
             responses: Some(responses),
+            response_error,
             listings,
             requests,
         };
@@ -1794,6 +1839,12 @@ pub(crate) mod tests {
             Some("q2")
         );
 
+        // Hard-won: a882023b6: a form beside dismissible messages fell back to a free-text reply.
+        assert_eq!(
+            dashboard.notification_form_session().as_deref(),
+            Some("q2"),
+            "a selected form remains answerable beside dismissible messages"
+        );
         let newest = drawn(&mut dashboard, 120, 44);
         assert!(newest.iter().any(|line| line.contains("2 of 2")));
         assert!(newest.iter().any(|line| line.contains("Which approach")));
@@ -2421,6 +2472,7 @@ pub(crate) mod tests {
             inner: fixture.stopped,
             form_view: None,
             responses: None,
+            response_error: None,
             requests,
             listings,
         });
@@ -2951,6 +3003,41 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert!(family.notifications.form_area.is_some());
+        let message = family
+            .frame_surfaces
+            .surface(mj_chat::selection::SurfaceId::NotificationText(
+                family.notifications.text_generation,
+            ))
+            .unwrap();
+        assert!(
+            family
+                .notifications
+                .form_area
+                .unwrap()
+                .contains(ratatui::layout::Position::new(
+                    message.rect.x,
+                    message.rect.y
+                ))
+        );
+        let range = mj_chat::selection::SelectionRange {
+            start: mj_chat::selection::ContentPos::new(0, 0),
+            end: mj_chat::selection::ContentPos::new(
+                message.total_rows.saturating_sub(1),
+                message.rect.width.saturating_sub(1),
+            ),
+        };
+        assert!(
+            chats
+                .get_mut("child-session")
+                .unwrap()
+                .elicitation_selection_text_in(
+                    mj_chat::chat::ElicitationSurface::Notification,
+                    &range
+                )
+                .unwrap()
+                .contains("path")
+        );
+
         let area = family.notifications_area.unwrap();
         let mut open = DashboardAction::None;
         for kind in [
@@ -3043,5 +3130,53 @@ pub(crate) mod tests {
             }
         );
         assert!(!chats["child-session"].has_elicitation());
+        let (chat, mut rejected) =
+            form_chat_with_error("child-session", approval, Some("not permitted".into()));
+        chats.insert("child-session".into(), chat);
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut family,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        family.handle_notification_form_event(
+            &mut chats,
+            &crossterm::event::Event::Paste("Retry me".into()),
+        );
+        family.handle_notification_form_event(
+            &mut chats,
+            &crossterm::event::Event::Key(key(KeyCode::Enter)),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            rejected.recv().await.unwrap();
+            while !chats["child-session"].has_elicitation() {
+                mj_chat::chat::ActiveChat::pump(chats.get_mut("child-session")).await;
+            }
+        })
+        .await
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut family,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        let area = family.notifications_area.unwrap();
+        assert!(
+            lines[usize::from(area.y)..usize::from(area.bottom())]
+                .iter()
+                .any(|line| line.contains("Answer was not sent: not permitted"))
+        );
     }
 }

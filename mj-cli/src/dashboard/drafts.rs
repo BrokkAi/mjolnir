@@ -250,6 +250,16 @@ impl DashboardContext {
         self.attachments
             .entry(session_id.to_owned())
             .or_default()
+            .observe_pane(&self.dashboard, pane, session_id);
+        if let Some(assignment) = self.dashboard.pane_assignment(pane) {
+            self.attachments
+                .entry(session_id.to_owned())
+                .or_default()
+                .request_pane(pane, assignment);
+        }
+        self.attachments
+            .entry(session_id.to_owned())
+            .or_default()
             .select(session_id);
         self.save_question_draft(session_id);
         // A lifecycle owns the row's conversation until its authoritative
@@ -304,13 +314,11 @@ impl DashboardContext {
             return;
         }
         for (pane, session) in self.dashboard.pane_sessions() {
-            if session == session_id
-                && let Some(assignment) = self.dashboard.pane_assignment(pane)
-            {
+            if session == session_id {
                 self.attachments
                     .entry(session.to_owned())
                     .or_default()
-                    .bind(pane, assignment);
+                    .observe_pane(&self.dashboard, pane, session_id);
             }
         }
         if self

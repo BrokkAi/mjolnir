@@ -13,9 +13,23 @@ pub(super) const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Default)]
 pub(super) struct SessionAttachment {
     selection: Option<String>,
-    assignments: BTreeMap<PaneId, mj_tui::PaneAssignment>,
+    assignments: BTreeMap<PaneId, PaneInterest>,
+    notification_requested: bool,
     generation: u64,
     task: Option<JoinHandle<()>>,
+}
+
+enum PaneInterest {
+    Requested(mj_tui::PaneAssignment),
+    Cancelled(mj_tui::PaneAssignment),
+}
+
+impl PaneInterest {
+    fn assignment(&self) -> mj_tui::PaneAssignment {
+        match self {
+            Self::Requested(assignment) | Self::Cancelled(assignment) => *assignment,
+        }
+    }
 }
 
 /// Resources that existed when a lifecycle operation was admitted. The
@@ -78,13 +92,92 @@ impl ChatRetirement {
 }
 
 impl SessionAttachment {
+    /// Observe navigation before permitting an old task to join its new
+    /// assignment. Work survives reassignment only through another live lease.
+    pub(super) fn observe_pane(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        pane: PaneId,
+        session: &str,
+    ) {
+        let Some(assignment) = dashboard.pane_assignment(pane) else {
+            return;
+        };
+        let changed = self
+            .assignments
+            .get(&pane)
+            .is_some_and(|interest| interest.assignment() != assignment);
+        if changed && self.pending() && !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+            self.selection = None;
+        }
+        self.bind(pane, assignment);
+    }
+
     /// A navigation assignment joins the session's one attachment operation.
     pub(super) fn bind(&mut self, pane: PaneId, assignment: mj_tui::PaneAssignment) {
-        if self.assignments.insert(pane, assignment) != Some(assignment) && !self.pending() {
+        if self
+            .assignments
+            .get(&pane)
+            .is_some_and(|interest| interest.assignment() == assignment)
+        {
+            return;
+        }
+        self.request_pane(pane, assignment);
+    }
+
+    /// An explicit retry can rejoin an assignment that Esc cancelled.
+    pub(super) fn request_pane(&mut self, pane: PaneId, assignment: mj_tui::PaneAssignment) {
+        let unchanged = matches!(self.assignments.get(&pane), Some(PaneInterest::Requested(current)) if *current == assignment);
+        self.assignments
+            .insert(pane, PaneInterest::Requested(assignment));
+        if !unchanged && !self.pending() {
             self.selection = None;
         }
     }
 
+    /// Observe the notification lease so a newly displayed card can start
+    /// work even when its conversation's earlier attempt was cancelled.
+    pub(super) fn bind_notification(&mut self, requested: bool) {
+        if requested && !self.notification_requested && !self.pending() {
+            self.selection = None;
+        }
+        self.notification_requested = requested;
+    }
+
+    pub(super) fn pane_pending(&self, pane: PaneId) -> bool {
+        self.pending()
+            && matches!(
+                self.assignments.get(&pane),
+                Some(PaneInterest::Requested(_))
+            )
+    }
+
+    pub(super) fn release_pane(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        pane: PaneId,
+        session: &str,
+    ) {
+        if let Some(assignment) = dashboard.pane_assignment(pane) {
+            self.assignments
+                .insert(pane, PaneInterest::Cancelled(assignment));
+        }
+        if !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+        }
+    }
+
+    fn has_surface_interest(&self, dashboard: &mj_tui::DashboardState, session: &str) -> bool {
+        dashboard.notification_form_session().as_deref() == Some(session)
+            || self.assignments.iter().any(|(pane, interest)| {
+                matches!(interest, PaneInterest::Requested(assignment)
+                    if dashboard.pane_assignment(*pane) == Some(*assignment)
+                    && dashboard.pane_session(*pane) == Some(session))
+            })
+    }
+
+    #[cfg(test)]
     pub(super) fn accepts_pane_result(
         &self,
         generation: u64,
@@ -94,7 +187,7 @@ impl SessionAttachment {
         session: &str,
     ) -> bool {
         self.accepts(generation, Some(session))
-            && self.assignments.get(&pane) == Some(&assignment)
+            && matches!(self.assignments.get(&pane), Some(PaneInterest::Requested(current)) if *current == assignment)
             && dashboard.pane_assignment(pane) == Some(assignment)
             && dashboard.pane_session(pane) == Some(session)
     }
@@ -105,11 +198,7 @@ impl SessionAttachment {
         dashboard: &mj_tui::DashboardState,
         session: &str,
     ) -> bool {
-        self.accepts(generation, Some(session))
-            && (dashboard.notification_form_session().as_deref() == Some(session)
-                || self.assignments.iter().any(|(pane, assignment)| {
-                    self.accepts_pane_result(generation, *assignment, dashboard, *pane, session)
-                }))
+        self.accepts(generation, Some(session)) && self.has_surface_interest(dashboard, session)
     }
 
     pub(super) fn pending(&self) -> bool {

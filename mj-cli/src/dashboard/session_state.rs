@@ -140,6 +140,10 @@ impl DashboardContext {
         if self.startup.pick_pending() {
             return;
         }
+        let notification = self.dashboard.notification_form_session();
+        for (session, attachment) in &mut self.attachments {
+            attachment.bind_notification(notification.as_deref() == Some(session.as_str()));
+        }
         // A transition finishing may make an assigned conversation attachable.
         // Selection changes from refresh never assign a different session. A
         // lifecycle release already emptied its pane. A historical session
@@ -150,12 +154,10 @@ impl DashboardContext {
             {
                 continue;
             }
-            if let Some(assignment) = self.dashboard.pane_assignment(pane) {
-                self.attachments
-                    .entry(session.clone())
-                    .or_default()
-                    .bind(pane, assignment);
-            }
+            self.attachments
+                .entry(session.clone())
+                .or_default()
+                .observe_pane(&self.dashboard, pane, &session);
             if self.dashboard.pane_session_is_suspended(&session) {
                 self.cancel_chat_open_in(pane);
                 continue;
@@ -170,15 +172,14 @@ impl DashboardContext {
                 self.open_chat_session_into(pane, &session);
             }
         }
-        if let Some(session) = self.dashboard.notification_form_session()
+        if let Some(session) = notification
             && self.dashboard.pane_session_can_attach(&session)
-            && self
-                .attachments
-                .entry(session.clone())
-                .or_default()
-                .select(&session)
         {
-            self.start_chat_attach(&session);
+            let attachment = self.attachments.entry(session.clone()).or_default();
+            attachment.bind_notification(true);
+            if attachment.select(&session) {
+                self.start_chat_attach(&session);
+            }
         }
         let wanted = self.wanted_chat_sessions();
         for (session, attachment) in &mut self.attachments {
@@ -190,10 +191,10 @@ impl DashboardContext {
             .dashboard
             .pane_sessions()
             .into_iter()
-            .filter(|(_, session)| {
+            .filter(|(pane, session)| {
                 self.attachments
                     .get(session)
-                    .is_some_and(|attachment| attachment.pending())
+                    .is_some_and(|attachment| attachment.pane_pending(*pane))
             })
             .collect();
         self.retire_chats_outside_the_layout();
@@ -218,7 +219,7 @@ impl DashboardContext {
         if let Some(session) = self.dashboard.pane_session(pane)
             && let Some(attachment) = self.attachments.get_mut(session)
         {
-            attachment.cancel();
+            attachment.release_pane(&self.dashboard, pane, session);
         }
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();

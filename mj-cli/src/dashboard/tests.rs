@@ -254,6 +254,8 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     finish.send(()).unwrap();
     let (generation, result) = received.await.unwrap();
     assert!(result.is_ok());
+    // Hard-won: a882023b6: reconciliation rebound an old task to a new A-to-B-to-A assignment.
+    attachment.observe_pane(&dashboard, pane, "session-1");
     assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
     assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
@@ -288,6 +290,73 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let restored = dashboard.pane_assignment(pane).unwrap();
     dashboard.close_pane(pane);
     assert!(!attachment.accepts_pane_result(generation, restored, &dashboard, pane, "session-1"));
+}
+
+// Hard-won: a882023b6: Esc on a pane cancelled the notification's shared attachment and left its form loading forever.
+#[tokio::test]
+async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+    let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
+    let pane = dashboard.focused_pane();
+    let assignment = dashboard.pane_assignment(pane).unwrap();
+    let card = NotificationCard {
+        since_ms: 1,
+        badge: mj_core::attention::NotificationKind::NeedsInput,
+        entries: Vec::new(),
+        dismissal: None,
+        holder: None,
+        form: Some(CardForm {
+            raised_at_ms: 1,
+            request_id: "form".into(),
+            message: "Answer".into(),
+        }),
+    };
+    dashboard.set_notification_cards(Some([("session-1".into(), card)].into_iter().collect()));
+    assert_eq!(
+        dashboard.notification_form_session().as_deref(),
+        Some("session-1")
+    );
+    let mut attachment = attachment::SessionAttachment::default();
+    attachment.bind(pane, assignment);
+    attachment.bind_notification(true);
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let (report, received) = tokio::sync::oneshot::channel();
+    attachment.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async move { wait.await.map_err(|error| error.to_string()) },
+        move |generation, result| {
+            report.send((generation, result)).unwrap();
+        },
+    );
+    attachment.release_pane(&dashboard, pane, "session-1");
+    assert!(attachment.pending());
+    assert!(!attachment.pane_pending(pane));
+    // Refreshes retain the cancellation, and never create a competing attach.
+    attachment.bind(pane, assignment);
+    attachment.bind_notification(true);
+    assert!(!attachment.select("session-1"));
+    assert!(!attachment.pane_pending(pane));
+    finish.send(()).unwrap();
+    let (generation, result) = received.await.unwrap();
+    assert!(result.is_ok());
+    assert!(attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
+    attachment.finish();
+    // Without the notification, Esc really cancels. A later notification
+    // request or explicit pane retry can still start its own accepted work.
+    dashboard.set_notification_cards(Some(Default::default()));
+    attachment.bind_notification(false);
+    attachment.release_pane(&dashboard, pane, "session-1");
+    assert!(!attachment.pending());
+    assert!(!attachment.select("session-1"));
+    attachment.bind_notification(true);
+    assert!(attachment.select("session-1"));
+    attachment.bind_notification(false);
+    attachment.release_pane(&dashboard, pane, "session-1");
+    attachment.request_pane(pane, assignment);
+    assert!(attachment.select("session-1"));
 }
 
 #[tokio::test]

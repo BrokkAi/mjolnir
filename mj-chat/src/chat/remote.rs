@@ -1209,6 +1209,9 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
             if !answered {
                 chat.restore_elicitation(request);
+                if let Some(dialog) = chat.elicitation.as_mut() {
+                    dialog.set_response_error(format!("Answer was not sent: {error}"));
+                }
             }
             chat.conversation_notice(if answered {
                 format!("Answer sent; follow-up failed: {error}")
@@ -1379,7 +1382,12 @@ pub(super) fn queue_chat_remote_operation(
                 }
                 ChatRemoteOperation::RespondElicitation { request, .. } => {
                     chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
-                    chat.restore_elicitation(request)
+                    chat.restore_elicitation(request);
+                    if let Some(dialog) = chat.elicitation.as_mut() {
+                        dialog.set_response_error(
+                            "Answer was not sent: session command queue is full".into(),
+                        );
+                    }
                 }
                 ChatRemoteOperation::Cancel { intent, .. } => {
                     chat.turn_control_submitting = false;

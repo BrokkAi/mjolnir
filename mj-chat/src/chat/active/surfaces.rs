@@ -61,12 +61,43 @@ impl ActiveChat {
     }
 
     /// Draw the current form without making another draft or response path.
-    pub fn draw_elicitation_in(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    pub fn draw_elicitation_in(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        focused: bool,
+    ) -> crate::selection::FrameSurfaces {
         self.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        let mut surfaces = crate::selection::FrameSurfaces::new();
         if let Some(dialog) = self.state.elicitation.as_ref() {
-            let mut surfaces = crate::selection::FrameSurfaces::new();
             render_elicitation_in(frame, dialog, &mut surfaces, area, focused);
         }
+        surfaces
+    }
+
+    pub fn elicitation_selection_text_in(
+        &mut self,
+        surface: super::super::ElicitationSurface,
+        range: &crate::selection::SelectionRange,
+    ) -> Option<String> {
+        self.select_elicitation_surface(surface);
+        self.state.elicitation_selection_text(range)
+    }
+
+    pub fn autoscroll_elicitation_in(
+        &mut self,
+        surface: super::super::ElicitationSurface,
+        direction: i8,
+    ) {
+        self.select_elicitation_surface(surface);
+        self.autoscroll_selection(SurfaceId::ElicitationMessage, direction);
+    }
+
+    pub fn elicitation_minimum_height(&self, width: u16) -> Option<u16> {
+        self.state
+            .elicitation
+            .as_ref()
+            .map(|dialog| dialog.minimum_height(width))
     }
 
     /// Visible host footer commands, indexed through the supplied chords then

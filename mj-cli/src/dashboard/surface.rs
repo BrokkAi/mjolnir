@@ -297,7 +297,17 @@ impl DashboardContext {
             return Ok(());
         };
         if matches!(surface, SurfaceId::NotificationText(_)) {
-            self.dashboard.autoscroll_notification_selection(direction);
+            if let Some(session) = self.dashboard.notification_form_session()
+                && let Some(chat) = self.chats.get_mut(&session)
+                && chat.has_elicitation()
+            {
+                chat.autoscroll_elicitation_in(
+                    mj_chat::chat::ElicitationSurface::Notification,
+                    direction,
+                );
+            } else {
+                self.dashboard.autoscroll_notification_selection(direction);
+            }
         } else if let Some(chat) = self.focused_chat_mut() {
             chat.autoscroll_selection(surface, direction);
         } else {
@@ -355,9 +365,20 @@ impl DashboardContext {
     ) -> Result<()> {
         self.draw()?;
         let extracted = match surface {
-            SurfaceId::NotificationText(generation) => self
-                .dashboard
-                .notification_selection_text(generation, &range),
+            SurfaceId::NotificationText(generation) => {
+                if let Some(session) = self.dashboard.notification_form_session()
+                    && let Some(chat) = self.chats.get_mut(&session)
+                    && chat.has_elicitation()
+                {
+                    chat.elicitation_selection_text_in(
+                        mj_chat::chat::ElicitationSurface::Notification,
+                        &range,
+                    )
+                } else {
+                    self.dashboard
+                        .notification_selection_text(generation, &range)
+                }
+            }
             SurfaceId::Transcript => self
                 .focused_chat_mut()
                 .and_then(|chat| chat.transcript_selection_text(&range)),
