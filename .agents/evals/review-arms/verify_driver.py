@@ -270,10 +270,12 @@ def run(batch_path, judge=None):
         time.sleep(30)
     while True:
         s = session(sid)
-        if s.get("attention") == "needs_input":
-            raise RuntimeError(f"verifier {sid} is waiting for input (permission request?)")
+        # A finished turn is done even if the end-of-turn attention classifier marks it needs_input
+        # (it does for a closing summary); only an open turn waiting for input blocks.
         if s.get("is_idle") and s.get("last_turn_outcome"):
             break
+        if s.get("attention") == "needs_input":
+            raise RuntimeError(f"verifier {sid} is waiting for input (permission request?)")
         time.sleep(60)
     if ((s["last_turn_outcome"].get("outcome") or {}).get("stop_reason")) == "QuotaLimit":
         # The provider stopped the turn; a partial pass is not a verification. Set the
