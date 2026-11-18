@@ -178,8 +178,10 @@ def reviewer_runtime(child, carrier):
     destroyed at role end). Podman reviewers run inside the carrier's container, which carries the
     carrier's session label; a reviewer with a container of its own is read from that instead.
     Harness binaries come from mj, so the mj version and mounts name them."""
+    # Each probe command gets the 60 s the process listing below already had: a stalled podman call
+    # ends this attempt (logged, retried) instead of holding collection.
     ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={child}",
-                                   "--format", "{{.ID}}"]).decode().split()
+                                   "--format", "{{.ID}}"], timeout=60).decode().split()
     source = "reviewer"
     child_state = {k: session(child).get(k) for k in ("lifecycle", "is_idle", "activity_state")}
     if not ids:
@@ -190,9 +192,9 @@ def reviewer_runtime(child, carrier):
         ids, source = [carrier], "carrier"
     if len(ids) != 1:
         return None
-    info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]]))[0]
-    image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]]))[0]
-    version = subprocess.check_output([str(MJX), "--version"]).decode().strip()
+    info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]], timeout=60))[0]
+    image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]], timeout=60))[0]
+    version = subprocess.check_output([str(MJX), "--version"], timeout=60).decode().strip()
     # The installed CLI can change during a run; the container's live processes name the worker and
     # harness binaries actually serving this review.
     # check=True: a failed probe raises, is logged by record_runtimes and retried at the next poll.
@@ -290,8 +292,8 @@ def probe_runtime(d, child, carrier):
             save(path, runtime)
             return
         try:
-            if session(child).get("lifecycle") != "live":
-                return  # finished or gone: collect() records it as unobserved
+            if session(child).get("lifecycle") in ("suspended", "closed", "failed", "destroyed"):
+                return  # ended: collect() records it as unobserved; starting reviewers keep being probed
         except Exception:  # noqa: BLE001 - a destroyed reviewer has no session to read
             return
         time.sleep(5)
