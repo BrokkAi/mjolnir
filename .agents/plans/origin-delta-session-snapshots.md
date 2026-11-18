@@ -352,8 +352,8 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
       Resuming elsewhere then lands where an abort would have returned.
 2. **Learn what origin has.**
-   - **The repository's common Git directory (`git rev-parse --git-common-dir`) lies inside the checkout,** as in an independent managed clone: best-effort `git fetch --prune origin`, since Mjolnir owns those refs. Otherwise the Git directory is shared with a checkout Mjolnir does not own (a raw checkout, or a legacy linked worktree still captured after the upgrade), and capture uses the read-only discovery below.
-   - **Shared Git directory:** never fetch. The user's remote-tracking refs are theirs, and `--prune` could delete the last reference to commits. Read origin's heads and tags with `git ls-remote origin` instead, and use the SHAs that exist locally as exclusions in step 6.
+   - **Independent managed clone** (ownership `Managed` AND the common Git directory, `git rev-parse --git-common-dir`, lies inside the checkout): best-effort `git fetch --prune origin`, since Mjolnir owns those refs. Every other case uses the read-only discovery below: a raw checkout, which usually has its own `.git` inside it but belongs to the user, and a legacy linked worktree, whose Git directory is the user's repository.
+   - **Any checkout that is not an independent managed clone:** never fetch. The user's remote-tracking refs are theirs, and `--prune` could delete the last reference to commits. Read origin's heads and tags with `git ls-remote origin` instead, and use the SHAs that exist locally as exclusions in step 6.
 
    In either case, when origin cannot be reached, exclude only the existing `refs/remotes/origin/*`, never local tags (a local tag may be unpublished), and set `remote_refs_stale`. This is the user's accepted risk: using old refs is better than refusing to suspend. If origin force-pushed since the last fetch, the delta can omit objects origin no longer has, and a later restore then fails visibly at its missing-object check. Suspend's result and the session's notice say "origin was unreachable; commits origin has since removed may not be restorable", so the user can resume and push, or retry suspend once origin is reachable.
 3. **Pin the cut.** Read every ref once with `git for-each-ref`, plus each checkout's HEAD: a branch name or a detached commit, or the pre-operation position from step 1. Select the refs to keep:
@@ -381,7 +381,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 **Restore**, into a target directory:
 
 1. Establish the base clone. Restore takes a `RestoreBase`:
-   - `Clone { origin, seed }` clones origin, then runs `git fetch --tags origin`, so every tag the exclusions relied on is present.
+   - `Clone { origin, seed }` clones origin with `--no-checkout`, runs `git fetch --tags origin` so every tag the exclusions relied on is present, and deletes every clone-created `refs/heads/*`. Otherwise a saved `refs/heads/release/hotfix` would conflict with a clone-created `release` that the session had deleted locally.
    - `Provisioned { allow_origin_fetch }` uses a clone the caller already prepared and skips both.
 
    History-cutoff workspaces (`--no-later-history`, see `HistoryCutoff` in `mj-core/src/targets.rs`) deliberately have no origin remote. Their resume already provisions and verifies the cutoff, so they restore with `Provisioned { allow_origin_fetch: false }`, capture with `origin_override`, and never fetch later history. Their capture uses `ExclusionSource::Commits(<cutoff base>)`: it excludes only what the provisioned base will contain, never origin's refs, so a session commit that was also published on origin is still packed. Keep the existing cutoff resume regression passing. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
@@ -448,7 +448,7 @@ Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal a
 1. **Early consent check.** Run the preflight inventory against the request's consent, changing nothing. Nearly every refusal happens here, while the session is still running untouched.
 2. **Interrupt the turn and stop every session process.** This uses today's teardown ownership in `mj-worker/src/worker_stop.rs` and the existing process-group teardown, extended to cover:
    - the harness and the process groups the worker tracks;
-   - the worker's descendants (on Linux the worker sets `PR_SET_CHILD_SUBREAPER`, so a descendant that daemonized is reparented to it and stays in its tree);
+   - the worker's descendants. On Linux the worker sets `PR_SET_CHILD_SUBREAPER` at startup (new in this milestone; today only a microVM test sets it), so a descendant that daemonizes is reparented to the worker and stays in its tree. Sessions whose processes started under an older worker lack that, and rely on the marker and the open-file check;
    - every process on the host carrying this session's marker (`MJ_SESSION_ID`), which the worker's process observer in `mj-worker/src/work_facts.rs` already finds, including `setsid`-detached ones.
 
    Each process is verified before it is signaled, by its start time and its marker or tree membership. On Linux this goes through a `pidfd` (`pidfd_open`, then `pidfd_send_signal`), so verification and signal refer to the same process. macOS has no pidfd, so the identity is re-read immediately before `kill`; say so in a code comment. The worker then waits until those processes have exited. A process in uninterruptible sleep (state `D`) can delay that indefinitely, so the wait is cancellable, and the suspend's progress names the processes still running. There is no guessed timeout.
@@ -475,7 +475,7 @@ At the end of this milestone, suspending and resuming a managed-clone session, a
 
 **Spec version and older workers.** Raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that request `OriginDelta`.
 
-A session whose running worker predates this change must not fall back to the old capture. That capture stores untracked files and full clone history, which is exactly what the user excluded, and can mean gigabytes of upload. An old worker also cannot stop the session's processes the way the new suspend requires. So suspending such a session first upgrades its worker through the existing atomic idle replacement (`mj-controller/src/controller/worker_restart.rs`, `IdleWorkspaceLease`), after interrupting any turn as suspend already does, and then proceeds exactly as for a current worker: consent, stop the processes, capture.
+A session whose running worker predates this change must not fall back to the old capture. That capture stores untracked files and full clone history, which is exactly what the user excluded, and can mean gigabytes of upload. An old worker also cannot stop the session's processes the way the new suspend requires. So suspending such a session first runs the read-only preflight against the request's consent, which interrupts nothing, and only if that passes upgrades its worker through the existing atomic idle replacement (`mj-controller/src/controller/worker_restart.rs`, `IdleWorkspaceLease`), after interrupting any turn as suspend already does, and then proceeds exactly as for a current worker: consent, stop the processes, capture.
 
 There is one suspend path, and no version-2 spec ever writes a new archive. If the replacement cannot happen, because the worker is not idle or the swap fails, suspend fails with that reason and the session keeps running. `--without-checkpoint` remains available.
 
@@ -659,7 +659,7 @@ Compaction no longer depends on a checkpoint holding a copy, so make sure Sessio
 4. Restore with the same code as resume.
 5. Wait for destination readiness, then retire the source.
 
-The archive is not installed on the daemon as the session's checkpoint; the daemon copy remains whatever the last suspend produced. Delete `mj-worker/src/move_workspace.rs`, the untracked inventory, picker and exclusions in `mj-core/src/move_workspace.rs` and their UI, the daemon-side workspace staging under `data_dir()/moves`, the rsync legs in `transfer.rs`, and Move's separate handoff archive. A Move whose destination is the same target as its source is always in place. It keeps the environment and checkout, swaps only the harness launch configuration, and never captures, transfers or stops writers. If the environment must be recreated, for example for changed mounts, it uses the existing storage-preserving container recreation over the same storage. Quota and login switches are the common case.
+The archive is not installed on the daemon as the session's checkpoint; the daemon copy remains whatever the last suspend produced. Delete `mj-worker/src/move_workspace.rs`, the untracked inventory, picker and exclusions in `mj-core/src/move_workspace.rs` and their UI, the daemon-side workspace staging under `data_dir()/moves`, the rsync legs in `transfer.rs`, and Move's separate handoff archive. A Move whose destination is the same target as its source is always in place. It keeps the environment and checkout, swaps only the harness launch configuration, and never captures, transfers or stops writers. If a change cannot be applied to the running environment (for example changed mounts, which need the container recreated over the same storage by the existing storage-preserving recreation), recreating it stops the container's running processes, dev servers and builds included. The Move confirmation says so, "applying <change> recreates the container; running background processes will stop", and the CLI requires `--yes` for that case. Otherwise nothing is disturbed. Quota and login switches are the common case.
 
 **Transport.** Implement `mj-controller/src/controller/move_session/transport.rs` with one function that copies an archive file from a source target to a destination target and verifies its SHA-256 there. Choose the route in this order:
 
@@ -1064,3 +1064,11 @@ Revision note (2026-11-18, review 18):
 - The dry-run route preview is read-only.
 
 Revision note (2026-11-18, user decision after review 18): the user chose to stop the session's processes before the final capture, for suspend and off-target Moves only, instead of pausing with SIGSTOP and resuming on refusal. That removes freeze records, resume decisions, paused-job tracking and group-ownership recovery. A refused or failed capture now leaves the checkout intact and restarts the agent in place, without its background processes. Same-target Moves are always in place and stop nothing; "if something writes into the checkout it's no big deal" there, since nothing is removed. The user prefers the simpler design.
+
+Revision note (2026-11-18, review 19):
+- Fetch requires managed ownership as well as a Git directory inside the checkout.
+- Restore clears clone-created branches before installing saved refs.
+- The worker sets `PR_SET_CHILD_SUBREAPER` at startup.
+- An older worker is replaced only after the read-only preflight passes.
+- A same-target Move that must recreate the container says it will stop background processes.
+- Overrides recorded: unrelated external writers, macOS PID reuse, and env-cleared processes that escape the tree.
