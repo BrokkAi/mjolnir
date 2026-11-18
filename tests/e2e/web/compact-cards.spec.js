@@ -1105,6 +1105,7 @@ test('the notifications screen clears and skips one card at a time and Clear all
   q.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
   i1.notification_dismissal = { read_through: 4 };
   i2.notification_dismissal = { read_through: 5 };
+  broken.notification_dismissal = { failure: { generation: 1, state: 'error', last_error: 'startup failed' } };
   await refresh(page, state);
   await page.locator('#notifications-badge').click();
   await expect(page).toHaveURL(/#notifications$/);
@@ -1113,10 +1114,14 @@ test('the notifications screen clears and skips one card at a time and Clear all
   await expect(page.locator('.inbox-message')).toContainText('The full message from card-q.');
   await expect(page.getByRole('button', { name: 'Clear all ! (2)' })).toBeVisible();
 
-  // Skip sends the card to the back; the question comes round again.
+  // Skip sends the card to the back; the question comes round again after the
+  // two ! cards and the failed session the screen lists after them.
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
   await expect(page.locator('.inbox-message')).toContainText('card-i2');
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Important');
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Failed');
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
   await expect(page.locator('.inbox-message')).toContainText('card-q');
 
@@ -1137,6 +1142,12 @@ test('the notifications screen clears and skips one card at a time and Clear all
 
   await page.getByRole('button', { name: 'Clear & Next' }).click();
   await expect.poll(() => state.actions.filter(action => action.session_id === 'card-q' && action.action === 'dismiss-notification').length).toBe(2);
+
+  // The failed session is a card of its own, so the screen is not empty yet.
+  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Failed');
+  await expect(page.locator('.inbox-header-text')).toContainText('card-failed');
+  await page.getByRole('button', { name: 'Clear & Next' }).click();
+  await expect.poll(() => state.actions.filter(action => action.session_id === 'card-failed' && action.action === 'dismiss-notification').length).toBe(1);
   await expect(page.locator('#inbox')).toContainText('No notifications.');
 });
 
