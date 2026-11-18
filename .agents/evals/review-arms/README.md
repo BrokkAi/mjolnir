@@ -1119,8 +1119,9 @@ Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
 - All 17 OT carriers ran on a different Podman image from the stored A and BT
   carriers, so the brief and the image changed together; the lift is an
   observed cohort difference.
-- The lift is on 8 diffs; 9 don't move. It shows only that reviewers benefit
-  when the fact is supplied, not that Bifrost queries can find it.
+- The lift is on 8 diffs; 9 don't move. It is an observed cohort difference;
+  reading it as a benefit of the supplied fact assumes the image change was
+  immaterial. It does not show that Bifrost queries can find the fact.
 - Round L's final A and BT labels equal the stored Sol labels. That is partly
   by construction: the parent applied the stored round's transient-failure
   precedent to three retained-fill rows. The assessor's unadjusted labels

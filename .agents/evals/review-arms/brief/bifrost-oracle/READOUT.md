@@ -19,7 +19,7 @@ Terra/high reviewers, 3 per diff on the 17 bifrost-dev relation diffs. Catch rat
 
 **Image caveat.** All 17 OT carriers ran on a different Podman image (`89128665…`) from the stored A and BT carriers (`0a614615…`; A on unproven-override-family-certifies-empty used `cd7e9788…`). The pins, intro/base commits and inventories match, but the brief and the reviewer image changed together across the whole OT cohort, so the paired bootstrap cannot separate their effects. The registered outcome stands as computed, and the lift is an observed cohort difference whose attribution to the brief rests on the image change being immaterial (`/mnt/optane/review-arms-bifrost-20261116/oracle-arm/review-driver/audit-report.md`).
 
-What this shows and what it doesn't: reviewers on bifrost-dev benefit when the decisive fact is supplied. It does not show that Bifrost's value-flow queries can find that fact for a blind writer. Query reach is unmeasured and is milestone 5's question.
+What this shows and what it doesn't: the OT cohort, which had the decisive fact supplied and also ran on the newer image, caught more than the stored no-brief cohort. Attributing that difference to the supplied fact assumes the image change was immaterial; the result alone does not prove it. It also does not show that Bifrost's value-flow queries can find that fact for a blind writer. Query reach is unmeasured and is milestone 5's question.
 
 ## Per diff (catches of 3)
 

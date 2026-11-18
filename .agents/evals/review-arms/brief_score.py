@@ -148,11 +148,25 @@ def build(arms, per_batch):
     if KEY.exists():
         # New output IDs would orphan any verdicts already returned for this round.
         raise SystemExit(f"{KEY} exists: round {J.name} is already built; use another --name")
-    J.mkdir(parents=True, exist_ok=True)
-    KEY.parent.mkdir(parents=True, exist_ok=True)
     corpus = CORPUS
     rows = sessions(arms)
     require_complete(rows, arms)
+    if REFERENCE_ROUND:
+        # Check the reference before freezing the round: score compares the same sessions, and
+        # finding a mismatch only then would orphan completed verdicts.
+        ref_path = ROOT / "private" / f"key-{REFERENCE_ROUND}.json"
+        if not ref_path.exists() or not (ROOT / REFERENCE_ROUND / "merged.jsonl").exists():
+            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key or merged verdicts")
+        ref = json.loads(ref_path.read_text())["outputs"].values()
+        ref_arms = READINGS[READING]["reference_arms"]
+        bugs = {r["bug"] for r in rows}
+        want = {(r["bug"], r["arm"], r["session"]) for r in rows if r["arm"] in ref_arms}
+        have = {(k["bug"], k["arm"], k["session"]) for k in ref if k["bug"] in bugs and k["arm"] in ref_arms}
+        if want != have:
+            raise SystemExit(f"reference round {REFERENCE_ROUND} does not hold the same {ref_arms} sessions: "
+                             f"{len(want - have)} only here, {len(have - want)} only there")
+    J.mkdir(parents=True, exist_ok=True)
+    KEY.parent.mkdir(parents=True, exist_ok=True)
     key = {}
     by_bug = collections.defaultdict(list)
     for r in rows:

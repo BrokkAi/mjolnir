@@ -141,14 +141,6 @@ class ScoringInterfaces(unittest.TestCase):
         self.save("jobs.json", [{"bug": b, "arm": a} for b in bugs for a in ("OT", "BT")])
         for bug in bugs:
             self.reviews(bug, arms=("A", "BT", "OT"))
-        self.run_script("brief_score.py", "build", "--arms", "OT,BT", "--models", "gpt-6.1-terra",
-                        "--bugs-from", self.root / "jobs.json", "--reading", "bifrost-oracle",
-                        "--reference-round", "bifrost-judge-relation", "--name", "oracle")
-        key_path = self.root / "private/key-oracle.json"
-        key = json.loads(key_path.read_text())
-        self.assertEqual((key["reading"], key["reference_round"]),
-                         ("bifrost-oracle", "bifrost-judge-relation"))
-        self.assertEqual(len(key["outputs"]), 153)
 
         def materialize_round(name, output_key, choose_label):
             verdicts = []
@@ -162,15 +154,29 @@ class ScoringInterfaces(unittest.TestCase):
             self.run_script("brief_score.py", "collect", "--name", name)
             self.save(f"{name}/handcheck-decisions.json", decisions)
 
-        materialize_round("oracle", key["outputs"], lambda row: "caught" if row["arm"] == "OT" else "missed")
-        reference_key = {f"reference-{i}": dict(row)
-                         for i, row in enumerate(key["outputs"].values()) if row["arm"] in ("A", "BT")}
-        reference_round = {**key, "arms": ["BT"], "outputs": reference_key}
-        reference_round.pop("reading")
-        reference_round.pop("reference_round")
-        self.save("private/key-bifrost-judge-relation.json", reference_round)
+        # The stored reference round exists before the oracle round is built; build checks it.
+        self.run_script("brief_score.py", "build", "--arms", "BT", "--models", "gpt-6.1-terra",
+                        "--bugs-from", self.root / "jobs.json", "--name", "bifrost-judge-relation")
+        reference_round = json.loads((self.root / "private/key-bifrost-judge-relation.json").read_text())
+        reference_key = reference_round["outputs"]
         materialize_round("bifrost-judge-relation", reference_key,
                           lambda row: "caught" if row["arm"] == "A" else "missed")
+        # A reference that does not exist is refused before the round's key is frozen.
+        self.assertNotEqual(self.run_script(
+            "brief_score.py", "build", "--arms", "OT,BT", "--models", "gpt-6.1-terra",
+            "--bugs-from", self.root / "jobs.json", "--reading", "bifrost-oracle",
+            "--reference-round", "no-such-round", "--name", "oracle", ok=False).returncode, 0)
+        self.assertFalse((self.root / "private/key-oracle.json").exists())
+        self.run_script("brief_score.py", "build", "--arms", "OT,BT", "--models", "gpt-6.1-terra",
+                        "--bugs-from", self.root / "jobs.json", "--reading", "bifrost-oracle",
+                        "--reference-round", "bifrost-judge-relation", "--name", "oracle")
+        key_path = self.root / "private/key-oracle.json"
+        key = json.loads(key_path.read_text())
+        self.assertEqual((key["reading"], key["reference_round"]),
+                         ("bifrost-oracle", "bifrost-judge-relation"))
+        self.assertEqual(len(key["outputs"]), 153)
+
+        materialize_round("oracle", key["outputs"], lambda row: "caught" if row["arm"] == "OT" else "missed")
         self.run_script("brief_score.py", "score", "--name", "oracle")
         report = json.loads((self.root / "oracle/score.json").read_text())
         self.assertEqual(report["bifrost_oracle"]["per_diff"][bugs[0]]["OT"]["caught"], 3)
