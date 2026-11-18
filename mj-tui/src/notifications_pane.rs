@@ -2,10 +2,7 @@
 //! deferrals, per-session reply editors and their submission feedback.
 use mj_chat::{components::ControlKind, theme};
 use mj_core::attention::{EntryMessage, NotificationDismissal, NotificationKind};
-use mj_core::notification_message::{
-    NotificationMessageFacts, NotificationMessageSource, notification_message_placeholder,
-    notification_message_sources,
-};
+use mj_core::notification_message::notification_message_placeholder;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -589,32 +586,6 @@ impl DashboardState {
         wanted
     }
 
-    /// Resolve a published completed entry independently of the card's form holder.
-    fn published_message_source(
-        &self,
-        session_id: &str,
-        entry: &mj_core::attention::NotificationStackEntry,
-    ) -> Option<NotificationReadSource> {
-        if let EntryMessage::Found(id) = &entry.message {
-            return Some(NotificationReadSource::Item(id.clone()));
-        }
-        let facts = NotificationMessageFacts {
-            pending_request: None,
-            review_activity: None,
-            question_message: None,
-            supports_open_request: self
-                .session_details
-                .get(session_id)
-                .is_none_or(|detail| detail.supports_open_request),
-        };
-        match notification_message_sources(entry.kind, &facts).first() {
-            Some(NotificationMessageSource::LastAgentMessage) => {
-                Some(NotificationReadSource::Through(entry.completed_ordinal))
-            }
-            _ => None,
-        }
-    }
-
     fn loaded_notification_text(&self, session_id: &str, stable_id: &str) -> Option<&str> {
         self.session_details
             .get(session_id)?
@@ -628,10 +599,13 @@ impl DashboardState {
     ) -> Option<NotificationReadRequest> {
         let (session_id, source) = if let Some(card) = &entry.published {
             let item = card.entries.get(self.selected_notification_item(entry))?;
-            (
-                entry.session_id.clone(),
-                self.published_message_source(&entry.session_id, item)?,
-            )
+            let source = match &item.message {
+                EntryMessage::Found(id) => NotificationReadSource::Item(id.clone()),
+                EntryMessage::Locating | EntryMessage::None => {
+                    NotificationReadSource::Through(item.completed_ordinal)
+                }
+            };
+            (entry.session_id.clone(), source)
         } else {
             if entry.level != AttentionLevel::Waiting {
                 return None;
@@ -1537,6 +1511,7 @@ pub(crate) mod tests {
         dashboard
     }
 
+    // Hard-won: dc77f11c1: an id-less question skipped its bounded text read.
     #[test]
     fn notification_navigation_keeps_reads_bound_to_the_selected_entry() {
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -1632,6 +1607,17 @@ pub(crate) mod tests {
                 .iter()
                 .any(|line| line.contains("The earlier completed update"))
         );
+
+        dashboard.set_question_message("q1", None, true);
+        let mut cards = dashboard.notification_cards.clone().unwrap();
+        let question = &mut cards.get_mut("q1").unwrap().entries[0];
+        question.kind = NotificationKind::NeedsInput;
+        question.message = EntryMessage::Locating;
+        dashboard.set_notification_cards(Some(cards));
+        dashboard.handle_key(alt(KeyCode::PageUp));
+        let locating = dashboard.wanted_notification_message().unwrap();
+        assert_eq!(locating.session_id, "q1");
+        assert_eq!(locating.source, NotificationReadSource::Through(4));
 
         let mut cards = dashboard.notification_cards.clone().unwrap();
         cards.get_mut("q1").unwrap().entries.clear();
