@@ -645,6 +645,31 @@ impl<K: Copy + Eq> Form<K> {
         }
     }
 
+    /// Registers a row of side-by-side columns the caller drew inside `area`,
+    /// such as the bars of a chart. A click anywhere in `area` over a column's
+    /// `(start, end)` screen span selects it, and the left and right arrows
+    /// move the selection, the way they move a tab strip's.
+    pub fn register_columns(
+        &mut self,
+        id: K,
+        area: Rect,
+        selected: usize,
+        columns: &[(u16, u16)],
+        enabled: bool,
+    ) {
+        let kind = ControlKind::Tabs {
+            len: columns.len(),
+            selected,
+        };
+        self.declare_with_enabled(id, kind, enabled);
+        let regions = columns
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end))| (*start, *end, index))
+            .collect();
+        self.register_with_regions(id, kind, area, enabled, regions);
+    }
+
     /// Declares a control for event handling before its first render.
     ///
     /// The declaration uses a zero geometry; a later render registration should replace it.

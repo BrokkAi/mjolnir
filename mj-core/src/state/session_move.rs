@@ -236,6 +236,12 @@ pub struct MovePreparation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion: Option<Box<RawConversionPreview>>,
     pub selection: MoveSelection,
+    /// The selection's size is the destination's default, which a clear
+    /// request resolved to. The sealed Move owns this fact so that retrying
+    /// the same command compares against what this Move decided rather than
+    /// against host state other sessions keep changing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sized_by_destination_default: bool,
     pub source_profile_id: String,
     pub source_target_template_id: String,
     /// The destination cannot continue the native conversation, because its

@@ -1310,9 +1310,14 @@ impl Controller {
                 selection.subagents = None;
             }
         }
+        // A Move must change something about the environment. A size alone is
+        // a change: it resizes the destination container on the target the
+        // session already names.
         ensure!(
-            selection.profile_id.is_some() || selection.target_template_id.is_some(),
-            "move requires a target or profile selection"
+            selection.profile_id.is_some()
+                || selection.target_template_id.is_some()
+                || selection.resource_allocation.is_some(),
+            "move requires a target, a profile, or a container size"
         );
         ensure!(
             previous
@@ -1368,10 +1373,17 @@ impl Controller {
             if selection.additional_mounts.is_none() {
                 selection.additional_mounts = sealed.additional_mounts.clone();
             }
-            if selection.resource_allocation.is_none() && !selection.clear_resource_allocation {
-                selection.resource_allocation = sealed.resource_allocation.clone();
-                selection.clear_resource_allocation = sealed.clear_resource_allocation;
-            }
+            // The accepted preparation is the sealed record of this decision,
+            // so a retry compares against what the Move decided rather than
+            // against host state other sessions keep changing.
+            reconcile_retry_resource_selection(
+                sealed,
+                retained
+                    .accepted_preparation
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.sized_by_destination_default),
+                &mut selection,
+            );
             if selection.subagents.is_none() {
                 selection.subagents = sealed.subagents.clone();
             }
@@ -1391,14 +1403,16 @@ impl Controller {
                 "retained Move target is missing or changed; refusing to recreate it"
             );
         }
-        let profile_id = selection.profile_id.as_deref().unwrap();
-        let target_id = selection.target_template_id.as_deref().unwrap();
+        // Owned, because the resource decision below rewrites the selection
+        // they name and every later step still reads both identifiers.
+        let profile_id = selection.profile_id.clone().unwrap();
+        let target_id = selection.target_template_id.clone().unwrap();
         let yolo_target = self
             .config
             .targets
-            .get(target_id)
+            .get(&target_id)
             .is_some_and(mj_core::config::TargetTemplate::is_yolo);
-        let profile = self.config.named_profile(profile_id)?;
+        let profile = self.config.named_profile(&profile_id)?;
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
         if requested_oracle
@@ -1431,36 +1445,47 @@ impl Controller {
             super::profile_config::validate_session_subagent_policy(
                 catalog,
                 &self.config,
-                profile_id,
+                &profile_id,
                 &policy,
-                target_id,
+                &target_id,
             )
             .await?;
         }
         self.config
             .targets
-            .get(target_id)
+            .get(&target_id)
             .context("unknown destination target")?;
-        let target = self.config.ensure_target_enabled(target_id)?;
-        self.validate_muse_resume_destination(source, profile.kind, target_id)?;
+        let target = self.config.ensure_target_enabled(&target_id)?;
+        self.validate_muse_resume_destination(source, profile.kind, &target_id)?;
         let checkout = self.state.checkout(&source.id)?;
         super::worktree::resume_compatibility_with_checkout(
             source,
             &checkout,
             &self.config,
-            target_id,
+            &target_id,
         )
         .map_err(anyhow::Error::msg)?;
+        // The environment decision and the destination size are one decision,
+        // so one function makes both and the sealed selection is what it
+        // decided from.
+        let (in_place, resolved_by_default) = resolve_move_size_for_environment(
+            source,
+            &mut selection,
+            &self.state,
+            &self.config.targets,
+            target,
+            self.state.subagents.contains_key(&source.id),
+            previous.as_ref(),
+        )?;
+        // The resolved selection is what every later reader decides from --
+        // the sealed Move, capacity admission inside execution and the
+        // destination record -- so it is never put back to the unresolved
+        // request.
+        let sized_by_destination_default =
+            move_size_is_destination_default(resolved_by_default, previous.as_ref());
         super::backend::validate_resource_allocation(
             target,
             move_requested_allocation(source, &selection),
-        )?;
-        let in_place = move_in_place_for_record(
-            source,
-            &selection,
-            &self.config.targets,
-            self.state.subagents.contains_key(&source.id),
-            previous.as_ref(),
         )?;
         // Preparation is where a Move is decided, and only an accepted Move
         // logs its decision, so a refused preparation would otherwise say
@@ -1493,9 +1518,9 @@ impl Controller {
             None
         } else {
             for mount in mounts {
-                self.validate_mount_source(target_id, &mount.source, executor)?;
+                self.validate_mount_source(&target_id, &mount.source, executor)?;
             }
-            self.validate_move_destination_paths(source, target_id, executor)?
+            self.validate_move_destination_paths(source, &target_id, executor)?
         };
         ensure!(
             profile.home.is_dir(),
@@ -1509,7 +1534,7 @@ impl Controller {
         let cross_harness = !self.config.native_continuity(
             source_record.harness_kind,
             &source_record.last_profile,
-            profile_id,
+            &profile_id,
         )?;
         // A compatible in-place Move already has its worker, mounts and
         // runtime. Only reconstruction needs provisioning prerequisites.
@@ -1517,7 +1542,7 @@ impl Controller {
             let worker_target = super::backend::session_target(
                 &self.config,
                 &source_record.bundle_id,
-                target_id,
+                &target_id,
                 executor,
             )?;
             super::worker_binary::preflight_worker_binary(&worker_target, executor)?;
@@ -1588,6 +1613,7 @@ impl Controller {
                     && !self.state.active_child_session_ids(&source.id).is_empty()),
             conversion,
             selection,
+            sized_by_destination_default,
             source_profile_id: source.last_profile.clone(),
             source_target_template_id: source.target_template_id.clone(),
             cross_harness,
@@ -1621,8 +1647,21 @@ impl Controller {
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
             let mut checked = {
                 let _timing = MovePhaseTimer::new(&id, "preflight destination checks");
-                self.prepare_move_session_controlled( catalog, prepared.selection.clone(), executor)
-                    .await?
+                let mut checked = self
+                    .prepare_move_session_controlled(
+                        catalog,
+                        prepared.selection.clone(),
+                        executor,
+                    )
+                    .await?;
+                // This re-prepares a selection preparation already resolved,
+                // so it sees an explicit size and cannot tell that clearing
+                // produced it. The confirmed preparation owns that fact; keep
+                // it, or a retry of the same clear request stops matching the
+                // Move this acceptance seals (#1585).
+                checked.sized_by_destination_default =
+                    prepared.sized_by_destination_default;
+                checked
             };
             // Destination checks can outlast a turn. Confirm against the relay
             // immediately before interruption, and hold its connection from
@@ -3226,6 +3265,154 @@ fn move_requested_allocation<'a>(
             .resource_allocation
             .as_ref()
             .or(source.resource_allocation.as_ref())
+    }
+}
+
+/// The size a Move gives a destination that has none of its own: the host's
+/// remembered container size, else the baseline `mj new` starts from. Host
+/// totals are not part of the controller's state, so the size is not clamped
+/// here; capacity admission refuses a size the host cannot hold.
+fn move_default_allocation(
+    state: &mj_core::state::State,
+    target: &mj_core::config::TargetTemplate,
+) -> Option<mj_core::state::SessionResourceAllocation> {
+    let host = mj_core::config::container_size_host(target)?;
+    let size =
+        mj_core::state::default_container_size(state.container_sizes.get(host).copied(), None);
+    Some(mj_core::state::SessionResourceAllocation::Container {
+        cpus: size.cpus,
+        memory_bytes: size.memory_bytes,
+    })
+}
+
+/// Decide a Move's environment and, when it provisions, the size it will
+/// provision with.
+///
+/// One function makes both decisions so the sealed selection is always the
+/// selection the decision was made from: execution re-prepares that selection
+/// and capacity admission re-decides `in_place` from it, and a Move whose
+/// sealed selection decided something else would be refused as having changed
+/// its mind (#1585).
+///
+/// A profile-only Move of a container that records no size changes nothing
+/// about the environment, so it stays in place and is not given a size here.
+/// Inventing one would turn it into a rebuild, and the automatic quota switch,
+/// which only ever sends a profile-only selection, refuses a Move that changes
+/// the environment.
+///
+/// Returns whether the environment is kept, and whether the applied size is
+/// the destination's default.
+fn resolve_move_size_for_environment(
+    source: &mj_core::state::SessionRecord,
+    selection: &mut MoveSelection,
+    state: &mj_core::state::State,
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
+    target: &mj_core::config::TargetTemplate,
+    is_subagent: bool,
+    previous: Option<&MoveOperation>,
+) -> Result<(bool, bool)> {
+    let sealed = previous.is_some_and(MoveOperation::holds_source_environment);
+    // An explicit clear means "the destination's default" and is always
+    // resolved: the person asked for a size, so an unknown current size is no
+    // reason to keep an unbounded container. Otherwise a size is resolved
+    // before the decision wherever comparing sizes means something -- the
+    // environment's own size is known -- so a request that resolves to the
+    // size the container already has is not a change. A profile-only Move of a
+    // container whose size is unknown resolves nothing here, and keeps its
+    // environment.
+    let comparable = mj_core::state::applied_container_settings(source)
+        .resource_allocation
+        .is_some();
+    let mut sized_by_destination_default = !sealed
+        && (selection.clear_resource_allocation || comparable)
+        && resolve_move_destination_size(source, selection, state, target);
+    let mut in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+    // A Move that provisions needs a size to create the container with. It
+    // takes the inherited one, else the destination's default. Sizing it can
+    // also settle the decision: a container whose environment the resolution
+    // made identical to its own is kept, not rebuilt.
+    if !in_place && !sealed && selection.resource_allocation.is_none() {
+        sized_by_destination_default |=
+            resolve_move_destination_size(source, selection, state, target);
+        in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+    }
+    Ok((in_place, sized_by_destination_default))
+}
+
+/// What a Move applies where its selection names no size, or where it clears
+/// the inherited one: the inherited size, or the destination's default.
+/// Returns whether the applied size is that default.
+///
+/// A destination without a default -- a fixed host -- has none to give, so
+/// there the request keeps its own meaning, and the clear request is what
+/// allows a sized session onto that host at all. Where a default exists the
+/// sealed selection names the size that will be applied, so no later reader
+/// has to work it out from the source record again.
+///
+/// The caller decides when this applies: never to a retained Move, whose
+/// sealed selection is its own record of what was decided and is re-prepared
+/// and compared by execution.
+fn resolve_move_destination_size(
+    source: &mj_core::state::SessionRecord,
+    selection: &mut MoveSelection,
+    state: &mj_core::state::State,
+    target: &mj_core::config::TargetTemplate,
+) -> bool {
+    let Some(default_size) = move_default_allocation(state, target) else {
+        return false;
+    };
+    if let Some(inherited) = move_requested_allocation(source, selection) {
+        if selection.resource_allocation.is_none() {
+            selection.resource_allocation = Some(inherited.clone());
+        }
+        return false;
+    }
+    selection.resource_allocation = Some(default_size);
+    selection.clear_resource_allocation = false;
+    true
+}
+
+/// Whether the destination's size is the default this Move resolved.
+///
+/// A preparation resolves it for a request that names none. A retry reaches
+/// preparation with the sealed size already in its selection, so it cannot
+/// resolve anything; the sealed Move's own record is what keeps the fact that
+/// this size came from clearing, and with it the match between the repeated
+/// command and the Move it retries (#1585).
+fn move_size_is_destination_default(resolved_now: bool, previous: Option<&MoveOperation>) -> bool {
+    resolved_now
+        || previous.is_some_and(|operation| {
+            operation.holds_source_environment()
+                && operation
+                    .accepted_preparation
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.sized_by_destination_default)
+        })
+}
+
+/// Reconcile a retry's resource selection with the one its Move was sealed
+/// with.
+///
+/// A request that omits the size keeps the sealed one, so a surface without
+/// the flag can retry a Move another surface sealed. A request that repeats a
+/// clear instruction is the same request as one whose sealed Move holds the
+/// size that instruction resolved to, because preparation replaces it with
+/// that size (#1585). The sealed Move owns that fact, so the comparison does
+/// not consult the host's remembered size, which other sessions change.
+/// Anything else keeps its own value and is then refused as a different
+/// selection.
+fn reconcile_retry_resource_selection(
+    sealed: &MoveSelection,
+    sealed_by_default: bool,
+    request: &mut MoveSelection,
+) {
+    if request.resource_allocation.is_some() {
+        return;
+    }
+    let repeats_a_resolved_clear = request.clear_resource_allocation && sealed_by_default;
+    if !request.clear_resource_allocation || repeats_a_resolved_clear {
+        request.resource_allocation = sealed.resource_allocation.clone();
+        request.clear_resource_allocation = sealed.clear_resource_allocation;
     }
 }
 
