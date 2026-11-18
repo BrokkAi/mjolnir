@@ -641,8 +641,10 @@ def collect(d, bug, identity, sid, place, before):
     if (d / "reviewers.json").exists():
         reviewers = json.loads((d / "reviewers.json").read_text())
     else:
-        children, verdict = await_review(d, sid)
-        join_runtime_probes(d)
+        try:
+            children, verdict = await_review(d, sid)
+        finally:
+            join_runtime_probes(d)  # every exit, including a failed status poll, ends this job's probes
         save(d / "verdict.json", verdict or {"kind": "cleared", "note": "review finished and cleared between polls"})
         if verdict and verdict.get("kind") == "failed":
             raise RuntimeError("review failed: " + json.dumps(verdict)[:800])
