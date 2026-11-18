@@ -829,6 +829,14 @@ def require_strict_judges(n, bug=None, verdicts=None):
             raise SystemExit(f"{bug}: round {n} leak record is not the registered judges' output")
 
 
+def quotes_rationale(why, rationale):
+    """The cause answer's reason must quote its own item's rationale: some quoted span of at least
+    eight characters in `why` appears in that rationale (whitespace and case normalized)."""
+    norm = lambda t: " ".join(t.split()).lower()
+    spans = re.findall(r'"([^"]{8,})"|\u201c([^\u201d]{8,})\u201d|\'([^\']{8,})\'', why)
+    return any(norm(s) in norm(rationale) for group in spans for s in group if s)
+
+
 def verdicts_fingerprint(leak_round):
     """Binds a gate result to the exact leak verdicts it judged."""
     return hashlib.sha256(json.dumps(leak_round["verdicts"], sort_keys=True).encode()).hexdigest()
@@ -862,7 +870,9 @@ def noleak_gate_build(n):
         require_strict_judges(n, bug, r["verdicts"])
         records[bug] = r
     for bug, r in records.items():
-        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
+        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]) \
+                or any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
+            # A verdict without a rationale cannot be cause-checked; the gate fails it in collect.
             continue
         for v in r["verdicts"]:
             unit.mkdir(parents=True, exist_ok=True)
@@ -898,8 +908,9 @@ def noleak_gate_collect(n):
             raise SystemExit("cause check must answer each verdict exactly once")
         # Validate every answer before any gate decision is recorded: a malformed row is an error to
         # fix and rerun, not evidence for or against a brief.
+        rationales = {t: json.loads((unit / f"item-{t}.json").read_text())["rationale"] for t in keymap}
         bad = [t for t, r in got.items() if r.get("answer") not in ("yes", "no", "unclear")
-               or not isinstance(r.get("why"), str) or not r["why"].strip()]
+               or not isinstance(r.get("why"), str) or not quotes_rationale(r["why"], rationales[t])]
         if bad:
             raise SystemExit(f"cause check rows without a valid answer and quoted reason: {bad}")
         causes = {f"{keymap[t]['bug']}-{keymap[t]['judge']}": {**got[t], "judge": keymap[t]["judge"],
@@ -912,6 +923,8 @@ def noleak_gate_collect(n):
         r = next(x for x in noleak_record(bug)["rounds"] if x["round"] == n)
         if r["label"] != "missed":
             results[bug] = {"pass": False, "gate": "leak", "why": f"leak label {r['label']}"}
+        elif any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
+            results[bug] = {"pass": False, "gate": "cause", "why": "a missed verdict has no rationale to check"}
         elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             results[bug] = {"pass": False, "gate": "leak", "why": "a missed verdict below high confidence: " +
                             ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
