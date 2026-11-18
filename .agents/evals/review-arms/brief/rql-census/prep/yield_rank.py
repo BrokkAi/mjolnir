@@ -18,6 +18,7 @@ import pathlib
 import sys
 
 BUG_PRECISION = 0.85
+TRACE_TARGET = 25  # the plan's per-repo tracing stop
 ADMISSION = 31 / 67
 WINDOWS = {  # label: (intro and fix on or after, fix windows counted)
     "wide_2025": (dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
@@ -142,9 +143,11 @@ def main():
             if w not in wins or not sample.get((repo, w)):
                 continue
             s = sample[(repo, w)]
-            good = sum(1 for r in s if not r.get("error") and r.get("strong") and r.get("multi_site_proxy")
-                       and r.get("trace_complete") is True
-                       and r.get("intro_ct") and r["intro_ct"] >= start.timestamp())
+            # The counting unit is the introducing change: several sampled fixes of one
+            # introduction count once.
+            good = len({r["intro_sha"] for r in s if not r.get("error") and r.get("strong")
+                        and r.get("multi_site_proxy") and r.get("trace_complete") is True
+                        and r.get("intro_ct") and r["intro_ct"] >= start.timestamp()})
             per[repo] += count * good / len(s)
         # Every clone keeps its own estimate, so a related clone stays eligible when the yield
         # leader turns out costly to index. Cohort selection takes at most one repo per
@@ -161,6 +164,10 @@ def main():
             "realistic_total_one_per_group": round(sum(best.values()), 1),
             "per_repo_realistic": dict(sorted(((r, round(v, 1)) for r, v in realistic.items()),
                                               key=lambda x: -x[1])),
+            # Tracing stops at TRACE_TARGET admitted bugs per repo, so selection ranks on the
+            # capped yield (bugs per indexing hour uses this figure).
+            "per_repo_realistic_capped": dict(sorted(((r, round(min(v, TRACE_TARGET), 1))
+                                                      for r, v in realistic.items()), key=lambda x: -x[1])),
         }
     json.dump(out, sys.stdout, indent=1)
 
