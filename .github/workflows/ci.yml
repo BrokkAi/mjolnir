@@ -189,11 +189,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+        # mj-controller's tests take 8 to 9 minutes to run on one runner, after
+        # a 6 minute build, so three runners each build the crate and run a
+        # part of them. `select` names the part: see "Run tests".
         # `--tests` leaves out the doc tests, which need a second, plain build
         # of the crate; `worker-cli` builds that anyway and runs them.
-        - name: controller
+        - name: controller, controller modules
           lane: tests-controller
           tests: -p brokk-mj-controller --tests
+          select: first
+        - name: controller, daemon and server modules
+          lane: tests-controller
+          tests: -p brokk-mj-controller --tests
+          select: second
+        - name: controller, other modules
+          lane: tests-controller
+          tests: -p brokk-mj-controller --tests
+          select: rest
         - name: worker-cli
           lane: tests-worker-cli
           tests: -p brokk-mj-worker -p brokk-mjolnir
@@ -228,8 +240,24 @@ jobs:
 
     # `--no-fail-fast` reports every failing test binary: one failure used to
     # hide the binaries after it.
+    #
+    # A shard with `select` runs the tests whose path contains one of its
+    # names. `rest` skips exactly the names the other parts select, so every
+    # test runs in some part, and a test in a new module runs in `rest`.
     - name: Run tests
-      run: cargo test --no-fail-fast ${{ matrix.tests }}
+      env:
+        SELECT: ${{ matrix.select }}
+      run: |
+        first='controller::'
+        second='daemon:: server'
+        case "$SELECT" in
+          '') set -- ;;
+          first) set -- $first ;;
+          second) set -- $second ;;
+          rest) set --; for name in $first $second; do set -- "$@" --skip "$name"; done ;;
+          *) echo "unknown test selection: $SELECT" >&2; exit 2 ;;
+        esac
+        cargo test --no-fail-fast ${{ matrix.tests }} -- "$@"
 
     # Also after a test failure: the doc tests do not depend on the tests.
     - name: Run doc tests

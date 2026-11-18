@@ -229,7 +229,7 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs workspace lint, the workspace tests in three parallel shards, and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
+CI runs workspace lint, the workspace tests in parallel shards, and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
 tests and the voice worker on macOS. The Windows
 lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
 controller-side suites and the installer test on Windows. Both lanes run nightly and on manual dispatch
