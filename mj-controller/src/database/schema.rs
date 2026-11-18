@@ -4708,8 +4708,8 @@ mod reader_tests {
                     )
                     .unwrap();
                 assert!(
-                    matches!(serde_json::from_str::<crate::daemon::StartupStep>(&pending).unwrap(),
-                    crate::daemon::StartupStep::Prompt { text, prompt: None, encoded_draft: None, .. }
+                    matches!(serde_json::from_str::<crate::database::StartupStep>(&pending).unwrap(),
+                    crate::database::StartupStep::Prompt { text, prompt: None, encoded_draft: None, .. }
                         if text == "Keep my queued prompt")
                 );
             }

@@ -1,0 +1,28 @@
+name: Cache Rust dependencies
+description: Restore compiled third-party dependencies; save them from master, including after a failed build
+inputs:
+  lane:
+    description: Independent build job and feature selection
+    required: true
+runs:
+  using: composite
+  steps:
+    # For the jobs that compile the whole workspace or a large part of it.
+    # `cache-rust` stores each lane's entire build directory and saves it only
+    # when the job succeeds. That build directory is 22GB for the workspace
+    # tests, against GitHub's limit of 10GB of caches per repository, and a
+    # failing test left nothing saved, so those jobs compiled everything from
+    # nothing. This action keeps only the third-party dependencies, a third to
+    # a half of a cold build, and Cargo rebuilds the workspace crates. It
+    # turns incremental compilation off, which a fresh runner cannot reuse.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: rust-dependencies-v1
+        # The lane alone names the cache: the job name would add nothing.
+        shared-key: ${{ inputs.lane }}
+        # Dependencies are compiled before the tests run, so they are worth
+        # keeping when the tests then fail.
+        cache-on-failure: true
+        # Pull requests and tags read master's cache; a cache they saved would
+        # be readable by that ref alone and would count against the limit.
+        save-if: ${{ github.ref == 'refs/heads/master' }}

@@ -325,8 +325,9 @@ fn scope_key() -> Result<&'static [u8]> {
     #[cfg(test)]
     let root = b"test signing key, not a secret".to_vec();
     #[cfg(not(test))]
-    let root = crate::server::load_or_create_cookie_key(&crate::server::cookie_key_path())
-        .context("read the controller's signing key")?;
+    let root =
+        crate::signing_key::load_or_create_cookie_key(&crate::signing_key::cookie_key_path())
+            .context("read the controller's signing key")?;
     use hmac::{Hmac, KeyInit, Mac};
     let mut derive =
         Hmac::<sha2::Sha256>::new_from_slice(&root).expect("HMAC accepts any key length");

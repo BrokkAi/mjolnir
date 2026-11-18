@@ -10,6 +10,9 @@ publish = true
 
 [lib]
 name = "mj_controller"
+# The crate has no doc tests. Looking for them makes rustdoc compile the whole
+# crate again: 2.5 minutes of every CI run, to run nothing.
+doctest = false
 
 [features]
 default = []

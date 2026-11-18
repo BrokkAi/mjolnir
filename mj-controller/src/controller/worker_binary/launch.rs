@@ -790,17 +790,17 @@ impl Controller {
             // A restore deletes the worker's command receipts, so the history
             // decides: once the assignment has started, the conversation
             // already holds it and the settings it was sent with.
-            let prompt_id = crate::daemon::startup_followup::startup_step_id(&group, "prompt");
+            let prompt_id = crate::database::startup_step_id(&group, "prompt");
             let assignment_started = prompt_started(session_id, &history, &prompt_id)?;
             if !assignment_started {
                 launch.initial_commands = steps
                     .into_iter()
                     .map(|step| {
                         let (command, optional) = match serde_json::from_str::<
-                            crate::daemon::StartupStep,
+                            crate::database::StartupStep,
                         >(&step.step_json)?
                         {
-                            crate::daemon::StartupStep::Configure {
+                            crate::database::StartupStep::Configure {
                                 key,
                                 value,
                                 optional,
@@ -808,7 +808,7 @@ impl Controller {
                                 mj_core::relay::RelayCommand::SetConfig { key, value },
                                 optional,
                             ),
-                            crate::daemon::StartupStep::ApiPrompt { text } => (
+                            crate::database::StartupStep::ApiPrompt { text } => (
                                 mj_core::relay::RelayCommand::Prompt {
                                     prompt: vec![
                                         agent_client_protocol::v1::schema::ContentBlock::Text(

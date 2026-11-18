@@ -20,7 +20,7 @@ Round L's oracle lift sat entirely on briefs that leaked the defect. This arm as
 - Readings confirmed by the supervisor: round 1 edits all 17 diffs; each round runs edit → blind fact check → paired leak check; a fact-check rejection uses up the round, and the next round edits the last accepted text; the editor sees the previous check's reasons, and round 1 sees the stored OT leak verdicts of the brief it edits; one blind fact-checker session per round.
 - Clarification (supervisor, recorded in the plan): edits may touch items the leak judges cite, not only carrying items. No item is deleted, and anchors are unchanged (the collector enforces the same line count, unchanged anchors per edited line, and lint).
 - A fact-checker quote must be a whole line of the hashed brief; only accepted texts become `texts/<diff>/round-N.md`, the only text a leak round can judge.
-- Round M reuses `brief_score.py` with `--arms ON,OT --reading bifrost-oracle-noleak --reference-round bifrost-judge-l`, and `verify_driver.py` judge and task modes with `--model opus --profiles claude7`.
+- Round M reuses `brief_score.py` with `--arms ON,AF,OT --reading bifrost-oracle-noleak --reference-round bifrost-judge-l`, and `verify_driver.py` judge and task modes with `--model opus --profiles claude7`.
 
 ## Context and Orientation
 
@@ -40,7 +40,9 @@ For N in 1..3, with `T="--census ROOT/census-results/missing-facts.jsonl --bugs-
     verify_driver.py ROOT/briefs/bifrost-oracle-noleak-leak-N --kind judge (same options)
     brief_writer_terra.py leak-collect (same flags as leak-build)
 
-Then `brief_oracle.py noleak-publish $T --jobs-out ROOT/oracle-noleak-arm/jobs-on.json`, then `driver.py` on that jobs file, then round M.
+Then `brief_oracle.py noleak-publish $T --jobs-out ROOT/oracle-noleak-arm/jobs-on-af.json` (ON and AF interleaved per diff), then `driver.py --jobs` on that file with `--same-image ROOT/oracle-noleak-arm/image-pin.json`, then round M with `brief_score.py build --arms ON,AF,OT --models gpt-6.1-terra --bugs-from <jobs-on-af> --reading bifrost-oracle-noleak --reference-round bifrost-judge-l`.
+
+ON − OT is a historical comparison: ON and OT ran in different review windows, and only ON has a same-window control (AF). The readout reports ON − OT as wording plus any window or cohort difference, and plus image if the pinned ON/AF image differs from the OT carriers' (`89128665…`), never as wording alone.
 
 ## Validation and Acceptance
 

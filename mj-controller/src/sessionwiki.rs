@@ -156,10 +156,7 @@ pub(crate) fn indexed_project_directory(
                 ),
             };
             Ok(Some(PathBuf::from(
-                crate::server_runtime::api::agent_working_directory_at(
-                    &workspace_root,
-                    &primary.destination,
-                ),
+                crate::targets::agent_working_directory_at(&workspace_root, &primary.destination),
             )))
         }
         mj_core::state::Checkout::Borrowed { .. } => {

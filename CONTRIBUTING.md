@@ -229,7 +229,7 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs workspace lint/tests and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
+CI runs workspace lint, the workspace tests in parallel shards, and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
 tests and the voice worker on macOS. The Windows
 lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
 controller-side suites and the installer test on Windows. Both lanes run nightly and on manual dispatch
@@ -240,7 +240,8 @@ compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with
 per-commit keys that restore compatible prior builds and refresh after success.
-Superseded CI runs for the same event and ref are cancelled. You do not need to reproduce
+The lint and test jobs cache compiled third-party dependencies only, saved from master even when tests fail.
+A newer commit cancels a pull request's superseded run; every commit pushed to master runs to completion. You do not need to reproduce
 every runner locally, but consider terminal capabilities, path syntax,
 filesystem behavior, subprocesses, audio dependencies, and platform-specific
 packaging when changing portable code.

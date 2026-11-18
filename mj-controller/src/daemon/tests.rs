@@ -7229,9 +7229,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let state = test_runtime_state_loading_the_store();
     // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
     state.profile_catalog.get_or_init(|| {
-        crate::server_runtime::profile_catalog::ProfileCatalog::new(
-            tokio_util::sync::CancellationToken::new(),
-        )
+        crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
     });
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     let shutdown = CancellationToken::new();
@@ -9301,7 +9299,12 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
-        "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+        format!(
+            "#!/bin/sh\n[ \"$2\" = stop ] && exit 0\n\
+             [ \"$2\" = proxy ] && {{ {proxy}; exit 0; }}\n\
+             cat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+            proxy = crate::controller::checkpoint::tests::latch_relay_proxy_command(&relay_root),
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -9529,9 +9532,11 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
         format!(
             "#!/bin/sh\n\
              [ \"$2\" = stop ] && exit 0\n\
+             [ \"$2\" = proxy ] && {{ {proxy}; exit 0; }}\n\
              [ \"$1 $2\" = 'worker export-checkpoint' ] || \
              {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
              {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
+            proxy = crate::controller::checkpoint::tests::latch_relay_proxy_command(&relay_root),
             program = std::env::current_exe().unwrap().display(),
             test = crate::controller::test_support::test_name(
                 module_path!(),

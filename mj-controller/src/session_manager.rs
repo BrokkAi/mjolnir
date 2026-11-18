@@ -106,3 +106,8 @@ pub(crate) mod tests;
 
 mod model_policy;
 use model_policy::SessionModelPolicy;
+
+mod pollable;
+pub use pollable::session_target_is_pollable;
+#[cfg(test)]
+pub(crate) use pollable::take_pollability_visits;

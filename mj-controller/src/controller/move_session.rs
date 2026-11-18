@@ -1265,7 +1265,7 @@ impl Controller {
 
     pub(crate) async fn prepare_move_session_controlled(
         &self,
-        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
+        catalog: &std::sync::Arc<crate::profile_catalog::ProfileCatalog>,
         mut selection: MoveSelection,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MovePreparation> {
@@ -1629,7 +1629,7 @@ impl Controller {
     pub(crate) async fn move_session_managed_controlled_with_admission(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
-        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
+        catalog: &std::sync::Arc<crate::profile_catalog::ProfileCatalog>,
         request: MoveSessionRequest,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
         executor: &(impl CommandExecutor + Sync),

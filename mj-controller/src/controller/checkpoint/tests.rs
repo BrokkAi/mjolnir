@@ -1173,6 +1173,34 @@ fn latch_relay_child_serves_stdio() {
             .expect("answer a queue or hello request");
             continue;
         }
+        // A checkpoint carries project memory on a second connection while
+        // the first still owns the control journal. A worker serves memory at
+        // the connection layer, without the journal; this stand-in has no
+        // memory endpoint, so it answers as `DurableRelay` does instead of
+        // opening a second journal writer.
+        if matches!(
+            &request.request,
+            mj_core::relay::RelayRequest::ProjectMemorySnapshot
+                | mj_core::relay::RelayRequest::ProjectMemoryTransfer { .. }
+                | mj_core::relay::RelayRequest::InstallProjectMemorySnapshot { .. }
+                | mj_core::relay::RelayRequest::ReplaceProjectMemoryTree { .. }
+        ) {
+            mj_core::relay::write_relay_frame(
+                &mut writer,
+                &mj_core::relay::RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: request.protocol_version,
+                    body: mj_core::relay::relay_error(
+                        mj_core::relay::RelayErrorCode::InvalidState,
+                        "connection-only requests must be handled by the live relay transport",
+                        false,
+                        None,
+                    ),
+                },
+            )
+            .expect("answer a project-memory request");
+            continue;
+        }
         let relay = relay.get_or_insert_with(|| {
             // Record this start so a parent test can tell a reconnect from a reused
             // connection.
@@ -1719,6 +1747,23 @@ fn unparseable_request_response(
         },
     }
 }
+/// The shell command a stand-in `hel` runs for `worker proxy`: one more
+/// connection to the stand-in relay over `relay_root`. A checkpoint opens such
+/// a connection for its project-memory transaction from the worker root, not
+/// from the session manager's target, so a fixture whose session has project
+/// memory needs its `hel` to answer it.
+#[cfg(unix)]
+pub(crate) fn latch_relay_proxy_command(relay_root: &Path) -> String {
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    format!(
+        "{LATCH_RELAY_ROOT}={root} {binary} --exact {child} --nocapture | \
+         grep --line-buffered '^{{'",
+        root = quote(relay_root),
+        binary = quote(&std::env::current_exe().unwrap()),
+        child = "controller::checkpoint::tests::latch_relay_child_serves_stdio",
+    )
+}
+
 /// A relay target served by this test binary over stdio. Each start of the
 /// server appends to `starts`, if given.
 #[cfg(unix)]
@@ -3696,6 +3741,14 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         std::fs::create_dir_all(directory).unwrap();
     }
     std::fs::create_dir_all(relay_root.join("profile")).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &relay_root,
+        "hel",
+        &format!(
+            "case \"${{2:-}}\" in proxy) {} ;; esac\nexit 0\n",
+            latch_relay_proxy_command(&relay_root)
+        ),
+    );
     // The archive covers exactly the two observations seeded below, so the
     // close latch reuses it instead of exporting a new one.
     let mut seed =

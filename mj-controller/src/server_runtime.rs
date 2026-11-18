@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 pub(crate) mod api;
 mod api_activity;
-pub(crate) mod profile_catalog;
+pub(crate) use crate::profile_catalog;
 mod publication;
 
 use mj_core::config::{Config, PhoneConfig, is_bare_project_target};
