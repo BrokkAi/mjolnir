@@ -19,7 +19,7 @@ import threading
 CLONES = pathlib.Path("/nfs/morannon/nvme/repo-clones")
 OUT = pathlib.Path(__file__).resolve().parent
 CANDS = pathlib.Path(sys.argv[1])
-JOBS = 24
+JOBS = 8
 CAP_PER_WINDOW = 10      # per repo, for windows from 2024-01 on
 PRE2024_GLOBAL = 300     # global random sample, rate only
 SEED = 20261118
@@ -104,19 +104,35 @@ def enclosing_fn(lines, line_no):
 def changed_sites(repo, h):
     """Per non-test .rs file: deleted old-side ranges and enclosing functions of every hunk.
 
-    Paths come from `--name-only -z` (never parsed from patch headers, which Git quotes), each
-    file's hunks from a literal-pathspec diff, and enclosing functions from the old file text,
+    Paths come from `--name-status -z -M` (never parsed from patch headers, which Git quotes;
+    renames keep their old path for blame), each file's hunks from a literal-pathspec diff, and enclosing functions from the old file text,
     so the result doesn't depend on the repo's diff drivers or attributes."""
-    rc, so, se = git(repo, "diff", "--name-only", "-z", f"{h}^", h, "--", "*.rs")
+    rc, so, se = git(repo, "diff", "--name-status", "-z", "-M", f"{h}^", h, "--", "*.rs")
     if rc:
         raise RuntimeError("diff names: " + se.strip()[-200:])
-    paths = [p for p in so.split("\0") if p and not is_test_path(p)]
+    fields, entries = so.split("\0"), []
+    i = 0
+    while i < len(fields) and fields[i]:
+        status = fields[i]
+        if status[0] in "RC":  # rename or copy: old path, then new path
+            entries.append((status, fields[i + 1], fields[i + 2]))
+            i += 3
+        else:
+            entries.append((status, fields[i + 1], fields[i + 1]))
+            i += 2
+    entries = [e for e in entries if not is_test_path(e[2])]
+    paths = {e[1] for e in entries}  # old-side paths: blame and old text live at fix^
     ranges, funcs = collections.defaultdict(list), set()
-    for path in paths:
-        rc, diff, se = git(repo, "diff", "-U0", "--no-color", f"{h}^", h, "--", f":(literal){path}")
+    for status, old_path, new_path in entries:
+        specs = [f":(literal){old_path}"] + ([f":(literal){new_path}"] if new_path != old_path else [])
+        rc, diff, se = git(repo, "diff", "-U0", "--no-color", "-M", f"{h}^", h, "--", *specs)
         if rc:
             raise RuntimeError("diff file: " + se.strip()[-200:])
-        rc, old, _ = git(repo, "show", f"{h}^:{path}")
+        path = old_path
+        if status.startswith("A"):
+            rc, old = 1, ""
+        else:
+            rc, old, _ = git(repo, "show", f"{h}^:{old_path}")
         old_lines = old.splitlines() if rc == 0 else []
         for line in diff.splitlines():
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)

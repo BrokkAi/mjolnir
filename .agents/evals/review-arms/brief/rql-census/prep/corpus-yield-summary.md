@@ -1,8 +1,8 @@
-# Local Rust corpus yield screen (2026-11-18, dbcece95; v3 after two review rounds)
+# Local Rust corpus yield screen (2026-11-18, dbcece95; v4 after three review rounds)
 
 Candidates: brokkbench sft-tools-commits/rust (993 repos), records with test_files>=1, non_test_files>=1 and a bug word in the oneline: 9,647. Clones /nfs/morannon/nvme/repo-clones, read only.
 Method: `scan.py` dates every candidate and blames the fix's deleted non-test .rs lines at fix^ on a capped sample (10 per repo per window from 2024; 300 pre-2024 globally). A fix with any failed blame is an incomplete trace and never strong. `yield_rank.py` turns the samples into per-repo yields: upper bound x bug precision 0.85 x admission 31/67.
-Strong = top blamed commit >=30% of blamed lines and <=4,000 changed lines. Multi-site proxy = fix touches >=2 non-test files or >=2 enclosing functions, found from the old file's `fn` signatures (crude, over-counts relation bugs). Paths come from `git diff --name-only -z`.
+Strong = top blamed commit >=30% of blamed lines and <=4,000 changed lines. Multi-site proxy = fix touches >=2 non-test files or >=2 enclosing functions, found from the old file's `fn` signatures (crude, over-counts relation bugs). Paths come from `git diff --name-status -z -M`; renamed files keep their old path for blame.
 Run: undated 0, blame errors 0, incomplete traces 0; the ranker refuses to rank while any planned draw lacks a record.
 
 | Window (intro and fix on or after) | Upper bound | Realistic | Repos >=5 | >=10 | >=15 | >=25 |

@@ -22,7 +22,7 @@ A positive result shows that the information helps when it's delivered this way.
 
 **Bugs.**
 - Candidates come from each selected repo's full git history: fix commits that change non-test code and add or change a test. The brokkbench SFT lists only seeded the screen, and they are a model-screened subset capped at 1,000 commits per repo.
-- The corpus SPEC rules (`corpus/SPEC.md`) apply, adapted: the regression test in the fix commit replaces the Hard-won marker, and the cutoff rule becomes the window below. Attribution, findable-from-the-diff, real behavior, not pre-flagged, ordinary commits, size and spread all apply unchanged.
+- The corpus SPEC rules (`corpus/SPEC.md`) apply, adapted: the regression test in the fix commit replaces the Hard-won marker, and the cutoff rule becomes the window below. The ordinary-commit rule uses each repo's default branch (the clone's HEAD branch, `main` or otherwise) in place of `master`. Attribution, findable-from-the-diff, real behavior, not pre-flagged, size and spread all apply unchanged.
 - Each candidate is admitted by a blind Sol/high tracer with a second-family check of the attribution, as in `PLAN-bifrost-bugs.md`.
 - Target about 25 admitted bugs per repo.
 
@@ -37,7 +37,7 @@ A positive result shows that the information helps when it's delivered this way.
 - Grammar, prompts and simulator tuning use mjolnir and bifrost-dev only.
 - No 2025+ test bug informs the menu, the grammar or the prompts.
 - **Menu rule, written before the development census:** the added steps are the top k = 3 missing step kinds, ranked by the repo-averaged share of relation bugs they decide.
-- **Leak check:** report whether the menu changes when one test repo's development bugs are left out, and when all of them are left out. An unchanged menu means nothing leaked.
+- **Menu stability:** report whether the menu changes when one test repo's development bugs are left out, and when all of them are left out. This shows the menu is stable. It can't certify that no test information reached the frozen inputs: step semantics, query bounds or prompts could shift while the three step names stay the same. That protection is procedural. Nobody who shapes those inputs sees a test bug's census record, fix or decisive facts before the freeze.
 - **Exclusion:** a test bug in the same family as a development bug from that repo is excluded. Same family means the same issue, or introduced by the development bug's fix.
 
 ## Stage 1: census (no reviewers)
@@ -73,7 +73,7 @@ It reports:
 - **Freezing the definition:** before freezing it, report on development data the share of bugs whose decisive row the table contains.
 
 **Fidelity gate** (per added step, on at least 40 gold queries drawn from the potential table, settled before any reviewer outcome is unblinded):
-- **Gold set:** built by pooling the engine's rows, a second-family model asked to enumerate, and the mechanical superset, with every candidate adjudicated.
+- **Gold set:** built by pooling the engine's rows, a second-family model asked to enumerate, and the mechanical superset, with every candidate adjudicated. For sampled queries whose scope includes a census decisive fact, those decisive rows are added to the gold set even when every enumerator missed them. They are never shown to the engine, so a step that misses the relations it exists to supply can't pass.
 - **Accuracy:** row precision at least 95% and recall at least 90%, with lower 95% bounds (bootstrap over queries) of 90% and 80%.
 - **Stability:** re-asking a sample without the cache returns the same rows at Jaccard 0.9 or better.
 - **Prescience:** decisive-row recall within 10 points of other-row recall. The pilot can only bound this gap to about ±20, which the readout says.
@@ -129,7 +129,7 @@ Decision bands (minimum effect set by Jonathan, 2026-11-18):
 
 Also reported:
 - **H against R:** if H comes within 5 points of R, the useful product today is a writer with model helpers, and Bifrost's case rests on cost, latency and completeness.
-- **G − N:** whether the shipped writer helps on these repos.
+- **G − N:** the effect of the checklist-assisted grep writer over no brief. G gets the new step list in prose, which the shipped writer's prompt (`WRITER.md`) doesn't have, so this isn't a measure of the shipped writer itself.
 - **The census rankings.**
 - **Cost.**
 
