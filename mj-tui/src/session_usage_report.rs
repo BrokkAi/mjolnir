@@ -263,7 +263,7 @@ pub(crate) fn render(
         UsageControl::Suspended,
     );
     let window = dialog.query.hour_start_ms.map_or_else(
-        || "last 24 hours".to_owned(),
+        || "last 24 clock hours".to_owned(),
         |ms| {
             let zone = |ms| {
                 chrono::DateTime::from_timestamp_millis(ms)

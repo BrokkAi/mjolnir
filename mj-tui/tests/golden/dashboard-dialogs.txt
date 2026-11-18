@@ -644,7 +644,7 @@ Ent
 │ C  │                                                                                                            │    │
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total ? · last 24 hours · estimated API USD                                                                 │    │
+│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -682,7 +682,7 @@ Ent
    │                                                              │
    │☐ Include suspended sessions                                  │
    │                                                              │
-   │Total ? · last 24 hours · estimated API USD                   │
+   │Total ? · last 24 clock hours · estimated API USD             │
    │$50                 ▂                     ░ ▃                 │
    │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
@@ -706,7 +706,7 @@ Ent
    │                                                              │
    │☐ Include suspended sessions                                  │
    │                                                              │
-   │Total ? · last 24 hours · estimated API USD                   │
+   │Total ? · last 24 clock hours · estimated API USD             │
    │$50                 ▂                     ░ ▃                 │
    │ $0     ▁ ▃ ▂     ▄ █ ▇ ▆ ▃ ▁ ░     ▂ ▄ █ ░ █ ▆ ▄ ▂           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
@@ -730,7 +730,7 @@ Ent
 │ C  │        ╭Profile───╮                                                                                        │    │
 │he  │☐ Includ│All       │sessions                                                                                │    │
 │›   │        │claude    │                                                                                        │    │
-│    │Total ? │claude-1  │urs · estimated API USD                                                                 │    │
+│    │Total ? │claude-1  │ock hours · estimated API USD                                                           │    │
 │    │$50     │codex     │                                                            ░░░                         │    │
 │    │        │codex-1   │                                                            ░░░ ▄▄▄                     │    │
 │    │$25     │codex-2   │                ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -768,7 +768,7 @@ Ent
 │ C  │                                                                                                            │    │
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total ? · last 24 hours · estimated API USD                                                                 │    │
+│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -844,7 +844,7 @@ Ent
 │ C  │                                                                                                            │    │
 │he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
-│    │Total ? · last 24 hours · estimated API USD                                                                 │    │
+│    │Total ? · last 24 clock hours · estimated API USD                                                           │    │
 │    │$50                                                                             ░░░                         │    │
 │    │                                                                                ░░░ ▄▄▄                     │    │
 │    │$25                                 ███ ▂▂▂                                 ▅▅▅ ░░░ ███                     │    │
@@ -880,7 +880,7 @@ Ent
    ╭ × Usage by session ──────────────────────────────────────────╮
    │Profile codex ▾                                               │
    │☒ Include suspended sessions                                  │
-   │Total ? · last 24 hours · estimated API USD                   │
+   │Total ? · last 24 clock hours · estimated API USD             │
    │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
    │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │Primary agents  $1.000                                        │
