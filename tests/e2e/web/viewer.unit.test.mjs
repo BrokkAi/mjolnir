@@ -1576,30 +1576,30 @@ test('conversation receipts require a visible focused caught-up conversation and
   assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
   context.cursor = 50;
   context.session.unread_frontier = 44;
-  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
-  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
-  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
-  finish();
-  await loaded;
   context.session.notification_card = { entries: [
     { kind: 'important', completed_ordinal: 55 },
-    { kind: 'important', completed_ordinal: 53 },
-    { kind: 'needs_input', completed_ordinal: 60 },
   ] };
-  const readStack = vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent[3][1], 55, 'receipt includes the largest Important completion beyond the loaded and unread frontiers');
+  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 0341c80d6: an unseen Important reply advanced the receipt past the loaded cursor.
+  assert.equal(sent[2][1], 50, 'acknowledges the loaded cursor even when the card includes an unseen reply');
   context.session.notification_card.entries.push({ kind: 'important', completed_ordinal: 57 });
   finish();
-  await readStack;
-  assert.equal(frames.length, 1, 'a newer Important completion published in flight schedules the next receipt');
-  frames.shift()();
-  assert.equal(sent[4][1], 57);
+  await loaded;
+  assert.equal(frames.length, 0, 'publishing another Important completion does not schedule a read');
+
+  context.cursor = 57;
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 3, 'the loaded reply still needs to be visible');
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 500, bottom: 650 });
+  const viewed = vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent[3][1], 57, 'the receipt reaches the Important reply once loaded and visible');
   finish();
-  await new Promise(resolve => setImmediate(resolve));
-  context.cursor = 51;
+  await viewed;
+  context.cursor = 58;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 5, 'closed conversations do not read');
+  assert.equal(sent.length, 4, 'closed conversations do not read');
 });
 
 

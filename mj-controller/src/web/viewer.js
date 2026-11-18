@@ -9183,14 +9183,6 @@ function scheduleConversationRead() {
   });
 }
 
-function conversationReadThrough(session) {
-  let through = cursor;
-  for (const entry of session?.notification_card?.entries ?? []) {
-    if (entry.kind === 'important') through = Math.max(through, entry.completed_ordinal);
-  }
-  return through;
-}
-
 async function persistVisibleConversationRead() {
   const sessionId = currentSession;
   // A window on another monitor or behind the active one still reports
@@ -9212,10 +9204,8 @@ async function persistVisibleConversationRead() {
     receipt = { through: 0, inFlight: false };
     conversationReads.set(sessionId, receipt);
   }
-  // The loaded cursor covers visible output. An Important completion can
-  // follow that output without a transcript item of its own.
-  if (!Number.isSafeInteger(cursor)) return;
-  const through = conversationReadThrough(session);
+  // Acknowledge through the loaded conversation cursor once its end is visible.
+  const through = cursor;
   if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
     || receipt.inFlight) return;
   receipt.inFlight = true;
@@ -9225,9 +9215,8 @@ async function persistVisibleConversationRead() {
     });
     receipt.through = Math.max(receipt.through, through);
     if (currentSession === sessionId) acknowledged = Math.max(acknowledged, through);
-    if (currentSession === sessionId && conversationReadThrough(sessionById(sessionId)) > through) {
-      scheduleConversationRead();
-    }
+    // A newer conversation cursor may have loaded while this receipt was pending.
+    if (currentSession === sessionId && cursor > through) scheduleConversationRead();
   } catch (err) {
     if (currentSession === sessionId) {
       if (err.message === 'unauthorized') showLogin();
