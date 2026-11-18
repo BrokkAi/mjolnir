@@ -506,9 +506,26 @@ async fn resolve_model_profile_selection_from(
         // A reviewer's effort is configured, not chosen: start with it as
         // configured and let the harness report a value it rejects, rather
         // than launching every candidate harness to list its efforts first.
+        // Efforts already known for this model still pass over a profile
+        // that cannot serve the slot, so a later one that can still runs it.
         if reviewer_source {
             let effort = match requirement {
-                EffortRequirement::Exact(requested) => Some(requested.to_owned()),
+                EffortRequirement::Exact(requested) => {
+                    let known = &candidate.candidate.choices;
+                    if known.model.as_deref() == Some(&candidate.model.value)
+                        && !known.efforts.is_empty()
+                        && !known.efforts.iter().any(|choice| choice.value == requested)
+                    {
+                        offered_any_effort = true;
+                        selection_errors.push(format!(
+                            "{} offers efforts: {}",
+                            candidate.profile_id,
+                            effort_names(&known.efforts)
+                        ));
+                        continue;
+                    }
+                    Some(requested.to_owned())
+                }
                 EffortRequirement::Default | EffortRequirement::Any => None,
             };
             return Ok(selection(
@@ -1849,6 +1866,38 @@ mod tests {
             assert_eq!(selected.effort.as_deref(), effort);
             assert_eq!(tokio::time::Instant::now(), start);
         }
+
+        // A preferred profile known not to offer the configured effort yields
+        // the slot to one whose efforts are unknown, still without probing.
+        let mut low_only = candidate("low-only", Some(90), &["fixed"]);
+        low_only.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
+            value: "low".into(),
+            name: "Low".into(),
+            description: None,
+        }];
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            ready_first: false,
+            staged: None,
+            discovery_fails: false,
+            config: Default::default(),
+            candidates: SubagentCandidates {
+                offered: vec![low_only, candidate("unknown", Some(10), &["fixed"])],
+                unavailable: Vec::new(),
+            },
+        });
+        let start = tokio::time::Instant::now();
+        let selected = resolve_model_profile_selection_matching(
+            &backend,
+            None,
+            "fixed",
+            EffortRequirement::Exact("high"),
+            None,
+            ModelProfileCandidateSource::ReviewersReady,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.profile_id, "unknown");
+        assert_eq!(tokio::time::Instant::now(), start);
     }
 
     #[tokio::test]
