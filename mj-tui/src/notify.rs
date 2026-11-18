@@ -33,6 +33,8 @@ pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
     /// The open forms this episode covers.
     forms: std::collections::BTreeSet<String>,
+    /// The newest completed question shown on the notification card.
+    shown_question_ordinal: Option<u64>,
     since_ms: u64,
     reported: bool,
 }
@@ -125,16 +127,27 @@ impl DashboardState {
                         .collect()
                 })
                 .unwrap_or_default();
+            let shown_question_ordinal = self
+                .notification_cards
+                .as_ref()
+                .and_then(|cards| cards.get(id))
+                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+                .map(|entry| entry.completed_ordinal);
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
                 forms: Default::default(),
+                shown_question_ordinal,
                 since_ms: now_ms,
                 reported: false,
             });
-            if episode.level != level || !forms.is_subset(&episode.forms) {
+            if episode.level != level
+                || !forms.is_subset(&episode.forms)
+                || shown_question_ordinal != episode.shown_question_ordinal
+            {
                 *episode = AttentionEpisode {
                     level,
                     forms,
+                    shown_question_ordinal,
                     since_ms: now_ms,
                     reported: false,
                 };
@@ -691,6 +704,29 @@ mod tests {
         assert_eq!(done.body, "All tests pass now.");
         // Reported once; the same episode never repeats.
         assert!(dashboard.notification_events(60_000).is_empty());
+
+        // A later turn contributes a newly shown question without changing
+        // the session's NeedsInput level or opening another form.
+        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "asks".into(),
+            mj_client::runtime_feed::NotificationCard {
+                since_ms: 60_001,
+                badge: mj_core::attention::NotificationKind::NeedsInput,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 60_001,
+                    completed_ordinal: 5,
+                    kind: mj_core::attention::NotificationKind::NeedsInput,
+                    message: mj_core::attention::EntryMessage::Found("agent:later".into()),
+                }],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 5 }),
+                holder: None,
+                form: None,
+            },
+        )])));
+        assert!(dashboard.notification_events(60_001).is_empty());
+        let later = dashboard.notification_events(62_001);
+        assert_eq!(later.len(), 1, "only the newly shown question starts an episode");
+        assert_eq!(later[0].session_id, "asks");
 
         // Answering and asking again starts a new episode.
         dashboard

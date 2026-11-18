@@ -893,6 +893,27 @@ test('a refusal while the card is still shown keeps the text in Quick reply and 
   assert.equal(view.nodes.cardError.textContent, 'Not sent: session is closed');
 });
 
+test('a refused parent-entry reply on a mixed card restores to Quick reply without hand-off', async () => {
+  const mixed = stack('needs_input', 3, [message(2, 'important', 'none')], {
+    holder: 'child', form: { request_id: 'r1', message: 'Child approval' },
+  });
+  const view = screen([row('parent', 'needs_input', 3, { notification_card: mixed }),
+    row('child', 'working', 1, { subagent_parent_id: 'parent' })]);
+  view.nodes.previous.onclick();
+  view.nodes.input.value = 'reply to parent';
+  view.nodes.input.oninput();
+  let refuse;
+  view.answers.set('prompt:parent', () => new Promise((_, reject) => {
+    refuse = () => reject(Object.assign(new Error('session is closed'), { status: 409 }));
+  }));
+  view.nodes.reply.onsubmit({ preventDefault() {} });
+  await settle();
+  refuse();
+  await settle();
+  assert.ok(noticeButton(view, 'Restore to Quick reply'));
+  assert.equal(noticeButton(view, 'Hand to conversation'), undefined);
+});
+
 test('an unconfirmed delivery is reported but never handed back for resending', async () => {
   const view = screen([row('a', 'needs_input', 3)]);
   view.nodes.input.value = 'hello';

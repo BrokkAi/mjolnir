@@ -989,7 +989,14 @@ impl DashboardState {
     pub fn has_notification_for_session(&self, session_id: &str) -> bool {
         self.notification_entries()
             .iter()
-            .any(|entry| self.notification_destination(entry) == session_id)
+            .any(|entry| match &entry.published {
+                Some(card) => {
+                    (!card.entries.is_empty() && entry.session_id == session_id)
+                        || (card.form.is_some()
+                            && card.holder.as_deref().unwrap_or(&entry.session_id) == session_id)
+                }
+                None => self.notification_destination(entry) == session_id,
+            })
     }
 
     /// Text copying uses the exact row space registered by the last render.
@@ -1624,6 +1631,10 @@ pub(crate) mod tests {
             dashboard.notification_destination(&dashboard.notification_entries()[0]),
             "q1",
             "the selected stack entry targets its own session"
+        );
+        assert!(
+            dashboard.has_notification_for_session("q2"),
+            "the same card still contains a live form for the child"
         );
         assert_eq!(dashboard.wanted_notification_message(), Some(item.clone()));
         assert!(

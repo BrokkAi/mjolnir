@@ -1574,7 +1574,11 @@ const inboxFailureNotices = new Map();
 function inboxHasReplyCard(destination) {
   return inboxEntries().some(entry => {
     const card = inboxCard(entry);
-    return card.canReply && card.destination === destination;
+    const stack = entry.notification_card;
+    const destinations = stack
+      ? [ ...(stack.entries.length ? [entry.id] : []), ...(stack.form ? [stack.holder ?? entry.id] : []) ]
+      : [card.destination];
+    return card.canReply && destinations.includes(destination);
   });
 }
 
