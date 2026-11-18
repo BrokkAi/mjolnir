@@ -296,6 +296,9 @@ def run(batch_path, judge=None):
     if a.kind == "task":
         (batch_path / a.output).write_text(out["text"])
         out = {"output": str(batch_path / a.output), "session_id": sid}
+    # Bind the output to the session that produced it, so a consumer can check the model and
+    # profile of the exact verdicts it reads rather than a session record that a rerun replaces.
+    out = {**out, "producer": {"session_id": sid, "profile": rec.get("profile"), "config": rec.get("config")}}
     save(out_path, out)
     mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
     return tag, "done"
@@ -322,17 +325,20 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
             print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e)}),
                   flush=True)
 both = [(b, j) for b in batches for j in ("A", "B")]
-if a.kind == "judge" and not failed and all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
-                                            for b, j in both):
-    # The input brief_score.py collect reads (it was written by brief/workflow-judge.js before);
-    # written by whichever invocation completes the last of both judges' verdicts.
-    verdicts = [{**v, "judge": j} for b, j in both
-                for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").read_text())["verdicts"]]
-    # Two invocations (judges A and B) can both get here: each writes a private temporary file and
-    # atomically replaces the aggregate, so readers never see a partial file, and a rerun after a
-    # rejudge refreshes it from the current verdict files.
-    target = V / "workflow-out.json"
-    tmp = target.with_name(f"workflow-out.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"verdicts": verdicts, "missing": []}, indent=2) + "\n")
-    os.replace(tmp, target)
+if a.kind == "judge" and not failed:
+    import fcntl
+    # One serialized decision point: under an exclusive lock, check that both judges' verdicts are
+    # present, read them, and replace the aggregate. A concurrent A or B invocation (or a rejudge)
+    # therefore publishes from the verdict files as they are when it holds the lock, never a stale
+    # read taken before another invocation's publication.
+    with open(V / "workflow-out.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists() for b, j in both):
+            verdicts = [{**v, "judge": j} for b, j in both
+                        for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json")
+                                            .read_text())["verdicts"]]
+            target = V / "workflow-out.json"
+            tmp = target.with_name(f"workflow-out.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"verdicts": verdicts, "missing": []}, indent=2) + "\n")
+            os.replace(tmp, target)
 raise SystemExit(1 if failed else 0)

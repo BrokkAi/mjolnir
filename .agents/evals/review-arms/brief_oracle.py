@@ -551,7 +551,7 @@ def noleak_state(bug, upto):
         if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
             raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
         if STRICT:
-            require_strict_judges(n)
+            require_strict_judges(n, bug, leak["verdicts"])
         source = text
         if leak["label"] == "missed" and not STRICT:
             return n, source, None
@@ -773,6 +773,7 @@ def strict_fidelity_decision(r, e):
         raise SystemExit(f"{r.get('id')}: fidelity row names another brief")
     elements = r.get("elements")
     if not isinstance(elements, list) or any(not isinstance(x, dict) or not isinstance(x.get("kept"), bool)
+                                             or not isinstance(x.get("element"), str) or not x["element"].strip()
                                              for x in elements):
         raise SystemExit(f"{r['id']}: fidelity row has no valid element list")
     if not isinstance(r.get("fact_inferred"), bool) or r.get("decision") not in ("pass", "fail"):
@@ -798,16 +799,29 @@ def strict_fidelity_decision(r, e):
 
 
 # Judge A on Claude Opus (claude7), judge B on GPT Sol (codex), as brief/PLAN-bifrost-oracle-strict.md registers.
-STRICT_JUDGE_MODELS = {"A": "opus", "B": "gpt-6.1-sol"}
+STRICT_JUDGE_MODELS = {"A": ("claude7", "opus"), "B": ("codex", "gpt-6.1-sol")}  # judge: (profile, model)
 
 
-def require_strict_judges(n):
-    """The registered leak rule pairs one Opus and one Sol judge for every strict leak judgment."""
-    sessions = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}" / "sessions"
-    models = {j: (json.loads((sessions / f"batch-0-{j}.json").read_text()).get("config") or {}).get("model")
-              for j in ("A", "B")}
-    if models != STRICT_JUDGE_MODELS:
-        raise SystemExit(f"round {n} leak judges ran on {models}, not {STRICT_JUDGE_MODELS}")
+def require_strict_judges(n, bug=None, verdicts=None):
+    """The registered leak rule pairs one Opus and one Sol judge for every strict leak judgment.
+
+    Reads each judge's output file, which names the session, profile and model that produced its
+    verdicts, and (given a leak record's verdicts) requires them to be exactly those outputs."""
+    leak_dir = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}"
+    key = json.loads((leak_dir / "key.json").read_text())
+    produced = {}
+    for judge, (profile, model) in STRICT_JUDGE_MODELS.items():
+        out = json.loads((leak_dir / "out" / f"verdicts-0-{judge}.json").read_text())
+        p = out.get("producer") or {}
+        if (p.get("profile"), (p.get("config") or {}).get("model")) != (profile, model):
+            raise SystemExit(f"round {n} judge {judge} verdicts came from {p.get('profile')}/"
+                             f"{(p.get('config') or {}).get('model')}, not {profile}/{model}")
+        for v in out["verdicts"]:
+            produced[(key[v["output_id"]]["bug"], judge)] = (v.get("label"), v.get("rationale"))
+    if bug is not None:
+        got = {(bug, v["judge"]): (v.get("label"), v.get("rationale")) for v in verdicts}
+        if set(got) != {(bug, "A"), (bug, "B")} or any(produced.get(k) != got[k] for k in got):
+            raise SystemExit(f"{bug}: round {n} leak record is not the registered judges' output")
 
 
 def verdicts_fingerprint(leak_round):
@@ -828,15 +842,19 @@ def noleak_gate_build(n):
     checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
     pending = 0
     keymap = {}
-    require_strict_judges(n)
-    # Every accepted diff's round-n leak record must exist before anything is written.
+    accepted = [bug for bug, d in checks.items() if d["decision"] == "carries"]
+    if not accepted:
+        # No edit passed fidelity: there was no leak round and nothing to gate.
+        print(json.dumps({"round": n, "cause_checks": 0, "dir": None, "note": "no brief passed fidelity"}))
+        return
+    # Every accepted diff's round-n leak record must exist and be the registered judges' output
+    # before anything is written.
     records = {}
-    for bug, d in checks.items():
-        if d["decision"] != "carries":
-            continue
+    for bug in accepted:
         r = next((x for x in noleak_record(bug)["rounds"] if x["round"] == n), None)
         if r is None:
             raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
+        require_strict_judges(n, bug, r["verdicts"])
         records[bug] = r
     for bug, r in records.items():
         if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
