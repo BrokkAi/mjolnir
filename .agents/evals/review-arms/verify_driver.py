@@ -269,21 +269,20 @@ def run_unit(batch_path, judge=None):
         producer = json.loads(out_path.read_text()).get("producer") or {}
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
-        if not producer and a.kind == "judge" and len(JUDGES) == 1:
-            # A split-judge invocation pins one side's model; an output that predates producer records
-            # cannot show it matches, so it is not reused.
-            raise RuntimeError(f"unit {tag} has output without a recorded producer; move {out_path.name} "
-                               f"and sessions/batch-{tag}.json aside to rerun it on {a.model}")
-        if (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
+        # A split-judge invocation pins one side's model, so an output that predates producer records
+        # cannot show it matches. Unknown and mismatched producers are both ineligible.
+        unknown = not producer and a.kind == "judge" and len(JUDGES) == 1
+        if unknown or (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
             # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
             # reads verdicts this check rejects.
             import fcntl
             with open(V / "workflow-out.lock", "w") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
-                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
+                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by] if producer else None,
                                                                       "requested": [PROFILES, a.model]}})
                 (V / "workflow-out.json").unlink(missing_ok=True)
-            raise RuntimeError(f"unit {tag} already has output from {made_on}/{made_by}, not "
+            raise RuntimeError(f"unit {tag} already has output from "
+                               f"{f'{made_on}/{made_by}' if producer else 'an unrecorded producer'}, not "
                                f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
                                f"sessions/batch-{tag}.json aside to rerun it")
         # The cached output matches this invocation, so any earlier invalid marker for it is stale.

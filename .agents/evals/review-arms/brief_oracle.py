@@ -665,9 +665,11 @@ def noleak_validate(bug, item, raw):
         if new != declared.get(i, old):
             raise SystemExit(f"{bug}: line {i + 1} differs from the declared edits")
     problems = brief_driver.lint(result_text, driver.CORPUS[bug])
-    if problems:
+    if problems and not STRICT:
         raise SystemExit(f"{bug}: edited brief fails lint: {problems}")
-    return result_text
+    # In strict mode a well-formed edit that breaks the brief rules (for example the length limit) is
+    # the editor's result for the round: it fails construction for that diff, not the whole round.
+    return result_text if not STRICT else (result_text, problems)
 
 
 def noleak_edit_collect(n):
@@ -691,9 +693,11 @@ def noleak_edit_collect(n):
         bug = u["id"]
         item = json.loads((base / bug / "item.json").read_text())
         raw = json.loads((base / bug / "edit.json").read_text())
-        text = noleak_validate(bug, item, raw)
+        validated = noleak_validate(bug, item, raw)
+        text, lint_problems = validated if STRICT else (validated, [])
         recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
-                     "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest()})
+                     "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                     **({"lint_problems": lint_problems} if lint_problems else {})})
     save(out_path, {"round": n, "results": recs})
     print(json.dumps([{k: r[k] for k in ("id", "edited_items", "brief_sha256")} for r in recs]))
 
@@ -701,7 +705,9 @@ def noleak_edit_collect(n):
 def noleak_check_build(n):
     W = task_work()
     noleak_require_scope()
-    edits = json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
+    # Edits that broke the brief rules already failed construction; only the others are checked.
+    edits = [r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]
+             if not r.get("lint_problems")]
     census_rows, _ = load_task_inputs()
     corpus = driver.CORPUS
     unit = W / f"round-{n}" / "check" / "factcheck"
@@ -734,7 +740,8 @@ def noleak_check_build(n):
 def noleak_check_collect(n):
     W = task_work()
     noleak_require_scope()
-    edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
+    all_edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
+    edits = {b: r for b, r in all_edits.items() if not r.get("lint_problems")}
     out_path = W / f"round-{n}" / "check-results.json"
     output = "fidelity.jsonl" if STRICT else "factcheck.jsonl"
     if STRICT:
@@ -762,6 +769,12 @@ def noleak_check_collect(n):
                               "brief_sha256": e["brief_sha256"],
                               **({"elements_not_kept": r["elements_not_kept"], "fact_inferred": r["fact_inferred"]}
                                  if STRICT else {})}
+    for bug, r in all_edits.items():
+        if r.get("lint_problems"):
+            decisions[bug] = {"decision": "does not carry", "item": None,
+                              "why": f"edit breaks the brief rules: {r['lint_problems']}",
+                              "brief_sha256": r["brief_sha256"],
+                              "elements_not_kept": [f"lint: {x}" for x in r["lint_problems"]], "fact_inferred": False}
     if out_path.exists():
         if json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
             raise SystemExit(f"{out_path} holds different decisions")
