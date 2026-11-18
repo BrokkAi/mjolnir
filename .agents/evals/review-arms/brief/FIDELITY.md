@@ -28,6 +28,10 @@ surrounding lines, is not kept. Use the repository in your working directory
 (`git show <intro>:<path>`) when you need to check what an element refers to.
 Do not build, run tests, edit tracked files, or use the network.
 
+Also list every relation element an edited line states that its original
+line did not (a new caller, guard, value, fallback or other fact). Wording
+changes are not elements; only new facts count.
+
 Then decide whether one line of the edited brief states the census fact
 explicitly, so that a reader learns it from that line without inference.
 
@@ -37,10 +41,12 @@ item file, each a JSON object:
 - `id` and `brief_sha256`, copied from the item file;
 - `elements`: a list of `{"pair": <index into pairs>, "element": <short
   description>, "kept": true | false}` covering every element of every pair;
+- `added`: a list of short descriptions of every relation element an edited
+  line adds, or an empty list;
 - `carrying_item`: the complete edited-brief line that states the census
   fact, copied exactly with its leading `- `, or null;
 - `fact_inferred`: true if stating the census fact needs inference or more
   than one line, otherwise false;
-- `decision`: `pass` only if every element is kept, `carrying_item` is set
-  and `fact_inferred` is false; otherwise `fail`;
+- `decision`: `pass` only if every element is kept, nothing is added,
+  `carrying_item` is set and `fact_inferred` is false; otherwise `fail`;
 - `why`: one or two sentences, naming every element that was not kept.

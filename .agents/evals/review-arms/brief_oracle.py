@@ -550,6 +550,8 @@ def noleak_state(bug, upto):
         leak = rounds.get(n)
         if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
             raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
+        if STRICT:
+            require_strict_judges(n)
         source = text
         if leak["label"] == "missed" and not STRICT:
             return n, source, None
@@ -782,7 +784,11 @@ def strict_fidelity_decision(r, e):
     if any(not isinstance(i, int) or not 0 <= i < pair_count for i in covered):
         raise SystemExit(f"{r['id']}: fidelity elements name pairs outside 0..{pair_count - 1}")
     uncovered = sorted(set(range(pair_count)) - covered)
-    not_kept = [x.get("element") for x in elements if not x["kept"]] + [f"pair {i}: no elements listed" for i in uncovered]
+    added = r.get("added")
+    if not isinstance(added, list):
+        raise SystemExit(f"{r['id']}: fidelity row has no list of added elements")
+    not_kept = ([x.get("element") for x in elements if not x["kept"]] + [f"pair {i}: no elements listed" for i in uncovered]
+                + [f"added: {a}" for a in added])
     quote = r.get("carrying_item")
     whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
     ok = r["decision"] == "pass" and not not_kept and not r["fact_inferred"] and whole_line
@@ -793,6 +799,15 @@ def strict_fidelity_decision(r, e):
 
 # Judge A on Claude Opus (claude7), judge B on GPT Sol (codex), as brief/PLAN-bifrost-oracle-strict.md registers.
 STRICT_JUDGE_MODELS = {"A": "opus", "B": "gpt-6.1-sol"}
+
+
+def require_strict_judges(n):
+    """The registered leak rule pairs one Opus and one Sol judge for every strict leak judgment."""
+    sessions = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}" / "sessions"
+    models = {j: (json.loads((sessions / f"batch-0-{j}.json").read_text()).get("config") or {}).get("model")
+              for j in ("A", "B")}
+    if models != STRICT_JUDGE_MODELS:
+        raise SystemExit(f"round {n} leak judges ran on {models}, not {STRICT_JUDGE_MODELS}")
 
 
 def verdicts_fingerprint(leak_round):
@@ -813,18 +828,17 @@ def noleak_gate_build(n):
     checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
     pending = 0
     keymap = {}
-    # The registered leak rule pairs one Opus and one Sol judge; check the sessions that judged.
-    sessions = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}" / "sessions"
-    models = {j: (json.loads((sessions / f"batch-0-{j}.json").read_text()).get("config") or {}).get("model")
-              for j in ("A", "B")}
-    if models != STRICT_JUDGE_MODELS:
-        raise SystemExit(f"round {n} leak judges ran on {models}, not {STRICT_JUDGE_MODELS}")
+    require_strict_judges(n)
+    # Every accepted diff's round-n leak record must exist before anything is written.
+    records = {}
     for bug, d in checks.items():
         if d["decision"] != "carries":
             continue
         r = next((x for x in noleak_record(bug)["rounds"] if x["round"] == n), None)
         if r is None:
             raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
+        records[bug] = r
+    for bug, r in records.items():
         if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             continue
         for v in r["verdicts"]:

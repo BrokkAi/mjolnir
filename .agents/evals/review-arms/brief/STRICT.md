@@ -43,7 +43,8 @@ Every relation element of every item you edit stays, stated as fact:
 
 ## What may change
 
-Only phrasing that states or implies a consequence, a failure, a defect, an
+Do not add any relation, caller, guard, value or fact that the original line
+does not state. Only phrasing that states or implies a consequence, a failure, a defect, an
 expectation or what should happen: "so ...", "which means ...", "is lost",
 "incorrectly", "should", "can therefore", "even though", emphasis such as
 "only" used to suggest a gap, and contrasts whose purpose is to show a gap
