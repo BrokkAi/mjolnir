@@ -85,7 +85,7 @@ It reports:
 - **N:** no brief.
 - **G:** grep writer. It gets the same step list in prose, so the contrast is the answers, not the checklist.
 - **R:** mocked-RQL writer, which keeps grep and the list.
-- **R0:** the same mocked engine with today's documented steps only (no added steps), keeping grep and the list. R − R0 is the added steps' own contribution, and R0 − G is what complete answers from today's steps add.
+- **R0:** the same mocked engine with today's documented steps only (no added steps), keeping grep and the list. R − R0 is the added steps' own contribution, and R0 − G is what complete answers from today's steps add. If no added step survives the pilot fidelity gate, R and R0 offer the same language and answers. R0 is then dropped from the test, R serves the documented steps alone, and the readout records that no added step reached test, with no added-step recommendation.
 - **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine. Its token budget equals all the engine model tokens spent answering R's queries on that diff, counted once per diff. That includes precomputed hops and classifications behind those answers, and rejected candidates, rejected hops and other work that produced no rows. A costly empty answer is still information R received. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
 - **D (conditional):** R with recall degraded inside the engine, not on its final answers. The drop unit is the one the owner's estimate describes. For a mechanical step, each candidate row is kept independently with the step's calibrated retention (see Realistic recall: the owner's recall divided by the engine's measured recall at that unit). For value flow, each hop is one unit (its edge together with the candidate it lands on), kept once with the per-hop calibrated retention, never twice. The delivered recall then matches the owner's: with 75% per hop, a two-hop path survives about 56% of the time, as it would in a real engine. Dropped elements are drawn once per diff and seeded, so repeated queries agree.
 
@@ -156,7 +156,7 @@ Also reported:
 
 ## Cost and quota (estimates, refined by the pilot)
 
-- **Census:** about $1 per traced candidate, including both labellers, so about $300–400 for 12 repos plus development.
+- **Census:** about $1 per traced candidate, including both labellers. Rejected candidates are traced too. At the 31/67 admission rate, about 2.2 traced candidates are needed per admitted bug, so about 650–700 traces for 12 repos at 25 admitted relation diffs each: about $650–800, plus development.
 - **Pilot:** about $350–500 in API-equivalent terms. That covers 35 relation diffs:
   - about 700 Terra reviewer sessions;
   - about 280 Sol writer sessions;

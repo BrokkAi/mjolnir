@@ -306,7 +306,10 @@ def main():
             latest[(r["repo"], r["hash"])] = r
     done = {k for k, r in latest.items() if not r.get("error") and r.get("trace_complete") is not False}
     todo = [c for c in sample if (c["repo"], c["hash"]) not in done]
-    json.dump({"candidates": len(cands), "dated": sum(1 for c in cands if c["window"]),
+    import hashlib
+    population = hashlib.sha256("\n".join(sorted(f"{c['repo']} {c['hash']}" for c in cands)).encode()).hexdigest()
+    json.dump({"candidates": len(cands), "candidates_sha256": population,
+               "dated": sum(1 for c in cands if c["window"]),
                "sample": len(sample), "todo": len(todo),
                "sample_ids": sorted(f"{c['repo']} {c['hash']}" for c in sample),
                "by_window": collections.Counter(c["window"] for c in cands),

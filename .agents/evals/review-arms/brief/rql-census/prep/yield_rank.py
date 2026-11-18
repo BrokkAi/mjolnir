@@ -79,7 +79,13 @@ def main():
         # silently: every candidate must be dated or recorded as undatable.
         sys.exit(f"{len(unaccounted)} candidates are neither dated nor recorded undatable, e.g. {unaccounted[:3]}")
     # Only the current plan's sampled commits count; failed draws stay in the denominator.
-    current = set(json.load(open(scan / "plan.json"))["sample_ids"])
+    plan = json.load(open(scan / "plan.json"))
+    # The sample plan must come from the same candidate population the ranker extrapolates to.
+    import hashlib
+    population = hashlib.sha256("\n".join(sorted(f"{c['repo']} {c['hash']}" for c in cands)).encode()).hexdigest()
+    if plan.get("candidates_sha256") != population:
+        sys.exit("plan.json was drawn from a different candidate population; rerun scan.py on this file")
+    current = set(plan["sample_ids"])
     present = set()
     for l in open(scan / "blame.jsonl"):
         r = json.loads(l)
