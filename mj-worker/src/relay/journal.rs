@@ -1071,7 +1071,7 @@ impl DurableRelay {
     }
 
     /// Ledger entries whose command is terminal at or below `through`, except
-    /// for the newest `RETAINED_TERMINAL_COMMANDS` of them.
+    /// for the newest `RETAINED_TERMINAL_COMMANDS` and owner-pinned receipts.
     ///
     /// Their events are no longer retained, but a controller that lost the
     /// reply to a submit may still retry it with the same command id after
@@ -1103,6 +1103,14 @@ impl DurableRelay {
         terminal
             .into_iter()
             .skip(RETAINED_TERMINAL_COMMANDS)
+            // Work tracking and login recovery still own the latest turn's
+            // receipt even when controls have pushed it beyond the retry tail.
+            .filter(|(_, command_id)| {
+                snapshot
+                    .turn_completion
+                    .as_ref()
+                    .is_none_or(|turn| &turn.command_id != *command_id)
+            })
             .map(|(_, command_id)| command_id.clone())
             .collect()
     }

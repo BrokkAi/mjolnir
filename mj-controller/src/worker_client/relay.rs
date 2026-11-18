@@ -923,13 +923,20 @@ impl RelayClient {
         RelayOperationalState,
         Option<mj_core::relay::NativeSessionUseEvidence>,
         BTreeSet<String>,
+        usize,
     )> {
         match self.call(RelayRequest::AdoptionSnapshot).await? {
             RelayResponsePayload::AdoptionSnapshot {
                 state,
                 native_use_evidence,
                 pending_elicitation_ids,
-            } => Ok((state, native_use_evidence, pending_elicitation_ids)),
+                unavailable_elicitations,
+            } => Ok((
+                state,
+                native_use_evidence,
+                pending_elicitation_ids,
+                unavailable_elicitations,
+            )),
             _ => bail!("relay returned an unexpected adoption snapshot"),
         }
     }

@@ -136,7 +136,8 @@ impl StandaloneSession {
                     if relay_desynchronized(&error)
                         && protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL =>
                 {
-                    let (snapshot, queue, questions) = connection.read_adoption_state().await?;
+                    let (snapshot, queue, questions, unavailable_questions) =
+                        connection.read_adoption_state().await?;
                     ensure!(
                         snapshot.session_id == target.session_id,
                         "adoption snapshot belongs to another session"
@@ -145,17 +146,34 @@ impl StandaloneSession {
                         .client
                         .attach(snapshot.latest_ordinal, &snapshot.latest_digest)
                         .await?;
-                    let mut projection = MaterializedSession::empty(&target.session_id);
-                    projection.applied_event_ordinal = snapshot.latest_ordinal;
-                    projection.applied_event_digest = snapshot.latest_digest.clone();
-                    projection.configuration.values =
-                        mj_transcript::projection::configuration_values(&snapshot.config_options)?;
-                    projection
-                        .configuration
-                        .values
-                        .extend(snapshot.config.iter().map(|(key, value)| {
-                            (key.clone(), serde_json::Value::String(value.clone()))
-                        }));
+                    let mut projection = connection.read_adoption_transcript(&snapshot).await?;
+                    projection.configuration.values = snapshot
+                        .config
+                        .iter()
+                        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                        .collect();
+                    projection.configuration.values.extend(
+                        mj_transcript::projection::configuration_values(&snapshot.config_options)?,
+                    );
+                    // Accepted selectors use canonical keys, while an adapter
+                    // may publish its current value under a different option ID.
+                    for canonical in ["model", "effort", "mode"] {
+                        if let Some(option) = mj_core::acp::find_session_config_option(
+                            &snapshot.config_options,
+                            canonical,
+                        ) && let Some(current) = projection
+                            .configuration
+                            .values
+                            .get(&option.id.to_string())
+                            .cloned()
+                            && projection.configuration.values.contains_key(canonical)
+                        {
+                            projection
+                                .configuration
+                                .values
+                                .insert(canonical.into(), current);
+                        }
+                    }
                     projection
                         .configuration
                         .values
@@ -202,19 +220,40 @@ impl StandaloneSession {
                     projection.last_activity_at_ms = Some(adopted_at);
                     projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
                         stable_id: mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID.into(),
+                        // Conservatively fence the current native conversation,
+                        // including a pre-ACK prompt dispatched after a clear.
                         position: snapshot.latest_ordinal,
                         latest_content_event_ordinal: None,
                         created_at_ms: adopted_at,
                         last_changed_at_ms: adopted_at,
                         body: mj_core::transcript::TranscriptBody::System {
-                            text: "Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact.".into(),
+                            text: format!("Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact. Recovered transcript starts after event {}.", snapshot.acknowledged_through),
                         },
                     }));
+                    if unavailable_questions > 0 {
+                        projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
+                            stable_id: "system:adoption-questions-unavailable".into(),
+                            position: snapshot.acknowledged_through,
+                            latest_content_event_ordinal: None,
+                            created_at_ms: adopted_at,
+                            last_changed_at_ms: adopted_at,
+                            body: mj_core::transcript::TranscriptBody::System {
+                                text: "An earlier pending question could not be recovered because its saved history was discarded. Ask the agent to repeat it.".into(),
+                            },
+                        }));
+                    }
+                    projection.transcript.sort_by(|a, b| {
+                        (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id))
+                    });
                     // Persist the exact cursor before ACKing any replacement
                     // history. Native-use proof stays with its owning worker.
                     save_materialized_session(&projection)?;
                     connection.window = mj_core::state::ProjectionWindow::of(&projection);
                     connection.materialized = projection;
+                    connection.window.trim(
+                        &mut connection.materialized,
+                        crate::database::PROJECTION_TAIL_ITEMS,
+                    );
                 }
                 Err(error) => return Err(error),
             }
@@ -223,15 +262,86 @@ impl StandaloneSession {
         Ok(connection)
     }
 
+    async fn read_adoption_transcript(
+        &mut self,
+        state: &RelayOperationalState,
+    ) -> Result<MaterializedSession> {
+        let mut projection = MaterializedSession::empty(&state.session_id);
+        projection.applied_event_ordinal = state.acknowledged_through;
+        projection.applied_event_digest = state.acknowledged_digest.clone();
+        let frontier = RelayCursor {
+            ordinal: state.latest_ordinal,
+            digest: state.latest_digest.clone(),
+        };
+        while projection.applied_event_ordinal < frontier.ordinal {
+            let after = RelayCursor {
+                ordinal: projection.applied_event_ordinal,
+                digest: projection.applied_event_digest.clone(),
+            };
+            let page = self.client.next_catch_up_page(&after, &frontier).await?;
+            self.cache_event_attachments(&page.events).await?;
+            projection = tokio::task::spawn_blocking(move || -> Result<_> {
+                let mut index = ProjectionIndex::new(&projection);
+                for event in page.events {
+                    let mutation = mj_transcript::projection::project_retained_relay_event_indexed(
+                        &projection,
+                        &index,
+                        &event,
+                    )?
+                    .mutation;
+                    apply_committed_projection_event_indexed(
+                        &mut projection,
+                        &mut index,
+                        &event,
+                        mutation,
+                    )?;
+                }
+                Ok(projection)
+            })
+            .await
+            .context("project retained adoption transcript")??;
+        }
+        Ok(projection)
+    }
+
+    async fn cache_prompt_attachments(
+        &mut self,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) -> Result<()> {
+        for reference in mj_core::attachment::references(prompt)? {
+            if let Err(error) = self.client.cache_attachment(&reference).await {
+                tracing::warn!(session_id = %self.materialized.session_id, attachment = %reference.sha256, %error,
+                    "could not cache image attachment during recovery");
+            }
+        }
+        Ok(())
+    }
+
+    async fn cache_event_attachments(
+        &mut self,
+        events: &[mj_core::relay::RelayEvent],
+    ) -> Result<()> {
+        for event in events {
+            if let mj_core::relay::RelayObservation::CommandQueued { command, .. } =
+                &event.observation
+                && let Some(prompt) = command.prompt_blocks()
+            {
+                self.cache_prompt_attachments(&prompt).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn read_adoption_state(
         &mut self,
     ) -> Result<(
         RelayOperationalState,
         Vec<mj_core::state::MaterializedQueuedPrompt>,
         Vec<mj_core::elicitation::ElicitationRequest>,
+        usize,
     )> {
         loop {
-            let (state, _native_use_evidence, question_ids) =
+            let (state, _native_use_evidence, question_ids, unavailable_questions) =
                 self.client.adoption_snapshot().await?;
             let mut queue = Vec::with_capacity(state.queued_prompts.len());
             for identity in &state.queued_prompts {
@@ -254,6 +364,7 @@ impl StandaloneSession {
                         let prompt = command
                             .prompt_blocks()
                             .context("worker returned a non-queue command during adoption")?;
+                        self.cache_prompt_attachments(&prompt).await?;
                         (
                             mj_core::state::QueuedCommandKind::Prompt,
                             prompt
@@ -277,14 +388,16 @@ impl StandaloneSession {
                     questions.push(request);
                 }
             }
-            let (current, _, current_questions) = self.client.adoption_snapshot().await?;
+            let (current, _, current_questions, current_unavailable) =
+                self.client.adoption_snapshot().await?;
             if current.queued_prompts == state.queued_prompts
                 && current.active_prompt == state.active_prompt
                 && current_questions == question_ids
+                && current_unavailable == unavailable_questions
                 && queue.len() == state.queued_prompts.len()
                 && questions.len() == question_ids.len()
             {
-                return Ok((state, queue, questions));
+                return Ok((state, queue, questions, unavailable_questions));
             }
             // Queue mutation ended this attempt. Reuse the reconnect cadence
             // before reading another snapshot; never hold or stop the worker.
@@ -770,27 +883,7 @@ impl StandaloneSession {
         // Reconnect pages can replay events not yet projected before restart.
         // Only failures completed in the last backoff window create marks.
         let history_floor_ms = now_ms.saturating_sub(15 * 60 * 1000);
-        for event in &page.events {
-            if let mj_core::relay::RelayObservation::CommandQueued {
-                command: RelayCommand::Prompt { prompt },
-                ..
-            } = &event.observation
-            {
-                for reference in mj_core::attachment::references(prompt)? {
-                    if let Err(error) = self.client.cache_attachment(&reference).await {
-                        // History remains readable even if a blob was lost. A
-                        // later submission still verifies every image before
-                        // admission, and must report missing data to the user.
-                        tracing::warn!(
-                            session_id = %self.materialized.session_id,
-                            attachment = %reference.sha256,
-                            %error,
-                            "could not cache image attachment during replay"
-                        );
-                    }
-                }
-            }
-        }
+        self.cache_event_attachments(&page.events).await?;
 
         let RelayEventPage {
             events,

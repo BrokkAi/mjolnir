@@ -1678,8 +1678,9 @@ pub struct RelaySnapshot {
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
     /// Worker-owned form bodies survive acknowledgement-based journal GC.
+    /// A null body preserves an open legacy ID whose event was already pruned.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub pending_elicitations: BTreeMap<String, ElicitationRequest>,
+    pub pending_elicitations: BTreeMap<String, Option<ElicitationRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

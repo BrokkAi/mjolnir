@@ -735,10 +735,7 @@ impl DurableRelay {
         }
         let recovered_native_history =
             missing_native_history && relay.recover_native_history_evidence();
-        let recovered_questions = upgrading_questions
-            && relay.recover_pending_elicitations().context(
-                "recover pending questions before acknowledgement-based journal collection",
-            )?;
+        let recovered_questions = upgrading_questions && relay.recover_pending_elicitations();
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {

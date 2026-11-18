@@ -970,6 +970,7 @@ pub enum RelayResponsePayload {
         state: RelayOperationalState,
         native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
         pending_elicitation_ids: std::collections::BTreeSet<String>,
+        unavailable_elicitations: usize,
     },
     QueuedCommand {
         command: Option<RelayCommand>,

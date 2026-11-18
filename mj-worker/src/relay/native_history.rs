@@ -75,7 +75,7 @@ impl DurableRelay {
         Ok(evidence)
     }
 
-    pub(super) fn recover_pending_elicitations(&mut self) -> Result<bool> {
+    pub(super) fn recover_pending_elicitations(&mut self) -> bool {
         let missing: BTreeSet<_> = self
             .snapshot
             .assessment_questions
@@ -84,7 +84,7 @@ impl DurableRelay {
             .cloned()
             .collect();
         if missing.is_empty() {
-            return Ok(false);
+            return false;
         }
         let mut recovered = BTreeMap::new();
         for event in &self.hot_events {
@@ -94,21 +94,27 @@ impl DurableRelay {
                 recovered.insert(request.id.clone(), request.clone());
             }
         }
-        if recovered.len() != missing.len() {
-            self.visit_legacy_evidence(|event| {
+        if recovered.len() != missing.len()
+            && let Err(error) = self.visit_legacy_evidence(|event| {
                 if let RelayObservation::ElicitationRequested { request } = event.observation
                     && missing.contains(&request.id)
                 {
                     recovered.insert(request.id.clone(), request);
                 }
-            })?;
+            })
+        {
+            tracing::warn!(session_id = %self.snapshot.session_id,
+                "could not read legacy pending question history; preserving unavailable IDs: {error:#}");
         }
-        anyhow::ensure!(
-            missing.iter().all(|id| recovered.contains_key(id)),
-            "pending question bodies are unavailable in the legacy journal"
-        );
-        self.snapshot.pending_elicitations.extend(recovered);
-        Ok(true)
+        for id in missing {
+            let body = recovered.remove(&id);
+            if body.is_none() {
+                tracing::warn!(session_id = %self.snapshot.session_id, question_id = %id,
+                    "legacy pending question body is unavailable; the worker remains usable");
+            }
+            self.snapshot.pending_elicitations.insert(id, body);
+        }
+        true
     }
 
     fn visit_legacy_evidence(&self, mut visit: impl FnMut(RelayEvent)) -> Result<()> {
@@ -289,6 +295,68 @@ mod tests {
                 replaced_unused_native_session_id: None,
             })
             .unwrap();
+    }
+
+    // Hard-won: b62fe3b: a legacy question below the recovery floor blocked worker upgrade.
+    #[test]
+    fn upgrade_keeps_a_pruned_legacy_question_id_without_blocking_worker_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+        let question = mj_core::elicitation::ElicitationRequest::from_acp_params("pruned-question", serde_json::json!({
+            "mode":"form", "sessionId":SESSION, "message":"Original question", "requestedSchema":{"type":"object", "properties":{}}
+        })).unwrap();
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: question.clone(),
+            })
+            .unwrap();
+        let frontier = relay.latest_ordinal();
+        let digest = relay.latest_digest().to_owned();
+        acknowledge_relay(&mut relay, "old-acked-question", frontier);
+        drop(relay);
+        let path = temp.path().join(RELAY_STATE_FILE);
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved["format_version"] = serde_json::json!(27);
+        saved["recovery_floor_ordinal"] = serde_json::json!(frontier);
+        saved["recovery_floor_digest"] = serde_json::json!(digest);
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_elicitations");
+        fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        for _ in 0..2 {
+            let mut relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();
+            assert!(relay.snapshot.assessment_questions.contains(&question.id));
+            assert_eq!(
+                relay.snapshot.pending_elicitations.get(&question.id),
+                Some(&None)
+            );
+            let response = relay.handle(relay_request(
+                "adopt-with-unavailable-question",
+                RelayRequest::AdoptionSnapshot,
+            ));
+            assert!(
+                matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::AdoptionSnapshot {
+                pending_elicitation_ids, unavailable_elicitations: 1, ..
+            } } if pending_elicitation_ids.is_empty())
+            );
+        }
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();
+        relay
+            .record_observation(RelayObservation::ElicitationRequested {
+                request: question.clone(),
+            })
+            .unwrap();
+        let response = relay.handle(relay_request(
+            "reissued-question",
+            RelayRequest::ReadPendingElicitation {
+                elicitation_id: question.id.clone(),
+            },
+        ));
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::PendingElicitation { request: Some(ref request) } } if request == &question)
+        );
     }
 
     // Hard-won: 363ef03: ACK pruning discarded the only durable pending-question body.

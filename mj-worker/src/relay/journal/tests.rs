@@ -10,6 +10,61 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
+// Hard-won: b62fe3b: later notices evicted the turn facts still read by the process watcher.
+#[test]
+fn current_turn_work_receipt_survives_acknowledged_control_flood_and_restart() {
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, WorkFacts};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    submit_relay(&mut relay, "watched-turn", prompt("start background work"));
+    relay.claim_pending_commands(true).unwrap();
+    let process = ProcessIdentity {
+        pid: 4242,
+        start: "same-process".into(),
+    };
+    relay
+        .record_command_completed(
+            "watched-turn",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                diagnostic: None,
+                usage: None,
+                work_facts: Some(Box::new(WorkFacts {
+                    observed_at_ms: 77,
+                    processes: Observed::Known(ProcessFacts {
+                        running: 1,
+                        shown: Vec::new(),
+                        omitted: 1,
+                        identities: vec![process.clone()],
+                        unattributed: 0,
+                    }),
+                    worktree: Observed::unavailable("not inspected"),
+                })),
+            },
+        )
+        .unwrap();
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("work-notice-{index}"),
+            RelayCommand::RecordNotice {
+                text: "later notice".into(),
+            },
+        );
+    }
+    let through = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-work-notices", through);
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("work-notice-0")
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert_eq!(relay.watched_work().unwrap().1, vec![process]);
+}
+
 // Hard-won: 806b123: a crash during ACK cleanup left sealed history below the durable cut.
 #[test]
 fn acknowledged_worker_reopens_after_interrupted_sealed_segment_cleanup() {

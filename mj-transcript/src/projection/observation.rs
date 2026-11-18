@@ -12,11 +12,15 @@ fn project_steered_prompt(
     queue: &mut Vec<MaterializedQueuedPrompt>,
     queued_prompt_id: &str,
     mutation: &mut MaterializedSessionMutation,
+    allow_missing_queue_references: bool,
 ) -> Result<()> {
     let Some(queue_index) = queue
         .iter()
         .position(|queued| queued.command_id == queued_prompt_id)
     else {
+        if allow_missing_queue_references {
+            return Ok(());
+        }
         bail!("steered prompt is missing from the materialized queue");
     };
     let entry = queue.remove(queue_index);
@@ -58,6 +62,7 @@ pub(super) fn project_observation(
     index: &ProjectionIndex,
     event: &RelayEvent,
     mutation: &mut MaterializedSessionMutation,
+    allow_missing_queue_references: bool,
 ) -> Result<()> {
     match &event.observation {
         RelayObservation::SteeringUnconfirmed { .. } => {}
@@ -480,6 +485,7 @@ pub(super) fn project_observation(
                         &mut queue,
                         queued_command_id,
                         mutation,
+                        allow_missing_queue_references,
                     )?;
                 }
                 mj_core::relay::RelayCommandOutcome::Configured => {
@@ -911,6 +917,7 @@ pub(super) fn project_observation(
                     &mut queue,
                     &steering.queued_prompt_id,
                     mutation,
+                    allow_missing_queue_references,
                 )?;
                 mutation.queued_prompts = Some(queue);
             }

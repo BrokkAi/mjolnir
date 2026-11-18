@@ -113,6 +113,15 @@ fn move_queue_relay_child() {
                 session_id: MOVE_QUEUE_SESSION_ID.into(),
                 worker_build: None,
             }),
+            RelayRequest::ReadAttachment { reference } => {
+                use base64::Engine as _;
+                let bytes = mj_core::attachment::AttachmentStore::worker(&root)
+                    .read(reference)
+                    .expect("read actual worker image blob");
+                Some(RelayResponsePayload::AttachmentData {
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+            }
             RelayRequest::PollSubagentQueue { acknowledged } => {
                 Some(RelayResponsePayload::SubagentQueue {
                     page: mj_core::subagent::SubagentQueuePage {
@@ -230,6 +239,7 @@ fn move_queue_relay_child() {
 
 #[cfg(unix)]
 // Hard-won: 581ae9e: adopting a live worker required journal genesis after ACK pruning.
+// Hard-won: b62fe3b: adoption lost retained output, queued blobs and current selectors.
 #[test]
 fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     let name = test_name("adoption_seeds_a_pruned_live_worker_without_replacing_native_history");
@@ -241,6 +251,19 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
     let marker = directory.path().join("adoption.marker");
     install_move_queue_relay_worker(&root, &marker, true);
+    let mut image_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    image_bytes.extend(vec![0; 70 * 1024]);
+    let image =
+        mj_core::attachment::AttachmentRef::new(&image_bytes, "image/png".into(), 1, 1).unwrap();
+    mj_core::attachment::AttachmentStore::worker(&root)
+        .install(&image, &image_bytes)
+        .unwrap();
+    assert!(
+        !mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .contains(&image)
+            .unwrap()
+    );
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     relay
         .record_observation(mj_core::relay::RelayObservation::SessionOpened {
@@ -262,6 +285,20 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             value: "high".into(),
         })
         .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
+            key: "effort".into(),
+            value: "high".into(),
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate": "config_option_update", "configOptions": [
+            {"id":"model", "name":"Model", "type":"select", "currentValue":"current-model-before-loss",
+             "options":[{"value":"current-model-before-loss","name":"Current"},{"value":"original-model","name":"Queued"}]},
+            {"id":"reasoning_effort", "name":"Effort", "type":"select", "currentValue":"medium",
+             "options":[{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]}
+        ]
+    })).unwrap()).unwrap();
     for command_id in ["active-before-loss", "surviving-queue", "surviving-config"] {
         let command = if command_id == "surviving-config" {
             RelayCommand::SetConfig {
@@ -269,9 +306,11 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
                 value: "original-model".into(),
             }
         } else {
-            RelayCommand::Prompt {
-                prompt: vec![ContentBlock::from("work survives".repeat(6000))],
+            let mut prompt = vec![ContentBlock::from("work survives".repeat(6000))];
+            if command_id == "surviving-queue" {
+                prompt.push(image.content_block());
             }
+            RelayCommand::Prompt { prompt }
         };
         relay.handle(mj_core::relay::RelayRequestEnvelope {
             request_id: command_id.into(),
@@ -297,10 +336,24 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             through_digest: digest,
         },
     });
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"unacknowledged work survives adoption"}
+    })).unwrap()).unwrap();
     drop(relay);
-    let snapshot_before: mj_core::relay::RelaySnapshot =
+    let mut snapshot_before: mj_core::relay::RelaySnapshot =
         serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
             .unwrap();
+    snapshot_before
+        .assessment_questions
+        .insert("unavailable-legacy-question".into());
+    snapshot_before
+        .pending_elicitations
+        .insert("unavailable-legacy-question".into(), None);
+    fs::write(
+        root.join(mj_core::relay::RELAY_STATE_FILE),
+        serde_json::to_vec(&snapshot_before).unwrap(),
+    )
+    .unwrap();
     let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
     crate::database::save_session(&session).unwrap();
     let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
@@ -313,10 +366,14 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
         assert_eq!(connection.operational().native_session_id.as_deref(), Some("surviving-native-conversation"));
         let projection = connection.snapshot().materialized;
         assert!(projection.applied_event_ordinal >= frontier);
+        assert!(serde_json::to_string(&projection).unwrap().contains("unacknowledged work survives adoption"));
+        assert_eq!(mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID).unwrap().read(&image).unwrap(), image_bytes);
+        assert_eq!(projection.pending_elicitations.len(), 1);
+        assert!(serde_json::to_string(&projection).unwrap().contains("An earlier pending question could not be recovered"));
         assert_eq!(projection.pending_elicitations[0].id, "question-before-loss");
         assert_eq!(projection.pending_elicitations[0].message, "Which destination?");
-        assert_eq!(projection.configuration.values["model"], "accepted-model-before-loss");
-        assert_eq!(projection.configuration.values["reasoning_effort"], "high");
+        assert_eq!(projection.configuration.values["model"], "current-model-before-loss");
+        assert_eq!(projection.configuration.values["reasoning_effort"], "medium");
         assert_eq!(projection.queued_prompts[0].command_id, "surviving-queue");
         assert_eq!(projection.queued_prompts[0].content[0]["text"], "work survives".repeat(6000));
         assert_eq!(projection.queued_prompts[1].kind, QueuedCommandKind::SetConfig { key: "model".into(), value: "original-model".into() });
@@ -337,7 +394,9 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
         MOVE_QUEUE_SESSION_ID,
         projection.applied_event_ordinal,
         Vec::new(),
-        Vec::new(),
+        mj_core::attachment::AttachmentStore::worker(&root)
+            .archive_artifacts()
+            .unwrap(),
     );
     input.canonical_session =
         mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
@@ -370,12 +429,20 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
     .unwrap();
     assert_eq!(
         verified.canonical_session.session.configuration.values["model"],
-        "accepted-model-before-loss"
+        "current-model-before-loss"
     );
     assert_eq!(
         verified.canonical_session.session.configuration.values["reasoning_effort"],
-        "high"
+        "medium"
     );
+    let accepted = mj_core::acp::AcceptedSessionConfig::from_archived_values(
+        &verified.canonical_session.session.configuration.values,
+    );
+    assert_eq!(
+        accepted.get("model").map(String::as_str),
+        Some("current-model-before-loss")
+    );
+    assert_eq!(accepted.get("effort").map(String::as_str), Some("medium"));
     let prompts = resumed.claim_pending_commands(true).unwrap();
     assert!(
         prompts
@@ -383,7 +450,10 @@ fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
             .any(|claimed| claimed.command_id == "surviving-queue"
                 && claimed.command
                     == RelayCommand::Prompt {
-                        prompt: vec![ContentBlock::from("work survives".repeat(6000))],
+                        prompt: vec![
+                            ContentBlock::from("work survives".repeat(6000)),
+                            image.content_block()
+                        ],
                     })
     );
     resumed
