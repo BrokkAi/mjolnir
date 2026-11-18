@@ -169,9 +169,15 @@ pub(super) async fn deliver(
         return Ok(Some(SystemPromptAppend::Antigravity(text)));
     }
     if !native_file {
-        emit_runtime_event(events, RuntimeEvent::Warning {
-            message: format!("{} adapter {} does not advertise a persistent instruction channel. Mjolnir's standing instructions and project memory could not be delivered. Updating the adapter fixes this.", spec.harness.display_name(), adapter_version.unwrap_or("(unknown version)")),
-        }).await?;
+        let message = format!(
+            "{} adapter {} does not advertise a persistent instruction channel. Mjolnir's standing instructions and project memory could not be delivered. Updating the adapter fixes this.",
+            spec.harness.display_name(),
+            adapter_version.unwrap_or("(unknown version)")
+        );
+        if matches!(spec.instruction_role, Some(InstructionRole::BriefWriter)) {
+            bail!("Cannot start the relation brief writer: {message}");
+        }
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
         return Ok(None);
     }
     // No user-home fallback: this explicit environment names the session's staged copy.
@@ -211,32 +217,39 @@ fn marker(bytes: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn replace_native_section(path: &Path, text: &str) -> Result<()> {
-    // Staging dereferences profile links. Refuse an unexpected link instead of
-    // modifying a file outside the session home.
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        ensure!(
-            !metadata.file_type().is_symlink(),
-            "staged instruction file {} is a symlink",
-            path.display()
-        );
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read staged instructions {}", path.display()));
-        }
-    };
-    let (before, after) = match (marker(&bytes, SECTION_START), marker(&bytes, SECTION_END)) {
-        (None, None) => (bytes.as_slice(), &[][..]),
-        (Some(start), Some(end)) if end >= start + SECTION_START.len() => {
-            let after = &bytes[end + SECTION_END.len()..];
+    let parent = path
+        .parent()
+        .context("staged instruction file has no directory")?;
+    let name = path
+        .file_name()
+        .context("staged instruction file has no name")?;
+    let root = mj_core::confined_path::ConfinedDir::open_root(parent)?.with_context(|| {
+        format!(
+            "staged instruction directory {} is missing",
+            parent.display()
+        )
+    })?;
+    let bytes = root
+        .read_bytes(name)
+        .with_context(|| format!("read staged instructions {}", path.display()))?
+        .unwrap_or_default();
+    let start = marker(&bytes, SECTION_START);
+    let end = marker(&bytes, SECTION_END);
+    // A duplicated delimiter is ambiguous even when it precedes the real block.
+    // Reject the whole file before writing, rather than consuming user text.
+    for (position, delimiter) in [(start, SECTION_START), (end, SECTION_END)] {
+        if let Some(position) = position {
             ensure!(
-                marker(after, SECTION_START).is_none() && marker(after, SECTION_END).is_none(),
+                marker(&bytes[position + 1..], delimiter).is_none(),
                 "multiple Mjolnir instruction sections in {}",
                 path.display()
             );
+        }
+    }
+    let (before, after) = match (start, end) {
+        (None, None) => (bytes.as_slice(), &[][..]),
+        (Some(start), Some(end)) if end >= start + SECTION_START.len() => {
+            let after = &bytes[end + SECTION_END.len()..];
             (&bytes[..start], after)
         }
         _ => bail!(
@@ -244,14 +257,9 @@ fn replace_native_section(path: &Path, text: &str) -> Result<()> {
             path.display()
         ),
     };
-    let parent = path
-        .parent()
-        .context("staged instruction file has no directory")?;
-    let mut replacement =
-        tempfile::NamedTempFile::new_in(parent).context("stage session instructions")?;
-    use std::io::Write;
-    replacement.write_all(before)?;
-    replacement.write_all(SECTION_START)?;
+    let mut replacement = Vec::new();
+    replacement.extend_from_slice(before);
+    replacement.extend_from_slice(SECTION_START);
     let mut payload = text.to_owned();
     for delimiter in [SECTION_START, SECTION_END] {
         let delimiter = std::str::from_utf8(delimiter)
@@ -259,11 +267,10 @@ fn replace_native_section(path: &Path, text: &str) -> Result<()> {
             .trim();
         payload = payload.replace(delimiter, &delimiter.replacen('<', "&lt;", 1));
     }
-    replacement.write_all(payload.as_bytes())?;
-    replacement.write_all(SECTION_END)?;
-    replacement.write_all(after)?;
-    replacement
-        .persist(path)
+    replacement.extend_from_slice(payload.as_bytes());
+    replacement.extend_from_slice(SECTION_END);
+    replacement.extend_from_slice(after);
+    root.write_atomically(name, &replacement, mj_core::confined_path::Publish::Replace)
         .with_context(|| format!("install staged instructions {}", path.display()))?;
     Ok(())
 }
@@ -278,6 +285,7 @@ mod tests {
     use mj_core::subagent::SubagentMcpRole;
 
     // Hard-won: 621276a78: quoted native end markers prevented the next open.
+    // Hard-won: bc66f0faa: nested markers deleted user bytes and FIFO profiles stalled opens.
     #[tokio::test]
     async fn session_instructions_native_files_replace_only_the_owned_section() {
         for harness in [HarnessKind::Kimi, HarnessKind::OpenCode, HarnessKind::Grok] {
@@ -286,10 +294,22 @@ mod tests {
             let mut spec = super::super::tests::reload_fallback_spec(harness);
             let home = harness.home_from_environment(temp.path());
             std::fs::create_dir_all(&home).unwrap();
+            let shared = temp.path().join("other-profile");
+            std::fs::create_dir_all(&shared).unwrap();
+            let shared_file = shared.join("AGENTS.md");
+            std::fs::write(&shared_file, b"other profile must remain unchanged").unwrap();
             spec.environment.insert(
-                harness.home_env().into(),
-                temp.path().to_string_lossy().into(),
+                "OPENCODE_CONFIG_DIR".into(),
+                shared.to_string_lossy().into(),
             );
+            harness.configure_home_environment(&home, &mut spec.environment);
+            if harness == HarnessKind::OpenCode {
+                // The pinned loader resolves global AGENTS.md from this effective override.
+                assert_eq!(
+                    Path::new(&spec.environment["OPENCODE_CONFIG_DIR"]).join("AGENTS.md"),
+                    home.join(harness.agent_instructions_file())
+                );
+            }
             let path = home.join(harness.agent_instructions_file());
             // Arbitrary pre-existing bytes, including non-UTF-8 and large profiles,
             // belong to the user and must survive both installation and replacement.
@@ -322,6 +342,7 @@ mod tests {
             )
             .await
             .unwrap();
+            let prefix_len = prefix.len();
             let mut expected = prefix;
             expected.extend_from_slice(SECTION_START);
             expected.extend_from_slice(b"updated index");
@@ -338,6 +359,59 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), expected, "{harness:?}");
+            let mut ambiguous = expected[..prefix_len].to_vec();
+            ambiguous.extend_from_slice(SECTION_START);
+            ambiguous.extend_from_slice(b"unrelated user instructions");
+            ambiguous.extend_from_slice(&expected[prefix_len..]);
+            std::fs::write(&path, &ambiguous).unwrap();
+            let error = deliver(
+                &spec,
+                &Default::default(),
+                None,
+                "replacement".into(),
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("multiple Mjolnir instruction sections"));
+            assert_eq!(std::fs::read(&path).unwrap(), ambiguous);
+            assert_eq!(
+                std::fs::read(&shared_file).unwrap(),
+                b"other profile must remain unchanged"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                use std::os::unix::fs::FileTypeExt;
+                std::fs::remove_file(&path).unwrap();
+                let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+                let error = tokio::time::timeout(
+                    crate::test_support::IO_TIMEOUT,
+                    deliver(
+                        &spec,
+                        &Default::default(),
+                        None,
+                        "replacement".into(),
+                        &events,
+                    ),
+                )
+                .await
+                .expect("a special instruction file must not wait for a writer")
+                .unwrap_err();
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("not a regular file")
+                        && message.contains(path.to_str().unwrap()),
+                    "{message}"
+                );
+                assert!(
+                    std::fs::symlink_metadata(&path)
+                        .unwrap()
+                        .file_type()
+                        .is_fifo()
+                );
+            }
         }
     }
 

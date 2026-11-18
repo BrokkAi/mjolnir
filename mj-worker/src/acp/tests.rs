@@ -9476,6 +9476,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
             "unreadable-load",
             "fifo-load",
             "unsupported-adapter",
+            "unsupported-brief-writer",
         ] {
             #[cfg(not(unix))]
             if phase == "fifo-load" {
@@ -9490,7 +9491,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 harness,
                 HarnessKind::Kimi | HarnessKind::OpenCode | HarnessKind::Grok
             );
-            if native_file && phase == "unsupported-adapter" {
+            if native_file && matches!(phase, "unsupported-adapter" | "unsupported-brief-writer") {
                 continue;
             }
             let staged_home = harness.home_from_environment(temp.path().join("profile"));
@@ -9503,6 +9504,9 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 temp.path().join("profile").to_string_lossy().into(),
             );
             spec.resume_session = resumed.then(|| "native".into());
+            if phase == "unsupported-brief-writer" {
+                spec.instruction_role = Some(InstructionRole::BriefWriter);
+            }
             spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::MessageOnly));
             spec.project_memory = Some(ProjectMemoryLaunchConfig {
                 history_socket: None,
@@ -9554,7 +9558,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                     serde_json::json!([]);
             }
 
-            if phase == "unsupported-adapter" {
+            if matches!(phase, "unsupported-adapter" | "unsupported-brief-writer") {
                 let capabilities = &mut replies.get_mut("initialize").unwrap()["agentCapabilities"];
                 capabilities["sessionCapabilities"]
                     .as_object_mut()
@@ -9639,7 +9643,7 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                         .await
                         .unwrap();
                 }
-                assert!(saw_open);
+                assert_eq!(saw_open, phase != "unsupported-brief-writer");
             });
             let (read, write) = tokio::io::split(client);
             let transport = ByteStreams::new(write.compat_write(), read.compat());
@@ -9656,6 +9660,30 @@ async fn session_instructions_system_prompt_contract_replays_pinned_adapters() {
                 )
                 .await
             });
+            if phase == "unsupported-brief-writer" {
+                while let Some(event) =
+                    tokio::time::timeout(crate::test_support::IO_TIMEOUT, events.recv())
+                        .await
+                        .unwrap()
+                {
+                    assert!(!matches!(
+                        event,
+                        RuntimeEvent::SessionStarted { .. }
+                            | RuntimeEvent::SessionConfigured { .. }
+                    ));
+                }
+                let error = driver.await.unwrap().unwrap_err();
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("Cannot start the relation brief writer")
+                        && message.contains(harness.display_name())
+                        && message.contains(&adapter_version),
+                    "{message}"
+                );
+                drop(tx);
+                bridge.await.unwrap();
+                continue;
+            }
             let mut index_warning = false;
             let mut delivery_warning = false;
             loop {

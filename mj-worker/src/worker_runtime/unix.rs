@@ -1777,6 +1777,15 @@ async fn prepare_and_start_harness(
         .context("login environment resolution exceeded its 10-second bound")?
     })
     .await?;
+    if config.harness == HarnessKind::OpenCode {
+        // Retained launch files can predate the explicit OpenCode config pin.
+        let home = super::credential_endpoint(&config)
+            .map_err(anyhow::Error::msg)?
+            .home;
+        config
+            .harness
+            .configure_home_environment(&home, &mut config.environment);
+    }
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);

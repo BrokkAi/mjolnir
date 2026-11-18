@@ -6,7 +6,7 @@ Worktree: `~/Projects/mjolnir-wt/session-instructions`, detached from `903cac6f6
 
 Each ACP open composes project memory (except Claude), offered MCP guidance, and the durable session role. Standard append is used when advertised; Antigravity's vendor append remains a string inside merged metadata. Kimi, OpenCode and Grok replace only the marked section of their session-owned native instruction file before opening. Existing profile and environment instructions remain outside that section. Native writes use atomic replacement and a worker-owned write lease retained by the I/O thread, so cancellation cannot let an older write overtake a replacement.
 
-An unavailable index emits a visible warning with path and cause and supplies the guidance/path block with an explicit unavailable line. Older non-native-file adapters without either append capability open with a visible harness/version warning; they receive no file or user-message fallback. An advertised append is never silently retried without instructions.
+An unavailable index emits a visible warning with path and cause and supplies the guidance/path block with an explicit unavailable line. Older non-native-file adapters without either append capability open with a visible harness/version warning; they receive no file or user-message fallback. Automated brief writers are the exception: without a supported composed-instruction channel, delivery fails before any native open, and review continues without a brief through its existing failure path. An advertised append is never silently retried without instructions.
 
 MCP initialize replies no longer contain `instructions`. Tool descriptions remain, including specialized reviewer and brief-writer handback descriptions. Child, reviewer and oracle assignments retain task-specific input and the report directory; oracle and brief-writer packets also retain one read-only task-scope sentence because their execution policy does not enforce read-only access. All other standing authority and the review rubric travel through composition. Reviewer output is plain text, matching the existing consumer. Existing `subagent_kind` and `reviewer_launch.role` launch fields provide roles on new/resumed/moved launches. Task-summary readers accept both historical handback prefixes and the new directory-only note.
 
@@ -38,7 +38,7 @@ Initial compilation exposed the missing ACP schema import and new role-field val
 
 Milestone 3 has not been started. Claude's fixture is explicitly source-derived from pinned bridge 0.108.0; the other harness lifecycle fixtures are recorded. Automatic approval review rejected the proposed live Claude probe under the original no-Milestone-3 scope, and the parent directed source-derived coverage instead. The prepared, unexecuted script is `/tmp/claude-session-instructions-probe.py` for parent-owned live acceptance. No credentials appear in fixtures or repository files.
 
-Known live behavior from the approved plan remains: Codex accepts a changed append on reopen but may keep the original thread's instructions. The implementation supplies current text on every open without claiming the provider updates its stored baseline. Kimi live acceptance remains subject to its weekly quota. All `memory-*.log` files are intentionally untracked.
+Known live behavior from the approved plan remains: Codex accepts a changed append on reopen but may keep the original thread's instructions. The implementation supplies current text on every open without claiming the provider updates its stored baseline. Reopened used Grok sessions likewise retain their original rule prelude, including pre-upgrade sessions that have no newly composed block; this accepted limitation is not warned about on every resume. Kimi live acceptance remains subject to its weekly quota. All `memory-*.log` files are intentionally untracked.
 
 
 ## First review corrections
@@ -63,3 +63,26 @@ All affected checks ran outside the sandbox on the dev profile, with no still-fa
 - `cargo fmt --all` and `git diff --check`: clean.
 
 No live acceptance, default-instance operation or push was performed. Review corrections are submitted for another formal review after commit; diagnostic logs remain untracked.
+
+
+## Second review corrections
+
+Review of `903cac6..bc66f0f` found four fixable defects and re-raised Grok freshness. The parent explicitly accepted Grok's original-session prelude retention, just as for Codex; the finding was formally overridden before committing changes. No native replacement, re-send or repetitive resume warning was added. New Grok native sessions read the staged block; already used native sessions can retain older instructions even after file replacement.
+
+Pinned OpenCode 2.2.7 source proves that OPENCODE_CONFIG_DIR replaces the global XDG directory, rather than adding another source (`packages/util/src/global.ts:83`, `packages/core/src/config/plugin/instruction.ts:41`). Session configuration now pins that variable alongside XDG_CONFIG_HOME, and worker preparation reapplies the same home helper from the authoritative retained launch home before merging the target login environment. A user's override directory is not used or copied within a Mjolnir session. The native integration fixture sets a conflicting directory, uses the actual home helper, resolves the pinned loader's effective path, and verifies the other profile's file remains untouched.
+
+Automated brief writers now fail through the same delivery decision when no composed-instruction channel exists. The failure names the harness and adapter version, occurs before session/new/load/resume, and reaches the existing brief_failed path. This is an exception to keeping a user's unsupported-adapter session usable: a brief writer without its brief structure cannot provide a meaningful automated result. The lifecycle fixture proves no native open occurs on all five append-capable harness families when that capability is removed. The daemon integration proves the actionable writer error is displayed and reviewers continue without forwarding an unstructured brief.
+
+Native-file parsing now rejects any duplicated start or end delimiter, including a standalone user start marker before the true block; the file remains unchanged on rejection. Reads and atomic replacements both use the existing confined directory helpers. A shared regular-file opener supports byte-preserving reads as well as text reads, rejects links/FIFOs before reading, and keeps replacement bound to the opened directory while preserving file permissions.
+
+Affected checks, outside the sandbox on the dev profile:
+
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed. Log: `memory-instructions-review2-worker-tests.log`.
+- `cargo test -p brokk-mj-worker-runtime session_instructions_native_files_replace_only_the_owned_section`: 1 passed after switching the writer to the existing confined atomic helper. Includes effective OpenCode path, untouched other-profile bytes, nested-marker rejection and FIFO staged-file rejection. Log: `memory-instructions-review2-native-final-test.log`.
+- `cargo test -p brokk-mj-core confined_path::tests`: 1 passed. Log: `memory-instructions-review2-confined-tests.log`.
+- `cargo test -p brokk-mj-daemon a_brief_writer_that_ends_without_a_handback_leaves_the_review_to_run_without_a_brief`: 1 passed. Log: `memory-instructions-review2-brief-failure-test.log`.
+- `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime -p brokk-mj-daemon --all-targets -- -D warnings`: passed. Log: `memory-instructions-review2-clippy.log`.
+- Final `cargo clippy -p brokk-mj-worker-runtime --all-targets -- -D warnings` after the confined-writer refactor: passed. Log: `memory-instructions-review2-worker-final-clippy.log`.
+- `cargo fmt --all` and `git diff --check`: clean.
+
+No still-failing tests, live acceptance, default-instance operations or pushes. Diagnostic logs remain untracked; the corrected implementation is submitted for formal re-review after commit.

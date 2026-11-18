@@ -418,6 +418,11 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
+        if self == Self::OpenCode {
+            // OpenCode replaces its XDG global config root with this override.
+            // Both variables must name the session-owned staged profile.
+            environment.insert("OPENCODE_CONFIG_DIR".into(), crate::target_path::text(home));
+        }
         if self == Self::Antigravity {
             // The managed pin owns updates, including during login/discovery.
             environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());

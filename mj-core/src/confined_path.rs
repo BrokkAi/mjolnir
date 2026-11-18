@@ -187,9 +187,7 @@ impl ConfinedDir {
         Ok(entries)
     }
 
-    /// Read the file `name` in this directory. Returns `None` when it does not
-    /// exist; refuses links and non-regular files.
-    pub fn read_to_string(&self, name: &OsStr) -> Result<Option<String>> {
+    fn open_regular_file(&self, name: &OsStr) -> Result<Option<std::fs::File>> {
         let path = self.path.join(name);
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -214,10 +212,28 @@ impl ConfinedDir {
         {
             bail!("{} is not a regular file", path.display());
         }
+        Ok(Some(file.into_std()))
+    }
+
+    /// Read bytes without following links or opening a non-regular file for reading.
+    pub fn read_bytes(&self, name: &OsStr) -> Result<Option<Vec<u8>>> {
+        let Some(mut file) = self.open_regular_file(name)? else {
+            return Ok(None);
+        };
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)
+            .with_context(|| format!("read {}", self.path.join(name).display()))?;
+        Ok(Some(content))
+    }
+
+    /// Read text without following links or opening a non-regular file for reading.
+    pub fn read_to_string(&self, name: &OsStr) -> Result<Option<String>> {
+        let Some(mut file) = self.open_regular_file(name)? else {
+            return Ok(None);
+        };
         let mut content = String::new();
-        file.into_std()
-            .read_to_string(&mut content)
-            .with_context(|| format!("read {}", path.display()))?;
+        file.read_to_string(&mut content)
+            .with_context(|| format!("read {}", self.path.join(name).display()))?;
         Ok(Some(content))
     }
 

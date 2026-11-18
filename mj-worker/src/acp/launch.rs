@@ -742,7 +742,7 @@ impl SessionDirectories {
 }
 
 /// Keep vendor prompt shapes at the ACP request boundary.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) enum SystemPromptAppend {
     Standard(SystemPrompt),
     Antigravity(String),

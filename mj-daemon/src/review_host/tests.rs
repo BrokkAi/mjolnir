@@ -1130,16 +1130,14 @@ async fn a_brief_writer_that_ends_without_a_handback_leaves_the_review_to_run_wi
         environment.clone(),
     );
     let writer = open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
-    host.child_ended(
-        writer.clone(),
-        "the writer's session ended (stopped)".into(),
-    );
+    let reason = "error: Cannot start the relation brief writer: Muse adapter 0.0.0 does not advertise a persistent instruction channel";
+    host.child_ended(writer.clone(), reason.into());
     let notice = next_notice(&mut manager).await;
     assert!(
         notice.starts_with("Review started without a relation brief:"),
         "{notice}"
     );
-    assert!(notice.contains("session ended (stopped)"), "{notice}");
+    assert!(notice.contains(reason), "{notice}");
     let reviewer = wait_for_nth_child(&environment, 2).await;
     let prompt = environment.children.lock().unwrap()[1].2.clone();
     assert!(!prompt.contains("Relations computed"), "{prompt}");

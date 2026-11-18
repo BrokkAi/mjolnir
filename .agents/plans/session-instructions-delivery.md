@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-18) Second-review corrections validated: reject nested native markers and special staged files using confined reads/writes, pin OpenCode's replacing config override (including retained launches), and stop unsupported automated brief writers before native open. Instruction, native-file, confined-directory and daemon brief-failure tests pass; edited-crate clippy and final worker clippy pass. Grok freshness finding overridden by parent decision; corrections proceed to formal re-review.
+
 - [x] (2026-11-18) Corrected first-review defects in `621276a78`: read-only task scope, native marker escaping, non-regular indexes, Kimi/Muse fixtures, daemon packet expectation and unsupported-adapter coverage. All affected tests and five-crate clippy passed. Generic hung-filesystem deadline finding overridden per parent ruling; fixes proceed to formal re-review.
 
 - [x] (2026-11-18) Saved superseded implementation as local reference `a77d745ae`; committed this plan first at `aa5c0fa00`. The old worktree is read-only.
@@ -48,6 +50,16 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Decision Log
 
+- Decision: Grok native sessions keep the instructions they started with when reopened, matching the accepted Codex freshness limitation. Do not add re-send machinery, replace native sessions, or warn on every resume.
+  Rationale: parent accepts retention of the original snapshot; an every-resume warning provides no actionable remedy. Record this limitation in Outcomes.
+  Date/Author: 2026-11-18, parent ruling after second review.
+- Decision: automated brief writers are an exception to warn-and-open. The same delivery function rejects startup before native open when it has no supported composed-instruction channel; its error names the harness and adapter version and reaches the existing `brief_failed` path so review continues without a brief.
+  Rationale: warn-and-open protects a user's session. An automated writer without its brief structure can only return an unstructured report, which is worse than no brief.
+  Date/Author: 2026-11-18, parent ruling after second review.
+- Decision: pin `OPENCODE_CONFIG_DIR` to the session-owned staged OpenCode home alongside the XDG pin, including retained worker launch configurations. Do not use or copy the user's override directory within Mjolnir sessions.
+  Rationale: pinned OpenCode 2.2.7 `util/global.ts:83` replaces Global.Service.config with OPENCODE_CONFIG_DIR, and `config/plugin/instruction.ts:41` reads its AGENTS.md instead of the default XDG global file. The staged profile is authoritative, with the same ownership reasoning as XDG_CONFIG_HOME.
+  Date/Author: 2026-11-18, parent ruling after source verification.
+
 - Decision: retain the single `READ_ONLY_TASK_SCOPE` sentence in every oracle assignment and brief-writer packet, while all other standing role text stays composed.
   Rationale: launch inspection confirmed that read-only behavior is prose-only; an older adapter without append support must still receive the assignment's safety scope. This is task data, not a user-message fallback for standing guidance.
   Date/Author: 2026-11-18, parent ruling after first review.
@@ -55,7 +67,7 @@ After this change there is one composer that builds a session's standing instruc
   Rationale: parent explicitly chose special-file rejection only. A hung filesystem is its own failure; speculative deadlines contradict the repository rule. The generic-stall portion of the review finding was formally overridden before committing fixes.
   Date/Author: 2026-11-18, parent ruling after first review.
 
-- Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
+- Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text (except automated brief writers, as decided above) and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
   Rationale: legacy shared Codex homes remain supported by `subagent_acp_mcp`; a capability-only file fallback could mutate shared files. Missing capabilities in older adapters must not prevent otherwise working sessions from opening.
   Date/Author: 2026-11-18, parent agent after implementation safety check.
 
@@ -88,7 +100,7 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Outcomes & Retrospective
 
-Milestones 1 and 2 are implemented. First-review corrections and their passing targeted checks are recorded in `.agents/docs/session-instructions-validation.md`; the generic hung-filesystem deadline demand was declined according to the parent's explicit special-file-only ruling. Recorded/source-derived ACP lifecycle coverage, native-file replacement, five role goldens, unavailable-index and shutdown regressions, MCP contracts, isolated controller registration, task-summary compatibility and relay digest checks pass. The four edited crates pass clippy; the worker-only final follow-up also passed and is recorded in `.agents/docs/session-instructions-validation.md`. The default instance was untouched. Milestone 3 remains parent-owned and unstarted; Claude live marker acceptance and Kimi quota-limited acceptance remain pending there.
+Milestones 1 and 2 are implemented. Accepted freshness limits: Codex can keep its original append on reopen; Grok keeps the model-visible rule prelude captured by the original native session despite a rewritten file, so an already-used pre-upgrade native session is not backfilled with the new standing block. These channels retain the original snapshot and do not promise refreshed instructions for reused native sessions. No per-resume warning or re-send is added. First-review corrections and their passing targeted checks are recorded in `.agents/docs/session-instructions-validation.md`; the generic hung-filesystem deadline demand was declined according to the parent's explicit special-file-only ruling. Recorded/source-derived ACP lifecycle coverage, native-file replacement, five role goldens, unavailable-index and shutdown regressions, MCP contracts, isolated controller registration, task-summary compatibility and relay digest checks pass. The four edited crates pass clippy; the worker-only final follow-up also passed and is recorded in `.agents/docs/session-instructions-validation.md`. The default instance was untouched. Milestone 3 remains parent-owned and unstarted; Claude live marker acceptance and Kimi quota-limited acceptance remain pending there.
 
 
 ## Context and Orientation
