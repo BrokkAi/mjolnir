@@ -50,6 +50,18 @@ def main():
         r = json.loads(l)
         for h, t in (r.get("dates") or {}).items():
             dates[(r["repo"], h)] = t
+    # A resumed scan appends rows: a repo is fine once any row for it succeeded.
+    undatable, date_ok, date_err = {}, set(), {}
+    for l in open(scan / "dates.jsonl"):
+        x = json.loads(l)
+        if x.get("error"):
+            date_err[x["repo"]] = x["error"]
+            continue
+        date_ok.add(x["repo"])
+        undatable.update({f"{x['repo']} {h}": e for h, e in (x.get("undatable") or {}).items()})
+    failed = sorted(set(date_err) - date_ok)
+    if failed:
+        sys.exit(f"dates unavailable for {failed[:5]}: {date_err[failed[0]]}")
     n = collections.Counter()
     undated = 0
     for c in cands:
@@ -89,12 +101,18 @@ def main():
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
+    root_ok, root_err = set(), {}
     for l in open(scan / "roots.jsonl"):
         x = json.loads(l)
         if x.get("error"):
-            sys.exit(f"root commits unavailable for {x['repo']}: {x['error']}")
+            root_err[x["repo"]] = x["error"]
+            continue
+        root_ok.add(x["repo"])
         for root in x["roots"]:
             by_hash["root:" + root].add(x["repo"])
+    failed = sorted(set(root_err) - root_ok)
+    if failed:
+        sys.exit(f"root commits unavailable for {failed[:5]}: {root_err[failed[0]]}")
     for repos in by_hash.values():
         repos = sorted(repos)
         for other in repos[1:]:
@@ -106,7 +124,7 @@ def main():
     keep = {max(members, key=lambda r: (size[r], r)) for members in groups.values()}
     shared = {max(m, key=lambda r: (size[r], r)): sorted(m) for m in groups.values() if len(m) > 1}
 
-    out = {"undated_candidates": undated, "shared_history_groups": shared, "blame_errors": errors,
+    out = {"undated_candidates": undated, "undatable": undatable, "shared_history_groups": shared, "blame_errors": errors,
            "incomplete_traces": sum(1 for rs in sample.values() for r in rs if r.get("trace_complete") is False),
            "bug_precision": BUG_PRECISION, "admission": ADMISSION, "windows": {}}
     for label, (start, wins) in WINDOWS.items():

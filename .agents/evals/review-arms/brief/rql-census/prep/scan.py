@@ -62,7 +62,9 @@ def stage_roots(repos):
     """Root commits of every clone. Clones sharing a root share history: forks and renames share
     their roots, and a subtree merge imports the subtree's roots into the host repo."""
     out = OUT / "roots.jsonl"
-    have = {json.loads(l)["repo"] for l in open(out)} if out.exists() else set()
+    have = set()
+    if out.exists():
+        have = {r["repo"] for r in map(json.loads, open(out)) if not r.get("error")}
 
     def one(repo):
         if repo in have:
@@ -93,10 +95,17 @@ def stage_dates(by_repo):
             rc, head, _ = git(repo, "log", "-1", "--format=%ct", "HEAD", timeout=120)
             hashes = "\n".join(c["hash"] for c in by_repo[repo] if (repo, c["hash"]) not in have) + "\n"
             rc2, so, se = git(repo, "log", "--no-walk=unsorted", "--format=%H %ct", "--stdin", stdin=hashes)
-            dates = dict(l.split() for l in so.splitlines() if l.strip())
+            dates = dict(l.split() for l in so.splitlines() if l.strip()) if rc2 == 0 else {}
+            undatable = {}
+            if rc2:  # one bad hash fails the batch: date the rest one at a time
+                for h in hashes.split():
+                    rc3, so3, se3 = git(repo, "log", "-1", "--format=%ct", h)
+                    if rc3 == 0 and so3.strip():
+                        dates[h] = so3.strip()
+                    else:
+                        undatable[h] = se3.strip()[-200:]
             emit(out, {"repo": repo, "clone_ct": int(head.strip() or 0),
-                       "dates": {h: int(t) for h, t in dates.items()},
-                       "error": se.strip()[-300:] if rc2 else None})
+                       "dates": {h: int(t) for h, t in dates.items()}, "undatable": undatable, "error": None})
         except Exception as e:  # report, don't drop
             emit(out, {"repo": repo, "error": repr(e)[:300]})
 
@@ -178,13 +187,24 @@ def intro_size(repo, sha):
     if len(parents.split()) > 2:
         return 0, True, None
     rc, so, se = git(repo, "show", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--format=",
-                     "--no-renames", sha, timeout=300)
+                     "-M", sha, timeout=300)
     if rc:
         return 0, False, "numstat: " + se.strip()[-200:]
-    size = 0
-    for record in so.split("\0"):
-        parts = record.strip("\n").split("\t", 2)
-        if len(parts) != 3 or SIZE_EXCLUDED.search(parts[2]):
+    # -z numstat: "added\tdeleted\tpath\0", or for a rename "added\tdeleted\t\0old\0new\0".
+    # A rename counts only its edited lines (corpus SPEC rule 7 counts the review diff).
+    size, fields, i = 0, so.lstrip("\n").split("\0"), 0
+    while i < len(fields):
+        parts = fields[i].lstrip("\n").split("\t", 2)
+        if len(parts) != 3:
+            i += 1
+            continue
+        if parts[2] == "":  # rename or copy: the next two fields are the old and new paths
+            path = fields[i + 2] if i + 2 < len(fields) else ""
+            i += 3
+        else:
+            path = parts[2]
+            i += 1
+        if SIZE_EXCLUDED.search(path):
             continue
         size += sum(int(x) for x in parts[:2] if x.isdigit())
     return size, False, None
