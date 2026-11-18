@@ -39,3 +39,5 @@ A positive result shows that reviewers benefit from a complete, non-leaking deci
 ## Quota
 
 claude7 runs the editor, fidelity checker, the Opus leak judge and round N; codex runs the Sol leak judge and the reviewers. Keep both above 25% of the week, checked before each launch. Don't use codex4.
+
+Amendment, before any edit: "Don't use codex4" applies to explicitly pinned sessions (the Sol leak judge runs with --profiles codex). OS and AF2 reviewers go through mj review's quota-weighted draw, which can't exclude a profile without a shared-config change; the number of reviewers that land on each profile is reported, and codex4's count as a deviation. Correction to the Quota section: the reviewers go through that draw, not specifically the codex profile. Every pinned profile's 25% floor is checked before each launch. If codex4 runs out mid-run and a reviewer fails, that reviewer is rerun through the draw and reported, not dropped.
