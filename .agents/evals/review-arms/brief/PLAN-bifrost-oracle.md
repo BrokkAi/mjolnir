@@ -39,3 +39,7 @@ Also reported: OT − BT; per-diff rates; the diffs where the leak check left th
 The lead confirmed that the outcomes apply in their listed priority: Facts carry, Partly, Facts don't carry, then Inconclusive. A confidence interval entirely between zero and +10 points is a proven small lift and reads Partly. Classification uses unrounded estimates and interval bounds; display rounding does not decide an outcome.
 
 The source brief is each final published BT brief, including the four neutralized texts. Editors receive only census fact, evidence, other_facts and kind, never query. Candidates remain unpublished until the final hash-bound fact check and paired leak check/recheck are complete. Round L uses fresh labels for every arm and compares its A/BT labels with the stored final labels for the same reviewer sessions.
+
+## Amendment, 2026-11-18, before any round L judgment
+
+codex4 quota is below the 25% floor, and the original lead session was lost to a Codex classifier bug, so round L's two judges and the hand-check assessor are Claude Opus/high on claude7, one model for all three arms. The stored readout's Sol/high labels for A and BT are reported beside round L's as a consistency check; a difference over 10 points for either arm is a caveat.
