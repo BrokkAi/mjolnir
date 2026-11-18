@@ -218,7 +218,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
 - Decision: add `mj purge-untracked [--session <id> | --all] [--dry-run]` to reclaim space once the user no longer needs old untracked payloads.
   - For each suspended session whose archive was written in an old format, it rewrites the archive without its untracked-file payloads, keeping everything else byte for byte.
   - It verifies the new archive, replaces the file atomically, and updates the stored SHA-256 in the same transaction.
-  - It rewrites archive payloads only. Move sources retained by earlier releases are whole environments and stay under the explicit `mj move-sources` cleanup.
+  - It rewrites archive payloads only. Move sources retained by earlier releases are whole environments and stay under the explicit `mj move-sources` cleanup. Old managed-clone archives also bundle original stash commits, and a `git stash -u` or `-a` entry's third parent carries untracked files the purge cannot strip without rewriting history. The purge reports those as retained ("N stash entries still hold untracked files"), so its result never implies they were removed.
   - It prints the space reclaimed per session. `--dry-run` reports without changing anything.
 
   Rationale: the user asked for "some kind of purge untracked tool to clean up my archives once I'm sure I don't need that stuff". Old untracked payloads stay restorable until the user explicitly purges them.
@@ -324,7 +324,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
 **Scope.** Add a new module, `mj-checkpoint/src/snapshot.rs`, whose functions run Git in a checkout and produce or consume a workspace snapshot. They go through the existing `GitCommandRunner` abstraction in `mj-checkpoint/src/archive/git.rs`, so the same code runs locally and on targets. This milestone adds the functions and their tests only; nothing calls them yet. At its end, a test can capture a checkout, restore it into a fresh clone of the same origin, and observe equal branches, tags, stash list, HEAD, index and tracked working files, with no untracked files.
 
-**Capture**, for one checkout and the linked worktrees nested inside it (from `git worktree list --porcelain`, recorded by path relative to the checkout; for a raw checkout, only worktrees absent from the launch record count):
+**Capture** works on a whole session at once. A session's export layout (`session_export_layout`) can hold several independent repositories, so `capture_session_snapshot` takes every repository and runs step 1 across all of them before the first abort or other change in any of them. Consent items and refusals are keyed by repository ID plus path. The steps below describe one repository and the linked worktrees nested inside it (from `git worktree list --porcelain`, recorded by path relative to the checkout; for a raw checkout, only worktrees absent from the launch record count):
 
 1. **Consent and operations, for every checkout before anything is read or changed.** An abort in a nested worktree can move a shared branch, and during a rebase or bisect HEAD sits on a temporary commit. So all of this happens before any HEAD or ref is read.
    1. Build the inventory:
@@ -333,10 +333,10 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
       - the in-progress operation of each checkout: `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`/`rebase-apply`, `BISECT_LOG`.
    2. Check it against the caller's `CaptureConsent`:
       - Untracked items are paths and stash untracked payloads. `UntrackedConsent::None` covers none of them, `Any` (the CLI flag) covers all, and `Shown(items)` (a dialog) covers only what the dialog displayed. An item that has since disappeared is fine; a new one is not.
-      - In a managed checkout, each operation must be covered by `OperationConsent::Any` or by a matching `Shown` entry. It is identified by checkout path, kind and identity: a digest of its state files (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, the rebase directory's `head-name`/`onto`/`orig-head`, `sequencer/head` and `sequencer/todo`, `BISECT_START` and the first line of `BISECT_LOG`). An operation that ended and was replaced by another of the same kind while the dialog was open therefore does not inherit the consent.
+      - In a managed checkout, each operation must be covered by `OperationConsent::Any` or by a matching `Shown` entry. It is identified by checkout path, kind and identity: a digest of the current HEAD commit and branch plus its state files (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, the rebase directory's `head-name`/`onto`/`orig-head`, `sequencer/head` and `sequencer/todo`, `BISECT_START` and the first line of `BISECT_LOG`). An operation that ended and was replaced by another of the same kind while the dialog was open therefore does not inherit the consent.
       - If anything is not covered, capture changes nothing and fails with `SnapshotRefused::Untracked(items)` or `SnapshotRefused::OperationInProgress(path, kind)`.
       - Hidden tracked edits keep Move's existing guard (`mj-worker/src/move_workspace.rs`, around line 98). If any index entry has `assume-unchanged` or `skip-worktree` set, `git stash create` could miss its edits, so capture refuses with `SnapshotRefused::HiddenTrackedEdits(paths)`. There is no consent override; the message says to clear those flags first.
-      - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has any status entry (untracked files included, as today's guard checks), or if any submodule commit the snapshot needs is not reachable from that submodule's remote-tracking refs, capture refuses. The commits it needs are the gitlink in HEAD, the gitlink in the index and the checked-out commit. A staged gitlink to an unpushed submodule commit is therefore caught even when the submodule looks clean. Reachability is checked against the remote restore will actually use. Capture records each submodule's effective URL (`git config submodule.<name>.url` in the superproject), checks against the remote-tracking refs of the submodule remote whose URL matches it, and refuses if none matches. Restore sets that URL before initializing, so a commit pushed only to a fork that restore would not consult is caught. with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
+      - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has any status entry (untracked files included, as today's guard checks), or if any submodule commit the snapshot needs is not reachable from that submodule's remote-tracking refs, capture refuses. The commits it needs are the gitlink in HEAD, the gitlink in the index and the checked-out commit. A staged gitlink to an unpushed submodule commit is therefore caught even when the submodule looks clean. Reachability is checked against the remote restore will actually use. Capture records each submodule's effective URL (`git config submodule.<name>.url` in the superproject), checks against the remote-tracking refs of the submodule remote whose URL matches it, and refuses if none matches. Restore sets that URL before initializing, so a commit pushed only to a fork that restore would not consult is caught. The comparison with remote URLs happens locally, unredacted. Only the URL run through `redact_origin_credentials` is persisted and restored, so a token embedded in a submodule URL never enters a snapshot, cache or destination. with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
 
       Capture itself is the single decision point, so nothing can appear between a separate check and the capture.
    3. Managed checkouts: run each covered abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
@@ -360,7 +360,9 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    The stash list is read with `git stash list --format=%H%x00%gs`, so the messages can be recreated.
 4. **Working state.** Run `git stash create` in each checkout not marked `working_state_skipped`. Empty output means a clean state; otherwise the result is a commit whose first parent is HEAD and whose second records the index. For each kept stash entry with a third parent, write a replacement without it, `git commit-tree <stash>^{tree} -p <stash>^1 -p <stash>^2 -m <message>`. It keeps the entry's tracked content; its untracked payload was consented to in step 1.
 5. **Verify the cut.** Each working-state commit's first parent must equal its checkout's pinned HEAD, and a second `for-each-ref` must match the pinned set. If anything moved (possible during a barrier-free export), start again from step 3 after a short backoff; the change in state is what ends the loop. If nothing is stable after a few attempts, fail with a clear error. Under the suspend barrier, the first pass succeeds.
-6. **Pack the delta.** Run `git pack-objects --revs <basename>`, which writes `<basename>-<hash>.pack` and its `.idx` straight to disk (a pack can be larger than memory should hold), feeding it on standard input:
+6. **Pack the delta.** After the pack is written, capture lists the untracked items again, and refuses if anything has appeared that the consent does not cover. A raw checkout can be written by the user or by another session, whose processes this session's freeze does not stop. For a raw checkout, the guarantee is this: everything the snapshot omits was either consented to or still sits untouched in the raw checkout, which Mjolnir never deletes.
+
+   Then the pack itself: Run `git pack-objects --revs <basename>`, which writes `<basename>-<hash>.pack` and its `.idx` straight to disk (a pack can be larger than memory should hold), feeding it on standard input:
    - the pinned SHAs: kept refs, every checkout's HEAD commit (attached or detached, primary and nested), working-state commits, and kept (or replaced) stash commits. A raw session that started on a branch with commits origin lacks, and only edited tracked files, depends on those commits;
    - a `--not` line;
    - the exclusions, chosen by what step 2 learned:
@@ -438,7 +440,11 @@ The new capture must never become active without its consent checks, so this mil
 Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal as an ordinary suspend failure. That is safe, because nothing is lost.
 
 **Freeze workspace writers before the final capture.** The relay barrier stops command dispatch, but a process the agent started earlier, such as a background command, a build or a dev server, can keep writing to the checkout. A file it creates after the consent check would then be deleted with the checkout, unseen.
-1. Under the barrier, after the early consent check, the worker writes a freeze record to its durable state listing the process groups it owns for the session: the harness and the background commands it tracks. It then stops each group with `killpg(SIGSTOP)`, repeatedly. After each signal it enumerates the group's current members by process-group ID (from `/proc` on Linux, `ps -g` on macOS) and signals the group again while any live member is not yet stopped. A stopped process cannot fork, so membership stops changing and the loop ends, even when a member forked a replacement and exited during the race. The worker then updates the record with every final member's identity (PID and birth time). Resume and teardown signal the whole group with `killpg`, so a member added at any point is covered. A group's leader may already have exited while other members keep writing, as when a shell starts a background job and exits. So a group is treated as still the session's while ANY recorded member is alive with its recorded birth time and still belongs to that group. POSIX does not reuse a process-group ID while the group has a member, so this check is safe after a worker crash or a host reboot. Before every later signal, the worker performs this check, the way `mj-worker/src/worker_stop.rs` already verifies birth identities for worker teardown, and skips a group only when no recorded member remains. A reused ID can never redirect a resume or kill onto an unrelated process, and a leaderless group is still frozen and torn down.
+1. Under the barrier, after the early consent check, the worker writes a freeze record to its durable state before sending any signal. The record holds the host's boot ID, the record time (in the same boot-relative clock as process start times: `/proc/<pid>/stat` field 22 on Linux, the kernel process start time on macOS), and the process groups the worker owns for the session (the harness and the background commands it tracks).
+
+   Ownership is decided from the record alone, because of how POSIX assigns group IDs. A group's ID equals the PID of the process that created it (`setpgid` or `setsid`), and an ID cannot be reused while the group has any member. So group P is still the session's group if the boot ID matches and no live process with PID P started after the record time. That stays true when the leader has exited, when members forked and exited, and after a worker crash at any point after the record was written. A different boot ID means every frozen process died with the old boot, so there is nothing to signal.
+
+   The worker then stops each group with `killpg(SIGSTOP)`, repeatedly. After each signal it enumerates the group's current members by group ID (`/proc` on Linux, `ps -g` on macOS) and signals again while any live member is not yet stopped. A stopped process cannot fork, so the loop ends, even when a member forked a replacement and exited during the race. Resume and teardown also signal whole groups with `killpg` after the same ownership check, so every member is covered whenever it joined. This is the birth-identity discipline `mj-worker/src/worker_stop.rs` already uses for worker teardown, applied to process groups.
 2. The loop above is what confirms that every live member has actually stopped before capture begins. The wait can be cancelled: a process in uninterruptible sleep (state `D`, for example blocked on an unavailable filesystem) may never stop. While waiting, the suspend's progress names the processes that have not stopped, and the user's cancel, or `suspend --without-checkpoint`, has the daemon record its decision and release or retire the freeze as in step 4. There is no timeout guessing how long is too long. Sending the signal only queues it, and a process running on another CPU can still write. On Linux, poll `/proc/<pid>/stat` until each live member's state is `T`; on macOS, poll `ps -o stat=`. A member that exited (state `Z`, a zombie whose frozen parent cannot reap it) or has disappeared counts as quiescent, because it can no longer write. The poll waits only for live writers, so it always ends. Only then does the final inventory and capture run, so the consent check and the saved cut see the same workspace.
 3. Capture runs, as the single consent decision point.
 4. **The daemon alone decides whether the frozen groups resume or are retired,** and it decides from its durable suspend intent. The worker never resumes or kills them on its own judgment, so a lost acknowledgement can never split the decision.
@@ -449,6 +455,8 @@ Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal a
    - **A user waiting on a stalled suspend** sees it as "suspending". They can retry, or run `suspend --without-checkpoint`, whose decision is retire. The processes are never left frozen without an owner.
 
 Processes that left the worker's process groups (daemonized with `setsid`) are outside this guarantee, exactly as they are outside today's teardown; say so in the code comment. Add tricky-condition tests: a background command creates a file after the preflight, and suspend without consent for it must refuse and then resume the command; a capture that fails with an injected Git error must also resume the frozen groups. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
+
+**Plain directories.** Sessions opened in a directory without Git (`PlainDirectory` in `session_export_layout`, `RepositoryMetadata::plain_directory`) keep their existing metadata-only treatment. Suspend never runs the Git inventory, consent check or capture on them, and their transcript is saved as today.
 
 **Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. An older daemon's archive reader rejects unknown schema versions. Once a suspend writes the new format and removes the checkout, an older daemon could open the session but never resume it. So the store migration that ships with this milestone is **breaking**: advance the migration revision and raise the minimum compatible read and write revision in the same transaction, with that reason beside it, and test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. Milestone 5's `MoveOperation` change raises the floor again, under its own revision. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
 
@@ -653,7 +661,7 @@ The archive is not installed on the daemon as the session's checkpoint; the daem
    Before installing either resource, persist its ownership in the move's durable state: the host and the key's comment (`mj-move-<operation-id>`), and the EC2 security group, rule and address.
    - **Keys** are per move (each has its own line and comment), so each move removes its own.
    - **A security-group rule can be shared:** AWS rejects a duplicate rule, so two concurrent moves between the same hosts need the same one. A SQLite transaction cannot roll back an AWS call, so the grant has durable states, and every AWS call happens between two committed state changes.
-     - **Install:** in one transaction, the move records itself as a user of the rule. If the rule is `removing`, the move does not register: it retries after a short backoff until the removal has finished and the record is gone, then installs afresh. This serializes acquisition against an in-flight revoke. If the rule has no other users, the move marks it `installing` and becomes its installer. If another move is installing it, this move registers as a user but uses the rule only once the record says `installed`, waiting with backoff. If that installation fails, the record is dropped and this move retries as installer. The record's state is the only thing any move consults, and every change to it happens in one transaction, so acquisition, installation and removal are serialized. Mjolnir then authorizes the rule with a description naming Mjolnir (`mj-move-grant`), and in a second transaction marks it `installed`.
+     - **Install:** in one transaction, the move records itself as a user of the rule. If the rule is `removing`, the move does not register: it retries after a short backoff until the removal has finished and the record is gone, then installs afresh. This serializes acquisition against an in-flight revoke. If the rule has no other users, the move marks it `installing` and becomes its installer. If another move is installing it, this move registers as a user but uses the rule only once the record says `installed`, waiting with backoff. If the installer's AWS call reports failure, the record is not dropped on that evidence alone, because the rule may have been created with the response lost. The installer queries AWS for a rule with Mjolnir's description. If one exists, the state becomes `installed`. If AWS confirms none exists, the record is dropped and a waiting move retries as installer. If the query itself fails, the record stays `installing` for startup reconciliation, which queries AWS the same way. The record's state is the only thing any move consults, and every change to it happens in one transaction, so acquisition, installation and removal are serialized. Mjolnir then authorizes the rule with a description naming Mjolnir (`mj-move-grant`), and in a second transaction marks it `installed`.
      - **Pre-existing rules:** if AWS reports a duplicate, the rule already existed. If its description is not Mjolnir's, it belongs to the user: record it as `external`, use it, and never revoke it.
      - **Release:** in one transaction, the move removes itself as a user. If it was the last user of a Mjolnir-created rule, it marks the rule `removing`. It then revokes the rule and, in a second transaction, deletes the record.
      - **Startup reconciliation** queries AWS for each recorded rule. An `installing` rule becomes `installed` if a rule with Mjolnir's description exists, and is otherwise dropped. A `removing` rule is revoked again if present and then dropped. Users whose moves are finished, or that resumed through another route, are released as above.
@@ -806,23 +814,25 @@ In `mj-checkpoint/src/snapshot.rs`, define:
 
     pub enum UntrackedItem { Path(PathBuf), Stash { commit: String, message: String } }  // stash = its -u/-a payload
     pub enum UntrackedConsent { None, Any, Shown(Vec<UntrackedItem>) }
-    pub struct ShownOperation { pub path: PathBuf, pub kind: GitOperationKind, pub identity: String }  // path "" = primary checkout; identity = digest of the operation's state files
+    pub struct ShownOperation { pub repository: String, pub path: PathBuf, pub kind: GitOperationKind, pub identity: String }  // path "" = primary checkout; identity = digest of HEAD and the operation's state files
     pub enum OperationConsent { None, Any, Shown(Vec<ShownOperation>) }
     pub struct CaptureConsent { pub untracked: UntrackedConsent, pub operations: OperationConsent }
 
-    pub fn capture_workspace_snapshot(
+    pub struct RepositoryInput { pub id: String, pub checkout: PathBuf, pub ownership: CheckoutOwnership, pub origin_override: Option<String>, pub pack_path: PathBuf }
+
+    pub fn capture_session_snapshot(
         runner: &dyn GitCommandRunner,
-        checkout: &Path,
-        ownership: &CheckoutOwnership,
+        repositories: &[RepositoryInput],
         consent: CaptureConsent,
-        pack_path: &Path,
-    ) -> Result<WorkspaceSnapshot>;   // SnapshotRefused::{Untracked(Vec<UntrackedItem>), OperationInProgress(PathBuf, GitOperationKind)}
+    ) -> Result<SessionSnapshot>;   // one WorkspaceSnapshot per repository; SnapshotRefused::{Untracked, OperationInProgress, DirtySubmodule, HiddenTrackedEdits}, keyed by repository and path
+
+    pub enum RestoreBase { Clone { origin: String, seed: Option<PathBuf> }, Provisioned { allow_origin_fetch: bool } }
 
     pub fn restore_workspace_snapshot(
         runner: &dyn GitCommandRunner,
         snapshot: &WorkspaceSnapshot,
         destination: &Path,
-        seed: Option<&Path>,
+        base: RestoreBase,
     ) -> Result<()>;
 
     pub struct UntrackedPath { pub path: PathBuf, pub bytes: u64 }
@@ -990,3 +1000,17 @@ Revision note (2026-11-18, review 10):
 - Submodule availability is checked against the URL restore will use.
 - Operation identity is carried through consent types and the API.
 - Reverse transfers open the source's security group.
+
+Revision note (2026-11-18, review 11):
+- The freeze record (boot ID, record time and group IDs) is written before the first signal.
+- Group ownership follows from POSIX group-ID rules: no live process with that PID started after the record. So recovery is safe at any crash point without per-member identities.
+
+Revision note (2026-11-18, review 12):
+- Capture decides consent once across every repository in a session before any abort.
+- Submodule URLs are redacted.
+- A post-pack re-inventory defines a raw checkout's guarantee.
+- Plain directories keep the metadata-only path.
+- An ambiguous EC2 install is reconciled by querying AWS.
+- Purge reports untracked payloads still held in old stash commits.
+- Operation identity includes HEAD.
+- Restore takes a `RestoreBase` in the interface.
