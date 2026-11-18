@@ -1436,6 +1436,11 @@ fn leased_relay_child_serves_stdio() {
             if PathBuf::from(&root).join("worker-unreachable").exists() {
                 return;
             }
+            if request.request.method_name() == "project_memory_transfer"
+                && PathBuf::from(&root).join("drop-project-memory").exists()
+            {
+                return;
+            }
             if matches!(
                 &request.request,
                 RelayRequest::Submit {
@@ -2098,6 +2103,21 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
                 .filter(|method| method.contains("project_memory"))
                 .collect::<Vec<_>>(),
             ["project_memory_transfer"]
+        );
+
+        // Hard-won: #1580: closing an abandoned memory connection panicked the checkpoint
+        std::fs::write(relay_root.path().join("drop-project-memory"), b"").unwrap();
+        connection
+            .sync_project_memory(
+                &target.spec,
+                &mj_core::config::Config::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("a memory connection lost mid-transfer is reported");
+        assert!(
+            connection.project_memory.is_some(),
+            "a lost memory connection must not disable memory"
         );
     }
 }
