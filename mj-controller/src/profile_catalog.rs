@@ -1752,12 +1752,14 @@ impl ProfileCatalog {
             Some(Entry::Ready(choices)) => Some(choices),
             _ => None,
         };
-        let default = ready((identity.clone(), None))
-            .filter(|choices| choices.model.as_deref() == Some(model));
+        // Either entry counts only when it reports the requested model: a
+        // model-specific probe can answer with the harness's default instead.
+        let default = ready((identity.clone(), None));
         let specific = ready((identity, Some(model.to_owned())));
         [default, specific]
             .into_iter()
             .flatten()
+            .filter(|choices| choices.model.as_deref() == Some(model))
             .max_by_key(|choices| choices.observed_at)
             .map(|choices| choices.efforts.clone())
     }
