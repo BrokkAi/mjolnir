@@ -403,6 +403,7 @@ pub(crate) use crate::signing_key::{COOKIE_KEY_BYTES, generate_cookie_key};
 pub use crate::signing_key::{
     cookie_key_path, install_rustls_crypto_provider, load_or_create_cookie_key,
 };
+pub use crate::wait_policy::ViewerLifecycleCategory;
 use auth::*;
 mod assets;
 use assets::*;

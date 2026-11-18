@@ -2,6 +2,7 @@
 
 pub(crate) mod backend;
 mod cache_host;
+pub(crate) use cache_host::CacheHost;
 pub(crate) mod checkpoint;
 mod container_upgrade;
 pub(crate) mod environment;

@@ -83,22 +83,6 @@ pub struct DiffOptions {
     pub json: bool,
 }
 
-/// Observed provider-owned background work; absent when no live snapshot is available.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ApiBackgroundWork {
-    pub known: Option<bool>,
-    pub tasks: Vec<mj_core::relay::BackgroundCommand>,
-}
-
-impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
-    fn from(state: &mj_core::relay::RelayOperationalState) -> Self {
-        Self {
-            known: state.background_work_known,
-            tasks: state.background_commands.clone(),
-        }
-    }
-}
-
 /// One session as the API presents it. This is a narrower, more stable shape
 /// than the viewer's own session projection, which changes whenever the browser
 /// needs something new.
@@ -455,41 +439,6 @@ pub struct PromptResponse {
     pub turn_id: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WaitRequest {
-    /// Return when the harness presents a structured input request.
-    #[serde(default)]
-    pub return_on_input: bool,
-    /// Wait for this specific prompt. Absent means "wait until the session is
-    /// idle with nothing queued", which is what a caller that lost its turn id
-    /// wants.
-    #[serde(default)]
-    pub turn_id: Option<u64>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-}
-
-/// How a wait ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitOutcome {
-    /// A structured elicitation needs an answer; only returned by opt-in waits.
-    InputRequired,
-    /// The turn completed normally.
-    Finished,
-    /// The turn failed, was rejected, or the session reported an error.
-    Error,
-    /// The turn was cancelled or interrupted.
-    Cancelled,
-    /// The model was at capacity and no retry is armed.
-    QuotaLimit,
-    /// The wait's deadline passed with the turn still running.
-    Timeout,
-    /// The session stopped or is stopping, so no turn can finish on it.
-    Stopped,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitCapacityRetry {
     pub attempt: u32,
@@ -750,17 +699,6 @@ pub struct TurnState {
 pub use crate::database::TurnSummary;
 
 pub use crate::database::StartFollowup;
-
-/// How far a created session's follow-up has got. Served in M2.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartStatus {
-    /// The session is still provisioning, or its harness is not ready.
-    Pending,
-    /// The follow-up prompt was submitted and accepted as this turn.
-    Submitted { turn_id: u64 },
-    /// The session could not be started, or the follow-up could not be applied.
-    Failed { message: String },
-}
 
 /// A page of transcript items, read from the durable projection.
 pub use crate::database::TranscriptPage;

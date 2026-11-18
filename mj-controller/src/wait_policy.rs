@@ -1,4 +1,12 @@
-use super::*;
+//! When a turn has ended and what a wait answers. One owner for the wait API,
+//! delegation and the session manager's direct observations.
+
+use serde::{Deserialize, Serialize};
+
+use mj_core::relay::CapacityRetry;
+use mj_core::state::{
+    MaterializedExecutionState, MaterializedTurn, MaterializedTurnOutcome, SessionState,
+};
 
 /// Classify a harness stop reason.
 ///
@@ -473,3 +481,107 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
+
+/// Observed provider-owned background work; absent when no live snapshot is available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiBackgroundWork {
+    pub known: Option<bool>,
+    pub tasks: Vec<mj_core::relay::BackgroundCommand>,
+}
+
+impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
+    fn from(state: &mj_core::relay::RelayOperationalState) -> Self {
+        Self {
+            known: state.background_work_known,
+            tasks: state.background_commands.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitRequest {
+    /// Return when the harness presents a structured input request.
+    #[serde(default)]
+    pub return_on_input: bool,
+    /// Wait for this specific prompt. Absent means "wait until the session is
+    /// idle with nothing queued", which is what a caller that lost its turn id
+    /// wants.
+    #[serde(default)]
+    pub turn_id: Option<u64>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// How a wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitOutcome {
+    /// A structured elicitation needs an answer; only returned by opt-in waits.
+    InputRequired,
+    /// The turn completed normally.
+    Finished,
+    /// The turn failed, was rejected, or the session reported an error.
+    Error,
+    /// The turn was cancelled or interrupted.
+    Cancelled,
+    /// The model was at capacity and no retry is armed.
+    QuotaLimit,
+    /// The wait's deadline passed with the turn still running.
+    Timeout,
+    /// The session stopped or is stopping, so no turn can finish on it.
+    Stopped,
+}
+
+/// How far a created session's follow-up has got. Served in M2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartStatus {
+    /// The session is still provisioning, or its harness is not ready.
+    Pending,
+    /// The follow-up prompt was submitted and accepted as this turn.
+    Submitted { turn_id: u64 },
+    /// The session could not be started, or the follow-up could not be applied.
+    Failed { message: String },
+}
+
+/// The small set of states a phone reasons about, alongside the precise state.
+///
+/// A phone groups and filters by this; it shows the precise `state` string as
+/// the word it prints. Collapsing here rather than in the browser keeps one
+/// definition of "live" in the controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewerLifecycleCategory {
+    Live,
+    Starting,
+    Suspending,
+    Suspended,
+    Failed,
+}
+
+impl ViewerLifecycleCategory {
+    pub const fn of(state: SessionState) -> Self {
+        match state {
+            SessionState::Provisioning => Self::Starting,
+            // A parked sub-agent stays on the dashboard with its parent.
+            SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+            | SessionState::Parked => Self::Live,
+            SessionState::Closing | SessionState::Destroying | SessionState::StartupCleanup => {
+                Self::Suspending
+            }
+            SessionState::Stopped => Self::Suspended,
+            SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
+                Self::Failed
+            }
+        }
+    }
+
+    /// Whether this session belongs on the dashboard. Stopped and failed
+    /// sessions belong to the resume flow instead, which is where a person can
+    /// do something about them.
+    pub const fn is_dashboard_visible(self) -> bool {
+        matches!(self, Self::Live | Self::Starting | Self::Suspending)
+    }
+}

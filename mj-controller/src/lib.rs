@@ -77,6 +77,8 @@ mod test_log;
 mod upgrade;
 pub(crate) mod web_push;
 
+pub mod wait_policy;
+
 pub mod github_student;
 
 mod session_images;
