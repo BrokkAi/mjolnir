@@ -77,7 +77,7 @@ It reports:
 - **Accuracy:** row precision at least 95% and recall at least 90%, with lower 95% bounds (bootstrap over queries) of 90% and 80%.
 - **Stability:** re-asking a sample without the cache returns the same rows at Jaccard 0.9 or better.
 - **Prescience:** decisive-row recall within 10 points of other-row recall. The pilot can only bound this gap to about ±20, which the readout says.
-- **On failure:** a failing step is removed, or the result is reported as RQL at its measured recall.
+- **On failure:** on development data (the pilot), a failing step is removed before the freeze. After the freeze the menu doesn't change: test-repo fidelity only qualifies the readout, which reports the step at its measured recall. Decisive-row recall on test bugs never feeds back into the menu.
 - **Test repos:** measure fidelity on each test repo too, with about 10 gold queries per step per repo, before any reviewer outcome. A failing repo is reported at its measured recall, not dropped.
 - **Realistic recall:** ask Bifrost's query-surface owner what recall each step could really reach. If that is about 75% or less, add arm D below.
 
@@ -85,15 +85,15 @@ It reports:
 - **N:** no brief.
 - **G:** grep writer. It gets the same step list in prose, so the contrast is the answers, not the checklist.
 - **R:** mocked-RQL writer, which keeps grep and the list.
-- **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine, and a token budget equal to the engine tokens spent answering R's queries on that diff. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
+- **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine. Its token budget equals the engine model tokens attributable to the rows R retrieved on that diff. Precomputed work counts: each retrieved value-flow row is charged the tokens of the hops that produced it, and each classified row its classification tokens, once per diff, whether it was computed ahead or on demand. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
 - **D (conditional):** R with answers degraded at random to the owner's realistic recall.
 
 **Leak audit.** Each brief's exact text, bound to its hash, gets the blind `judge/SPEC.md` check (one Opus/high) as if it were a review output. Briefs are not rewritten: a blind writer that states the defect from accurate rows is the product working. The readout reports, per arm, the share of briefs that state the defect, and a secondary R − G that excludes diffs where any arm's brief states it. That separates writer-found defects from facts the reviewer used.
 
-**Writer gates.** One blind Opus judge decides per brief whether it contains the decisive fact (any minimal set). Every diff where R's and G's containment differ is hand-checked. A gate is read only if R actually queried the engine (Terra never called the tool in the Oz run). Prompt fixes are allowed in the pilot and frozen before test.
+**Writer gate.** One blind Opus judge decides per brief whether it contains the decisive fact (any minimal set). Every diff where R's and G's containment differ is hand-checked. A gate is read only if R actually queried the engine (Terra never called the tool in the Oz run). Prompt fixes are allowed in the pilot and frozen before test.
 - **Pilot (futility bar):** if R's containment doesn't exceed G's by at least 10 points, stop before pilot reviewers and report. The menu was chosen on these bugs, so a pass here is weak evidence and a fail is strong.
-- **Test (binding):** run every test writer first. If the upper bound of R − G containment (the same repo-level t interval) is below +10, skip the test reviewers and report "stopped for futility". On mjolnir, a brief with the decisive fact was worth about +40 to +50 catch points, so a +10 catch effect needs about +20 containment.
-- **Arms N and G always run their reviewers,** whatever the gates say: the census ranking among baseline misses, the contamination measure and G − N all need them. The gates skip only R, H and D reviewers.
+- **Test:** containment is reported but gates nothing. Reviewers run for every arm on the fixed test sample. R can match G on containment yet still lift catch, for example by giving a concrete value or call path, so a containment bound can't rule out the +10 catch effect.
+- **Arms N and G always run their reviewers,** even when the pilot gate stops: the census ranking among baseline misses, the contamination measure and G − N all need them. The pilot gate skips only R, H and D pilot reviewers, and a pilot stop ends the study before test.
 
 **Reviewers and judging.**
 - Terra/high reviewers. Each brief arm gets 2 briefs per diff with 2 reviewers per brief. N gets 4 reviewers per diff.

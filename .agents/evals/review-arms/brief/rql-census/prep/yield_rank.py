@@ -5,8 +5,9 @@ Usage: yield_rank.py CANDIDATES.jsonl SCAN_DIR > yield.json
 
 For each (repo, fix window) cell: expected strong multi-site candidates =
 (candidates in the cell) x (share of the cell's blamed sample that is strong, multi-site,
-completely traced, and introduced on or after the window start). Cells with no blamed
-sample contribute nothing. Realistic yield multiplies by BUG_PRECISION (bug-word filter,
+completely traced, and introduced on or after the window start). Only the commits in the
+current plan's sample count, and a failed draw stays in the denominator as unconfirmed. Cells
+with no blamed sample contribute nothing. Realistic yield multiplies by BUG_PRECISION (bug-word filter,
 eyeballed on 30 onelines, 2026-11-18) and ADMISSION (bifrost-dev SPEC admission after
 attribution, 31/67), both stated in the plan.
 """
@@ -57,13 +58,15 @@ def main():
             undated += 1
             continue
         n[(c["repo"], window(t))] += 1
+    # Only the current plan's sampled commits count; failed draws stay in the denominator.
+    current = set(json.load(open(scan / "plan.json"))["sample_ids"])
     sample = collections.defaultdict(list)
     errors = 0
     for l in open(scan / "blame.jsonl"):
         r = json.loads(l)
-        if r.get("error"):
-            errors += 1
+        if f"{r['repo']} {r['hash']}" not in current:
             continue
+        errors += bool(r.get("error"))
         sample[(r["repo"], r["window"])].append(r)
 
     out = {"undated_candidates": undated, "blame_errors": errors,
@@ -75,8 +78,8 @@ def main():
             if w not in wins or not sample.get((repo, w)):
                 continue
             s = sample[(repo, w)]
-            good = sum(1 for r in s if r.get("strong") and r.get("multi_site_proxy")
-                       and r.get("trace_complete", True)
+            good = sum(1 for r in s if not r.get("error") and r.get("strong") and r.get("multi_site_proxy")
+                       and r.get("trace_complete") is True
                        and r.get("intro_ct") and r["intro_ct"] >= start.timestamp())
             per[repo] += count * good / len(s)
         realistic = {r: v * BUG_PRECISION * ADMISSION for r, v in per.items()}

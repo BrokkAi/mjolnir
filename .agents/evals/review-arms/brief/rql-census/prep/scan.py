@@ -147,7 +147,10 @@ def blame_one(c):
             rec["traceable"] = False
             return rec
         top, n = counts.most_common(1)[0]
-        rc, so, _ = git(repo, "show", "--shortstat", "--format=%ct", top, timeout=300)
+        rc, so, se = git(repo, "show", "--shortstat", "--format=%ct", top, timeout=300)
+        if rc:
+            failed.append({"intro_size": top, "stderr": se.strip()[-200:]})
+            rec["trace_complete"] = False
         lines = [l for l in so.splitlines() if l.strip()]
         size = sum(int(x) for x in re.findall(r"(\d+) (?:insertion|deletion)", lines[-1])) if len(lines) > 1 else 0
         rec.update(traceable=True, top_share=n / total, intro_sha=top, intro_ct=ctimes.get(top),
@@ -197,6 +200,7 @@ def main():
     todo = [c for c in sample if (c["repo"], c["hash"]) not in done]
     json.dump({"candidates": len(cands), "dated": sum(1 for c in cands if c["window"]),
                "sample": len(sample), "todo": len(todo),
+               "sample_ids": sorted(f"{c['repo']} {c['hash']}" for c in sample),
                "by_window": collections.Counter(c["window"] for c in cands),
                "clone_ct": clone_ct}, open(OUT / "plan.json", "w"), indent=1)
     with cf.ThreadPoolExecutor(JOBS) as ex:
