@@ -324,33 +324,19 @@ pub async fn resolve_reviewer_model_profile_selection(
     .await
     .map_err(|_| {
         ApiFailure::unavailable(format!(
-            "reviewer effort discovery timed out for model {model:?}"
+            "reviewer model discovery timed out for model {model:?}"
         ))
     })?
 }
 
+/// A pinned reviewer's profile, model and effort are all configured, so there
+/// is nothing to discover: the harness reports a value it rejects.
 pub async fn resolve_pinned_reviewer_model_profile_selection(
-    backend: &Arc<dyn SubagentBackend>,
+    _backend: &Arc<dyn SubagentBackend>,
     profile: &str,
     model: &str,
     effort: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
-    let choices = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        backend.profile_config(profile.to_owned(), Some(model.to_owned()), false),
-    )
-    .await
-    .map_err(|_| {
-        ApiFailure::unavailable(format!(
-            "review profile {profile:?} effort discovery timed out"
-        ))
-    })?
-    .map_err(|error| {
-        ApiFailure::unavailable(format!(
-            "review profile {profile:?} is unavailable: {error:#}"
-        ))
-    })?;
-    validate_selectors(&choices, Some(model), effort)?;
     Ok(selection(
         profile.to_owned(),
         model,
@@ -505,35 +491,10 @@ async fn resolve_model_profile_selection_from(
         source,
         ModelProfileCandidateSource::Reviewers | ModelProfileCandidateSource::ReviewersReady
     );
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-    let mut probes = tokio::task::JoinSet::new();
-    if reviewer_source && !matches!(requirement, EffortRequirement::Default) {
-        for candidate in &offered {
-            let backend = Arc::clone(backend);
-            let candidate = candidate.clone();
-            probes.spawn(async move {
-                let result = if candidate.choices.model.as_deref() == Some(&candidate.model.value)
-                    && !candidate.choices.efforts.is_empty()
-                {
-                    Ok(candidate.choices.efforts.clone())
-                } else {
-                    model_efforts(&backend, &candidate.candidate, &candidate.model.value).await
-                };
-                (candidate.candidate.profile_id, result)
-            });
-        }
-    }
-    let mut ready_results: std::collections::HashMap<
-        String,
-        Result<Vec<mj_core::acp::SessionConfigChoice>, ApiFailure>,
-    > = std::collections::HashMap::new();
-    // The grace starts when a later candidate can serve the slot. It belongs
-    // to the slot, not to each earlier candidate in the draw order.
-    let mut later_ready_deadline: Option<tokio::time::Instant> = None;
     let mut offered_any_effort = false;
     let mut selection_errors = Vec::new();
     let mut unhealthy = Vec::new();
-    for (index, candidate) in offered.iter().enumerate() {
+    for candidate in &offered {
         // A pinned profile runs even while marked: someone chose it. Other
         // profiles must be skipped before probing a login that just failed.
         if profile_id.is_none()
@@ -542,66 +503,21 @@ async fn resolve_model_profile_selection_from(
             unhealthy.push(note);
             continue;
         }
-        let result = if reviewer_source && matches!(requirement, EffortRequirement::Default) {
-            Ok(Vec::new())
-        } else if reviewer_source {
-            let mut candidate_deadline = deadline;
-            loop {
-                if let Some(result) = ready_results.remove(&candidate.profile_id) {
-                    break result;
-                }
-                let later_ready = offered.iter().skip(index + 1).any(|later| {
-                    unhealthy_note(&later.candidate, &later.model.value).is_none()
-                        && ready_results.get(&later.profile_id).is_some_and(|result| {
-                            result.as_ref().is_ok_and(|efforts| match requirement {
-                                EffortRequirement::Exact(requested) => {
-                                    efforts.iter().any(|effort| effort.value == requested)
-                                }
-                                _ => false,
-                            })
-                        })
-                });
-                if later_ready {
-                    let grace = *later_ready_deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + std::time::Duration::from_secs(2)
-                    });
-                    candidate_deadline = candidate_deadline.min(grace);
-                }
-                match tokio::time::timeout_at(candidate_deadline, probes.join_next()).await {
-                    Ok(Some(Ok((id, result)))) => {
-                        let later_qualifies = offered.iter().skip(index + 1).any(|later| {
-                            later.profile_id == id
-                                && unhealthy_note(&later.candidate, &later.model.value).is_none()
-                        }) && result.as_ref().is_ok_and(|efforts| {
-                            match requirement {
-                                EffortRequirement::Exact(requested) => {
-                                    efforts.iter().any(|effort| effort.value == requested)
-                                }
-                                _ => false,
-                            }
-                        });
-                        ready_results.insert(id, result);
-                        if later_qualifies {
-                            let grace = *later_ready_deadline.get_or_insert_with(|| {
-                                tokio::time::Instant::now() + std::time::Duration::from_secs(2)
-                            });
-                            candidate_deadline = candidate_deadline.min(grace);
-                        }
-                    }
-                    Ok(Some(Err(error))) => {
-                        selection_errors.push(format!("reviewer probe failed: {error}"))
-                    }
-                    Ok(None) | Err(_) => {
-                        break Err(ApiFailure::unavailable(format!(
-                            "reviewer effort probe timed out for {:?}",
-                            candidate.profile_id
-                        )));
-                    }
-                }
-            }
-        } else {
-            model_efforts(backend, &candidate.candidate, &candidate.model.value).await
-        };
+        // A reviewer's effort is configured, not chosen: start with it as
+        // configured and let the harness report a value it rejects, rather
+        // than launching every candidate harness to list its efforts first.
+        if reviewer_source {
+            let effort = match requirement {
+                EffortRequirement::Exact(requested) => Some(requested.to_owned()),
+                EffortRequirement::Default | EffortRequirement::Any => None,
+            };
+            return Ok(selection(
+                candidate.profile_id.clone(),
+                &candidate.model.value,
+                effort,
+            ));
+        }
+        let result = model_efforts(backend, &candidate.candidate, &candidate.model.value).await;
         let efforts = match result {
             Ok(efforts) => efforts,
             Err(error) => {
@@ -629,14 +545,12 @@ async fn resolve_model_profile_selection_from(
                 child_effort(&candidate.model.value, &efforts, None, inherited_effort)?
             }
         };
-        probes.abort_all();
         return Ok(selection(
             candidate.profile_id.clone(),
             &candidate.model.value,
             effort,
         ));
     }
-    probes.abort_all();
     if !unhealthy.is_empty() {
         return Err(all_unhealthy(
             model,
@@ -1903,118 +1817,9 @@ mod tests {
         assert_eq!(selected.profile_id, "subscription");
     }
 
+    // Hard-won: a stalled effort probe refused a reviewer whose effort was configured.
     #[tokio::test(start_paused = true)]
-    async fn reviewer_ready_later_candidate_bounds_earlier_probe_grace() {
-        let mut ready = candidate("ready", None, &["fixed"]);
-        ready.choices.model = Some("fixed".into());
-        ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
-            value: "high".into(),
-            name: "High".into(),
-            description: None,
-        }];
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: None,
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: SubagentCandidates {
-                offered: vec![candidate("stalled-first", Some(80), &["fixed"]), ready],
-                unavailable: Vec::new(),
-            },
-        });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected.profile_id, "ready");
-        assert_eq!(
-            tokio::time::Instant::now().duration_since(start),
-            std::time::Duration::from_secs(2)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reviewer_completed_third_candidate_bounds_each_stalled_predecessor() {
-        let mut ready = candidate("ready-third", None, &["fixed"]);
-        ready.choices.model = Some("fixed".into());
-        ready.choices.efforts = vec![mj_core::acp::SessionConfigChoice {
-            value: "high".into(),
-            name: "High".into(),
-            description: None,
-        }];
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: None,
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: SubagentCandidates {
-                offered: (0..10)
-                    .map(|index| candidate(&format!("stalled-{index}"), Some(80), &["fixed"]))
-                    .chain(std::iter::once(ready))
-                    .collect(),
-                unavailable: Vec::new(),
-            },
-        });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected.profile_id, "ready-third");
-        assert_eq!(
-            tokio::time::Instant::now().duration_since(start),
-            std::time::Duration::from_secs(2)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reviewer_later_probe_completion_starts_grace_after_probe_finishes() {
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: None,
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: SubagentCandidates {
-                offered: vec![
-                    candidate("stalled-first", Some(80), &["fixed"]),
-                    candidate("delayed-later", None, &["fixed"]),
-                ],
-                unavailable: Vec::new(),
-            },
-        });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected.profile_id, "delayed-later");
-        assert_eq!(
-            tokio::time::Instant::now().duration_since(start),
-            std::time::Duration::from_secs(3)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reviewer_default_effort_skips_stalled_model_effort_probe() {
+    async fn reviewer_configured_or_default_effort_skips_stalled_model_effort_probe() {
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
             ready_first: false,
             staged: None,
@@ -2025,100 +1830,25 @@ mod tests {
                 unavailable: Vec::new(),
             },
         });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Default,
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await
-        .unwrap();
-        assert_eq!(selected.profile_id, "stalled-default");
-        assert_eq!(tokio::time::Instant::now(), start);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reviewer_cold_start_keeps_waiting_past_a_profile_that_cannot_serve_the_slot() {
-        // Only the model-specific probe of "fixed" offers high; this profile
-        // reports no effort for the model, so it cannot serve a high slot.
-        let first = candidate("full-but-wrong-effort", Some(90), &["fixed"]);
-        let second = candidate("second", Some(50), &["fixed"]);
-        let staged = |ids: &[&SubagentCandidate]| SubagentCandidates {
-            offered: ids.iter().map(|candidate| (*candidate).clone()).collect(),
-            unavailable: Vec::new(),
-        };
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: Some(vec![
-                (1, staged(&[&first])),
-                (8, staged(&[&first, &second])),
-            ]),
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: staged(&[&first, &second]),
-        });
-        let start = tokio::time::Instant::now();
-        let selected = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
+        for (requirement, effort) in [
+            (EffortRequirement::Default, None),
+            (EffortRequirement::Exact("high"), Some("high")),
+        ] {
+            let start = tokio::time::Instant::now();
+            let selected = resolve_model_profile_selection_matching(
+                &backend,
+                None,
+                "fixed",
+                requirement,
+                None,
+                ModelProfileCandidateSource::ReviewersReady,
+            )
             .await
             .unwrap();
-        assert_eq!(selected.profile_id, "second");
-        let waited = tokio::time::Instant::now().duration_since(start);
-        assert!(waited >= std::time::Duration::from_secs(8), "{waited:?}");
-        assert!(waited < std::time::Duration::from_secs(20), "{waited:?}");
-
-        // When no later profile can serve it, the deadline still ends the wait.
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: Some(vec![
-                (1, staged(&[&first])),
-                (30, staged(&[&first, &second])),
-            ]),
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: staged(&[&first, &second]),
-        });
-        let start = tokio::time::Instant::now();
-        let error = resolve_reviewer_model_profile_selection(&backend, "fixed", Some("high"))
-            .await
-            .unwrap_err();
-        assert!(
-            tokio::time::Instant::now().duration_since(start) <= std::time::Duration::from_secs(20)
-        );
-        assert!(error.message.contains("timed out"), "{}", error.message);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reviewer_stalled_probes_share_one_deadline() {
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            ready_first: false,
-            staged: None,
-            discovery_fails: false,
-            config: Default::default(),
-            candidates: SubagentCandidates {
-                offered: vec![
-                    candidate("stalled-one", Some(80), &["fixed"]),
-                    candidate("stalled-two", Some(70), &["fixed"]),
-                ],
-                unavailable: Vec::new(),
-            },
-        });
-        let start = tokio::time::Instant::now();
-        let result = resolve_model_profile_selection_matching(
-            &backend,
-            None,
-            "fixed",
-            EffortRequirement::Exact("high"),
-            None,
-            ModelProfileCandidateSource::ReviewersReady,
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(
-            tokio::time::Instant::now().duration_since(start) <= std::time::Duration::from_secs(20)
-        );
+            assert_eq!(selected.profile_id, "stalled-default");
+            assert_eq!(selected.effort.as_deref(), effort);
+            assert_eq!(tokio::time::Instant::now(), start);
+        }
     }
 
     #[tokio::test]
