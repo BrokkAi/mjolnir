@@ -1,0 +1,70 @@
+[
+  {
+    "bug": "python-filescope-enclosing-tie",
+    "arm": "OT"
+  },
+  {
+    "bug": "cpp-template-inherited-base-signature",
+    "arm": "OT"
+  },
+  {
+    "bug": "incompatible-semantic-bundle-late-gate",
+    "arm": "OT"
+  },
+  {
+    "bug": "retained-fill-java-memo-loses-gap",
+    "arm": "OT"
+  },
+  {
+    "bug": "kotlin-source-constructor-steals-class-header-comment",
+    "arm": "OT"
+  },
+  {
+    "bug": "mcp-default-advisory-reported-clean",
+    "arm": "OT"
+  },
+  {
+    "bug": "go-receiver-poisons-package-result-contract-discovery",
+    "arm": "OT"
+  },
+  {
+    "bug": "python-module-binding-representative-after-event",
+    "arm": "OT"
+  },
+  {
+    "bug": "jvm-protected-unindexed-hierarchy-denied",
+    "arm": "OT"
+  },
+  {
+    "bug": "python-module-mutation-repeated-scan-budget",
+    "arm": "OT"
+  },
+  {
+    "bug": "dependency-failure-drops-independent-model-evidence",
+    "arm": "OT"
+  },
+  {
+    "bug": "php-indexed-write-reenters-current-rhs",
+    "arm": "OT"
+  },
+  {
+    "bug": "kotlin-value-class-this-loses-underlying-projection",
+    "arm": "OT"
+  },
+  {
+    "bug": "go-nilness-ignores-modeled-nonreturn",
+    "arm": "OT"
+  },
+  {
+    "bug": "java-static-getter-drops-incomplete-route",
+    "arm": "OT"
+  },
+  {
+    "bug": "unproven-override-family-certifies-empty",
+    "arm": "OT"
+  },
+  {
+    "bug": "js-synthetic-owner-leaks-file-summary",
+    "arm": "OT"
+  }
+]

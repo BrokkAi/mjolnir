@@ -29,6 +29,7 @@ import random
 import secrets
 import statistics
 import sys
+from fractions import Fraction
 
 import brief_oracle
 from driver import ARMS, CORPUS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
@@ -46,6 +47,8 @@ BUGS = None
 SELECTED_MODELS = MODELS
 EXACT_BASELINE = False
 ROUND_SETS = None
+READING = None
+REFERENCE_ROUND = None
 
 
 def scoped_sets():
@@ -173,6 +176,7 @@ def build(arms, per_batch):
     (J / "SPEC.md").write_text((SCRIPTS / "judge/SPEC.md").read_text())
     save(KEY, {"arms": list(arms), "outputs": key, "sets": scoped_sets(),
                "models": list(SELECTED_MODELS), "exact_baseline": EXACT_BASELINE,
+               **({"reading": READING, "reference_round": REFERENCE_ROUND} if READING else {}),
                **({"bugs": sorted(BUGS)} if BUGS is not None else {})})
     print(json.dumps({"dir": str(J), "batches": batches}))
     print(json.dumps({"outputs": len(key), "by_condition_model": collections.Counter(
@@ -180,8 +184,10 @@ def build(arms, per_batch):
 
 
 def load_round():
-    global BUGS, SELECTED_MODELS, EXACT_BASELINE, ROUND_SETS
+    global BUGS, SELECTED_MODELS, EXACT_BASELINE, ROUND_SETS, READING, REFERENCE_ROUND
     saved = json.loads(KEY.read_text())
+    READING = saved.get("reading")
+    REFERENCE_ROUND = saved.get("reference_round")
     BUGS = set(saved["bugs"]) if "bugs" in saved else None
     SELECTED_MODELS = tuple(saved.get("models", MODELS))
     if not SELECTED_MODELS or len(set(SELECTED_MODELS)) != len(SELECTED_MODELS) or set(SELECTED_MODELS) - set(MODELS):
@@ -311,6 +317,24 @@ def boot(diff_values, n=10000):
     return round(means[int(0.025 * n)], 3), round(means[int(0.975 * n)], 3)
 
 
+def boot_exact(diff_values, n=10000):
+    """Exact paired bootstrap quantiles, converted only after strict decisions."""
+    rng = random.Random(1)
+    means = sorted(sum((diff_values[i] for i in rng.choices(range(len(diff_values)), k=len(diff_values))),
+                       Fraction()) / len(diff_values) for _ in range(n))
+    return means[int(.025 * n)], means[int(.975 * n)]
+
+
+def oracle_outcome(estimate, low, high):
+    if estimate >= Fraction(17, 100) and low > 0:
+        return "Facts carry"
+    if low > 0 and estimate < Fraction(17, 100):
+        return "Partly"
+    if high < Fraction(10, 100):
+        return "Facts don't carry"
+    return "Inconclusive"
+
+
 def score():
     saved = load_round()
     key = saved["outputs"]
@@ -367,6 +391,43 @@ def score():
                                   "median_tokens": statistics.median(k["total_tokens"] for k in ks),
                                   "median_latency_s": statistics.median(lat) if lat else None,
                                   "median_tool_calls": (statistics.median(t) if (t := [k["tool_calls"] for k in ks if k["tool_calls"] is not None]) else None)})
+    if READING == "bifrost-oracle":
+        import brief_writer_terra
+        if set(sets) != {"P"} or len(sets["P"]) != 17 or SELECTED_MODELS != ("gpt-6.1-terra",):
+            raise SystemExit("bifrost-oracle requires exactly 17 P diffs and Terra only")
+        bugs = sets["P"]
+        per_diff = {}
+        for bug in bugs:
+            per_diff[bug] = {}
+            for arm in ("A", "BT", "OT"):
+                entries = [(oid, k) for oid, k in key.items() if k["bug"] == bug and k["arm"] == arm]
+                if len(entries) != 3 or any(k["model"] != "gpt-6.1-terra" for _, k in entries):
+                    raise SystemExit(f"{bug} {arm}: requires exactly three Terra sessions")
+                labels = [final[oid] for oid, _ in entries]
+                per_diff[bug][arm] = {"sessions": 3, "caught": labels.count("caught"),
+                                      "partial": labels.count("partial"), "catch_rate": labels.count("caught") / 3,
+                                      "partial_rate": labels.count("partial") / 3}
+        effects = {arm: [Fraction(per_diff[b]["OT"]["caught"], 3) -
+                         Fraction(per_diff[b][arm]["caught"], 3) for b in bugs]
+                   for arm in ("A", "BT")}
+        contrasts, raw_contrasts = {}, {}
+        for arm, values in effects.items():
+            estimate = sum(values, Fraction()) / len(values)
+            low, high = boot_exact(values)
+            raw_contrasts[arm] = (estimate, low, high)
+            contrasts[f"OT-{arm}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
+        estimate, low, high = raw_contrasts["A"]
+        report["expected_catches_per_reviewer"] = report.pop("expected_catches_of_30")
+        report["bifrost_oracle"] = {"outcome": oracle_outcome(estimate, low, high),
+                                    "bootstrap": {"seed": 1, "draws": 10000, "unit": "paired diff",
+                                                  "classification_uses_unrounded_rational_bounds": True},
+                                    "OT_minus_A": contrasts["OT-A"], "OT_minus_BT": contrasts["OT-BT"],
+                                    "per_diff": per_diff}
+        report["label_consistency"] = brief_writer_terra.compare_same_sessions(
+            J.name, REFERENCE_ROUND, bugs, arms=("A", "BT"), model="gpt-6.1-terra")
+        save(J / "score.json", report)
+        print(json.dumps(report, indent=1))
+        return
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
     if "bifrost" in conds and "blind" in conds:
@@ -383,7 +444,11 @@ if __name__ == "__main__":
     p.add_argument("--bugs-per-batch", type=int, default=3)
     p.add_argument("--bugs-from", help="build: jobs file ([{bug, arm}]) whose diffs the round covers")
     p.add_argument("--name", default="brief-judge", help="judging round: batches in <name>/, key in private/")
+    p.add_argument("--reading", choices=["bifrost-oracle"], help="registered reading (build only)")
+    p.add_argument("--reference-round", help="stored-label round for same-session comparison (build only)")
     a = p.parse_args()
+    if a.step != "build" and (a.reading or a.reference_round):
+        raise SystemExit("--reading and --reference-round apply to build only; values are persisted in the key")
     J, KEY = ROOT / a.name, ROOT / "private" / f"key-{a.name}.json"
     if a.bugs_from:
         if a.step != "build":
@@ -397,6 +462,12 @@ if __name__ == "__main__":
             raise SystemExit(f"--models must select distinct supported models: {MODELS}")
         EXACT_BASELINE = True
     if a.step == "build":
+        if bool(a.reading) != bool(a.reference_round):
+            raise SystemExit("--reading and --reference-round must be supplied together")
+        READING, REFERENCE_ROUND = a.reading, a.reference_round
+        if READING and (tuple(a.arms.split(",")) != ("OT", "BT") or
+                        SELECTED_MODELS != ("gpt-6.1-terra",) or len(scoped_sets().get("P", [])) != 17):
+            raise SystemExit("bifrost-oracle build requires --arms OT,BT, Terra only, and 17 P diffs")
         if a.bugs_per_batch < 1:
             raise SystemExit("--bugs-per-batch must be positive")
         build(tuple(a.arms.split(",")), a.bugs_per_batch)

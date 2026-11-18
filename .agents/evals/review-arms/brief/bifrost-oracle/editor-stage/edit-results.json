@@ -1,0 +1,113 @@
+{
+  "scope": {
+    "census": "/mnt/optane/review-arms-bifrost-20261116/census-results/missing-facts.jsonl",
+    "census_sha256": "cec120df43bc890efbfbd5fee79fc2236ff654e1249b3dcb1f9309c054536089",
+    "jobs": "/mnt/optane/review-arms-bifrost-20261116/oracle-arm/jobs-ot.json",
+    "jobs_sha256": "8b1efbdbb4e2549ba2a895c3931c29b0d9bcf1e4f1b34d813bd7a45fb385b946",
+    "name": "bifrost-oracle"
+  },
+  "results": [
+    {
+      "id": "python-filescope-enclosing-tie",
+      "contains": "no",
+      "carrier_item": "- `PythonAdapter::parse_file` registers the real module with the tree root range (`src/analyzer/python/adapter.rs:78`, `src/analyzer/python/adapter.rs:84`); for a whole-file root, that range has the same byte span as the synthetic `FileScope` range `0..source.len()` (`src/analyzer/tree_sitter_analyzer.rs:327`).",
+      "candidate_sha256": "5c9cc953faf51d3b818e8ec3bcb6e7f200f9b73f689f67aade2739875b955aea"
+    },
+    {
+      "id": "cpp-template-inherited-base-signature",
+      "contains": "partial",
+      "carrier_item": "- The inherited traversal calls `cpp_direct_base_types` (`src/analyzer/usages/get_definition.rs:3023`), which prefers `unit.signature()` over source text (`src/analyzer/usages/get_definition.rs:3211`). Class `CodeUnit`s receive `scope.template_signature` as that identity signature (`src/analyzer/cpp/declarations.rs:317`, `src/analyzer/model.rs:355`); `cpp_template_signature` supplies only the template parameter head, not the class base clause (`src/analyzer/cpp/declarations.rs:207`, `src/analyzer/cpp/declarations.rs:1317`).",
+      "candidate_sha256": "c9e7a4655b2d458027acb8e1cd91ffe2d901c66998e8255a0016d3626b5b56cd"
+    },
+    {
+      "id": "incompatible-semantic-bundle-late-gate",
+      "contains": "no",
+      "carrier_item": "- `verify_release_bundle` hashes every asset listed in `SHA256SUMS` through `verify_checksums` (`crates/bifrost-semantic-packs/src/release_bundle.rs:1728`, `crates/bifrost-semantic-packs/src/release_bundle.rs:2382`), then decodes each curated manifest and shard (`crates/bifrost-semantic-packs/src/release_bundle.rs:1733`, `crates/bifrost-semantic-packs/src/release_bundle.rs:1777`) before calling `verify_generated_production` (`crates/bifrost-semantic-packs/src/release_bundle.rs:1793`), which checks generated schema and cache versions (`crates/bifrost-semantic-packs/src/release_bundle.rs:2059`, `crates/bifrost-semantic-packs/src/release_bundle.rs:2065`).",
+      "candidate_sha256": "c725efa719b973be1d2d567523c8a4c9a8714c6ff2c5babfa3f08e836b212f7a"
+    },
+    {
+      "id": "retained-fill-java-memo-loses-gap",
+      "contains": "no",
+      "carrier_item": "- `JavaSource::unique_class_by_fqn_in_file` uses the request-domain `JavaFileClassIndexMemo`, which stores only `Arc<JavaFileClassIndex>` values (`crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:787`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:695`); it inserts indexes built from `declarations(file)` without a completion check and returns memo hits without replaying their build gaps (`crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:801`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:803`, `crates/bifrost-jvm-analysis/src/analyzer/java/mod.rs:799`).",
+      "candidate_sha256": "73b7c4b9dcd08da07621d6516028658779ec95052217e451c35608494ff1e7cc"
+    },
+    {
+      "id": "kotlin-source-constructor-steals-class-header-comment",
+      "contains": "no",
+      "carrier_item": "- The source primary constructor registered as a class child (crates/bifrost-jvm/src/kotlin/declarations.rs:409) enters comment-density traversal through Kotlin's synthetic-only child filter (crates/bifrost-analysis/src/analyzer/kotlin/mod.rs:675); collection expands every child's ranges without a primary-constructor exclusion (crates/bifrost-analysis/src/analyzer/comment_density.rs:162, crates/bifrost-analysis/src/analyzer/comment_density.rs:181), and `enclosing_declaration` assigns overlapping comments to the deepest declaration (crates/bifrost-analysis/src/analyzer/comment_density.rs:248).",
+      "candidate_sha256": "c64c7d45350c75a375d114d897b8119c83191fcd1ade453c992ad32839a0cf15"
+    },
+    {
+      "id": "mcp-default-advisory-reported-clean",
+      "contains": "partial",
+      "carrier_item": "- MCP constructs evaluation options without an inconclusive override (`crates/bifrost-mcp/src/searchtools_service.rs:3619`), inheriting `Pass` (`crates/bifrost-policy/src/coordinator.rs:326`); `run_policy` maps `outcome.exit_status()` directly to the public status, with `POLICY_EXIT_CLEAN` becoming `clean`, and returns `outcome.into_report()` alongside it (`crates/bifrost-mcp/src/searchtools_service.rs:7024`, `crates/bifrost-mcp/src/searchtools_service.rs:7039`).",
+      "candidate_sha256": "c601f2bdced7c0e4e2f1c9c1ae07ffd04ecbc698795f180e25f9ae8dc5716ddb"
+    },
+    {
+      "id": "go-receiver-poisons-package-result-contract-discovery",
+      "contains": "partial",
+      "carrier_item": "- The empty-open-lookup check calls `may_name_result_contract`, whose inventory insertion and lookup use only `(language, member, parameter_count)`, without `summary.target.has_receiver` or call receiver applicability; receiverless summaries and receiver calls with the same tuple share an inventory entry (crates/bifrost-rql/src/structural/search/effects.rs:263; crates/bifrost-rql/src/structural/search/effects.rs:283; crates/bifrost-rql/src/structural/search/effects.rs:492).",
+      "candidate_sha256": "abd4fd87a6af72c20430e28b8acca5b41da415a153c8e5dd66cab95b5c06a7a1"
+    },
+    {
+      "id": "python-module-binding-representative-after-event",
+      "contains": "no",
+      "carrier_item": "- Repeated module assignments to the same name construct the same `Field` CodeUnit and call `replace_code_unit`, retaining only the last assignment's declaration range, not a range for each binding event; replacement removes the prior ranges before adding the current declaration (`crates/bifrost-python/src/declarations.rs:551`, `crates/bifrost-python/src/declarations.rs:569`, `crates/bifrost-core/src/analyzer/parsed_file.rs:274`, `crates/bifrost-core/src/analyzer/parsed_file.rs:425`); the event selector reads these ranges through `analyzer.ranges(candidate)` (`crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1773`).",
+      "candidate_sha256": "352aeba7ed37c673d77c4c74581b44af58f7699b5d1ae4277449e5af0951722a"
+    },
+    {
+      "id": "jvm-protected-unindexed-hierarchy-denied",
+      "contains": "partial",
+      "carrier_item": "- `jvm_type_is_subtype` initializes `uncertain` to false (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26549) and sets it only inside the returned-supertype-edge loop (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26562); for distinct types with an empty supertype inventory, it returns `Some(false)` without checking hierarchy closure (crates/bifrost-analysis/src/analyzer/resolution/fact_resolution.rs:26597).",
+      "candidate_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d"
+    },
+    {
+      "id": "python-module-mutation-repeated-scan-budget",
+      "contains": "partial",
+      "carrier_item": "- `class_hierarchy` creates one bounded `ResolutionSession` and `PythonDefinitionProvider` for the ancestry traversal (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:373`); `runtime_source_bases` receives the same budget for each workspace owner (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:441`) and calls `python_class_object_base_candidate` with `budget.provider` for each base (`crates/bifrost-analysis/src/analyzer/python/hierarchy.rs:711`), including its module-binding guard (`crates/bifrost-analysis/src/analyzer/usages/get_definition/python.rs:1963`).",
+      "candidate_sha256": "f2e666da81e245336362ef8686909d3ecd8a2a0b58aa32ed417f1df78ffe3a4b"
+    },
+    {
+      "id": "dependency-failure-drops-independent-model-evidence",
+      "contains": "no",
+      "carrier_item": "- The workspace lifecycle clones the caller's activation request (crates/bifrost-analysis/src/analyzer/workspace.rs:273). The Go overlay fixture supplies module `fixture.invalid` evidence and enables the registered `fixture.go.reader` and `fixture.go.consumer` session packs (tests/suite_semantic/semantic_model_overlay.rs:337, tests/suite_semantic/semantic_model_overlay.rs:348), then acquires a `Ready` runtime without dependency discovery (tests/suite_semantic/semantic_model_overlay.rs:377).",
+      "candidate_sha256": "d1eff1980fcf51245f1d25fbabb0a7f27bd9937f5416cbf7f997e6411d9e0962"
+    },
+    {
+      "id": "php-indexed-write-reenters-current-rhs",
+      "contains": "partial",
+      "carrier_item": "- `collection_element_type_fq_name` passes `collection.start_byte()` as `before_byte` and a callback to `instance_receiver_type_fq_name_inner` (`crates/bifrost-php/src/graph/syntax.rs:1548`, `crates/bifrost-php/src/graph/syntax.rs:1553`). `infer_indexed_local_element_type` walks the enclosing scope (`crates/bifrost-php/src/graph/syntax.rs:1393`), filters nodes by start byte but does not check assignment end bytes (`crates/bifrost-php/src/graph/syntax.rs:1401`), and calls `resolve_value(right)` for matching indexed writes even when the assignment encloses the current collection read (`crates/bifrost-php/src/graph/syntax.rs:1421`).",
+      "candidate_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745"
+    },
+    {
+      "id": "kotlin-value-class-this-loses-underlying-projection",
+      "contains": "no",
+      "carrier_item": "- The `this_expression` flow at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:316` reads `captured_receiver` or `self.receiver`; dispatch receiver creation at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:279` sets `self.receiver` without the `bind_carrier` call used for formal slots at `crates/bifrost-analysis/src/analyzer/kotlin/semantic/values.rs:241`.",
+      "candidate_sha256": "ee49a9e5f33c50ba5dcaf690b584547fc63908f26d33ea5a7517067030c2811c"
+    },
+    {
+      "id": "go-nilness-ignores-modeled-nonreturn",
+      "contains": "no",
+      "carrier_item": "- `complete_modeled_call_facts` requires `complete: true` (`crates/bifrost-rql/src/structural/search/effects.rs:2586`); `proves_normal_continuation_absent` evaluates exact active-model agreement independently of summary completeness (`crates/bifrost-analysis/src/analyzer/semantic_model/runtime.rs:432`), including `testing.T.Fatal`'s partial summary with `normal_continuation_absent: true` (`crates/bifrost-semantic-packs/models/go-stdlib-testing.json:474`).",
+      "candidate_sha256": "19df943f4239d5cf23c1b001f551e09af0e3117d7293a6eb96524835ed5a9c62"
+    },
+    {
+      "id": "java-static-getter-drops-incomplete-route",
+      "contains": "no",
+      "carrier_item": "- Kotlin property extraction emits `ResolutionJvmAliasKind::Getter` with `is_static` set from `top_level` (crates/bifrost-jvm/src/kotlin/resolution.rs:2309), targeting the property declaration in the Value namespace (crates/bifrost-jvm/src/kotlin/resolution.rs:1487); the alias reader compares the resulting kind and static flag with the import demand namespace (crates/bifrost-analysis/src/analyzer/store/resolution_operation/jvm_context.rs:2339).",
+      "candidate_sha256": "0548dbe3d696de7bcf75850648fd74a0b5631bc4eba16d1543d1bd9c961ebb18"
+    },
+    {
+      "id": "unproven-override-family-certifies-empty",
+      "contains": "yes",
+      "carrier_item": "- `MemberFamilyAnswer::is_proven` compares the outcome with `Proven` (`crates/bifrost-analysis/src/analyzer/usages/member_family.rs:146`). The hierarchy helper collects `ImplementedBy`/`OverriddenBy` targets for that outcome, otherwise constructs an empty vector, and returns `Some(targets)` in both cases (`crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:945`). Both empty-vector routes enter the new `Some(overrides) if overrides.is_empty()` arm (`crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs:554`).",
+      "candidate_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c"
+    },
+    {
+      "id": "js-synthetic-owner-leaks-file-summary",
+      "contains": "no",
+      "carrier_item": "- `signature_elements` reads declaration ranges (`src/searchtools.rs:1162`) and sets each element extent to the maximum of its signature line count and matching range line count, retaining the signature text (`src/searchtools.rs:1176`, `src/searchtools.rs:1190`, `src/searchtools.rs:1198`); the JS/TS registrations supply the root range alongside the import signature (`src/analyzer/javascript/mod.rs:123`, `src/analyzer/typescript/mod.rs:131`).",
+      "candidate_sha256": "3587b9c753e8a1522ae418525e3b8ddd10c98cc0d28a2fe957418a29bd71ff6d"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "stage": "oracle registration before any brief",
+  "files": {
+    "ids.json": "c85086313c319b0f0495e09bea682f267069ae3d27740fffa2fc4bb1fac20295",
+    "jobs-ot.json": "8b1efbdbb4e2549ba2a895c3931c29b0d9bcf1e4f1b34d813bd7a45fb385b946",
+    "registration.json": "901912755aefbd98591b8e3fb88bd0ad54846a23acfbf369dd7c5ac4510a7669",
+    "source-plan.md": "abc7a2048c482e464826d95b6ead307f6c6be5319506be551a4b6feab503683c"
+  },
+  "experimental_roles_started": 0
+}

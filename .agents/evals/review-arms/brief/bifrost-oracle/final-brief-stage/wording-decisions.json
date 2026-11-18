@@ -1,0 +1,129 @@
+{
+  "recorded_at": "2026-11-17T19:43:01.724092+00:00",
+  "decisions": [
+    {
+      "bug": "python-filescope-enclosing-tie",
+      "selected": "wording editor output",
+      "why": "Replaces a causal connector with punctuation. The equal module and FileScope spans and both lookup relations remain.",
+      "candidate_sha256": "5c9cc953faf51d3b818e8ec3bcb6e7f200f9b73f689f67aade2739875b955aea",
+      "raw_proposal_sha256": "983d46c6a6eee0550cd263e27365847f0d0bdd58bc753b79cc0a5261494578c0",
+      "selected_sha256": "983d46c6a6eee0550cd263e27365847f0d0bdd58bc753b79cc0a5261494578c0"
+    },
+    {
+      "bug": "cpp-template-inherited-base-signature",
+      "selected": "wording editor output",
+      "why": "Removes emphasis before the template parameter head while explicitly retaining exclusion of the base clause.",
+      "candidate_sha256": "c9e7a4655b2d458027acb8e1cd91ffe2d901c66998e8255a0016d3626b5b56cd",
+      "raw_proposal_sha256": "cf69c3b9605690c9e56d247bedd30a010fb7b752d15d89d238814be5f67dbece",
+      "selected_sha256": "cf69c3b9605690c9e56d247bedd30a010fb7b752d15d89d238814be5f67dbece"
+    },
+    {
+      "bug": "incompatible-semantic-bundle-late-gate",
+      "selected": "wording editor output",
+      "why": "Removes temporal emphasis from four other relations. The checksum and decoding order and all described calls remain.",
+      "candidate_sha256": "c725efa719b973be1d2d567523c8a4c9a8714c6ff2c5babfa3f08e836b212f7a",
+      "raw_proposal_sha256": "3fa68a1d8ccad7dc5fb165dc0bc799369851b641a5dcba5f4513c5f94ec3e6a6",
+      "selected_sha256": "3fa68a1d8ccad7dc5fb165dc0bc799369851b641a5dcba5f4513c5f94ec3e6a6"
+    },
+    {
+      "bug": "retained-fill-java-memo-loses-gap",
+      "selected": "wording editor output",
+      "why": "Removes emphasis about the memo value and a connector. The item still states unconditional insertion and the absence of replay on hits.",
+      "candidate_sha256": "73b7c4b9dcd08da07621d6516028658779ec95052217e451c35608494ff1e7cc",
+      "raw_proposal_sha256": "8b7b7555c697acb9ad10b22d7308cdad1af015c0b417fe6a8535c6222eefc763",
+      "selected_sha256": "8b7b7555c697acb9ad10b22d7308cdad1af015c0b417fe6a8535c6222eefc763"
+    },
+    {
+      "bug": "kotlin-source-constructor-steals-class-header-comment",
+      "selected": "wording editor output",
+      "why": "States the synthetic exclusion directly. Constructor visibility and the two comment-density relations are preserved.",
+      "candidate_sha256": "c64c7d45350c75a375d114d897b8119c83191fcd1ade453c992ad32839a0cf15",
+      "raw_proposal_sha256": "06eaf4eaac3bffb8a7f8488f096359505ff68463ffea72c1b2a381e0af91f576",
+      "selected_sha256": "06eaf4eaac3bffb8a7f8488f096359505ff68463ffea72c1b2a381e0af91f576"
+    },
+    {
+      "bug": "mcp-default-advisory-reported-clean",
+      "selected": "wording editor output",
+      "why": "Drops emphasis and a temporal adverb. The exit_status to clean mapping and report flow are preserved.",
+      "candidate_sha256": "c601f2bdced7c0e4e2f1c9c1ae07ffd04ecbc698795f180e25f9ae8dc5716ddb",
+      "raw_proposal_sha256": "251366e31ac638d3df55d7911f93469db9f89f8cb1bdc05dd4c47e8943692d32",
+      "selected_sha256": "251366e31ac638d3df55d7911f93469db9f89f8cb1bdc05dd4c47e8943692d32"
+    },
+    {
+      "bug": "go-receiver-poisons-package-result-contract-discovery",
+      "selected": "wording editor output",
+      "why": "Drops only as emphasis while explicitly retaining the receiver applicability exclusion from insertion and lookup.",
+      "candidate_sha256": "abd4fd87a6af72c20430e28b8acca5b41da415a153c8e5dd66cab95b5c06a7a1",
+      "raw_proposal_sha256": "18993fcf1e19231c99e3063e2677b68431eb7aabdb3f35b75ac191b9c14e4a81",
+      "selected_sha256": "18993fcf1e19231c99e3063e2677b68431eb7aabdb3f35b75ac191b9c14e4a81"
+    },
+    {
+      "bug": "python-module-binding-representative-after-event",
+      "selected": "wording editor output",
+      "why": "Drops emphasis about the last assignment. The same item still explicitly excludes per-event ranges and states removal of the prior ranges.",
+      "candidate_sha256": "352aeba7ed37c673d77c4c74581b44af58f7699b5d1ae4277449e5af0951722a",
+      "raw_proposal_sha256": "5599e04c3bebd8c4d305c5200a15f50967dbcdcdad6f7e9fe6203d7fb752f18d",
+      "selected_sha256": "5599e04c3bebd8c4d305c5200a15f50967dbcdcdad6f7e9fe6203d7fb752f18d"
+    },
+    {
+      "bug": "jvm-protected-unindexed-hierarchy-denied",
+      "selected": "original candidate",
+      "why": "Retain candidate wording. Only inside the returned-edge loop describes where uncertainty can be set. Removing it weakens a decisive condition.",
+      "candidate_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d",
+      "raw_proposal_sha256": "5033d42394fc81b37de5224bff74abf1369356980418320ca588f318c36de7f4",
+      "selected_sha256": "25308a33e036d3918a520a4763fc0a8ba09103c8caac10ab54d7b18ac0bb7e4d"
+    },
+    {
+      "bug": "php-indexed-write-reenters-current-rhs",
+      "selected": "original candidate",
+      "why": "Retain candidate wording. Replacing even when with when makes inclusion of enclosing writes read like a condition of the callback and narrows the original relation.",
+      "candidate_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745",
+      "raw_proposal_sha256": "8da86841d1809962ae6761861788891911e8e5d3744da16827191c63e0d850ca",
+      "selected_sha256": "ed7a2f88f92cab2688f02ec7c0c1c0794817c91f4c9fce24b2fe1e9d5f1b6745"
+    },
+    {
+      "bug": "kotlin-value-class-this-loses-underlying-projection",
+      "selected": "wording editor output",
+      "why": "Drops a connector while preserving the gate, projection, join and unchanged receiver carrier item.",
+      "candidate_sha256": "ee49a9e5f33c50ba5dcaf690b584547fc63908f26d33ea5a7517067030c2811c",
+      "raw_proposal_sha256": "c1d62c6d3b25b28e1b1aac3e61968b6338d9ce5536d5c03d0867cac79107abcc",
+      "selected_sha256": "c1d62c6d3b25b28e1b1aac3e61968b6338d9ce5536d5c03d0867cac79107abcc"
+    },
+    {
+      "bug": "go-nilness-ignores-modeled-nonreturn",
+      "selected": "wording editor output",
+      "why": "Changes punctuation on the compiler validation relation. The normal-continuation proof and partial Fatal witness remain.",
+      "candidate_sha256": "19df943f4239d5cf23c1b001f551e09af0e3117d7293a6eb96524835ed5a9c62",
+      "raw_proposal_sha256": "8d8cd655626f2e5bf024c58b8d41c58dfe60c6dbecc31fbf3cd79dec1f3a6de1",
+      "selected_sha256": "8d8cd655626f2e5bf024c58b8d41c58dfe60c6dbecc31fbf3cd79dec1f3a6de1"
+    },
+    {
+      "bug": "java-static-getter-drops-incomplete-route",
+      "selected": "wording editor output",
+      "why": "Changes punctuation on the named-import route. Producer, Value target and static flag remain.",
+      "candidate_sha256": "0548dbe3d696de7bcf75850648fd74a0b5631bc4eba16d1543d1bd9c961ebb18",
+      "raw_proposal_sha256": "75a880f45ab02ecc29654f4887d7bddc43765e284789862f801b0918bc7edbb4",
+      "selected_sha256": "75a880f45ab02ecc29654f4887d7bddc43765e284789862f801b0918bc7edbb4"
+    },
+    {
+      "bug": "unproven-override-family-certifies-empty",
+      "selected": "wording editor output",
+      "why": "Removes temporal emphasis. The item still states that the unproven path returns an empty vector in Some and names its consumer.",
+      "candidate_sha256": "e3b1f5c97bcf02a1cdc20edfb0b4a58c9e084b60b0eb36462017899005054b8c",
+      "raw_proposal_sha256": "513c3242a07f7ce632a4b7d3f79caaaa545a780d5a9f081e2e4b457175c1e7c1",
+      "selected_sha256": "513c3242a07f7ce632a4b7d3f79caaaa545a780d5a9f081e2e4b457175c1e7c1"
+    },
+    {
+      "bug": "js-synthetic-owner-leaks-file-summary",
+      "selected": "wording editor output",
+      "why": "Drops a connector while keeping the source-retrieval relation and the unchanged extent computation.",
+      "candidate_sha256": "3587b9c753e8a1522ae418525e3b8ddd10c98cc0d28a2fe957418a29bd71ff6d",
+      "raw_proposal_sha256": "bc35e4cfbd944008184cf68b7dad2e3d700f575bedcbdbb1e47eb5b0667c9957",
+      "selected_sha256": "bc35e4cfbd944008184cf68b7dad2e3d700f575bedcbdbb1e47eb5b0667c9957"
+    }
+  ],
+  "proposals": 15,
+  "accepted": 13,
+  "original_wording_retained": 2,
+  "all_flagged_in_recheck": true
+}

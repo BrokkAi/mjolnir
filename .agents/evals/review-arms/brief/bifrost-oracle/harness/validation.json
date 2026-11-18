@@ -1,0 +1,24 @@
+{
+  "recorded_at": "2026-11-17T18:28:04.228356+00:00",
+  "all_prior_files_unchanged": 6862,
+  "frozen_BT_inputs_unchanged": 17,
+  "oracle_roles_started": 0,
+  "tests": {
+    "oracle_lifecycle": 2,
+    "writer_terra": 9,
+    "runtime_source": 2,
+    "verifier_instance": 2,
+    "reviewer_workspace": 2,
+    "scoring_interfaces": "all methods passed; one reference fixture corrected and only failing method rerun"
+  },
+  "source_ast": "pass",
+  "initial_failures_preserved": ".mj/agents/24873100ef4a5d06e031541f9a4c328d/oracle-construction-test-evidence.md",
+  "parent_review_corrections": [
+    "oracle report initialized after shared calculations",
+    "complete reference fixture and required handcheck",
+    "existing blank separators retained",
+    "canonical newline before leak hash",
+    "explicit output cwd and historical reads"
+  ],
+  "no_live_calls": true
+}

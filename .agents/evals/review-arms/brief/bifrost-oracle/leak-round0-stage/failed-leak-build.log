@@ -1,0 +1,5 @@
+usage: brief_writer_terra.py [-h] [--round {0,1}] [--name NAME]
+                             [--kind {blind-terra,blind}]
+                             [--bugs-from BUGS_FROM]
+                             {leak-build,leak-collect,rewrite-build,rewrite-collect,contains-build,usage,readout}
+brief_writer_terra.py: error: argument --kind: invalid choice: 'oracle' (choose from blind-terra, blind)

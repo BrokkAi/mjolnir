@@ -19,6 +19,9 @@ a brief leaks when either says caught or partial.
 
 Set REVIEW_ARMS_SETS to select frozen P/S/C membership.
 Leak/rewrite steps also accept --kind blind --bugs-from jobs.json --name <stage>.
+Oracle edits (brief/PLAN-bifrost-oracle.md) use --kind oracle --bugs-from jobs-ot.json
+--brief-root <dir with <bug>/candidate.md>: round 1 judges <bug>/final.md, verdict records go to
+briefs/<stage>-leak-records/<bug>/blind-leak.json, and an accepted rewrite becomes final.md.
 Use the same flags on every step. This selects only the jobs' known-bug diffs,
 uses briefs/<stage>-leak-<round> and briefs/<stage>-rewrite, and validates saved
 scope before consuming results. A still-leaking round 1 result is reported.
@@ -107,7 +110,14 @@ def rewrite_dir(scope):
     return ROOT / "briefs" / f"{scope['name']}-rewrite"
 
 
-def round_scope(kind, name, bugs_from):
+def round_scope(kind, name, bugs_from, brief_root=None):
+    if kind == "oracle":
+        jobs = json.loads(bugs_from.read_text())
+        ids = [j["bug"] for j in jobs]
+        if not ids or len(ids) != len(set(ids)) or any(j.get("arm") != "OT" for j in jobs):
+            raise SystemExit("oracle leak scope needs unique OT jobs")
+        return {"kind": kind, "name": name or kind, "diffs": {b: "P" for b in ids},
+                "brief_root": str(brief_root.resolve())}
     selected = diffs()
     if bugs_from is not None:
         bugs = {j["bug"] for j in json.loads(bugs_from.read_text())}
@@ -115,6 +125,20 @@ def round_scope(kind, name, bugs_from):
             raise SystemExit(f"empty or unknown leak subset: {sorted(bugs - selected.keys())}")
         selected = {b: g for b, g in selected.items() if b in bugs}
     return {"kind": kind, "name": name or kind, "diffs": selected}
+
+
+def brief_path(scope, bug, n=0):
+    """The text a leak round judges: oracle round 1 judges the accepted rewrite where one exists."""
+    if scope["kind"] == "oracle":
+        root = pathlib.Path(scope["brief_root"]) / bug
+        return root / ("final.md" if n == 1 and (root / "final.md").exists() else "candidate.md")
+    return out_dir(scope) / bug / "brief.md"
+
+
+def record_path(scope, bug):
+    if scope["kind"] == "oracle":
+        return ROOT / "briefs" / f"{scope['name']}-leak-records" / bug / "blind-leak.json"
+    return out_dir(scope) / bug / "blind-leak.json"
 
 
 def check_scope(directory, scope, *, create=False, legacy=False):
@@ -134,9 +158,17 @@ def leak_build(n, scope):
     corpus = driver.CORPUS
     if n == 0:
         bugs = list(scope["diffs"])
+    elif scope["kind"] == "oracle":
+        bugs = []
+        for b in scope["diffs"]:
+            rec = record_path(scope, b)
+            if rec.exists() and json.loads(rec.read_text())["rounds"][0]["label"] != "missed":
+                if not (pathlib.Path(scope["brief_root"]) / b / "final.md").is_file():
+                    raise SystemExit(f"{b}: wording rewrite is missing")
+                bugs.append(b)
     else:
         bugs = [b for b in scope["diffs"] if (out / b / "brief-writer.md").exists()]
-    missing = [b for b in bugs if not (out / b / "done.json").exists()]
+    missing = [] if scope["kind"] == "oracle" else [b for b in bugs if not (out / b / "done.json").exists()]
     if missing:
         raise SystemExit(f"briefs not written yet: {missing}")
     d = leak_dir(n, scope)
@@ -145,7 +177,7 @@ def leak_build(n, scope):
     check_scope(d, scope, create=True)
     batch, key = [], {}
     for b in bugs:
-        brief = (out / b / "brief.md").read_text()
+        brief = brief_path(scope, b, n).read_text()
         oid = secrets.token_hex(8)
         key[oid] = {"bug": b, "brief_sha256": sha(brief)}
         batch.append({"bug": b, **{k: corpus[b][k] for k in CORPUS_FIELDS},
@@ -157,7 +189,6 @@ def leak_build(n, scope):
 
 
 def leak_collect(n, scope, *, legacy=False):
-    out = out_dir(scope)
     d = leak_dir(n, scope)
     check_scope(d, scope, legacy=legacy)
     key = json.loads((d / "key.json").read_text())
@@ -174,14 +205,14 @@ def leak_collect(n, scope, *, legacy=False):
         vs = judged[oid]
         assert sorted(v["judge"] for v in vs) == ["A", "B"], (k["bug"], vs)
         assert all(v.get("bug") == k["bug"] and v["label"] in ("caught", "partial", "missed") for v in vs), "wrong bug or invalid leak label"
-        assert sha((out / k["bug"] / "brief.md").read_text()) == k["brief_sha256"], \
-            f"{k['bug']}: brief.md changed since leak round {n} was built"
+        assert sha(brief_path(scope, k["bug"], n).read_text()) == k["brief_sha256"], \
+            f"{k['bug']}: brief changed since leak round {n} was built"
     rows = []
     for oid, k in key.items():
         b, vs = k["bug"], judged[oid]
         label = "missed" if all(v["label"] == "missed" for v in vs) else \
             "caught" if any(v["label"] == "caught" for v in vs) else "partial"
-        path = out / b / "blind-leak.json"
+        path = record_path(scope, b)
         record = json.loads(path.read_text()) if path.exists() else {"id": b, "group": scope["diffs"][b], "rounds": []}
         record["rounds"] = [r for r in record["rounds"] if r["round"] != n] + [
             {"round": n, "label": label, "brief_sha256": k["brief_sha256"], "judge_dir": str(d),
@@ -206,17 +237,16 @@ The brief is brief-in.md in this folder. Write the rewritten brief to brief.md i
 
 
 def rewrite_build(scope):
-    out = out_dir(scope)
     base = rewrite_dir(scope)
     check_scope(base, scope, create=True)
     made = 0
     for b in scope["diffs"]:
-        record = json.loads((out / b / "blind-leak.json").read_text())
+        record = json.loads(record_path(scope, b).read_text())
         first = next(r for r in record["rounds"] if r["round"] == 0)
         if first["label"] == "missed" or (base / b).exists():
             continue
         u = base / b
-        brief = (out / b / "brief.md").read_text()
+        brief = brief_path(scope, b).read_text()
         assert sha(brief) == first["brief_sha256"], f"{b}: brief.md is not the text judged in round 0"
         (u / "brief-in.md").parent.mkdir(parents=True, exist_ok=True)
         (u / "brief-in.md").write_text(brief)
@@ -238,15 +268,24 @@ def rewrite_collect(scope, *, legacy=False):
             print(json.dumps({"bug": b, "state": "no rewrite fetched"}))
             continue
         text = out.read_text()
+        if scope["kind"] == "oracle":
+            text = text.rstrip() + "\n"
         original = (u / "brief-in.md").read_text()
-        record = json.loads((d / "blind-leak.json").read_text())
+        record = json.loads(record_path(scope, b).read_text())
         first = next(r for r in record["rounds"] if r["round"] == 0)
         assert sha(original) == first["brief_sha256"], f"{b}: rewrite input is not the round0 judged text"
-        current = (d / "brief.md").read_text()
+        current = brief_path(scope, b).read_text()
         assert current in (original, text), f"{b}: brief changed since rewrite was prepared"
         problems = brief_driver.lint(text, driver.CORPUS[b])
         if problems:
             print(json.dumps({"bug": b, "state": "rewrite fails lint", "problems": problems}))
+            continue
+        if scope["kind"] == "oracle":
+            final_path = pathlib.Path(scope["brief_root"]) / b / "final.md"
+            if final_path.exists() and final_path.read_text() != text:
+                raise SystemExit(f"{b}: refusing to replace a different accepted rewrite")
+            final_path.write_text(text)
+            print(json.dumps({"bug": b, "state": "candidate rewritten", "brief_sha256": sha(text)}))
             continue
         if not (d / "brief-writer.md").exists():
             (d / "brief-writer.md").write_text((u / "brief-in.md").read_text())
@@ -390,6 +429,68 @@ def observations(round_name, groups, arm_conditions):
                         "partial_rate": statistics.fmean(final[oid] == "partial"
                                                          for oid, _ in cells[(bug, cond)])}
                   for arm, cond in arm_conditions.items()} for bug in bugs}
+
+
+def compare_same_sessions(round_name, reference_round, bugs, arms=("A", "BT"), model=REVIEW_MODEL):
+    """Compare final labels for identical (bug, condition, session) observations across rounds."""
+    if not bugs or not arms or set(arms) - {"A", "BT"}:
+        raise SystemExit("same-session comparison needs bugs and A/BT arms")
+    rounds = (round_name, reference_round)
+    selected, finals = {}, {}
+    conditions = {"A": "no-brief", "BT": "blind"}
+    for name in rounds:
+        key, finals[name] = judged_round(name)
+        cells = {}
+        for oid, k in key.items():
+            if k["model"] != model or k["bug"] not in bugs or k["arm"] not in arms:
+                continue
+            arm = k["arm"]
+            if k["condition"] != conditions[arm]:
+                raise SystemExit(f"{name}: wrong condition for {arm}: {oid}")
+            identity = (k["bug"], arm, k["session"])
+            if identity in cells:
+                raise SystemExit(f"{name}: duplicate same-session cell: {identity}")
+            cells[identity] = oid
+        selected[name] = cells
+        for bug in bugs:
+            for arm in arms:
+                count = sum(identity[:2] == (bug, arm) for identity in cells)
+                if count != 3:
+                    raise SystemExit(f"{name}: expected exactly 3 {arm} sessions for {bug}, found {count}")
+    current, reference = (selected[name] for name in rounds)
+    if current.keys() != reference.keys():
+        raise SystemExit("same-session comparison needs identical keys; "
+                         f"only {round_name}: {sorted(current.keys() - reference.keys())}; "
+                         f"only {reference_round}: {sorted(reference.keys() - current.keys())}")
+    per_diff = []
+    for bug in bugs:
+        row = {"bug": bug, "arms": {}}
+        for arm in arms:
+            ids = sorted(i for i in current if i[:2] == (bug, arm))
+            if not ids:
+                raise SystemExit(f"{bug}: no same-session rows for {arm}")
+            labels = [{"session": i[2], "round": finals[round_name][current[i]],
+                       "reference": finals[reference_round][reference[i]]} for i in ids]
+            row["arms"][arm] = {"sessions": len(ids), "labels": labels,
+                                "catch_rate": {name: statistics.fmean(
+                                    (r["round"] if name == round_name else r["reference"]) == "caught"
+                                    for r in labels) for name in rounds}}
+        per_diff.append(row)
+    summary, caveats = {}, []
+    for arm in arms:
+        n = sum(r["arms"][arm]["sessions"] for r in per_diff)
+        # Exact rational comparison keeps the registered strict >10-point boundary exact.
+        delta = sum((Fraction(sum(x["round"] == "caught" for x in r["arms"][arm]["labels"]),
+                               r["arms"][arm]["sessions"])
+                     - Fraction(sum(x["reference"] == "caught" for x in r["arms"][arm]["labels"]),
+                                r["arms"][arm]["sessions"])) for r in per_diff) / len(bugs)
+        changed = sum(x["round"] != x["reference"] for r in per_diff for x in r["arms"][arm]["labels"])
+        summary[arm] = {"sessions": n, "difference_points": float(100 * delta),
+                        "changed_labels": changed, "differs_over_10_points": abs(delta) > Fraction(1, 10)}
+        if summary[arm]["differs_over_10_points"]:
+            caveats.append(f"{arm}: {round_name} vs {reference_round} differs by {float(100 * delta):.1f} points")
+    return {"reference_round": reference_round, "reviewer_model": model, "diffs": len(bugs),
+            "arms": summary, "caveats": caveats, "per_diff": per_diff}
 
 
 def readout_data(round_name, groups, study=TERRA):
@@ -605,21 +706,24 @@ def main():
     p.add_argument("--writer", choices=sorted(STUDIES), default="terra")
     p.add_argument("--round", type=int, choices=[0, 1], default=0)
     p.add_argument("--name", help="readout judging round, or path prefix for leak/rewrite")
-    p.add_argument("--kind", choices=("blind", *(s["kind"] for s in STUDIES.values())),
+    p.add_argument("--kind", choices=("blind", "oracle", *(s["kind"] for s in STUDIES.values())),
                    help="leak/rewrite brief kind (default: the selected writer's kind)")
     p.add_argument("--bugs-from", type=pathlib.Path, help="leak/rewrite jobs whose diffs are the explicit subset")
+    p.add_argument("--brief-root", type=pathlib.Path, help="oracle leak/rewrite: root containing <bug>/candidate.md")
     a = p.parse_args()
     study = STUDIES[a.writer]
     leak_steps = ("leak-build", "leak-collect", "rewrite-build", "rewrite-collect")
-    if (a.kind or a.bugs_from) and a.step not in leak_steps:
-        p.error("--kind and --bugs-from apply only to leak/rewrite steps")
+    if (a.kind or a.bugs_from or a.brief_root) and a.step not in leak_steps:
+        p.error("--kind, --bugs-from and --brief-root apply only to leak/rewrite steps")
+    if a.kind == "oracle" and (a.brief_root is None or a.bugs_from is None):
+        p.error("--kind oracle requires --brief-root and --bugs-from")
     if a.step in leak_steps and a.name is not None and (
             pathlib.Path(a.name).name != a.name or a.name in ("", ".", "..")):
         p.error("--name must be a single round path component")
 
     if a.step in leak_steps:
         kind = a.kind or study["kind"]
-        scope = round_scope(kind, a.name, a.bugs_from)
+        scope = round_scope(kind, a.name, a.bugs_from, a.brief_root)
         legacy = (kind == study["kind"] and a.name is None and a.bugs_from is None
                   and not os.environ.get("REVIEW_ARMS_SETS"))
         {"leak-build": lambda: leak_build(a.round, scope),
