@@ -6601,6 +6601,17 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         }));
         source
     };
+    // Record the size the running container actually has, separately from the
+    // session's next-creation request.
+    let to_applied_size = |source: &mut mj_core::state::SessionRecord, allocation| {
+        let mut runtime = mj_core::state::TargetRuntimeSettings::from(&config.targets["podman"]);
+        runtime.container_settings = Some(mj_core::state::ContainerSettings {
+            resource_allocation: allocation,
+            additional_mounts: Vec::new(),
+            default_image: None,
+        });
+        source.target_runtime = Some(runtime.into());
+    };
     // A sealed Move of `sealed`, with the container settings acceptance
     // records, so the retry path reads exactly what a real Move stores.
     let prepared_operation = |sealed: &mj_core::state::MoveSelection| {
@@ -6888,6 +6899,74 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         )
         .unwrap()
     );
+    // A container whose next-creation size was cleared but which is running at
+    // the host default: clearing that request is what this state records, and
+    // resolving it to the size the container already has keeps the
+    // environment. Deciding before resolving would call it a rebuild and then
+    // seal a selection that says otherwise, which execution refuses.
+    let mut cleared_request = container_source(None);
+    to_applied_size(&mut cleared_request, container_size(12, 24));
+    let mut defaulted_in_place = selection("podman", None, false);
+    let (kept, sized_by_default) = super::resolve_move_size_for_environment(
+        &cleared_request,
+        &mut defaulted_in_place,
+        &state,
+        &config.targets,
+        &config.targets["podman"],
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(
+        kept,
+        "the size it resolves to is the one the container already has"
+    );
+    assert!(sized_by_default);
+    assert_eq!(
+        defaulted_in_place.resource_allocation,
+        container_size(12, 24)
+    );
+    // Execution re-decides from the sealed selection and must agree.
+    assert!(
+        super::move_in_place_for_record(
+            &cleared_request,
+            &defaulted_in_place,
+            &config.targets,
+            false,
+            None
+        )
+        .unwrap()
+    );
+    // A device default the container does not have is still a resize.
+    let mut resized = container_source(None);
+    to_applied_size(&mut resized, container_size(4, 8));
+    let mut resized_selection = selection("podman", None, false);
+    let (kept, _) = super::resolve_move_size_for_environment(
+        &resized,
+        &mut resized_selection,
+        &state,
+        &config.targets,
+        &config.targets["podman"],
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(!kept);
+    assert_eq!(
+        resized_selection.resource_allocation,
+        container_size(12, 24)
+    );
+    assert!(
+        !super::move_in_place_for_record(
+            &resized,
+            &resized_selection,
+            &config.targets,
+            false,
+            None
+        )
+        .unwrap()
+    );
+
     // The same profile-only Move that cannot keep its environment is sized for
     // the container it has to create, and stays a rebuild when re-decided.
     let mut provisioned = selection("podman", None, false);

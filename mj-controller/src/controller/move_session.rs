@@ -3312,18 +3312,26 @@ fn resolve_move_size_for_environment(
     previous: Option<&MoveOperation>,
 ) -> Result<(bool, bool)> {
     let sealed = previous.is_some_and(MoveOperation::holds_source_environment);
-    // A clear request means "the destination's default", so it is resolved
-    // before the decision: when that default is the size the container
-    // already has, the environment is unchanged.
-    let mut sized_by_destination_default = selection.clear_resource_allocation
-        && !sealed
-        && resolve_move_destination_size(source, selection, state, target);
-    let in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+    // A size is resolved before the decision wherever comparing sizes means
+    // something: the environment's own size is known, so a request that
+    // resolves to the size it already has is not a change. That covers a
+    // clear request, and a request that leaves the size out while the record's
+    // own next-creation size was cleared -- rebuilding a container to the size
+    // it already has would contradict the decision this very selection states.
+    let comparable = mj_core::state::applied_container_settings(source)
+        .resource_allocation
+        .is_some();
+    let mut sized_by_destination_default =
+        !sealed && comparable && resolve_move_destination_size(source, selection, state, target);
+    let mut in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
     // A Move that provisions needs a size to create the container with. It
-    // takes the inherited one, else the destination's default.
+    // takes the inherited one, else the destination's default. Sizing it can
+    // also settle the decision: a container whose environment the resolution
+    // made identical to its own is kept, not rebuilt.
     if !in_place && !sealed && selection.resource_allocation.is_none() {
         sized_by_destination_default |=
             resolve_move_destination_size(source, selection, state, target);
+        in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
     }
     Ok((in_place, sized_by_destination_default))
 }
