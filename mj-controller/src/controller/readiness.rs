@@ -17,7 +17,7 @@ use mj_core::relay::{HarnessPreparation, RelayExecutionState};
 
 use super::worker_binary::{WorkerProbe, probe_worker};
 
-pub(crate) use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
+pub use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 /// How long a worker that has said nothing at all is waited for. A worker that
 /// is recording startup progress is waited for longer; see
@@ -55,23 +55,7 @@ pub(super) enum NativeSessionReadiness {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HarnessPreparationFailure {
-    pub step: String,
-    pub error: String,
-}
-
-impl std::fmt::Display for HarnessPreparationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "harness preparation failed at {}: {}",
-            self.step, self.error
-        )
-    }
-}
-
-impl std::error::Error for HarnessPreparationFailure {}
+pub use mj_session_types::HarnessPreparationFailure;
 
 pub(super) trait NativeSessionProbe {
     fn protocol_version(&self) -> u32 {

@@ -1,9 +1,9 @@
 //! Terminal-specific adapters for controller background feeds.
 use crate::dashboard::io::{DashboardIoUpdate, report};
 use mj_controller::controller::Controller;
-pub(crate) use mj_controller::pollers::*;
 use mj_controller::session_manager::ViewError;
 use mj_controller::targets::CancellableProcessExecutor;
+pub(crate) use mj_daemon::pollers::*;
 use mj_tui::DashboardState;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;

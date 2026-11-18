@@ -17,14 +17,17 @@ path = "src/main.rs"
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-daemon/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
 tempfile.workspace = true
 mj-core.workspace = true
+mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-controller.workspace = true
+mj-setup.workspace = true
+mj-daemon.workspace = true
 mj-chat.workspace = true
 mj-tui.workspace = true
 # `mj acp` serves the protocol on its own standard input and output.
@@ -70,6 +73,7 @@ windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 # The ACP adapter test launches `mj acp` as an agent subprocess.
 agent-client-protocol = { workspace = true, features = ["process"] }
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-build-id = { workspace = true, features = ["test-hooks"] }
 # The API client test answers itself from a canned in-process router.
 axum.workspace = true
 # The pinned-certificate tests serve HTTPS with generated certificates.

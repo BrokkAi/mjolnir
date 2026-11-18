@@ -136,14 +136,14 @@ impl BuildIdentity {
 pub fn this_build() -> &'static BuildIdentity {
     static THIS_BUILD: std::sync::OnceLock<BuildIdentity> = std::sync::OnceLock::new();
     THIS_BUILD.get_or_init(|| {
-        let revision = mj_core::worker_build::BUILD_ID
+        let revision = mj_core::worker_build::build_id()
             .rsplit_once('+')
             .map(|(_, revision)| revision.to_ascii_lowercase());
         BuildIdentity {
             version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
                 .expect("the workspace version is semver"),
             revision,
-            commit_time: mj_core::worker_build::BUILD_COMMIT_TIME.parse().ok(),
+            commit_time: mj_core::worker_build::commit_time().parse().ok(),
             executable_modified: running_executable_modified(),
         }
     })

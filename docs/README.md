@@ -16,7 +16,7 @@ path prefix.
 
 ## Target guides
 
-`mj-controller/docs/PODMAN.md` and `mj-controller/docs/DOCKER.md` at the repository
+`mj-targets/docs/PODMAN.md` and `mj-targets/docs/DOCKER.md` at the repository
 root are the canonical embedded runtime guides; this directory owns `SSH.md`
 and `AWS.md`. The `predev`, `precheck`, and `prebuild` hooks copy them into
 `src/content/docs/` with Starlight frontmatter. Edit the uppercase source,
@@ -50,7 +50,7 @@ page. Edit that source instead of `src/content/docs/configuration.md`.
 | Commands and flags | `mj-cli/src/main.rs`, `mj-cli/src/api_commands.rs`, `mj-cli/src/acp.rs`; `mj --help` | CLI reference, ACP agent, README examples |
 | Configuration fields and defaults | `mj-core/src/config.rs`, `mj-core/src/config/` | Configuration reference and affected task guide |
 | Harness capabilities and launch policy | `mj-core/src/config/harness.rs`, `mj-core/src/harness_runtime.rs`, worker launch code | Profiles, targets, overview, security |
-| Session and workspace lifecycle | `mj-controller/src/controller/`, `mj-controller/src/daemon/`, `mj-controller/src/server/api/` | Sessions, durability, workspaces, CLI and API references |
+| Session and workspace lifecycle | `mj-controller/src/controller/`, `mj-daemon/src/daemon/`, `mj-server/src/server/api/` | Sessions, durability, workspaces, CLI and API references |
 | Packaging and prerequisites | `install.sh`, `scripts/install.sh`, `npm/scripts/package-release.mjs`, Cargo manifests | Install, README, contributing guide |
 
 Paths in that table are relative to the repository root. Treat the source as

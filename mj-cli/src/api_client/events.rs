@@ -40,7 +40,7 @@ impl EventDecoder {
                 if self.kind == "stream_error" {
                     bail!("{}", self.data.trim_end());
                 }
-                if self.kind == mj_controller::server::api::DAEMON_HANDOFF_CODE {
+                if self.kind == mj_daemon::server::api::DAEMON_HANDOFF_CODE {
                     let Some(cursor) = self.id else {
                         bail!("the daemon handoff announcement names no event ID");
                     };

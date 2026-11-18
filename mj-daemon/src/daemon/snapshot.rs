@@ -1,0 +1,519 @@
+use super::*;
+
+/// Derived worker facts, rebuilt on attachment. Records and configuration are
+/// read afresh when retrying work after gate contention or a policy deadline.
+pub(super) struct BackgroundPolicyState {
+    quiet: bool,
+    checkpoint_wait: Option<mj_core::activity::CheckpointWait>,
+    latest_completed_turn_ordinal: Option<u64>,
+    worker_build: Option<String>,
+    /// Why the worker is not replaceable while the session is otherwise idle;
+    /// empty otherwise. Kept to log a change once, not on every view.
+    idle_replacement_blockers: Vec<&'static str>,
+}
+
+/// Whether the daemon keeps a routine recovery copy of the session. A
+/// reviewer is disposable: its handback is its output, and the review host
+/// destroys it once its role has an outcome, so a copy of it only moves bytes
+/// for a session that is about to be destroyed (#1580).
+fn keeps_recovery_copies(
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
+    session_id: &str,
+) -> bool {
+    subagents
+        .get(session_id)
+        .is_none_or(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
+}
+
+impl RuntimeState {
+    fn observe_background_policy(
+        &self,
+        session: &SessionRecord,
+        config: &Config,
+        policy: &BackgroundPolicyState,
+        recovery_copies: bool,
+    ) {
+        if policy.quiet {
+            self.worker_upgrade_observer
+                .observe(WorkerUpgradeObservation {
+                    session: session.clone(),
+                    config: config.clone(),
+                    worker_build: policy.worker_build.clone(),
+                    quiet: true,
+                });
+        }
+        if recovery_copies {
+            self.recovery_observer.observe(RecoveryObservation {
+                checkpoint_wait: policy.checkpoint_wait,
+                session: session.clone(),
+                config: config.clone(),
+                latest_completed_turn_ordinal: policy.latest_completed_turn_ordinal,
+            });
+        }
+    }
+
+    /// Quiet workers need no new view to retry a skipped or delayed operation.
+    /// This only queues observations; coordinators perform the actual I/O.
+    pub(super) fn refresh_background_policies(&self) {
+        let mut owner = self.owner();
+        let records = owner.controller().state.sessions.clone();
+        let config = owner.controller().config.clone();
+        let subagents = owner.controller().state.subagents.clone();
+        owner.background_policies.retain(|session_id, policy| {
+            let Some(session) = records
+                .get(session_id)
+                .filter(|session| session.state.has_live_worker())
+            else {
+                return false;
+            };
+            self.observe_background_policy(
+                session,
+                &config,
+                policy,
+                keeps_recovery_copies(&subagents, session_id),
+            );
+            true
+        });
+    }
+
+    pub async fn reload_controller(&self) -> Result<()> {
+        // Serialize installs so an earlier phone publication cannot overwrite
+        // a later completed lifecycle with the controller snapshot it loaded.
+        let mut inactivity = self.config_mutation.lock().await;
+        if self.committed.is_some() {
+            let config = tokio::task::spawn_blocking(Config::load)
+                .await
+                .context("daemon configuration reader panicked")??;
+            self.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            self.owner().install_config(config);
+        } else {
+            let controller_loader = self.controller_loader;
+            let controller = tokio::task::spawn_blocking(controller_loader)
+                .await
+                .context("daemon controller loader panicked")??;
+            self.configure_inactivity(&mut inactivity, controller.config.advanced.auto_afk_minutes);
+            self.owner().install_controller(controller);
+        }
+        self.publish_revision();
+        Ok(())
+    }
+
+    /// Definitive missing-target evidence belongs to the daemon, including
+    /// when no terminal is attached. Generic connection failures stay transient.
+    pub(super) fn missing_target_record(
+        &self,
+        session_id: &str,
+        view: &ManagedSessionView,
+    ) -> Option<(String, String)> {
+        let Some(ViewError::TargetMissing(detail)) = &view.error else {
+            return None;
+        };
+        if view.connected {
+            return None;
+        }
+        let controller_owner = self.owner();
+        if controller_owner
+            .lifecycle
+            .get(session_id)
+            .is_some_and(|active| {
+                active.is_running()
+                    || (active.kind == LifecycleKind::UpgradeContainer
+                        && active.restart_intent.is_some())
+            })
+        {
+            return None;
+        }
+        let controller = controller_owner.controller();
+        let session = controller.state.sessions.get(session_id)?;
+        if !matches!(
+            session.state,
+            SessionState::Running | SessionState::Disconnected
+        ) {
+            return None;
+        }
+        Some((detail.clone(), session.updated_at.clone()))
+    }
+
+    pub(super) async fn persist_missing_target(
+        self: &Arc<Self>,
+        session_id: &str,
+        detail: String,
+        observed_updated_at: String,
+    ) {
+        let mut failure_reported = false;
+        let (changed, committed_at) = loop {
+            // This timestamp is the optimistic revision of this exact write.
+            let updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            let result = blocking({
+                let session_id = session_id.to_owned();
+                let detail = detail.clone();
+                let observed_updated_at = observed_updated_at.clone();
+                let updated_at = updated_at.clone();
+                move || {
+                    mj_controller::database::mark_session_target_missing_if_current(
+                        &session_id,
+                        &detail,
+                        &updated_at,
+                        &observed_updated_at,
+                    )
+                }
+            })
+            .await;
+            match result {
+                Ok(changed) => break (changed, updated_at),
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        };
+        // Keep the committed outcome through reload retries. Rewriting would
+        // now return None and lose the one-time notice or Lost cleanup.
+        loop {
+            match self.reload_controller().await {
+                Ok(()) => break,
+                Err(error) => {
+                    self.report_missing_target_retry(session_id, &error, &mut failure_reported);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        }
+        let still_current = {
+            let owner = self.owner();
+            owner
+                .controller()
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| {
+                    Some(session.state) == changed && session.updated_at == committed_at
+                })
+        };
+        if let Some(state) = changed.filter(|_| still_current) {
+            // A lost session has no checkpoint and no target, so its record
+            // offers nothing but Destroy. Report it once and discard it
+            // instead of leaving a tombstone behind.
+            if state == SessionState::Lost {
+                self.discard_lost_session(session_id.to_owned()).await;
+            } else {
+                self.push_notice(session_id, detail);
+            }
+        }
+    }
+
+    fn report_missing_target_retry(
+        &self,
+        session_id: &str,
+        error: &anyhow::Error,
+        reported: &mut bool,
+    ) {
+        tracing::warn!(%session_id, %error, "could not persist missing worker target; retrying");
+        if !*reported {
+            self.push_notice(
+                session_id,
+                format!("Could not record missing session target: {error:#}; retrying"),
+            );
+            *reported = true;
+        }
+    }
+
+    /// Capture durable/lifecycle ownership for reported harness failures.
+    /// Current workers decide expiry; only old protocols use the actor clock.
+    pub(super) fn harness_failure_record(&self, id: &str) -> Option<String> {
+        let owner = self.owner();
+        if owner
+            .lifecycle
+            .get(id)
+            .is_some_and(|active| active.is_running())
+            || owner.close_requested.contains(id)
+        {
+            return None;
+        }
+        let record = owner.controller().state.sessions.get(id)?;
+        (record.state == SessionState::Running).then(|| record.updated_at.clone())
+    }
+
+    /// Fail one session whose harness never became usable, so it stops looking
+    /// like a session a driver can wait for.
+    pub(super) async fn fail_unready_session(
+        &self,
+        session_id: String,
+        failure: mj_controller::session_manager::HarnessStartupFailure,
+    ) -> Result<bool> {
+        let _activity = mj_controller::upgrade::activity_unless_draining("harness failure record")?;
+        if self.harness_failure_record(&session_id).as_deref()
+            != Some(failure.observed_updated_at.as_str())
+        {
+            return Ok(false);
+        }
+        let cause = failure.cause();
+        let observed_updated_at = failure.observed_updated_at.clone();
+        tracing::warn!(%session_id, "{cause}");
+        let applied = blocking({
+            let session_id = session_id.clone();
+            let cause = cause.clone();
+            let activity = _activity.clone();
+            move || {
+                let _activity = activity;
+                let mut controller = Controller::load()?;
+                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+            }
+        })
+        .await;
+        let applied = applied?;
+        if applied {
+            if let Err(error) = self.reload_controller().await {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
+            }
+            self.push_notice(&session_id, cause);
+            self.publish_revision();
+        }
+        Ok(applied)
+    }
+
+    pub(super) async fn publish_session(
+        self: &Arc<Self>,
+        session_id: String,
+        view: ManagedSessionView,
+    ) -> Result<()> {
+        let connected = view.connected;
+        let has_snapshot = view.snapshot.is_some();
+        tracing::debug!(
+            %session_id,
+            connected,
+            has_snapshot,
+            "daemon received a session view"
+        );
+        let recovered_failure = {
+            let mut owner = self.owner();
+            let controller = owner.controller();
+            if !controller.state.sessions.contains_key(&session_id)
+                || !owner.runs_relay_actor(&session_id)
+            {
+                return Ok(());
+            }
+            // All prompt sources and harness-initiated turns reach this
+            // projection publication. Compare start positions with the last
+            // observed frontier, not activity: a running turn predating the
+            // failure cannot retire it, nor can its completion. The window
+            // retains starts even when a whole turn coalesces into one update.
+            // The first attachment establishes a baseline; replay is not a
+            // newly observed turn start.
+            let recovered_failure = view.snapshot.as_ref().and_then(|snapshot| {
+                let previous = owner.sessions.get(&session_id)?;
+                previous.operational.as_ref()?;
+                let start = snapshot.window.latest_turn_start_position?;
+                let record = controller.state.sessions.get(&session_id)?;
+                let error = record.public_error()?;
+                (start > previous.projection_ordinal).then(|| error.to_owned())
+            });
+            if view.connected
+                && let Some(snapshot) = view.snapshot.as_ref()
+                && let Some(session) = controller.state.sessions.get(&session_id)
+                && session.state.has_live_worker()
+            {
+                let quiet = snapshot.operational.quiet();
+                if !quiet.is_yes() {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        reason = quiet.reason(),
+                        "session is not quiet; upgrade, checkpoint and move wait"
+                    );
+                }
+                let facts = snapshot.operational.facts();
+                // A busy session is not replaced, and that needs no comment.
+                // An idle one that is still not replaceable would otherwise
+                // be skipped without a trace (B-5).
+                let idle_replacement_blockers = if mj_core::activity::can_submit(&facts)
+                    && !mj_core::activity::safe_to_replace(&facts, session.harness_kind)
+                {
+                    mj_core::activity::replacement_blockers(&facts, session.harness_kind)
+                } else {
+                    Vec::new()
+                };
+                if !idle_replacement_blockers.is_empty()
+                    && owner
+                        .background_policies
+                        .get(&session_id)
+                        .is_none_or(|previous| {
+                            previous.idle_replacement_blockers != idle_replacement_blockers
+                        })
+                {
+                    tracing::info!(
+                        %session_id,
+                        harness = ?session.harness_kind,
+                        worker_build = ?snapshot.worker_build,
+                        reasons = ?idle_replacement_blockers,
+                        "an idle worker is not replaced"
+                    );
+                }
+                let policy = BackgroundPolicyState {
+                    idle_replacement_blockers,
+                    quiet: snapshot.operational.safe_to_replace(session.harness_kind),
+                    checkpoint_wait: snapshot
+                        .operational
+                        .routine_checkpoint_wait(session.harness_kind),
+                    latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),
+                    worker_build: snapshot.worker_build.clone(),
+                };
+                self.observe_background_policy(
+                    session,
+                    &controller.config,
+                    &policy,
+                    keeps_recovery_copies(&controller.state.subagents, &session_id),
+                );
+                owner.background_policies.insert(session_id.clone(), policy);
+            } else {
+                owner.background_policies.remove(&session_id);
+            }
+            owner.publish_view(session_id.clone(), view);
+            let profile_id = &owner.controller().state.sessions[&session_id].last_profile;
+            let published = owner
+                .sessions
+                .get(&session_id)
+                .filter(|view| view.connected);
+            let operational = published.and_then(|view| view.operational.as_ref());
+            let fingerprint = operational.and_then(|state| state.held_login_fingerprint.as_deref());
+            let retry_intent =
+                operational.and_then(|state| state.authentication_retry_intent.as_deref());
+            let publication = published.zip(operational).map(|(view, _)| {
+                mj_core::credentials::WorkerPublication::new(
+                    fingerprint,
+                    retry_intent,
+                    view.projection_ordinal,
+                )
+            });
+            // The runtime owner serializes view publication and retirement.
+            // The registry serializes this observation with delivery starts.
+            self.rejected_logins
+                .lock()
+                .expect("rejected logins poisoned")
+                .observe_worker(profile_id, &session_id, publication);
+            recovered_failure
+        };
+        if let Some(recorded_error) = recovered_failure {
+            let state = self.clone();
+            match mj_controller::upgrade::activity("lifecycle failure clear") {
+                Ok(upgrade_task) => {
+                    tokio::spawn(async move {
+                        let _upgrade_task = upgrade_task;
+                        state
+                            .clear_recorded_lifecycle_failure(&session_id, &recorded_error)
+                            .await;
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    %session_id,
+                    %error,
+                    "could not admit lifecycle failure clear"
+                ),
+            }
+        }
+        reach_test_hook("relay_projection_before_revision_publication").await?;
+        self.publish_revision();
+        Ok(())
+    }
+}
+
+impl RuntimeState {
+    /// Persist before publishing; the mutex orders concurrent operator toggles.
+    pub async fn set_operator_away(&self, away: bool) -> Result<()> {
+        let mut inactivity = self.config_mutation.lock().await;
+        let ids = self.persist_operator_away(away).await?;
+        inactivity.reset();
+        self.inactivity_changed.notify_one();
+        drop(inactivity);
+        self.deliver_operator_away(ids).await;
+        Ok(())
+    }
+
+    // Caller holds the inactivity/config coordinator through commit.
+    pub(super) async fn persist_operator_away(&self, away: bool) -> Result<Vec<String>> {
+        let auto_afk_window = self.with_config(|config| {
+            Duration::from_secs(u64::from(config.advanced.auto_afk_minutes) * 60)
+        });
+        let changed = tokio::task::spawn_blocking(move || {
+            mj_controller::database::set_operator_away(away, auto_afk_window)
+        })
+        .await
+        .context("operator away database writer panicked")??;
+        if !changed {
+            return Ok(Vec::new());
+        }
+        // The committed owner is refreshed on access; bootstrap tests have no
+        // committed feed and install the freshly loaded controller instead.
+        if self.committed.is_none() {
+            let load = self.controller_loader;
+            let controller = tokio::task::spawn_blocking(load).await??;
+            self.owner().install_controller(controller);
+        }
+        self.publish_revision();
+        let ids = self
+            .owner()
+            .sessions
+            .iter()
+            .filter(|(_, view)| {
+                view.connected
+                    && view
+                        .operational
+                        .as_ref()
+                        .and_then(|state| state.relay_protocol_version)
+                        .is_some_and(|version| {
+                            version >= mj_core::relay::RELAY_OPERATOR_AWAY_PROTOCOL
+                        })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        Ok(ids)
+    }
+
+    pub(super) async fn deliver_operator_away(&self, ids: Vec<String>) {
+        let mut deliveries = tokio::task::JoinSet::new();
+        for id in ids {
+            let manager = self.session_manager.clone();
+            deliveries.spawn(async move {
+                let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+                    if let Some(handle) = manager.find_session(id.clone()).await? {
+                        handle.sync_now().await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }).await;
+                if !matches!(delivered, Ok(Ok(()))) {
+                    tracing::warn!(session_id=%id, result=?delivered, "could not synchronize operator away setting; reconnect will retry");
+                }
+            });
+        }
+        while let Some(result) = deliveries.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "operator away delivery task failed");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_copy_tests {
+    use super::keeps_recovery_copies;
+    use mj_core::subagent::SubagentKind;
+
+    // A reviewer is destroyed by the review host once its role has an
+    // outcome; 209 of 215 reviewers in the #1580 incident had a recovery
+    // copy cancelled by their own close.
+    #[test]
+    fn a_reviewer_is_never_given_a_recovery_copy_but_other_sessions_are() {
+        let mut subagents = mj_core::snapshot_map::SnapshotMap::new();
+        for (id, kind) in [
+            ("reviewer", SubagentKind::Reviewer),
+            ("worker", SubagentKind::Worker),
+            ("oracle", SubagentKind::Oracle),
+        ] {
+            let mut record = crate::daemon::tests::runtime_test_subagent(id, "parent");
+            record.kind = kind;
+            subagents.insert(id.to_owned(), record.into());
+        }
+        assert!(!keeps_recovery_copies(&subagents, "reviewer"));
+        assert!(keeps_recovery_copies(&subagents, "worker"));
+        assert!(keeps_recovery_copies(&subagents, "oracle"));
+        assert!(keeps_recovery_copies(&subagents, "top-level-session"));
+    }
+}

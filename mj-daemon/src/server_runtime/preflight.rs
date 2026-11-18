@@ -1,0 +1,298 @@
+use super::*;
+
+/// Cancel the shared subprocess executor when its request owner goes away.
+pub(crate) struct ProcessCancellationGuard(pub(crate) Arc<AtomicBool>);
+
+impl Drop for ProcessCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Perform the preflight for a new session.
+///
+/// This runs on the blocking task owned by the phone server. Bare targets
+/// need the same directory-and-Git-HEAD validation as the dashboard. Isolated
+/// targets resolve every bundle repository to a network source and report the
+/// exact fetch branch and publication destinations. Local working-tree
+/// contents are never copied for this path.
+#[cfg(test)]
+pub(super) fn run_new_preflight(
+    config: Config,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+) -> Result<crate::server::PreflightNew> {
+    run_new_preflight_with_executor(
+        config,
+        bundle_id,
+        target_id,
+        project_directory,
+        &CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
+    )
+}
+
+/// Run one resume preflight on its own task, like a new-session preflight:
+/// the disk work stays off the feed loop, a disconnected browser cancels it,
+/// and the task is supervised by the same `JoinSet`.
+pub(super) fn spawn_resume_preflight(
+    jobs: &mut tokio::task::JoinSet<()>,
+    controller: &Controller,
+    request: crate::server::ResumePreflightRequest,
+    termination: &tokio_util::sync::CancellationToken,
+) {
+    let crate::server::ResumePreflightRequest {
+        session_id,
+        target_id,
+        mut reply,
+    } = request;
+    let config = controller.config.clone();
+    let state = controller.state.clone();
+    let termination = termination.clone();
+    jobs.spawn(async move {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
+        let mut blocking = tokio::task::spawn_blocking(move || {
+            run_resume_preflight(config, state, &session_id, &target_id, cancelled)
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = termination.cancelled() => None,
+            _ = reply.closed() => None,
+            answer = &mut blocking => Some(answer),
+        };
+        let Some(answer) = answer else {
+            drop(cancellation_guard);
+            if let Err(error) = blocking.await {
+                tracing::warn!(%error, "cancelled phone resume preflight task failed");
+            }
+            return;
+        };
+        let answer = answer.map_err(|error| {
+            tracing::warn!(%error, "phone resume preflight task failed");
+            PreflightFailure::Controller(format!("resume preflight task failed: {error}"))
+        });
+        if reply.send(answer).is_err() {
+            tracing::debug!("phone resume preflight reply dropped after client disconnect");
+        }
+    });
+}
+
+/// Answer one path-completion request on its own task.
+///
+/// Listing a directory can mean an SSH round trip, so it stays off the feed
+/// loop and runs under the same supervision, cap and cancellation as a
+/// preflight. A browser that abandons the request, or a controller that is
+/// shutting down, stops the child process rather than waiting for it.
+pub(super) fn spawn_path_completion(
+    jobs: &mut tokio::task::JoinSet<()>,
+    config: &Config,
+    request: crate::server::PathCompletionRequest,
+    termination: &tokio_util::sync::CancellationToken,
+) {
+    let crate::server::PathCompletionRequest {
+        host,
+        prefix,
+        kind,
+        mut reply,
+    } = request;
+    let config = config.clone();
+    let termination = termination.clone();
+    jobs.spawn(async move {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
+        let mut blocking = tokio::task::spawn_blocking(move || {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(5));
+            config_only_controller(config).complete_path(&host, &prefix, kind, &executor)
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = termination.cancelled() => None,
+            _ = reply.closed() => None,
+            answer = &mut blocking => Some(answer),
+        };
+        let Some(answer) = answer else {
+            drop(cancellation_guard);
+            if let Err(error) = blocking.await {
+                tracing::warn!(%error, "cancelled phone path completion task failed");
+            }
+            return;
+        };
+        let answer = match answer {
+            Ok(answer) => answer.map_err(|error| format!("{error:#}")),
+            Err(error) => {
+                tracing::warn!(%error, "phone path completion task failed");
+                Err(format!("path completion task failed: {error}"))
+            }
+        };
+        if reply.send(answer).is_err() {
+            tracing::debug!("phone path completion reply dropped after client disconnect");
+        }
+    });
+}
+
+/// What resuming this session on this target does to its repository content.
+///
+/// Anything but a local-checkout conversion is `Ready` and reads nothing:
+/// the compatibility gate is a pure function, so a browser may ask about
+/// every destination it offers. A conversion that cannot be planned reports
+/// the plan's own message, which is what tells a person to add a remote or
+/// commit a submodule.
+pub(super) fn run_resume_preflight(
+    config: Config,
+    state: mj_core::state::State,
+    session_id: &str,
+    target_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> crate::server::PreflightResume {
+    let Some(session) = state.sessions.get(session_id) else {
+        return crate::server::PreflightResume::Unavailable {
+            detail: "this session is no longer available".to_owned(),
+        };
+    };
+    let checkout = match state.checkout(session_id) {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            return crate::server::PreflightResume::Unavailable {
+                detail: format!("{error:#}"),
+            };
+        }
+    };
+    match mj_controller::controller::resume_compatibility_with_checkout(
+        session, &checkout, &config, target_id,
+    ) {
+        Err(reason) => crate::server::PreflightResume::Unavailable { detail: reason },
+        Ok(plan) if plan != mj_controller::controller::ResumePlan::RawToWorkspace => {
+            crate::server::PreflightResume::Ready
+        }
+        Ok(_) => {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+            match mj_controller::controller::raw_conversion_preview_for(
+                session, &checkout, &config, &executor,
+            ) {
+                Err(error) => crate::server::PreflightResume::Unavailable {
+                    detail: format!("{error:#}"),
+                },
+                Ok(mut preview) => {
+                    // Credentials never reach a browser, here as everywhere
+                    // else a repository URL is published.
+                    preview.fetch_url = display_url(&preview.fetch_url);
+                    preview.push_urls = preview
+                        .push_urls
+                        .iter()
+                        .map(|url| display_url(url))
+                        .collect();
+                    crate::server::PreflightResume::ConvertingRawCheckout {
+                        preview: Box::new(preview),
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn run_new_preflight_with_executor(
+    config: Config,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+    executor: &impl CommandExecutor,
+) -> Result<crate::server::PreflightNew> {
+    let result = config_only_controller(config).preflight_new_session(
+        &bundle_id,
+        &target_id,
+        project_directory.as_deref(),
+        executor,
+    )?;
+    Ok(crate::server::PreflightNew {
+        project_directory: result.project_directory,
+        managed_worktree: result.managed_worktree,
+        remote_repairs: result.remote_repairs,
+        dirty_repositories: Vec::new(),
+        remote_repositories: result
+            .remote_repositories
+            .into_iter()
+            .map(|repository| crate::server::PreflightRepository {
+                id: repository.id,
+                fetch_url: repository.fetch_url,
+                default_branch: repository.default_branch,
+                push_urls: repository.push_urls,
+            })
+            .collect(),
+        local_changes_excluded: result.local_changes_excluded,
+        review_notice: result
+            .review_turns_off
+            .then(|| mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()),
+    })
+}
+
+/// Full launch interpretation for HTTP and authenticated control requests.
+pub(crate) fn preflight_new_request(
+    config: Config,
+    request: mj_client::daemon::NewSessionPreflightRequest,
+    executor: CancellableProcessExecutor,
+) -> Result<crate::server::PreflightNew> {
+    let snapshot = crate::server::ViewerSnapshot::from_config_state(
+        &config,
+        &mj_core::state::State::default(),
+        0,
+    );
+    crate::server::validate_new_preflight(&request, &snapshot).map_err(anyhow::Error::msg)?;
+    validate_new_mounts(
+        &config,
+        &request.target_id,
+        &request.additional_mounts,
+        &executor,
+    )
+    .map_err(|error| error.context(InvalidNewMount))?;
+    if !request.remote_repairs.is_empty() {
+        let target = config
+            .targets
+            .get(&request.target_id)
+            .context("unknown target")?;
+        anyhow::ensure!(
+            !is_bare_project_target(target) && request.project_directory.is_none(),
+            "remote repair requires an isolated target"
+        );
+        let bundle = config
+            .bundles
+            .get(&request.bundle_id)
+            .context("unknown bundle")?;
+        mj_core::local_git::apply_repository_remote_repairs(
+            bundle,
+            &request.remote_repairs,
+            &executor,
+        )?;
+    }
+    run_new_preflight_with_executor(
+        config,
+        request.bundle_id,
+        request.target_id,
+        request.project_directory,
+        &executor,
+    )
+}
+
+pub(super) fn validate_new_mounts(
+    config: &Config,
+    target_id: &str,
+    mounts: &[mj_controller::targets::AdditionalMount],
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let controller = config_only_controller(config.clone());
+    for mount in mounts {
+        controller.validate_mount_source(target_id, &mount.source, executor)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(super) struct InvalidNewMount;
+impl std::fmt::Display for InvalidNewMount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attached directory validation failed")
+    }
+}
+impl std::error::Error for InvalidNewMount {}

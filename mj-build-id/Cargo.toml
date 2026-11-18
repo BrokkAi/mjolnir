@@ -1,0 +1,29 @@
+[package]
+name = "brokk-mj-build-id"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "The build identity compiled into the Mjolnir programs"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+build = "build.rs"
+
+[lib]
+name = "mj_build_id"
+doctest = false
+
+[features]
+default = []
+# Also builds a worker stand-in stamped with this build's worker identity,
+# for tests in which a real `mj` verifies a fake worker.
+test-hooks = ["mj-core/test-hooks"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true

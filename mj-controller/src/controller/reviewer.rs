@@ -9,7 +9,7 @@ use super::worker_binary::bridge_launch;
 use mj_core::worker_launch::{ReviewMcpServer, ReviewerLaunchConfig};
 
 impl Controller {
-    pub(crate) fn reviewer_launch_config(
+    pub fn reviewer_launch_config(
         &self,
         session_id: &str,
         profile_id: &str,

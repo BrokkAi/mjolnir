@@ -25,13 +25,13 @@ use mj_transcript::projection::{
 };
 
 use crate::targets::{
-    CancellableProcessExecutor, CommandExecutor, CommandPlan, CommandSpec, TargetLocator,
-    TargetRecoveryOutcome, TargetRecoveryPlan, ensure_recovery_target_running,
+    CancellableProcessExecutor, CommandExecutor, CommandSpec, TargetRecoveryOutcome,
+    ensure_recovery_target_running,
 };
 use mj_core::relay::{RelayCommand, RelayCursor, RelayOperationalState};
 
 /// Build the same idempotent read consequence on receipt and relay attachment.
-pub(crate) fn notifications_read(
+pub fn notifications_read(
     live: &RelayOperationalState,
     through: u64,
 ) -> Option<(String, RelayCommand, u64)> {
@@ -72,11 +72,15 @@ const WORKER_RESTART_COOLDOWN: Duration = Duration::from_secs(60);
 const SESSION_MANAGER_SHUTDOWN_GRACE: Duration = Duration::from_millis(750);
 
 mod types;
-pub use types::*;
+pub use mj_session_types::{
+    DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, RelaySessionTarget, WorkerBinaryRefresh,
+    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
+};
+use types::*;
 mod recovery;
-pub(crate) use recovery::*;
+pub use recovery::*;
 mod delegation;
-pub(crate) use delegation::*;
+pub use delegation::*;
 mod channels;
 pub use channels::*;
 mod handle;
@@ -93,14 +97,18 @@ mod spawn;
 pub use spawn::*;
 mod readiness;
 use readiness::HarnessStartupWatch;
-pub(crate) use readiness::{HarnessFailureHandler, HarnessStartupFailure};
+pub use readiness::{HarnessFailureHandler, HarnessStartupFailure};
 mod actor;
-pub(crate) use actor::session_has_ended;
+pub use actor::session_has_ended;
 use actor::*;
 mod standalone;
 mod subagent_queue;
 pub use standalone::*;
 
+// The stand-in relay; the `test-support` feature lends it to mj-daemon's tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod stand_in;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -109,5 +117,5 @@ use model_policy::SessionModelPolicy;
 
 mod pollable;
 pub use pollable::session_target_is_pollable;
-#[cfg(test)]
-pub(crate) use pollable::take_pollability_visits;
+#[cfg(any(test, feature = "test-support"))]
+pub use pollable::take_pollability_visits;

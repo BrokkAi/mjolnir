@@ -10,15 +10,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
-use mj_controller::server::api::{
+use mj_daemon::server::api::{
     ApiSession, ExportKind, ExportRequest, MailboxEventRequest, RelayState, ResumeSessionRequest,
     StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
 };
 
 use mj_client::daemon::WikiSessionStatus;
-use mj_controller::server::ViewerLifecycleCategory;
 use mj_controller::sessionwiki::WikiContinuation;
 use mj_core::transcript::sanitize_terminal_text;
+use mj_daemon::server::ViewerLifecycleCategory;
 
 use crate::api_client::{ApiClient, ExportResult};
 
@@ -300,7 +300,7 @@ pub(crate) async fn message(args: MessageArgs) -> Result<()> {
     let text = read_prompt(args.text, args.prompt_file)?
         .context("pass the message text, --prompt-file, or `-` to read standard input")?;
     let from_the_user = sender_session_id.is_none();
-    let request = mj_controller::server::api::SessionMessageRequest {
+    let request = mj_daemon::server::api::SessionMessageRequest {
         request_id: match args.command_id {
             Some(id) => id,
             None => mj_core::state::new_session_id()?,
@@ -1532,7 +1532,7 @@ where
     let started = std::time::Instant::now();
     let budget = request
         .timeout_secs
-        .unwrap_or(mj_controller::server::api::DEFAULT_WAIT_SECS);
+        .unwrap_or(mj_daemon::server::api::DEFAULT_WAIT_SECS);
     let mut client = first;
     loop {
         match client.wait(session, &request).await {
@@ -2160,7 +2160,7 @@ async fn resume_with_warnings(
     client: &ApiClient,
     session_id: &str,
     request: &ResumeSessionRequest,
-) -> Result<mj_controller::server::api::ResumeSessionResponse> {
+) -> Result<mj_daemon::server::api::ResumeSessionResponse> {
     let mut warnings = crate::LaunchWarnings::new().await;
     let response = client.resume(session_id, request).await?;
     warnings.report(session_id).await;
@@ -2225,7 +2225,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
             let response = client
                 .wiki_restore(
                     &wiki_id,
-                    &mj_controller::server::api::WikiRestoreBody {
+                    &mj_daemon::server::api::WikiRestoreBody {
                         workspace_id: args.workspace_id.clone(),
                         profile_id,
                         target_id,
@@ -2392,7 +2392,7 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
 
 /// A review as plain lines: its status, one line per role, then the verdict
 /// and its text.
-fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec<String> {
+fn review_lines(review: Option<&mj_daemon::server::ViewerTurnReview>) -> Vec<String> {
     let Some(review) = review else {
         return vec!["no review is open".to_owned()];
     };
@@ -2412,9 +2412,7 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
 
 /// A finished review as plain lines, including each reviewer's full handback
 /// and the usage its deleted child session still accounts for.
-fn finished_review_lines(
-    response: &mj_controller::server::api::FinishedReviewResponse,
-) -> Vec<String> {
+fn finished_review_lines(response: &mj_daemon::server::api::FinishedReviewResponse) -> Vec<String> {
     let Some(review) = &response.review else {
         return vec![format!(
             "no finished review is recorded for {}",
@@ -3241,7 +3239,7 @@ pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
             client
                 .set_config(
                     &args.session,
-                    &mj_controller::server::api::SetConfigRequest { key, value },
+                    &mj_daemon::server::api::SetConfigRequest { key, value },
                 )
                 .await?
         }
@@ -3265,7 +3263,7 @@ pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
 }
 
 /// One line per setting: its key, its current value, and what it accepts.
-fn config_option_lines(options: &[mj_controller::server::ViewerConfigOption]) -> Vec<String> {
+fn config_option_lines(options: &[mj_daemon::server::ViewerConfigOption]) -> Vec<String> {
     options
         .iter()
         .map(|option| {
@@ -3486,14 +3484,12 @@ mod tests {
             ("terminal:two", true),
         ]
         .into_iter()
-        .map(
-            |(id, can_stop)| mj_controller::server::ViewerBackgroundTask {
-                id: id.into(),
-                command: "sleep 60".into(),
-                started_at_ms: 0,
-                can_stop,
-            },
-        )
+        .map(|(id, can_stop)| mj_daemon::server::ViewerBackgroundTask {
+            id: id.into(),
+            command: "sleep 60".into(),
+            started_at_ms: 0,
+            can_stop,
+        })
         .collect();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let requests = seen.clone();
@@ -3510,7 +3506,7 @@ mod tests {
                 post(
                     move |headers: HeaderMap,
                           Json(request): Json<
-                        mj_controller::server::api::StopBackgroundTaskRequest,
+                        mj_daemon::server::api::StopBackgroundTaskRequest,
                     >| {
                         let requests = requests.clone();
                         async move {
@@ -3645,12 +3641,12 @@ mod tests {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     [
-                        (mj_controller::server::UPGRADE_HEADER, "pending"),
+                        (mj_daemon::server::UPGRADE_HEADER, "pending"),
                         ("retry-after", "1"),
                     ],
                     axum::Json(serde_json::json!({
                         "error": "the Mjolnir daemon is being replaced by an upgrade; ask again",
-                        "code": mj_controller::server::api::DAEMON_HANDOFF_CODE,
+                        "code": mj_daemon::server::api::DAEMON_HANDOFF_CODE,
                     })),
                 )
             }),
@@ -3668,7 +3664,7 @@ mod tests {
                          axum::Json(request): axum::Json<WaitRequest>| async move {
                             asked.lock().unwrap().push(request);
                             (
-                                [(mj_controller::server::api::API_VERSION_HEADER, "1")],
+                                [(mj_daemon::server::api::API_VERSION_HEADER, "1")],
                                 axum::Json(wait_response("finished", serde_json::json!({}))),
                             )
                         },
@@ -4190,9 +4186,9 @@ mod tests {
         let mut output = String::from("mj sessions --session s1\n");
         output.push_str(&session_report_lines(&session, 0).join("\n"));
         output.push_str("\n\nmj doctor\n");
-        let checks = mj_controller::doctor::login_checks(&[("claude".into(), failure)].into());
+        let checks = mj_setup::doctor::login_checks(&[("claude".into(), failure)].into());
         let mut doctor = Vec::new();
-        mj_controller::doctor::render_human(&checks, &mut doctor).unwrap();
+        mj_setup::doctor::render_human(&checks, &mut doctor).unwrap();
         output.push_str(&String::from_utf8(doctor).unwrap());
         output.push_str("\nSession JSON login status: ");
         output

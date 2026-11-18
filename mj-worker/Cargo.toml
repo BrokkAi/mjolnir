@@ -1,19 +1,15 @@
 [package]
-name = "brokk-mj-worker"
+name = "brokk-mj-worker-runtime"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
-description = "Target-side worker runtime for Mjolnir sessions"
+description = "Target-side worker runtime library for Mjolnir sessions"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
 [lib]
 name = "mj_worker"
-
-[[bin]]
-name = "mj-worker"
-path = "src/main.rs"
 
 [features]
 default = []
@@ -51,9 +47,6 @@ tokio-util = { workspace = true, features = ["compat"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
-mimalloc = "0.1"
 
 # Mach time base for `proc_pid_rusage` CPU ticks; `libc` deprecated its own
 # bindings in favour of this crate.

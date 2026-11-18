@@ -1,0 +1,93 @@
+use super::*;
+
+/// Claude Code's switch for its auto-memory directory and memory reminder.
+pub const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
+pub fn project_memory_launch(
+    session: &mj_core::state::SessionRecord,
+    bundle: Option<&ProjectBundle>,
+    workspace: &(String, Vec<String>),
+    target_profile_home: &str,
+    parent_worktree: Option<&mj_core::state::ManagedWorktree>,
+) -> Result<ProjectMemoryLaunchConfig> {
+    // A sub-agent records its parent's checkout as its project directory.
+    // For an isolated parent that is the parent's own clone, not the project,
+    // so the child takes the parent's checkout for its identity and shares
+    // the parent's memory (R10-4).
+    let identity = if let Some(project) = &session.project {
+        project.memory_identity()?
+    } else {
+        ProjectMemoryIdentity::for_legacy_session(session, bundle, parent_worktree)?
+    };
+    let project_key = identity.key()?;
+    let replica_slug = project_memory_replica_slug(&project_key, &session.id);
+    let project_root = mj_core::target_path::join(
+        Path::new(target_profile_home),
+        &Path::new("projects").join(replica_slug),
+    );
+    let root = mj_core::target_path::join(&project_root, Path::new("memory"));
+    let baseline_root =
+        mj_core::target_path::join(&project_root, Path::new(".hel-memory-baseline"));
+    let mut repository_roots = std::collections::BTreeMap::new();
+    if let Some(bundle) = bundle {
+        let target_roots =
+            std::iter::once(workspace.0.as_str()).chain(workspace.1.iter().map(String::as_str));
+        let repositories = std::iter::once(bundle.primary().context("bundle primary is missing")?)
+            .chain(
+                bundle
+                    .repositories
+                    .iter()
+                    .filter(|repository| repository.id != bundle.primary_repo),
+            );
+        repository_roots.extend(
+            repositories
+                .zip(target_roots)
+                .map(|(repository, root)| (repository.id.clone(), PathBuf::from(root))),
+        );
+    }
+    Ok(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key,
+        root,
+        baseline_root,
+        repository_roots,
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    })
+}
+
+pub fn project_memory_replica_slug(project_key: &str, session_id: &str) -> String {
+    format!("hel-{}-{session_id}", &project_key[..16])
+}
+
+pub fn project_memory_mcp_delivery(
+    harness: mj_core::config::HarnessKind,
+    target: &targets::TargetLocator,
+) -> ProjectMemoryMcpDelivery {
+    if harness == mj_core::config::HarnessKind::Kimi
+        && !matches!(target, targets::TargetLocator::LocalBare { .. })
+    {
+        ProjectMemoryMcpDelivery::HarnessProfile
+    } else {
+        ProjectMemoryMcpDelivery::Acp
+    }
+}
+
+pub fn canonical_memory_root(project_key: &str) -> PathBuf {
+    data_dir().join("projects").join(project_key).join("memory")
+}
+
+pub fn stage_memory_replica<'a>(
+    memory: &'a ProjectMemoryLaunchConfig,
+    target_profile_home: &Path,
+    profile_stage: &Path,
+) -> Result<[&'a Path; 2]> {
+    let canonical = mj_core::project_memory::resolve_canonical_root(&canonical_memory_root(
+        &memory.project_key,
+    ))?;
+    std::fs::create_dir_all(&canonical)?;
+    let replica = memory.root.strip_prefix(target_profile_home)?;
+    let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
+    copy_profile_entry(&canonical, &profile_stage.join(replica))?;
+    copy_profile_entry(&canonical, &profile_stage.join(baseline))?;
+    Ok([replica, baseline])
+}

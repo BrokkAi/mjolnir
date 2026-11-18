@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub use crate::targets::backend_locator;
+pub(super) use crate::targets::recorded_backend_locator;
+
 use anyhow::{Context, Result, bail, ensure};
 
 use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
@@ -14,8 +17,8 @@ use mj_core::state::{
 };
 
 use crate::targets::{
-    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageRefresh,
-    ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
+    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ProjectBundleSpec,
+    ProvisionStage, RepositorySpec, SshTarget,
 };
 
 use super::Controller;
@@ -471,7 +474,7 @@ pub(super) fn preflight_target(
 /// Whether a local container engine can run sessions, as the launch
 /// preflight and the dashboard's Targets pane judge it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalEngineReadiness {
+pub enum LocalEngineReadiness {
     Ready,
     /// The engine's command is not on this host.
     NotInstalled,
@@ -483,7 +486,7 @@ pub(crate) enum LocalEngineReadiness {
 /// kind (`local-podman`, `local-docker`, or `apple-container`).
 ///
 /// Answers `None` for any other kind: their readiness is not a local engine's.
-pub(crate) fn local_engine_readiness(
+pub fn local_engine_readiness(
     kind: &str,
     executor: &impl CommandExecutor,
 ) -> Option<LocalEngineReadiness> {
@@ -511,7 +514,7 @@ pub(crate) fn local_engine_readiness(
 }
 
 /// Whether a command failed because its program is not installed.
-pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
+pub fn is_missing_command(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -640,7 +643,7 @@ fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn backend_bundle(
     bundle: &ProjectBundle,
     executor: &impl CommandExecutor,
@@ -820,7 +823,7 @@ pub(crate) fn session_image_platform(
 
 /// Resolve the project assignment before preflight, creation, or recreation.
 /// A target without project images does not require an additional host probe.
-pub(crate) fn session_target(
+pub fn session_target(
     config: &Config,
     bundle_id: &str,
     target_id: &str,
@@ -893,54 +896,6 @@ pub(super) fn backend_target(
             container: backend_container_with(container, allocation, overrides, true),
         },
     })
-}
-
-/// Every container image the daemon downloads in the background, once per
-/// (host, image, platform).
-///
-/// Every container target is covered, including Apple's `container` engine.
-/// A `never` policy is the one opt-out. The rest differ only in when they
-/// download: `always` and `newer` pull on every refresh, while the others
-/// pull only when the host has no copy of the image.
-///
-/// Several targets often share one image on one host, and that needs one
-/// download. When two such targets disagree about when to pull, the merged
-/// entry takes the more eager of the two.
-pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
-    let mut plan: Vec<ImageRefresh> = Vec::new();
-    for (target_id, target) in &config.targets {
-        let Some((host, container)) = target.image_host() else {
-            continue;
-        };
-        let mut images = vec![container.image.as_str()];
-        if let Some(platform) = container.platform.as_deref() {
-            for bundle_id in config.bundles.keys() {
-                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
-                    images.push(image);
-                }
-            }
-        }
-        for image in images {
-            let Some(refresh) = targets::image_refresh(
-                host.clone(),
-                image,
-                container.platform.as_deref(),
-                container.pull_policy,
-            ) else {
-                continue;
-            };
-            if let Some(existing) = plan.iter_mut().find(|entry| {
-                entry.host == refresh.host
-                    && entry.image == refresh.image
-                    && entry.platform == refresh.platform
-            }) {
-                existing.when = existing.when.max(refresh.when);
-            } else {
-                plan.push(refresh);
-            }
-        }
-    }
-    plan
 }
 
 /// Where the controller's GitHub credential came from, so an error about a
@@ -1072,7 +1027,7 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
             .iter_mut()
             .chain(repository.push_urls.iter_mut())
         {
-            if let Some(github) = crate::setup::github_repository_from_origin(source) {
+            if let Some(github) = crate::import::github_repository_from_origin(source) {
                 *source = format!(
                     "https://github.com/{}/{}.git",
                     github.owner, github.repository
@@ -1159,7 +1114,7 @@ fn backend_container_with(
     }
 }
 
-pub(crate) fn validate_resource_allocation(
+pub fn validate_resource_allocation(
     target_kind: impl Into<ResourceAllocationKind>,
     allocation: Option<&SessionResourceAllocation>,
 ) -> Result<()> {
@@ -1333,49 +1288,6 @@ pub(super) fn locator_after_provision_named(
         },
         TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
     })
-}
-
-/// The execution-plan locator for a session's stored target.
-///
-/// The mapping itself lives in `mj_core::targets`; this only pairs the stored
-/// locator with the target template the session was created against.
-pub(crate) fn backend_locator(
-    locator: &TargetLocator,
-    session: &SessionRecord,
-    config: &Config,
-) -> Result<targets::TargetLocator> {
-    recorded_backend_locator(
-        locator,
-        &session.id,
-        &session.target_template_id,
-        session.target_runtime.as_deref(),
-        config,
-    )
-}
-
-pub(super) fn recorded_backend_locator(
-    locator: &TargetLocator,
-    session_id: &str,
-    target_template_id: &str,
-    runtime: Option<&mj_core::state::TargetRuntimeSettings>,
-    config: &Config,
-) -> Result<targets::TargetLocator> {
-    let runtime = if runtime.is_some() || targets::locator_needs_connection(locator) {
-        Some(mj_core::state::target_runtime_settings_for(
-            session_id,
-            target_template_id,
-            Some(locator),
-            runtime,
-            config,
-        )?)
-    } else {
-        None
-    };
-    Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
-        locator,
-        runtime: runtime.as_deref(),
-        session_id,
-    })?)
 }
 
 #[cfg(test)]

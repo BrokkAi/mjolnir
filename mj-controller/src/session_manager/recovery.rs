@@ -15,7 +15,7 @@ pub(super) fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkerRecoveryOutcome {
+pub enum WorkerRecoveryOutcome {
     Alive,
     Starting,
     TargetMissing,
@@ -96,19 +96,7 @@ pub(super) fn refresh_worker_binary_if_stale(
     }
 }
 
-pub(crate) fn installed_digest_matches(
-    executor: &impl CommandExecutor,
-    command: &CommandSpec,
-    expected: &str,
-) -> bool {
-    executor.execute(command).as_ref().is_ok_and(|output| {
-        output.status == 0
-            && String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .next()
-                .is_some_and(|digest| digest.eq_ignore_ascii_case(expected))
-    })
-}
+pub(crate) use mj_targets::command_checks::installed_digest_matches;
 
 pub(super) fn refresh_worker_launch_if_stale(
     executor: &impl CommandExecutor,
@@ -126,7 +114,7 @@ pub(super) fn refresh_worker_launch_if_stale(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
@@ -186,9 +174,9 @@ pub(crate) fn recover_worker_admitted(
             admission.context("relay recovery has no session admission")?,
         )?),
         None => {
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             bail!("worker recovery requires a session identity");
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 None
             }
@@ -228,7 +216,7 @@ pub(crate) fn recover_worker_admitted(
         // The probe plan stages the current worker, then runs it.
         let output = plan
             .liveness_probe
-            .execute(executor)
+            .execute(executor, &crate::controller::ControlWorker)
             .context("probe relay worker liveness")?
             .pop()
             .context("the liveness probe produced no output")?;
@@ -351,7 +339,8 @@ fn restart_owned_worker(
             }
         }
     }
-    plan.restart.execute(executor)?;
+    plan.restart
+        .execute(executor, &crate::controller::ControlWorker)?;
     if let Some(owner) = owner.as_ref() {
         crate::database::advance_worker_restart(
             owner.session_id(),
@@ -362,8 +351,8 @@ fn restart_owned_worker(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn recover_worker_controlled(
+#[cfg(any(test, feature = "test-support"))]
+pub fn recover_worker_controlled(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,

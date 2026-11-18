@@ -1,0 +1,783 @@
+//! Background worker-binary upgrade policy and coordination.
+//!
+//! A running session keeps the worker it started with, so a session that is
+//! never stopped never gains anything a newer daemon's worker learned. This
+//! coordinator watches the same session views the recovery coordinator does
+//! and, when a session is quiet and its worker has a different compatibility
+//! identity from the one this controller would install, replaces it in place.
+//!
+//! Quiet is the whole safety argument: stopping a worker tears down the ACP
+//! bridge with it, so an upgrade may only run when nothing would be lost.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use tokio::task::JoinSet;
+
+use crate::recovery::{backoff_delay, elapsed_at_least};
+use mj_controller::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
+use mj_controller::recovery_gate::{
+    BackgroundWork, ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver,
+    observation_channel,
+};
+use mj_controller::session_manager::SessionManagerControl;
+use mj_controller::targets::CancellableProcessExecutor;
+use mj_core::config::Config;
+use mj_core::state::{SessionRecord, SessionState, State};
+
+/// How long a failed upgrade waits before it is tried again, doubling per
+/// consecutive failure. The daemon periodically reobserves quiet sessions, so
+/// without this one broken target would be retried continuously.
+const WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const WORKER_UPGRADE_DEFERRED_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Ceiling on the widening retry delay, so a target that is broken rather than
+/// blipping is still probed, just rarely.
+const MAX_WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Upper bound on one upgrade. Stopping, installing, starting and waiting for
+/// a recovered journal all happen inside it; past this the attempt is a
+/// reported failure rather than a session whose upgrade never ends.
+const WORKER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// One session view, reduced to what the upgrade decision reads.
+#[derive(Debug, Clone)]
+pub struct WorkerUpgradeObservation {
+    pub session: SessionRecord,
+    pub config: Config,
+    /// Worker-input compatibility identity reported in hello, or `None` when
+    /// it is too old to report one. `None` counts as outdated.
+    pub worker_build: Option<String>,
+    /// Whether replacing the worker now would destroy nothing. See
+    /// [`mj_core::relay::RelayOperationalState::is_quiet`].
+    ///
+    /// An observer may skip reporting a session that is working - the daemon
+    /// does, to keep the config clone off the streaming path - but the rule
+    /// lives here, so a busy observation that does arrive is still refused.
+    pub quiet: bool,
+}
+
+/// Reports session activity to the upgrade coordinator.
+///
+/// Like the recovery observer, this is a queued hand-off: the caller is an
+/// event loop and must never wait on an upgrade decision.
+#[derive(Clone)]
+pub struct WorkerUpgradeObserver {
+    observations: ObservationSender<WorkerUpgradeObservation>,
+}
+
+impl WorkerUpgradeObserver {
+    pub fn observe(&self, observation: WorkerUpgradeObservation) {
+        self.observations
+            .send(observation.session.id.clone(), observation, |_, _| {});
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerUpgradeResult {
+    pub session_id: String,
+    pub outcome: Result<WorkerUpgradeOutcome, String>,
+    /// Notice for a failure durably applied before this result was published.
+    pub(crate) applied_preparation_failure: Option<String>,
+    /// The attempt was preempted by a lifecycle operation or by coordinator
+    /// shutdown. It judged nothing, so it is neither a success nor a failure.
+    pub cancelled: bool,
+}
+
+pub struct WorkerUpgradeCoordinator {
+    supervisor: Option<tokio::task::JoinHandle<()>>,
+    observer: WorkerUpgradeObserver,
+    results: ObservationReceiver<WorkerUpgradeResult>,
+    gate: Arc<RecoveryGate>,
+}
+
+impl Drop for WorkerUpgradeCoordinator {
+    fn drop(&mut self) {
+        // Closing the shared gate prevents new attempts and cancels existing
+        // ones atomically. Both supervisors retain ownership until settlement.
+        self.gate.close();
+    }
+}
+
+impl WorkerUpgradeCoordinator {
+    /// Start the coordinator, sharing the recovery observer's gate so a
+    /// recovery copy and an upgrade never touch one session at the same time.
+    pub fn spawn(session_manager: SessionManagerControl, recovery: &RecoveryObserver) -> Self {
+        let (observations_tx, mut observations_rx) =
+            observation_channel::<WorkerUpgradeObservation>();
+        let (results_tx, results_rx) = observation_channel();
+        let gate = recovery.gate.clone();
+        let coordinator_gate = gate.clone();
+        let supervisor = tokio::spawn(async move {
+            let mut policies = BTreeMap::<String, PolicyState>::new();
+            let mut attempts = JoinSet::new();
+            let mut closing = false;
+            loop {
+                if closing && attempts.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    _ = coordinator_gate.closed(), if !closing => { closing = true; }
+                    observed = observations_rx.recv(), if !closing => {
+                        let Some(observation) = observed else { coordinator_gate.close(); closing = true; continue; };
+                        let session_id = observation.session.id.clone();
+                        let policy = policies.entry(session_id.clone()).or_default();
+                        policy.observe(&observation);
+                        if !policy.due(&observation, Utc::now()) {
+                            continue;
+                        }
+                        let Ok(upgrade_cancelled) = coordinator_gate.try_start(&session_id, BackgroundWork::WorkerReplacement).inspect_err(|refusal| tracing::debug!(%session_id, holders = ?refusal.holders, "worker upgrade deferred"))
+                        else {
+                            continue;
+                        };
+                        let session_manager = session_manager.clone();
+                        let task_cancelled = upgrade_cancelled.cancellation();
+                        let task_session_id = session_id.clone();
+                        attempts.spawn(async move {
+                            let observed_updated_at = observation.session.updated_at.clone();
+                            let (joined, admission) = upgrade_cancelled.run_blocking(move |cancelled| {
+                                let Some(session) = mj_controller::recovery_gate::current_background_session(&observation.session)
+                                    .map_err(|error| format!("read current upgrade placement: {error:#}"))?
+                                else { return Ok((Ok(WorkerUpgradeOutcome::Deferred), None)); };
+                                let mut state = State::default();
+                                state.sessions.insert(task_session_id.clone(), session);
+                                let controller = Controller {
+                                    config: observation.config,
+                                    state,
+                                };
+                                let executor = CancellableProcessExecutor::new(cancelled.cancellation())
+                                    .with_deadline(WORKER_UPGRADE_TIMEOUT);
+                                let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &mj_controller::recovery_gate::SessionAdmission::Background(cancelled.clone()),
+                                    &task_session_id,
+                                    &executor,
+                                    &session_manager,
+                                    observation.worker_build.as_deref(),
+                                ))
+                                .and_then(|result| result);
+                                let preparation_failure = outcome
+                                    .as_ref()
+                                    .err()
+                                    .and_then(|error| error.downcast_ref::<HarnessPreparationFailure>())
+                                    .cloned();
+                                Ok((
+                                    outcome.map_err(|error| format!("{error:#}")),
+                                    preparation_failure,
+                                ))
+                            })
+                            .await;
+                            let (outcome, preparation_failure) = match joined {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(error)) => (Err(error), None),
+                                Err(error) => (
+                                    Err(format!("worker upgrade task failed: {error}")),
+                                    None,
+                                ),
+                            };
+                            // Keep the per-session slot through settlement: foreground
+                            // lifecycle work cancels us and waits for this slot before
+                            // changing placement or revision.
+                            let (applied_preparation_failure, admission) = if let Some(failure) = preparation_failure {
+                                let id = session_id.clone();
+                                let (settled, admission) = admission.run_blocking(move |cancelled| {
+                                    settle_preparation_failure(&id, &failure, &observed_updated_at, &cancelled)
+                                }).await;
+                                let notice = match settled {
+                                    Ok(Ok(notice)) => notice,
+                                    Ok(Err(error)) => {
+                                        tracing::warn!(%session_id, %error, "could not persist worker harness preparation failure");
+                                        None
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%session_id, %error, "worker harness failure settlement task failed");
+                                        None
+                                    }
+                                };
+                                (notice, admission)
+                            } else { (None, admission) };
+                            let result = WorkerUpgradeResult {
+                                session_id,
+                                outcome,
+                                applied_preparation_failure,
+                                cancelled: task_cancelled.load(Ordering::Acquire),
+                            };
+                            (result, admission)
+                        });
+                    }
+                    completed = attempts.join_next(), if !attempts.is_empty() => {
+                        let Some(completed) = completed else { continue };
+                        let (result, _admission) = match completed {
+                            Ok(completed) => completed,
+                            Err(error) => { tracing::error!(%error, "worker upgrade attempt supervisor failed"); continue; }
+                        };
+                        let policy = policies.entry(result.session_id.clone()).or_default();
+                        policy.record(&result, Utc::now());
+                        if let Err(error) = &result.outcome && !result.cancelled {
+                            tracing::warn!(session_id = %result.session_id, %error, "background worker upgrade failed");
+                        }
+                        results_tx.send(result.session_id.clone(), result, |_, _| {});
+                    }
+                }
+            }
+        });
+        Self {
+            supervisor: Some(supervisor),
+            observer: WorkerUpgradeObserver {
+                observations: observations_tx,
+            },
+            results: results_rx,
+            gate,
+        }
+    }
+
+    /// Close admission and wait for every admitted executor and durable
+    /// settlement. The daemon applies its shared shutdown watchdog outside.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.gate.close();
+        if let Some(supervisor) = self.supervisor.take() {
+            supervisor.await.map_err(|error| {
+                anyhow::anyhow!("background coordinator supervisor failed: {error}")
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn observer(&self) -> WorkerUpgradeObserver {
+        self.observer.clone()
+    }
+
+    pub fn try_result(&mut self) -> Option<WorkerUpgradeResult> {
+        self.results.try_recv()
+    }
+}
+
+/// Preparation is disposable; once failure settlement is accepted its short
+/// durable write holds daemon admission as well as the session's recovery slot.
+fn settle_preparation_failure(
+    session_id: &str,
+    failure: &HarnessPreparationFailure,
+    observed_updated_at: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<Option<String>> {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let Ok(_settling) =
+        mj_controller::upgrade::activity_unless_draining("worker harness failure settlement")
+    else {
+        // Nothing accepted: the next daemon reobserves the unusable worker.
+        return Ok(None);
+    };
+    // This transition only reads records. Use the writer's committed snapshot
+    // so settlement never waits for unrelated configuration filesystem reads.
+    let mut controller = Controller {
+        config: Config::default(),
+        state: mj_controller::database::load_state()?,
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let cause = failure.to_string();
+    Ok(controller
+        .fail_unready_session(session_id, &cause, observed_updated_at)?
+        .then_some(cause))
+}
+
+/// What the coordinator remembers about one session between observations.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PolicyState {
+    /// The build proved current for this coordinator. While the observed
+    /// build still matches it, no attempt is needed and nothing is hashed.
+    current_build: Option<String>,
+    failed_at: Option<DateTime<Utc>>,
+    deferred_at: Option<DateTime<Utc>>,
+    consecutive_failures: u32,
+}
+
+impl PolicyState {
+    /// Whether an upgrade attempt should start for this observation.
+    fn due(&self, observation: &WorkerUpgradeObservation, now: DateTime<Utc>) -> bool {
+        // Killing a worker mid-turn destroys the turn, and a session that is
+        // shutting down or already stopped has no worker worth replacing.
+        if !observation.quiet || observation.session.state != SessionState::Running {
+            return false;
+        }
+        if self.worker_is_known_current(observation.worker_build.as_deref()) {
+            return false;
+        }
+        if self.deferred_at.is_some_and(|deferred| {
+            !elapsed_at_least(deferred, now, WORKER_UPGRADE_DEFERRED_INTERVAL)
+        }) {
+            return false;
+        }
+        self.failed_at.is_none_or(|failed_at| {
+            elapsed_at_least(
+                failed_at,
+                now,
+                backoff_delay(
+                    WORKER_UPGRADE_RETRY_INTERVAL,
+                    MAX_WORKER_UPGRADE_RETRY_INTERVAL,
+                    self.consecutive_failures,
+                ),
+            )
+        })
+    }
+
+    /// Whether a previous attempt proved this exact build current. A worker
+    /// reporting no build is never current: it predates the field, so it
+    /// predates this controller.
+    fn worker_is_known_current(&self, worker_build: Option<&str>) -> bool {
+        let (Some(observed), Some(current)) = (worker_build, self.current_build.as_deref()) else {
+            return false;
+        };
+        observed == current
+    }
+
+    /// Fold in what one observation proves, before deciding whether to act.
+    ///
+    /// The one thing it can prove is that the last upgrade took: the worker
+    /// now reports the build that upgrade installed. That releases the
+    /// cooldown an upgrade leaves behind.
+    fn observe(&mut self, observation: &WorkerUpgradeObservation) {
+        if self.current_build.is_some()
+            && observation.worker_build.as_deref() == self.current_build.as_deref()
+        {
+            self.failed_at = None;
+            self.deferred_at = None;
+            self.consecutive_failures = 0;
+        }
+    }
+
+    fn record(&mut self, result: &WorkerUpgradeResult, now: DateTime<Utc>) {
+        if result.cancelled {
+            // A preempted attempt judged nothing: it must neither be counted
+            // as a failure nor suppress the next observation.
+            return;
+        }
+        self.deferred_at = None;
+        match &result.outcome {
+            Ok(WorkerUpgradeOutcome::Deferred) => {
+                // A busy worker or target recovery can refuse the swap. Do not
+                // repeat preparation on every unchanged quiet observation.
+                self.deferred_at = Some(now);
+            }
+            Ok(outcome @ WorkerUpgradeOutcome::AlreadyCurrent { .. }) => {
+                self.failed_at = None;
+                self.consecutive_failures = 0;
+                self.current_build = outcome.build().map(str::to_owned);
+            }
+            Ok(outcome @ WorkerUpgradeOutcome::Upgraded { .. }) => {
+                // The worker this session runs now, so the next observation
+                // reporting it needs no attempt - and, through `observe`,
+                // clears the cooldown below.
+                self.current_build = outcome.build().map(str::to_owned);
+                // An upgrade that did not take would otherwise restart this
+                // worker on every sync tick, forever. The same widening
+                // cooldown a failure gets bounds that; a worker that comes
+                // back reporting the installed build releases it immediately,
+                // so a healthy upgrade pays nothing.
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.failed_at = Some(now);
+            }
+            Err(_) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.failed_at = Some(now);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_record(state: SessionState) -> SessionRecord {
+        SessionRecord {
+            oracle_choice: None,
+            oracle: true,
+            notifications_ignored: false,
+            project: None,
+            target_runtime: None,
+            launch_base: None,
+            launch_branch: None,
+            checkout: None,
+            publication: None,
+            build_cache: None,
+            container_workspace: None,
+            subagents: None,
+            create_managed_worktree: None,
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+            archived: false,
+            id: "session-1".to_owned(),
+            title: "work".into(),
+            harness_kind: mj_core::config::HarnessKind::Codex,
+            last_profile: "codex-1".into(),
+            bundle_id: "hel".into(),
+            project_directory: None,
+            managed_worktree: None,
+            review: None,
+            no_project_memory: false,
+            no_github_events: false,
+            no_github_credentials: false,
+            target_template_id: "podman".into(),
+            resource_allocation: None,
+            additional_mounts: Vec::new(),
+            state,
+            target: None,
+            native_session_id: None,
+            acp_session_title: None,
+            session_title_override: None,
+            created_at: "2026-08-09T12:00:00Z".into(),
+            updated_at: "2026-08-09T12:01:00Z".into(),
+            viewed_through_event_ordinal: 0,
+            draft_input: String::new(),
+            last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
+            last_checkpoint_error: None,
+            checkpoint: None,
+        }
+    }
+
+    fn observation(worker_build: Option<&str>, quiet: bool) -> WorkerUpgradeObservation {
+        WorkerUpgradeObservation {
+            session: session_record(SessionState::Running),
+            config: Config::default(),
+            worker_build: worker_build.map(str::to_owned),
+            quiet,
+        }
+    }
+
+    fn failure(detail: &str) -> WorkerUpgradeResult {
+        WorkerUpgradeResult {
+            session_id: "session-1".into(),
+            outcome: Err(detail.into()),
+            applied_preparation_failure: None,
+            cancelled: false,
+        }
+    }
+
+    fn current(build: &str) -> WorkerUpgradeOutcome {
+        WorkerUpgradeOutcome::AlreadyCurrent {
+            build: build.to_owned(),
+        }
+    }
+
+    fn upgraded(build: &str) -> WorkerUpgradeOutcome {
+        WorkerUpgradeOutcome::Upgraded {
+            build: build.to_owned(),
+        }
+    }
+
+    fn success(outcome: WorkerUpgradeOutcome) -> WorkerUpgradeResult {
+        WorkerUpgradeResult {
+            session_id: "session-1".into(),
+            outcome: Ok(outcome),
+            applied_preparation_failure: None,
+            cancelled: false,
+        }
+    }
+
+    #[test]
+    fn a_busy_turn_is_never_upgraded_no_matter_how_long_it_runs() {
+        let started = Utc::now();
+        let policy = PolicyState::default();
+        let two_days_later = started + chrono::Duration::days(2);
+
+        assert!(!policy.due(&observation(Some("old-build"), false), two_days_later));
+        assert!(
+            policy.due(&observation(Some("old-build"), true), two_days_later),
+            "the next quiet observation may upgrade without an age-based busy timeout"
+        );
+        assert!(
+            policy.due(&observation(None, true), two_days_later),
+            "a worker too old to report a build is outdated"
+        );
+    }
+
+    /// A session that is closing, checkpointing or already stopped is not a
+    /// session whose worker may be replaced underneath it.
+    #[test]
+    fn only_a_running_session_is_due() {
+        let now = Utc::now();
+        let policy = PolicyState::default();
+        for state in [
+            SessionState::Provisioning,
+            SessionState::Disconnected,
+            SessionState::Checkpointing,
+            SessionState::Closing,
+            SessionState::Destroying,
+            SessionState::Stopped,
+            SessionState::Lost,
+            SessionState::Error,
+            SessionState::DestroyedWithDataLoss,
+        ] {
+            let mut observation = observation(Some("build-a"), true);
+            observation.session.state = state;
+            assert!(!policy.due(&observation, now), "{state:?}");
+        }
+    }
+
+    /// A proved build stays current until a different worker is observed.
+    #[test]
+    fn a_worker_proved_current_stays_trusted_for_coordinator_lifetime() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(&success(current("build-a")), now);
+
+        assert!(!policy.due(&observation(Some("build-a"), true), now));
+        assert!(
+            !policy.due(
+                &observation(Some("build-a"), true),
+                now + chrono::Duration::days(2)
+            ),
+            "the launched build remains trusted for the coordinator lifetime"
+        );
+        assert!(
+            policy.due(&observation(Some("build-b"), true), now),
+            "a different build is outdated however recently the last one was checked"
+        );
+    }
+
+    /// A failed upgrade waits, and waits longer each time, so a broken target
+    /// is not restarted on every sync tick.
+    #[test]
+    fn a_failed_upgrade_backs_off_and_widens() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(&failure("install the current Mjolnir worker binary"), now);
+
+        let interval = chrono::Duration::from_std(WORKER_UPGRADE_RETRY_INTERVAL).unwrap();
+        assert!(!policy.due(&observation(Some("build-a"), true), now));
+        assert!(!policy.due(
+            &observation(Some("build-a"), true),
+            now + interval - chrono::Duration::seconds(1)
+        ));
+        assert!(policy.due(&observation(Some("build-a"), true), now + interval));
+
+        policy.record(&failure("install the current Mjolnir worker binary"), now);
+        assert!(!policy.due(
+            &observation(Some("build-a"), true),
+            now + interval * 2 - chrono::Duration::seconds(1)
+        ));
+        assert!(policy.due(&observation(Some("build-a"), true), now + interval * 2));
+    }
+
+    /// A successful upgrade stops the session being probed again: the worker
+    /// that answers next is the new one, and confirming it clears the failure
+    /// run the upgrade itself was guarded by.
+    #[test]
+    fn a_successful_upgrade_stops_the_probing_and_confirming_it_clears_the_backoff() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(&failure("install the current Mjolnir worker binary"), now);
+        policy.record(&success(upgraded("build-b")), now);
+
+        let confirmed = observation(Some("build-b"), true);
+        policy.observe(&confirmed);
+        assert_eq!(policy.consecutive_failures, 0);
+        assert_eq!(policy.failed_at, None);
+        assert!(
+            !policy.due(&confirmed, now),
+            "the worker now runs the installed build, so nothing is due"
+        );
+    }
+
+    /// An upgrade that does not take - the worker comes back reporting a build
+    /// that is still not the installed one - must not restart that worker on
+    /// every freshness window forever.
+    #[test]
+    fn an_upgrade_that_does_not_take_backs_off_instead_of_looping() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(&success(upgraded("build-b")), now);
+
+        // The worker came back as something else, so nothing confirms the
+        // upgrade and the cooldown stands.
+        let unchanged = observation(Some("build-a"), true);
+        policy.observe(&unchanged);
+        let interval = chrono::Duration::from_std(WORKER_UPGRADE_RETRY_INTERVAL).unwrap();
+        assert!(!policy.due(&unchanged, now));
+        assert!(policy.due(&unchanged, now + interval));
+
+        policy.record(&success(upgraded("build-b")), now + interval);
+        policy.observe(&unchanged);
+        assert!(!policy.due(&unchanged, now + interval * 2));
+        assert!(policy.due(&unchanged, now + interval * 3));
+    }
+
+    /// Deferrals retain a bounded retry deadline even if observations stay quiet.
+    #[test]
+    fn a_deferred_upgrade_waits_before_repeating_preparation() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(&success(WorkerUpgradeOutcome::Deferred), now);
+
+        assert!(!policy.due(&observation(Some("build-a"), true), now));
+        let delay = chrono::Duration::from_std(WORKER_UPGRADE_DEFERRED_INTERVAL).unwrap();
+        assert!(!policy.due(
+            &observation(Some("build-a"), true),
+            now + delay - chrono::Duration::milliseconds(1)
+        ));
+        assert!(policy.due(&observation(Some("build-a"), true), now + delay));
+    }
+
+    /// A preempted attempt says nothing either way: it must not count as a
+    /// failure and must not delay the next attempt.
+    #[test]
+    fn a_preempted_attempt_is_neither_a_success_nor_a_failure() {
+        let now = Utc::now();
+        let mut policy = PolicyState::default();
+        policy.record(
+            &WorkerUpgradeResult {
+                session_id: "session-1".into(),
+                outcome: Err("operation cancelled".into()),
+                applied_preparation_failure: None,
+                cancelled: true,
+            },
+            now,
+        );
+
+        assert_eq!(policy.consecutive_failures, 0);
+        assert!(policy.due(&observation(Some("build-a"), true), now));
+    }
+
+    /// Recovery holds the same per-session slot, so an upgrade cannot start
+    /// while a recovery copy is running for that session.
+    #[test]
+    fn the_shared_gate_keeps_an_upgrade_and_a_recovery_copy_apart() {
+        let gate = Arc::new(RecoveryGate::default());
+        let recovery_copy = gate
+            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .expect("the slot starts free");
+
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
+
+        drop(recovery_copy);
+        assert!(
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
+                .is_ok()
+        );
+    }
+
+    /// Observing must hand off and return: the daemon reports from its event
+    /// loop, and no upgrade decision may hold that loop up.
+    #[test]
+    fn observing_hands_off_without_waiting() {
+        let (observations, mut queued) = observation_channel();
+        let observer = WorkerUpgradeObserver { observations };
+
+        for _ in 0..64 {
+            observer.observe(observation(Some("build-a"), true));
+        }
+
+        let received = std::iter::from_fn(|| queued.try_recv()).count();
+        assert_eq!(received, 1);
+    }
+    // Hard-won: #1499: failure settlement escaped the coordinator's session admission.
+    #[tokio::test]
+    async fn preparation_failure_settlement_preserves_admission_and_lifecycle() {
+        const CHILD: &str = "MJ_UPGRADE_SETTLEMENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                "worker_upgrade::tests::preparation_failure_settlement_preserves_admission_and_lifecycle",
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-settlement-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        Config::default().save().unwrap();
+        let _writer = mj_controller::database::install_isolated_test_writer();
+        let session = session_record(SessionState::Running);
+        mj_controller::database::save_session(&session).unwrap();
+        let failure = HarnessPreparationFailure {
+            step: "prepare".into(),
+            error: "broken harness".into(),
+        };
+        let gate = Arc::new(RecoveryGate::default());
+
+        // A superseding lifecycle revision and a cancelled attempt must each
+        // suppress both the write and the applied-failure notice.
+        assert!(
+            settle_preparation_failure(&session.id, &failure, "older revision", &false.into())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            settle_preparation_failure(&session.id, &failure, &session.updated_at, &true.into())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            mj_controller::database::load_state().unwrap().sessions[&session.id].state,
+            SessionState::Running
+        );
+
+        // Hold SQLite's real writer lock so settlement cannot finish. This
+        // exercises durable write ownership rather than a fake persistence call.
+        let lock = rusqlite::Connection::open(mj_controller::database::database_path()).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let admission = gate
+            .try_start(&session.id, BackgroundWork::WorkerReplacement)
+            .unwrap();
+        let id = session.id.clone();
+        let revision = session.updated_at.clone();
+        let settling = tokio::spawn(admission.run_blocking(move |cancelled| {
+            settle_preparation_failure(&id, &failure, &revision, &cancelled)
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !mj_controller::upgrade::blockers()
+                .iter()
+                .any(|b| b.label == "worker harness failure settlement")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(gate.is_busy(&session.id));
+        assert!(!settling.is_finished());
+        assert!(
+            gate.try_start(&session.id, BackgroundWork::WorkerReplacement)
+                .is_err()
+        );
+        let independent = gate
+            .try_start("other-session", BackgroundWork::WorkerReplacement)
+            .unwrap();
+        let (completed, independent) = independent.run_blocking(|_| 42).await;
+        assert_eq!(
+            completed.unwrap(),
+            42,
+            "unrelated attempts remain concurrent"
+        );
+        drop(independent);
+        lock.execute_batch("COMMIT").unwrap();
+        let (notice, admission) = settling.await.unwrap();
+        assert!(notice.unwrap().unwrap().is_some());
+        let durable = mj_controller::database::read_durable_session_record(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.state, SessionState::Error);
+        assert!(durable.last_error.unwrap().contains("broken harness"));
+        assert!(
+            gate.is_busy(&session.id),
+            "publication retains the attempt until supervised completion"
+        );
+        assert!(
+            !mj_controller::upgrade::blockers()
+                .iter()
+                .any(|b| b.label == "worker harness failure settlement")
+        );
+        drop(admission);
+        assert!(!gate.is_busy(&session.id));
+    }
+}

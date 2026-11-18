@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 /// `the_baked_release_image_agrees_with_the_channel_rule` checks.
 const AGENT_DEV_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
 
+/// The digest part of the identity a test binary reports. Keep it equal to
+/// `TEST_REVISION` in `src/worker_build.rs`.
+const TEST_REVISION: &str = "0000000000000000000000000000000000000000";
+
 fn tracked_read(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(value) => {
@@ -16,154 +20,20 @@ fn tracked_read(path: &Path) -> Option<String> {
     }
 }
 
-fn git_revision(root: &Path) -> Option<String> {
-    let entry = root
-        .ancestors()
-        .map(|path| path.join(".git"))
-        .find(|path| path.exists())?;
-    let git = if entry.is_dir() {
-        entry
-    } else {
-        let contents = tracked_read(&entry)?;
-        entry
-            .parent()?
-            .join(contents.trim().strip_prefix("gitdir: ")?)
-    };
-    let head = tracked_read(&git.join("HEAD"))?;
-    let Some(reference) = head.trim().strip_prefix("ref: ") else {
-        return Some(head.trim().to_owned());
-    };
-    let common = tracked_read(&git.join("commondir"))
-        .map(|path| git.join(path.trim()))
-        .unwrap_or_else(|| git.clone());
-    if let Some(revision) = tracked_read(&common.join(reference)) {
-        return Some(revision.trim().to_owned());
-    }
-    // A packed ref can become a loose ref on the next commit. Watch the
-    // existing refs directory, not a missing file that makes Cargo rebuild
-    // on every invocation.
-    println!("cargo:rerun-if-changed={}", common.join("refs").display());
-    tracked_read(&common.join("packed-refs"))?
-        .lines()
-        .find_map(|line| {
-            let (revision, name) = line.split_once(' ')?;
-            (name == reference).then(|| revision.to_owned())
-        })
-}
-
-/// The committer time of `revision`, in seconds since the Unix epoch.
-///
-/// Two builds of one release are ordered by the time of the commit they were
-/// built from; a commit hash alone has no order. A source archive without Git
-/// supplies it as `MJ_BUILD_COMMIT_TIME`, which is what `git log -1
-/// --format=%ct` prints. Without either the time is unknown, never guessed:
-/// the build still succeeds, and startup treats its order as unknown.
-///
-/// The revision is looked up by hash, so a registry crate unpacked inside an
-/// unrelated checkout cannot pick up that checkout's time: the commit is
-/// either there, with its own time, or the lookup fails. Cargo already reruns
-/// this script whenever the revision changes, which is its only input.
-fn commit_time(root: &Path, revision: &str) -> Option<i64> {
-    if let Ok(time) = std::env::var("MJ_BUILD_COMMIT_TIME") {
-        return Some(
-            time.trim()
-                .parse()
-                .expect("MJ_BUILD_COMMIT_TIME must be the commit's Unix time in seconds"),
-        );
-    }
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["show", "-s", "--format=%ct"])
-        .arg(format!("{revision}^{{commit}}"))
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
-}
-
-fn worker_inputs_id(root: &Path, fallback_revision: &str) -> String {
-    if let Ok(override_id) = std::env::var("MJ_WORKER_INPUTS_ID") {
-        return validate_worker_inputs_id(&override_id);
-    }
-    if root.join(".cargo_vcs_info.json").exists() || git_revision(root).is_none() {
-        return validate_worker_inputs_id(fallback_revision);
-    }
-    let helper = root.join("worker_build_inputs.py");
-    let _ = tracked_read(&helper).expect("worker input identity helper");
-    let _ = tracked_read(&root.join("worker-build-inputs.txt")).expect("worker input path list");
-    let python = if cfg!(windows) { "python" } else { "python3" };
-    let output = std::process::Command::new(python)
-        .arg(&helper)
-        .args(["--package-root"])
-        .arg(root)
-        .args(["--fallback-revision", fallback_revision])
-        .output()
-        .unwrap_or_else(|error| panic!("run worker input identity helper: {error}"));
-    assert!(
-        output.status.success(),
-        "worker input identity helper failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let identity = String::from_utf8(output.stdout)
-        .expect("worker input identity is UTF-8")
-        .trim()
-        .to_owned();
-    validate_worker_inputs_id(&identity)
-}
-
-fn validate_worker_inputs_id(identity: &str) -> String {
-    let identity = identity.trim();
-    assert!(
-        identity.len() == 40 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "worker input identity must be a full 40-character digest"
-    );
-    identity.to_ascii_lowercase()
-}
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=MJ_BUILD_REVISION");
-    println!("cargo:rerun-if-env-changed=MJ_WORKER_INPUTS_ID");
-    println!("cargo:rerun-if-env-changed=MJ_BUILD_COMMIT_TIME");
+    // This script must not read Git. Every crate depends on this one, and
+    // Cargo rebuilds a crate and its dependents whenever its build script
+    // reruns, so a script that followed `HEAD` would recompile the workspace
+    // after every commit. The commit and the worker input digest are compiled
+    // into `mj-build-id`, which only the programs depend on.
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let revision = std::env::var("MJ_BUILD_REVISION").ok().or_else(|| {
-        // Registry installs must use the published crate's revision, even if
-        // Cargo unpacked it inside another Git checkout.
-        tracked_read(&root.join(".cargo_vcs_info.json")).map(|body| {
-            let info: serde_json::Value = serde_json::from_str(&body)
-                .expect("parse Cargo source revision metadata");
-            info["git"]["sha1"].as_str().expect("Cargo source revision").to_owned()
-        })
-    }).or_else(|| git_revision(&root)).expect(
-        "worker build identity needs Git or .cargo_vcs_info.json; for a source archive set MJ_BUILD_REVISION to its full Git commit",
-    );
-    assert!(
-        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "MJ_BUILD_REVISION must be a full 40-character Git commit"
-    );
-    let worker_inputs_id = worker_inputs_id(&root, &revision);
-    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    println!(
-        "cargo:rustc-env=MJ_BUILD_ID={}+{}",
-        version,
-        revision.to_ascii_lowercase()
-    );
-    println!("cargo:rustc-env=MJ_WORKER_BUILD_ID={version}+{worker_inputs_id}");
-    // Empty when unknown: daemon startup then cannot order this build against
-    // a different revision of the same release.
-    println!(
-        "cargo:rustc-env=MJ_BUILD_COMMIT_TIME={}",
-        commit_time(&root, &revision).map_or_else(String::new, |time| time.to_string())
-    );
     // Which container image a session uses when its target names none. A
     // release runs the immutable image published for its own version; a
     // development build runs the floating image published from master. The
     // release workflow sets MJ_BUILD_CHANNEL, and a crates.io source package
-    // carries .cargo_vcs_info.json, so both count as releases.
+    // carries .cargo_vcs_info.json, so both count as releases. Keep this rule
+    // equal to the one in mj-build-id/build.rs.
     println!("cargo:rerun-if-env-changed=MJ_BUILD_CHANNEL");
     println!("cargo:rerun-if-env-changed=MJ_AGENT_DEV_IMAGE");
     let release = std::env::var("MJ_BUILD_CHANNEL").as_deref() == Ok("release")
@@ -181,21 +51,16 @@ fn main() {
         "cargo:rustc-env=MJ_AGENT_DEV_IMAGE_RELEASE={}",
         u8::from(release)
     );
-    // The release's image carries a worker stamped with the Git-tree identity
-    // of its inputs. A build whose own identity fell back to the commit (a
-    // crates.io package, or a tree without Git) can never match it.
-    let carries_worker = release && worker_inputs_id != revision.to_ascii_lowercase();
-    println!(
-        "cargo:rustc-env=MJ_RELEASE_IMAGE_CARRIES_WORKER={}",
-        u8::from(carries_worker)
-    );
     if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
         // Generate this fixture at build time: writing an executable during
         // parallel tests can leave inherited writable descriptors (ETXTBSY).
+        // It carries the identity a test binary has (`worker_build`'s test
+        // identity), not this build's: `mj-build-id` makes the one stamped
+        // with the real identity.
         let fixture = root.join("tests/fixtures/fake-command.sh");
         let script = tracked_read(&fixture).expect("fake command fixture");
         let stamped = format!(
-            "{script}\n#MJ-BUILD-ID:{version}+{worker_inputs_id}\n#\0MJ-WORKER-BUILD:{version}+{worker_inputs_id}\0\n",
+            "{script}\n#MJ-BUILD-ID:{version}+{TEST_REVISION}\n#\0MJ-WORKER-BUILD:{version}+{TEST_REVISION}\0\n",
         );
         let destination =
             PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");

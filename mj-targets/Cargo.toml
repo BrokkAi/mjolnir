@@ -1,0 +1,47 @@
+[package]
+name = "brokk-mj-targets"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Session target provisioning, control and cleanup for Mjolnir"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_targets"
+# The crate has no doc tests; looking for them makes rustdoc compile it again.
+doctest = false
+
+[features]
+default = []
+test-hooks = ["mj-core/test-hooks"]
+# Exposes the shared test fixtures to the tests of the crates above.
+test-support = ["mj-core/test-hooks"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-client.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+hmac = "0.13"
+libc.workspace = true
+rustls.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+signal-hook = "0.3"
+tempfile.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat", "io"] }
+tracing.workspace = true
+
+[dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

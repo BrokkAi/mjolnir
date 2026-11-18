@@ -5,19 +5,132 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
+/// The digest part of the identity a test binary reports: no commit has it.
+/// Keep it equal to `TEST_REVISION` in `build.rs`, which stamps the fake
+/// worker fixture with it.
+#[cfg(any(test, feature = "test-identity"))]
+const TEST_REVISION: &str = "0000000000000000000000000000000000000000";
+/// The worker stamp of the test identity, as a constant so that its bytes are
+/// in every test executable (see `installed`).
+#[cfg(any(test, feature = "test-identity"))]
+const TEST_WORKER_BUILD_STAMP: &str = concat!(
+    "\0MJ-WORKER-BUILD:",
+    env!("CARGO_PKG_VERSION"),
+    "+0000000000000000000000000000000000000000\0"
+);
+
+/// The identities of the running program's build.
+///
+/// A program installs this first thing in `main` ([`install`]) and library
+/// code reads it through [`build_id`], [`worker_build_id`] and
+/// [`commit_time`]. Library crates do not compile the values in: a value that
+/// changes with every commit would make each crate that names it, and every
+/// crate above that one, stale after every commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildIdentity {
+    /// Package version, `+`, and the commit: see [`build_id`].
+    pub build_id: &'static str,
+    /// Package version, `+`, and the worker input digest: see [`worker_build_id`].
+    pub worker_build_id: &'static str,
+    /// The commit's time in Unix seconds, or empty when unknown.
+    pub commit_time: &'static str,
+    /// See [`release_image_carries_worker`].
+    pub release_image_carries_worker: bool,
+}
+
+#[cfg(any(test, feature = "test-identity"))]
+impl BuildIdentity {
+    /// What a test binary reports. It names no commit, so it is the same
+    /// after every commit and a test build stays fresh; its commit time is
+    /// unknown, as for a build without Git.
+    fn for_tests() -> Self {
+        Self {
+            build_id: concat!(
+                env!("CARGO_PKG_VERSION"),
+                "+0000000000000000000000000000000000000000"
+            ),
+            worker_build_id: concat!(
+                env!("CARGO_PKG_VERSION"),
+                "+0000000000000000000000000000000000000000"
+            ),
+            commit_time: "",
+            release_image_carries_worker: false,
+        }
+    }
+}
+
+static INSTALLED: std::sync::OnceLock<BuildIdentity> = std::sync::OnceLock::new();
+
+/// Record the identity of the running program. Call it once, first thing in
+/// `main`.
+///
+/// # Panics
+///
+/// When a different identity is already installed: a process has one build.
+pub fn install(identity: BuildIdentity) {
+    let installed = INSTALLED.get_or_init(|| identity);
+    assert_eq!(
+        *installed, identity,
+        "a process cannot install two build identities"
+    );
+}
+
+fn installed() -> &'static BuildIdentity {
+    // A test binary has no `main` of ours to install one. Some tests hand
+    // their own executable to the code that verifies a worker binary, so the
+    // stamp has to be in that file, as it is in a real worker.
+    #[cfg(any(test, feature = "test-identity"))]
+    return INSTALLED.get_or_init(|| {
+        debug_assert!(TEST_WORKER_BUILD_STAMP.contains(TEST_REVISION));
+        std::hint::black_box(TEST_WORKER_BUILD_STAMP);
+        BuildIdentity::for_tests()
+    });
+    #[cfg(not(any(test, feature = "test-identity")))]
+    INSTALLED
+        .get()
+        .expect("the program did not install its build identity before using it")
+}
+
 /// Identity of this daemon build: package version plus commit. It orders
 /// daemon replacements and remains visible to users and clients.
-pub const BUILD_ID: &str = env!("MJ_BUILD_ID");
-/// Compatibility identity of workers built from the same Cargo inputs. The
-/// digest is based on Git trees at `HEAD`, so uncommitted changes are not
-/// reflected, matching [`BUILD_ID`].
-pub const WORKER_BUILD_ID: &str = env!("MJ_WORKER_BUILD_ID");
-/// The committer time, in Unix seconds, of the revision in [`BUILD_ID`], or
+#[must_use]
+pub fn build_id() -> &'static str {
+    installed().build_id
+}
+
+/// Compatibility identity of workers built from the same Cargo inputs: the
+/// package version plus a digest of the worker's inputs at the commit.
+#[must_use]
+pub fn worker_build_id() -> &'static str {
+    installed().worker_build_id
+}
+
+/// The committer time, in Unix seconds, of the revision in [`build_id`], or
 /// empty when the build had neither Git nor `MJ_BUILD_COMMIT_TIME`.
-pub const BUILD_COMMIT_TIME: &str = env!("MJ_BUILD_COMMIT_TIME");
-/// Referenced by the worker entry point so stripping cannot discard it.
-pub const WORKER_BUILD_STAMP: &str =
-    concat!("\0MJ-WORKER-BUILD:", env!("MJ_WORKER_BUILD_ID"), "\0");
+#[must_use]
+pub fn commit_time() -> &'static str {
+    installed().commit_time
+}
+
+/// Whether this is a release build whose container image
+/// (`config::RELEASE_CONTAINER_IMAGE`) carries its own worker. The release
+/// workflow publishes that image with the worker built from the same commit,
+/// whose identity equals this build's, so a container on it needs no worker
+/// from the host. Neither a development build nor a crates.io package, whose
+/// identity falls back to the commit, is.
+#[must_use]
+pub fn release_image_carries_worker() -> bool {
+    installed().release_image_carries_worker
+}
+
+/// The bytes a worker executable carries so its build can be read from the
+/// file: [`worker_build_id`] between the stamp's markers.
+#[must_use]
+pub fn worker_build_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| format!("\0MJ-WORKER-BUILD:{}\0", worker_build_id()))
+}
+
 const PREFIX: &[u8] = b"\0MJ-WORKER-BUILD:";
 // Preserve the existing stamp parser's search window, including its terminator.
 const STAMP_BYTES: usize = 192;
@@ -99,14 +212,16 @@ pub fn verify_worker_build(path: &Path) -> Result<()> {
         .with_context(|| format!("read worker build from {}", path.display()))?;
     let found = worker_build_from_reader(&mut input).with_context(|| {
         format!(
-            "worker {}; expected build {WORKER_BUILD_ID}",
-            path.display()
+            "worker {}; expected build {}",
+            path.display(),
+            worker_build_id()
         )
     })?;
-    if found != WORKER_BUILD_ID {
+    if found != worker_build_id() {
         bail!(
-            "worker {} has build {found}; expected build {WORKER_BUILD_ID}",
-            path.display()
+            "worker {} has build {found}; expected build {}",
+            path.display(),
+            worker_build_id()
         );
     }
     Ok(())
@@ -214,12 +329,12 @@ mod tests {
             150_000,
         ] {
             let mut bytes = vec![0xff; offset];
-            bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
+            bytes.extend_from_slice(worker_build_stamp().as_bytes());
             bytes.extend_from_slice(&vec![0xff; READ_BYTES]);
             // Matching stamps in separate chunks are valid, too.
-            bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
+            bytes.extend_from_slice(worker_build_stamp().as_bytes());
             std::fs::write(&path, &bytes).unwrap();
-            assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
+            assert_eq!(worker_build_from_bytes(&bytes).unwrap(), worker_build_id());
             verify_worker_build(&path).unwrap();
         }
     }
@@ -231,16 +346,17 @@ mod tests {
         bytes.extend_from_slice(
             b"read worker build stampconflicting worker build stampsmissing worker build stamp (legacy or invalid worker)",
         );
-        bytes.extend_from_slice(WORKER_BUILD_ID.as_bytes());
-        bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
-        assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
+        bytes.extend_from_slice(worker_build_id().as_bytes());
+        bytes.extend_from_slice(worker_build_stamp().as_bytes());
+        assert_eq!(worker_build_from_bytes(&bytes).unwrap(), worker_build_id());
     }
 
     #[test]
     fn rejects_missing_truncated_stale_and_conflicting_stamps() {
         assert!(worker_build_from_bytes(b"legacy worker").is_err());
         assert!(
-            worker_build_from_bytes(WORKER_BUILD_STAMP.trim_end_matches('\0').as_bytes()).is_err()
+            worker_build_from_bytes(worker_build_stamp().trim_end_matches('\0').as_bytes())
+                .is_err()
         );
         let stale = format!("\0MJ-WORKER-BUILD:0.1.0+{}\0", "a".repeat(40));
         let directory = tempfile::tempdir().unwrap();
@@ -249,25 +365,25 @@ mod tests {
         let error = verify_worker_build(&path).unwrap_err().to_string();
         assert!(
             error.contains("0.1.0+")
-                && error.contains(WORKER_BUILD_ID)
+                && error.contains(worker_build_id())
                 && error.contains("stale-worker")
         );
-        let conflicting = format!("{WORKER_BUILD_STAMP}{stale}");
+        let conflicting = format!("{}{stale}", worker_build_stamp());
         assert!(
             worker_build_from_bytes(conflicting.as_bytes())
                 .unwrap_err()
                 .to_string()
                 .contains("conflicting")
         );
-        let mut bytes = WORKER_BUILD_STAMP.as_bytes().to_vec();
+        let mut bytes = worker_build_stamp().as_bytes().to_vec();
         bytes.resize(2 * READ_BYTES - PREFIX.len(), 0xff);
         bytes.extend_from_slice(stale.as_bytes());
         std::fs::write(&path, &bytes).unwrap();
         let error = format!("{:#}", verify_worker_build(&path).unwrap_err());
         assert!(error.contains("conflicting") && error.contains("stale-worker"));
         bytes.truncate(READ_BYTES - 2);
-        bytes[..WORKER_BUILD_STAMP.len()].fill(0xff);
-        bytes.extend_from_slice(WORKER_BUILD_STAMP.trim_end_matches('\0').as_bytes());
+        bytes[..worker_build_stamp().len()].fill(0xff);
+        bytes.extend_from_slice(worker_build_stamp().trim_end_matches('\0').as_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(format!("{:#}", verify_worker_build(&path).unwrap_err()).contains("missing"));
     }

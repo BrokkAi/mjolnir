@@ -1,0 +1,5844 @@
+use super::*;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use axum::http::Request;
+use http_body_util::BodyExt as _;
+use tower::ServiceExt as _;
+
+#[tokio::test]
+async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
+    let gate = Arc::new(mj_controller::upgrade::Gate::default());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Body::from_stream(futures::stream::pending::<
+                            Result<String, std::convert::Infallible>,
+                        >())
+                    }
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            gate.clone(),
+            upgrade_admission,
+        ));
+
+    let request = tokio::spawn(
+        app.clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap()),
+    );
+    entered.notified().await;
+    assert!(gate.active_labels().is_empty());
+    assert!(
+        gate.try_close(),
+        "a waiting HTTP handler must not hold handoff"
+    );
+    release.notify_one();
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        gate.active_labels().is_empty(),
+        "an unread response must not hold handoff"
+    );
+
+    let rejected = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.headers()["x-mj-upgrade"], "pending");
+}
+
+use mj_core::config::{
+    CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
+    ProjectRepository, SshConnection,
+};
+use mj_core::remote_git::Shorthand;
+use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
+
+pub(super) fn sample_config_state() -> (Config, AppState) {
+    let config = Config {
+        images: Default::default(),
+        keys: Default::default(),
+        jev: Default::default(),
+        quota: Default::default(),
+        subagents: Default::default(),
+        version: CONFIG_VERSION,
+        sessions_side: Default::default(),
+        sidebar_size: Default::default(),
+        advanced: Default::default(),
+        notify: Default::default(),
+        spinner: Default::default(),
+        theme: Default::default(),
+        phone: Default::default(),
+        daemon: Default::default(),
+        github: Default::default(),
+        review: Default::default(),
+        sessionwiki: Default::default(),
+        legacy_startup: (),
+        default_targets: Default::default(),
+        disabled_targets: Default::default(),
+        machines: Default::default(),
+        profiles: BTreeMap::from([(
+            "codex-1".into(),
+            HarnessProfile {
+                environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
+                ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, "/highly/secret/codex")
+            },
+        )]),
+        bundles: BTreeMap::from([(
+            "hel".into(),
+            ProjectBundle {
+                primary_repo: "hel".into(),
+                repositories: vec![ProjectRepository {
+                    id: "hel".into(),
+                    github: Some("owner/hel".into()),
+                    local: Some("/private/source/hel".into()),
+                    destination: "hel".into(),
+                    git_ref: None,
+                }],
+            },
+        )]),
+        targets: BTreeMap::from([
+            (
+                "podman".into(),
+                TargetTemplate::LocalPodman {
+                    container: ContainerTemplate {
+                        build_cache: None,
+                        image: "secret.registry/image".into(),
+                        pull_policy: Default::default(),
+                        platform: None,
+                        cpus: None,
+                        memory: None,
+                        environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())])
+                            .into(),
+                        workspace_storage: Default::default(),
+                    },
+                },
+            ),
+            ("raw".into(), TargetTemplate::LocalBare),
+        ]),
+    };
+    let state = AppState {
+        last_oracle_choices: Default::default(),
+        operator_presence: Default::default(),
+        last_subagent_policies: Default::default(),
+        subagents: Default::default(),
+        version: STATE_VERSION,
+        sessions: [(
+            "session-1".into(),
+            SessionRecord {
+                oracle_choice: None,
+                oracle: true,
+                notifications_ignored: false,
+                project: None,
+                target_runtime: None,
+                launch_base: None,
+                launch_branch: None,
+                checkout: None,
+                publication: None,
+                build_cache: None,
+                container_workspace: None,
+                subagents: None,
+                create_managed_worktree: None,
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                archived: false,
+                id: "session-1".into(),
+                title: "Build Hel".into(),
+                harness_kind: HarnessKind::Codex,
+                last_profile: "codex-1".into(),
+                bundle_id: "hel".into(),
+                project_directory: None,
+                managed_worktree: None,
+                review: None,
+                no_project_memory: false,
+                no_github_events: false,
+                no_github_credentials: false,
+                target_template_id: "podman".into(),
+                resource_allocation: None,
+                additional_mounts: vec![],
+                state: SessionState::Running,
+                target: None,
+                native_session_id: Some("native-secret-id".into()),
+                acp_session_title: Some("Build Hel".into()),
+                session_title_override: None,
+                created_at: "now".into(),
+                updated_at: "now".into(),
+                viewed_through_event_ordinal: 0,
+                draft_input: String::new(),
+                last_error: Some("secret-token at /highly/secret/codex".into()),
+                dismissed_failure: None,
+                failure_generation: 0,
+                last_checkpoint_error: None,
+                checkpoint: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
+    };
+    (config, state)
+}
+
+type TestServer = (
+    Router,
+    mpsc::Receiver<ControllerRequest>,
+    mpsc::Receiver<ReadReceiptRequest>,
+    mpsc::Receiver<PreflightRequest>,
+    mpsc::Receiver<ClientStateRequest>,
+);
+
+fn app() -> TestServer {
+    app_with_conversations(BTreeMap::new())
+}
+
+fn app_with_conversations(conversations: BTreeMap<String, BrowserTranscript>) -> TestServer {
+    app_with(conversations, |_| {})
+}
+
+fn app_with_snapshot(adjust: impl FnOnce(&mut ViewerSnapshot)) -> TestServer {
+    app_with(BTreeMap::new(), adjust)
+}
+
+fn app_with(
+    conversations: BTreeMap<String, BrowserTranscript>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+) -> TestServer {
+    app_with_backend(conversations, adjust, None)
+}
+
+fn app_with_backend(
+    conversations: BTreeMap<String, BrowserTranscript>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    backend: Option<Arc<dyn api::SubagentBackend>>,
+) -> TestServer {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    adjust(&mut snapshot);
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+    let (_conversation_tx, conversation_rx) = watch::channel(conversations.into_iter().collect());
+    let (action_tx, action_rx) = mpsc::channel(8);
+    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+    let (receipt_tx, receipt_rx) = mpsc::channel(8);
+    let (preflight_tx, preflight_rx) = mpsc::channel(8);
+    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
+    let (client_state_tx, client_state_rx) = mpsc::channel(8);
+    let options = test_options(
+        snapshot_rx,
+        conversation_rx,
+        action_tx,
+        bundle_tx,
+        receipt_tx,
+        preflight_tx,
+        move_preparation_tx,
+        client_state_tx,
+    )
+    .with_test_credentials("123456", b"01234567890123456789012345678901");
+    let mut options = options;
+    if let Some(backend) = backend {
+        options.set_subagent_backend(backend);
+    }
+    (
+        router(options),
+        action_rx,
+        receipt_rx,
+        preflight_rx,
+        client_state_rx,
+    )
+}
+
+fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleRequest>) {
+    let (app, bundles, _) = app_with_bundle_and_action_receivers(|_| {});
+    (app, bundles)
+}
+
+fn app_with_bundle_and_action_receivers(
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+) -> (
+    Router,
+    mpsc::Receiver<BundleRequest>,
+    mpsc::Receiver<ControllerRequest>,
+) {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    adjust(&mut snapshot);
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
+    let (action_tx, action_rx) = mpsc::channel(8);
+    let (bundle_tx, bundle_rx) = mpsc::channel(8);
+    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
+    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+    let options = test_options(
+        snapshot_rx,
+        conversation_rx,
+        action_tx,
+        bundle_tx,
+        receipt_tx,
+        preflight_tx,
+        move_preparation_tx,
+        client_state_tx,
+    )
+    .with_test_credentials("123456", b"01234567890123456789012345678901");
+    (router(options), bundle_rx, action_rx)
+}
+
+// Keep this test factory's arguments aligned with `ServerRequests`; each
+// channel is asserted independently by the HTTP behavior tests below.
+#[allow(clippy::too_many_arguments)]
+fn test_options(
+    snapshot_rx: watch::Receiver<ViewerSnapshot>,
+    conversation_rx: watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
+    action_tx: mpsc::Sender<ControllerRequest>,
+    bundle_tx: mpsc::Sender<BundleRequest>,
+    receipt_tx: mpsc::Sender<ReadReceiptRequest>,
+    preflight_tx: mpsc::Sender<PreflightRequest>,
+    move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
+    client_state_tx: mpsc::Sender<ClientStateRequest>,
+) -> ServerOptions {
+    ServerOptions::new(
+        "127.0.0.1:0".parse().unwrap(),
+        snapshot_rx,
+        conversation_rx,
+        ServerRequests {
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            move_preparation_tx,
+            client_state_tx,
+        },
+    )
+    .unwrap()
+}
+
+fn detached_options() -> ServerOptions {
+    let (config, state) = sample_config_state();
+    let (_snapshot_tx, snapshot_rx) =
+        watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
+    let (action_tx, _action_rx) = mpsc::channel(1);
+    let (bundle_tx, _bundle_rx) = mpsc::channel(1);
+    let (receipt_tx, _receipt_rx) = mpsc::channel(1);
+    let (preflight_tx, _preflight_rx) = mpsc::channel(1);
+    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(1);
+    let (client_state_tx, _client_state_rx) = mpsc::channel(1);
+    test_options(
+        snapshot_rx,
+        conversation_rx,
+        action_tx,
+        bundle_tx,
+        receipt_tx,
+        preflight_tx,
+        move_preparation_tx,
+        client_state_tx,
+    )
+}
+
+/// A valid session cookie for the test server's key.
+///
+/// Most checks are about what an authenticated request does rather than
+/// about how it authenticated, and going through the login route for each
+/// one buys nothing.
+fn cookie() -> String {
+    format!(
+        "{COOKIE_NAME}={}",
+        signed_cookie_value(
+            b"01234567890123456789012345678901",
+            "test-viewer",
+            now_unix().saturating_add(3600)
+        )
+    )
+}
+
+async fn login_cookie(app: &Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/auth/session")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"code":"123456"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    response
+        .headers()
+        .get(SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn app_with_background_stop_receiver(
+    can_stop: bool,
+) -> (Router, mpsc::Receiver<BackgroundTaskStopRequest>) {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot.sessions[0].background_tasks = vec![ViewerBackgroundTask {
+        id: "terminal:background-1".into(),
+        command: "cargo test".into(),
+        started_at_ms: 1_000,
+        can_stop,
+    }];
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
+    let (action_tx, _action_rx) = mpsc::channel(8);
+    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
+    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+    let (stop_tx, stop_rx) = mpsc::channel(8);
+    let mut options = test_options(
+        snapshot_rx,
+        conversation_rx,
+        action_tx,
+        bundle_tx,
+        receipt_tx,
+        preflight_tx,
+        move_preparation_tx,
+        client_state_tx,
+    )
+    .with_test_credentials("123456", b"01234567890123456789012345678901");
+    options.set_background_task_stop_tx(stop_tx);
+    options.set_api_token("test-api-token".into());
+    (router(options), stop_rx)
+}
+
+#[tokio::test]
+async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
+    let (app, mut requests) = app_with_background_stop_receiver(true);
+    let body = r#"{"background_task_id":"terminal:background-1"}"#;
+    let path = "/api/v1/sessions/session-1/background-tasks/stop";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()[api::API_VERSION_HEADER], "1");
+    assert!(requests.try_recv().is_err());
+
+    for route in ["/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header("authorization", "Bearer test-api-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session = if route.ends_with("session-1") {
+            &json
+        } else {
+            &json["sessions"][0]
+        };
+        assert_eq!(
+            session["background_tasks"][0]["id"],
+            "terminal:background-1"
+        );
+        assert_eq!(session["background_tasks"][0]["can_stop"], true);
+    }
+
+    let response = tokio::spawn(
+        app.clone().oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    );
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.background_task_id, "terminal:background-1");
+    assert!(
+        !response.is_finished(),
+        "HTTP acknowledgement must wait for the actor"
+    );
+    request.reply.send(Ok(())).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    let (app, mut requests) = app_with_background_stop_receiver(false);
+    let response = app
+        .oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgement() {
+    let (app, mut requests) = app_with_background_stop_receiver(true);
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/sessions/session-1/background-tasks/stop")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"background_task_id":"terminal:background-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.background_task_id, "terminal:background-1");
+    request.reply.send(Ok(())).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+
+    let (app, mut requests) = app_with_background_stop_receiver(false);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::post("/api/sessions/session-1/background-tasks/stop")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"background_task_id":"terminal:background-1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn background_task_stop_reports_provider_failure_without_leaking_details() {
+    let (app, mut requests) = app_with_background_stop_receiver(true);
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/sessions/session-1/background-tasks/stop")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"background_task_id":"terminal:background-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let request = requests.recv().await.unwrap();
+    request
+        .reply
+        .send(Err(BackgroundTaskStopFailure::Provider))
+        .unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &body[..],
+        br#"{"error":"the provider could not stop this background task"}"#
+    );
+}
+
+#[tokio::test]
+async fn bundle_endpoint_authenticates_and_forwards_the_source() {
+    let (app, mut bundles) = app_with_bundle_receiver();
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::post("/api/bundles")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"source":"example/app"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert!(bundles.try_recv().is_err());
+
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/bundles")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(COOKIE, cookie)
+                    .body(Body::from(r#"{"source":"example/app"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let request = bundles.recv().await.expect("bundle request forwarded");
+    assert_eq!(request.source, "example/app");
+    request.reply.send(Ok("app".into())).unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), br#"{"bundle_id":"app"}"#);
+}
+
+#[tokio::test]
+async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
+    for source in [String::new(), "x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)] {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .oneshot(
+                Request::post("/api/bundles")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(COOKIE, cookie)
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({"source": source})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(bundles.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn api_requires_a_valid_signed_cookie() {
+    let (app, _, _, _, _) = app();
+    let unauthorized = app
+        .clone()
+        .oneshot(Request::get("/api/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let cookie = login_cookie(&app).await;
+    let authorized = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[test]
+fn signed_cookie_rejects_expiry_and_tampering() {
+    let key = b"01234567890123456789012345678901";
+    let cookie = signed_cookie_value(key, "test-viewer", 200);
+    assert!(session_cookie_valid(key, &cookie, 100));
+    assert!(!session_cookie_valid(key, &cookie, 200));
+    assert!(!session_cookie_valid(key, &format!("{cookie}x"), 100));
+    assert!(!session_cookie_valid(b"another-key", &cookie, 100));
+}
+
+#[test]
+fn generated_code_and_cookie_attributes_are_phone_safe() {
+    let code = generate_viewer_code().unwrap();
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+    let header = session_cookie_header("signed", Some(60), true)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(header.contains("HttpOnly"));
+    assert!(header.contains("SameSite=Strict"));
+    assert!(header.contains("Secure"));
+    assert!(header.contains("Max-Age=60"));
+}
+
+#[test]
+fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
+    let (mut config, state) = sample_config_state();
+    config.review = mj_core::config::ReviewConfig {
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
+    };
+
+    let value =
+        serde_json::to_value(ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
+    assert_eq!(
+        value.get("review_config"),
+        Some(&serde_json::json!({
+            "trigger": "push",
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
+        }))
+    );
+    let json = value.to_string();
+    assert!(!json.contains("/highly/secret"));
+    assert!(!json.contains("secret-token"));
+    assert!(!json.contains("secret-target"));
+    assert!(!json.contains("secret.registry"));
+    assert!(!json.contains("native-secret-id"));
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
+    assert!(json.contains("\"has_error\":true"));
+}
+
+#[test]
+fn public_snapshot_keeps_running_sessions_but_omits_disabled_profiles() {
+    let (mut config, state) = sample_config_state();
+    config.profiles.get_mut("codex-1").unwrap().enabled = false;
+
+    let retired: TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    }))
+    .unwrap();
+    config.targets.insert("retired-ec2".into(), retired);
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
+
+    assert!(
+        !snapshot
+            .targets
+            .iter()
+            .any(|target| target.id == "retired-ec2")
+    );
+    assert!(snapshot.profiles.is_empty());
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(snapshot.sessions[0].profile_id, "codex-1");
+}
+
+#[test]
+fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty() {
+    let (mut config, mut state) = sample_config_state();
+    config
+        .targets
+        .insert("raw-local".into(), TargetTemplate::LocalBare);
+    config.targets.insert(
+        "raw-builder".into(),
+        TargetTemplate::SshBare {
+            ssh: SshConnection {
+                host: "builder-a".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: PermissionMode::Guardian,
+            workspace_prefix: "workspaces".into(),
+        },
+    );
+    state.remember_project_directory("local", Path::new("/work/local"));
+    state.remember_project_directory("builder-a", Path::new("/srv/builder"));
+    state.remember_project_directory("other-host", Path::new("/not-published"));
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let target = |id: &str| {
+        snapshot
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap()
+    };
+    assert_eq!(
+        target("raw-local").recent_project_directories,
+        vec!["/work/local"]
+    );
+    assert_eq!(
+        target("raw-builder").recent_project_directories,
+        vec!["/srv/builder"]
+    );
+    assert!(target("podman").recent_project_directories.is_empty());
+}
+
+#[test]
+fn a_parent_lists_its_reviewers_apart_from_its_other_children() {
+    let (config, mut state) = sample_config_state();
+    let parent = state.sessions["session-1"].clone();
+    for (id, kind) in [
+        ("worker", mj_core::subagent::SubagentKind::Worker),
+        ("reviewer", mj_core::subagent::SubagentKind::Reviewer),
+    ] {
+        let mut child = parent.clone();
+        child.id = id.into();
+        child.state = if id == "reviewer" {
+            mj_core::state::SessionState::Error
+        } else {
+            mj_core::state::SessionState::Stopped
+        };
+        state.sessions.insert(id.into(), child);
+        state.subagents.insert(
+            id.into(),
+            mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: id.into(),
+                parent_session_id: "session-1".into(),
+                task_name: id.into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: String::new(),
+                request_key: id.into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+    }
+
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let row = |id: &str| snapshot.sessions.0.get(id).unwrap();
+    assert_eq!(
+        row("session-1").subagent_session_ids,
+        ["reviewer", "worker"]
+    );
+    assert_eq!(row("session-1").reviewer_session_ids, ["reviewer"]);
+    assert!(row("worker").reviewer_session_ids.is_empty());
+    assert!(row("reviewer").active);
+    assert!(!row("worker").active);
+
+    // The summary rows a compact client sees carry both lists, so Reviewers
+    // and Subagents never wait for a child's own record.
+    let mut stopped = state.clone();
+    stopped.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Stopped;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &stopped, 1);
+    let wire = viewer_wire::row(snapshot.sessions.0.get("session-1").unwrap()).unwrap();
+    assert_eq!(wire.row["detail"], false);
+    assert_eq!(
+        wire.row["reviewer_session_ids"],
+        serde_json::json!(["reviewer"])
+    );
+}
+
+#[test]
+fn public_snapshot_exposes_only_review_status_configuration() {
+    let (mut config, state) = sample_config_state();
+    config.review = mj_core::config::ReviewConfig {
+        legacy: None,
+        disabled: false,
+        brief_writer: None,
+        reviewers: vec![
+            mj_core::config::SubagentChoice {
+                model: "private-review-model".into(),
+                effort: Some("private-review-effort".into())
+            };
+            2
+        ],
+    };
+
+    let value =
+        serde_json::to_value(ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
+
+    assert_eq!(
+        value.get("review_config"),
+        Some(&serde_json::json!({
+            "trigger": "push",
+            "reviewers": [{"model":"private-review-model","effort":"private-review-effort"},{"model":"private-review-model","effort":"private-review-effort"}],
+        }))
+    );
+    let json = value.to_string();
+    assert!(json.contains("private-review-model"));
+    assert!(json.contains("private-review-effort"));
+}
+
+#[test]
+fn session_review_count_overrides_phone_status_projection() {
+    let (mut config, mut state) = sample_config_state();
+    config.review.reviewers = vec![
+        mj_core::config::SubagentChoice {
+            model: "model-a".into(),
+            effort: None
+        };
+        2
+    ];
+    state.sessions.get_mut("session-1").unwrap().review =
+        Some(Box::new(mj_core::config::SessionReview::Push {
+            reviewers: Some(vec![mj_core::config::SubagentChoice {
+                model: "model-b".into(),
+                effort: None,
+            }]),
+        }));
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
+    assert_eq!(snapshot.review_config.reviewers.len(), 2);
+    let session = snapshot.sessions.get("session-1").unwrap();
+    assert_eq!(session.review_trigger, mj_core::config::ReviewTrigger::Push);
+    assert_eq!(session.review_count, 1);
+    let wire = serde_json::to_value(session).unwrap();
+    assert_eq!(wire["review_count"], 1);
+}
+
+fn sample_elicitation() -> ElicitationRequest {
+    ElicitationRequest::from_acp_params(
+        "elicitation-1",
+        serde_json::json!({
+            "sessionId": "session-1",
+            "mode": "form",
+            "message": "Which CI architecture should the workflow use?",
+            "requestedSchema": {
+                "type": "object",
+                "required": ["question_0"],
+                "properties": {
+                    "question_0": {
+                        "type": "string",
+                        "title": "CI architecture",
+                        "oneOf": [
+                            {"const": "reusable", "title": "Reusable workflow"},
+                            {"const": "matrix", "title": "Matrix job"}
+                        ]
+                    },
+                    "question_0_custom": {
+                        "type": "string",
+                        "title": "Other",
+                        "_meta": {"jetbrains": {"air": {"version": 1, "customAnswer": {
+                            "questionId": "question_0",
+                            "isCustomAnswer": true
+                        }}}}
+                    }
+                }
+            }
+        }),
+    )
+    .expect("sample elicitation parses")
+}
+
+fn accept(pairs: &[(&str, &str)]) -> ElicitationResponse {
+    ElicitationResponse::Accept {
+        content: pairs
+            .iter()
+            .map(|(id, value)| {
+                (
+                    (*id).to_owned(),
+                    mj_core::elicitation::ElicitationValue::String((*value).to_owned()),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
+    snapshot.sessions[0].pending_elicitations = vec![sample_elicitation()];
+}
+
+#[tokio::test]
+async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        pending_elicitation_snapshot(snapshot);
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::NeedsInput;
+    });
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(
+                "/api/sessions/session-1/notification-message?holder=session-1&requests=elicitation-1",
+            )
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(
+        body["text"],
+        "Which CI architecture should the workflow use?"
+    );
+
+    // A card that captured another holder or request gets a conflict, never text.
+    for stale in [
+        "holder=other-session&requests=elicitation-1",
+        "holder=session-1&requests=elicitation-0",
+        "holder=session-1&requests=elicitation-1&question=agent:9",
+        "holder=session-1",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "notification_changed");
+    }
+
+    let missing = app
+        .oneshot(
+            Request::get(
+                "/api/sessions/unknown-session/notification-message?holder=unknown-session",
+            )
+            .header(COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn elicitation_answer_is_typed_and_forwarded() {
+    let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/actions")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"respond-elicitation","session_id":"session-1","elicitation_id":"elicitation-1","response":{"action":"accept","content":{"question_0":"reusable"}}}"#,
+                ))
+                .unwrap(),
+        ),
+    );
+    let action = actions.recv().await.unwrap();
+    assert_eq!(
+        action.action,
+        ControllerAction::RespondElicitation {
+            session_id: "session-1".into(),
+            elicitation_id: "elicitation-1".into(),
+            response: accept(&[("question_0", "reusable")]),
+        }
+    );
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
+#[tokio::test]
+async fn elicitation_answer_for_an_unknown_request_is_refused_without_reaching_the_controller() {
+    let (app, mut actions, _, _, _) = app_with_snapshot(pending_elicitation_snapshot);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::post("/api/actions")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"respond-elicitation","session_id":"session-1","elicitation_id":"elicitation-9","response":{"action":"cancel"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actions.try_recv().is_err());
+}
+
+#[test]
+fn elicitation_answers_are_checked_against_the_request_the_agent_asked() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    pending_elicitation_snapshot(&mut snapshot);
+    let respond = |response: ElicitationResponse| ControllerAction::RespondElicitation {
+        session_id: "session-1".into(),
+        elicitation_id: "elicitation-1".into(),
+        response,
+    };
+
+    assert!(validate_action(&respond(accept(&[("question_0", "matrix")])), &snapshot).is_ok());
+    // Declining and cancelling never carry content, so they are always
+    // answerable.
+    assert!(validate_action(&respond(ElicitationResponse::Decline), &snapshot).is_ok());
+    // An option the agent never offered, a field it never published, and a
+    // missing required answer are all refused.
+    assert!(validate_action(&respond(accept(&[("question_0", "cron")])), &snapshot).is_err());
+    assert!(validate_action(&respond(accept(&[("smuggled", "yes")])), &snapshot).is_err());
+    assert!(validate_action(&respond(accept(&[])), &snapshot).is_err());
+    // A free-text answer answers the select it belongs to, exactly as the
+    // chat form submits it; the harness then gets it in the select's field.
+    assert!(
+        validate_action(
+            &respond(accept(&[("question_0_custom", "a monorepo pipeline")])),
+            &snapshot,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn oversized_elicitation_answers_are_refused() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    pending_elicitation_snapshot(&mut snapshot);
+    let long = "x".repeat(MAX_ELICITATION_BYTES);
+    assert!(
+        validate_action(
+            &ControllerAction::RespondElicitation {
+                session_id: "session-1".into(),
+                elicitation_id: "elicitation-1".into(),
+                response: accept(&[("question_0_custom", long.as_str())]),
+            },
+            &snapshot,
+        )
+        .is_err()
+    );
+}
+
+/// One slice of the browser application, named by the two markers that
+/// bracket it in `src/web/viewer.js`.
+///
+/// Slicing keeps each check to the functions it is about, so an unrelated
+/// change elsewhere in the application cannot make it fail for the wrong
+/// reason. The markers are ordinary source text, so a rename that moves
+/// them fails loudly here rather than silently testing nothing.
+fn viewer_source(from: &str, to: &str) -> &'static str {
+    let start = VIEWER_JS
+        .find(from)
+        .unwrap_or_else(|| panic!("src/web/viewer.js no longer contains {from:?}"));
+    let end = VIEWER_JS[start..]
+        .find(to)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("src/web/viewer.js no longer contains {to:?} after {from:?}"));
+    &VIEWER_JS[start..end]
+}
+
+/// Run one JavaScript check under Node.
+///
+/// The check and the modules it imports are written to a real directory
+/// rather than passed to `--eval`, so a failure reports a line number a
+/// person can open, and so a check can import the shipped module under
+/// test by its real name instead of against a copy pasted into a string.
+fn run_web_check(name: &str, check: &str) {
+    let directory = tempfile::tempdir().expect("temporary directory for a web check");
+    for (file, source) in [
+        ("test-dom.js", TEST_DOM_JS),
+        ("markdown.js", MARKDOWN_JS),
+        ("tool-output.js", TOOL_OUTPUT_JS),
+    ] {
+        std::fs::write(directory.path().join(file), source).expect("write a web module");
+    }
+    let path = directory.path().join(format!("{name}.mjs"));
+    std::fs::write(&path, check).expect("write the web check");
+    let output = std::process::Command::new("node")
+        .arg(&path)
+        .output()
+        .expect("Node.js is required to exercise the web viewer");
+    assert!(
+        output.status.success(),
+        "{name} failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Run one JavaScript check that supplies its own environment, for the
+/// checks that slice a function out of `viewer.js` and drive it against a
+/// hand-written stub rather than importing a module.
+fn run_viewer_script(name: &str, script: &str) {
+    run_web_check(name, script);
+}
+
+#[test]
+fn browser_runtime_deltas_are_atomic_and_do_not_visit_history() {
+    let source = viewer_source("class ViewerRuntimeState", "const viewerState =");
+    let checks = r#"
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+for (const count of [100, 10000, 100000]) {
+  let visits = 0;
+  const state = new ViewerRuntimeState(row => { visits++; return row.live; }, row => { visits++; return !row.live; }, () => 0);
+  const rows = Array.from({length: count}, (_, id) => ({id: String(id), workspace_id:'w', live:false}));
+  rows.push({id:'active', workspace_id:'w', live:true});
+  state.apply({kind:'snapshot', cursor:{incarnation:'a',sequence:1}, snapshot:{sessions:rows}});
+  const histories = state.resume('w');
+  visits = 0;
+  const frame = {kind:'delta', from:{incarnation:'a',sequence:1}, cursor:{incarnation:'a',sequence:2}, metadata:{revision:2}, sessions:[['active',{id:'active',workspace_id:'w',live:true,title:'changed'}]], interned:{}};
+  assert(state.apply(frame), 'delta was not accepted');
+  assert(visits <= 4, 'a live update visited history');
+  assert(state.resume('w') === histories, 'unchanged history was rebuilt');
+  assert(!state.apply(frame), 'duplicate delta was reapplied');
+  const previous = state.rows.get('active');
+  let refused = false;
+  try { state.apply({...frame, from:{incarnation:'other',sequence:2}, cursor:{incarnation:'other',sequence:3}, sessions:[['active',null]]}); } catch (_) { refused = true; }
+  assert(refused && state.rows.get('active') === previous, 'a gap partly applied');
+  state.apply({kind:'delta', from:frame.cursor, cursor:{incarnation:'a',sequence:3}, metadata:{}, sessions:[['active',null]], interned:{}});
+  assert(!state.rows.has('active') && !state.live.has('w'), 'deleted membership survived');
+  state.apply({kind:'reset_required'});
+  assert(state.cursor === null, 'reset retained the cursor');
+  state.apply({kind:'snapshot', cursor:{incarnation:'b',sequence:1}, snapshot:{sessions:[]}});
+  assert(state.rows.size === 0, 'replacement retained old history');
+}
+"#;
+    run_viewer_script("runtime-deltas", &format!("{source}\n{checks}"));
+}
+
+#[test]
+fn web_upgrade_waits_for_readiness_and_retries_only_explicit_refusals() {
+    let source = viewer_source(
+        "async function upgradeAwareFetch",
+        "async function request(",
+    );
+    run_viewer_script(
+        "upgrade-admission",
+        &format!(
+            r#"
+{source}
+const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
+globalThis.setTimeout = callback => {{ callback(); }};
+const options = {{ method: 'POST', body: JSON.stringify({{command_id:'steer-1', active_prompt_id:'turn-1'}}) }};
+let actions = 0, probes = 0;
+const response = (status, pending = false) => ({{ status, ok:status === 200,
+  headers:{{get:() => pending ? 'pending' : null}}, body:{{cancel:async () => {{}}}} }});
+globalThis.fetch = async (url, sent) => {{
+  if (url === '/') {{
+    probes++;
+    if (probes === 1) throw new Error('old listener stopped');
+    return response(200);
+  }}
+  assert(sent === options, 'request identity or steering target changed');
+  return ++actions === 1 ? response(503, true) : response(200);
+}};
+assert((await upgradeAwareFetch('/api/actions', options)).ok, 'request did not complete');
+assert(actions === 2 && probes === 2, 'handoff did not wait for the replacement');
+globalThis.fetch = async () => {{ throw new Error('acknowledgement lost'); }};
+let failed = false;
+try {{ await upgradeAwareFetch('/api/actions', options); }} catch {{ failed = true; }}
+assert(failed, 'an ambiguous mutation must not be replayed');
+globalThis.fetch = async () => response(503);
+assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
+  'unrelated service failures must not trigger an upgrade retry');
+"#
+        ),
+    );
+}
+
+/// Live path suggestions are the only place the browser types and asks at
+/// once, so the shipped source has to drop an answer that no longer matches
+/// what the field holds, and accepting a row has to re-announce the edit.
+#[test]
+fn web_path_suggestions_drop_stale_answers_and_re_announce_an_accepted_row() {
+    // The suggestion state outlives any one input element, so the slice starts
+    // at the map that owns it rather than at the function that reads it.
+    let source = viewer_source(
+        "const pathSuggestionOwners = new Map();",
+        "\nfunction pathField(",
+    );
+    let setup = r#"
+const PATH_SUGGESTION_DELAY_MS = 0;
+const setTimeout = run => run();
+const clearTimeout = () => {};
+const el = (name, className, textContent) => ({
+  tagName: name.toUpperCase(),
+  className: className || '',
+  textContent: textContent === undefined ? '' : textContent,
+  dataset: {},
+  children: [],
+  attributes: {},
+  classList: { add() {}, remove() {} },
+  append(...children) { this.children.push(...children); },
+  replaceChildren(...children) { this.children = children; },
+  setAttribute(key, value) { this.attributes[key] = value; },
+  addEventListener() {},
+});
+const requests = [];
+let pending = null;
+const request = (url, options) => new Promise(resolve => {
+  requests.push({ url, body: JSON.parse(options.body) });
+  pending = resolve;
+});
+class Event { constructor(type) { this.type = type; } }
+const input = {
+  value: '',
+  listeners: new Map(),
+  after(node) { this.next = node; },
+  addEventListener(type, listener) {
+    this.listeners.set(type, [...(this.listeners.get(type) || []), listener]);
+  },
+  dispatchEvent(event) { for (const l of this.listeners.get(event.type) || []) l(event); },
+  fire(type, event = {}) { this.dispatchEvent({ type, preventDefault() {}, ...event }); },
+};
+const document = { activeElement: input };
+const flush = () => new Promise(resolve => setImmediate(resolve));
+"#;
+    let checks = r#"
+attachPathSuggestions(input, { host: () => 'raw', kind: 'directories', applies: () => true });
+const list = input.next;
+
+input.value = '/work/re';
+input.fire('input');
+if (requests.length !== 1) throw Error('the field did not ask for suggestions');
+const answer = { candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false };
+
+// An answer for text the person has moved past is not drawn under them.
+input.value = '/work/rep';
+pending(answer);
+await flush();
+if (list.children.length !== 0) throw Error('a stale answer was rendered');
+
+input.value = '/work/re';
+input.fire('input');
+pending(answer);
+await flush();
+if (list.children.length !== 2) throw Error('the answer was not rendered');
+if (input.value !== '/work/re') throw Error('the typed text was rewritten');
+
+input.fire('keydown', { key: 'ArrowDown' });
+input.fire('keydown', { key: 'Enter' });
+if (input.value !== '/work/repos/') throw Error('Enter did not accept the highlighted row');
+if (requests.length !== 3 || requests[2].body.prefix !== '/work/repos/')
+  throw Error('accepting did not re-announce the edit');
+"#;
+    run_viewer_script("path-suggestions", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[test]
+fn viewer_reports_configuration_drift_without_exposing_private_configuration() {
+    let (mut config, state) = sample_config_state();
+    let bundle = config.bundles.remove("hel").unwrap();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(snapshot.sessions[0].has_error);
+    assert!(
+        snapshot.sessions[0]
+            .configuration_issue
+            .as_deref()
+            .unwrap()
+            .contains("missing bundle")
+    );
+    let json = serde_json::to_string(&snapshot).unwrap();
+    assert!(!json.contains("secret-token"));
+    assert!(!json.contains("/highly/secret"));
+    config.bundles.insert("hel".into(), bundle);
+    let repaired = ViewerSnapshot::from_config_state(&config, &state, 2);
+    assert!(repaired.sessions[0].configuration_issue.is_none());
+}
+
+#[test]
+fn web_preflight_applies_resolved_path_and_ignores_cancelled_reply() {
+    let source = viewer_source(
+        "async function preflightNew()",
+        "async function advanceNew()",
+    );
+    let setup = r#"
+let newDraft = { targetId: 'remote', profileId: 'codex', bundleId: 'bundle', projectDirectory: '~/project', projectDirectories: {} };
+let pendingNewPreflight = null, pendingNewPreflightController = null;
+function targetIsBare() { return true; }
+function renderNewForm() {}
+function selectedWorkspaceId() { return 'workspace'; }
+let resolveRequest;
+function request() { return new Promise(resolve => { resolveRequest = resolve; }); }
+"#;
+    let checks = r#"
+let pending = preflightNew();
+resolveRequest({ project_directory: '/remote/project' });
+if (!await pending || newDraft.projectDirectory !== '/remote/project' || newDraft.projectDirectories.remote !== '/remote/project') throw Error('resolved path was not applied');
+newDraft.projectDirectory = '~/newer';
+pending = preflightNew();
+pendingNewPreflightController.abort();
+resolveRequest({ project_directory: '/remote/stale' });
+if (await pending || newDraft.projectDirectory !== '~/newer') throw Error('cancelled reply replaced draft');
+"#;
+    run_viewer_script("path-preflight", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[test]
+fn embedded_viewer_displays_capacity_retry_deadlines() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
+if (sessionActivityLabel(session, 60000) !== 'Provider unavailable · retrying in 1m00s') throw Error('missing retry countdown');
+if (sessionActivityLabel(session, 121000) !== 'Provider unavailable · retrying in 0m00s') throw Error('negative retry countdown');
+"#;
+    run_viewer_script("capacity-retry", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[test]
+fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
+    let source = format!(
+        "{}\n{}\n{}",
+        viewer_source("function isSubagentSession(", "function liveSessions("),
+        viewer_source("function isResumeSession(", "const resumeDrafts ="),
+        viewer_source("class ViewerRuntimeState", "const viewerState ="),
+    );
+    let setup = r#"
+const snapshot = {
+  sessions: [
+{ id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
+{ id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
+{ id: "child-a", workspace_id: "workspace-a", subagent_parent_id: "absent-parent", capabilities: { resume: true } },
+{ id: "running-a", workspace_id: "workspace-a", lifecycle: "live", has_error: true, capabilities: { resume: false, open: false } },
+{ id: "move-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "failed" } },
+{ id: "moving-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "starting_queue" } },
+  ],
+};
+function selectedWorkspaceId() { return "workspace-a"; }
+function sessionActivityMs() { return 0; }
+function epochMs() { return null; }
+"#;
+    let checks = r#"
+const viewerState = new ViewerRuntimeState(() => false, row => !isSubagentSession(row) && isResumeSession(row), resumeActivityMs);
+viewerState.install(snapshot);
+const ids = workspace => resumeSessions(workspace).map(session => session.id).sort();
+if (JSON.stringify(ids("workspace-a")) !== JSON.stringify(["history-a", "move-a"])) {
+  throw new Error(`workspace A histories or recoveries were wrong: ${JSON.stringify(ids("workspace-a"))}`);
+}
+if (JSON.stringify(ids("workspace-b")) !== JSON.stringify(["history-b"])) {
+  throw new Error(`workspace B histories were wrong: ${JSON.stringify(ids("workspace-b"))}`);
+}
+if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace exposed sessions");
+"#;
+    run_viewer_script(
+        "workspace-resume-history",
+        &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+#[test]
+fn embedded_viewer_warns_before_stopping_an_active_session() {
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function sessionById(", "function sessionInWorkspace("),
+        viewer_source("async function runSessionAction", "sessions.onclick =")
+    );
+    let setup = r#"
+const pendingActions = new Set();
+const pendingLifecycleActions = new Map();
+const snapshot = {
+  sessions: [
+{ id: "active", chat_phase: "running" },
+{ id: "idle", chat_phase: "idle" },
+  ],
+};
+const questions = [];
+const viewerState = { rows: new Map(snapshot.sessions.map(row => [row.id, row])) };
+function confirm(question) { questions.push(question); return false; }
+function navigate() {}
+"#;
+    let checks = r#"
+const errorNode = { textContent: "" };
+await runSessionAction({ action: "suspend", id: "active" }, errorNode);
+await runSessionAction({ action: "suspend", id: "idle" }, errorNode);
+if (!questions[0].startsWith("Suspend session?\n\n")) {
+  throw new Error(`active close warning was ${JSON.stringify(questions[0])}`);
+}
+if (!questions[0].includes("current turn will be interrupted")) {
+  throw new Error(`active close omitted interruption: ${JSON.stringify(questions[0])}`);
+}
+if (!questions[1].startsWith("Suspend session?\n\n")) {
+  throw new Error(`idle close warning was ${JSON.stringify(questions[1])}`);
+}
+"#;
+    run_viewer_script(
+        "active-session-stop-confirmation",
+        &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+/// The projection publishes what the browser needs to group and filter
+/// without publishing what the redaction contract keeps back. A project
+/// key groups two sessions in one project together and says nothing about
+/// where that project lives.
+#[test]
+fn the_project_key_groups_without_naming_a_path() {
+    let (config, mut state) = sample_config_state();
+    let first = state.sessions["session-1"].clone();
+    let mut second = first.clone();
+    second.id = "session-2".into();
+    state.sessions.insert(second.id.clone(), second);
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+
+    let keys = snapshot
+        .sessions
+        .iter()
+        .map(|session| session.project_key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(keys.len(), 1, "two sessions in one project did not group");
+    let key = keys.into_iter().next().expect("one key");
+    assert!(!key.is_empty(), "the project key is empty");
+    assert!(
+        !key.contains('/') && !key.contains("hel"),
+        "the project key leaks its identity: {key}"
+    );
+    assert_eq!(
+        snapshot.sessions[0].project_label, "hel",
+        "the project label should be a name a person recognises"
+    );
+}
+
+#[test]
+fn web_project_keys_follow_the_complete_repository_set() {
+    let (mut config, mut state) = sample_config_state();
+    let shared_bundle = config.bundles["hel"].clone();
+    config.bundles.insert("other".into(), shared_bundle);
+
+    let mut other = state.sessions["session-1"].clone();
+    other.id = "session-2".into();
+    other.bundle_id = "other".into();
+    state.sessions.insert(other.id.clone(), other);
+
+    assert_eq!(
+        config.bundles["hel"].primary_repo,
+        config.bundles["other"].primary_repo
+    );
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let first = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "session-1")
+        .expect("first session");
+    let second = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "session-2")
+        .expect("second session");
+
+    assert_eq!(first.project_label, "hel");
+    assert_eq!(second.project_label, "hel");
+    assert_eq!(first.project_key, second.project_key);
+
+    let secondary = ProjectRepository {
+        id: "secondary".into(),
+        github: Some("owner/secondary".into()),
+        local: None,
+        destination: "secondary".into(),
+        git_ref: None,
+    };
+    config
+        .bundles
+        .get_mut("other")
+        .unwrap()
+        .repositories
+        .push(secondary.clone());
+    let project_keys = |config: &Config| {
+        ViewerSnapshot::from_config_state(config, &state, 1)
+            .sessions
+            .into_iter()
+            .map(|session| session.project_key)
+            .collect::<Vec<_>>()
+    };
+    let keys = project_keys(&config);
+    assert_ne!(
+        keys[0], keys[1],
+        "an added repository must change the bundle identity"
+    );
+
+    let first_bundle = config.bundles.get_mut("hel").unwrap();
+    first_bundle.repositories.insert(0, secondary);
+    first_bundle.primary_repo = "secondary".into();
+    let keys = project_keys(&config);
+    assert_eq!(
+        keys[0], keys[1],
+        "the same repository set must group together despite order or primary choice"
+    );
+}
+
+#[test]
+fn viewer_session_applies_a_resolved_source_without_publishing_it() {
+    let (config, state) = sample_config_state();
+    let mut viewer = ViewerSnapshot::from_config_state(&config, &state, 1)
+        .sessions
+        .into_iter()
+        .next()
+        .expect("session");
+    let source = ProjectSourceIdentity::git_remote(
+        "git@github.com:BrokkAi/bifrost-dev.git",
+        Shorthand::Allowed,
+    )
+    .expect("GitHub source");
+
+    viewer.set_project_source(&source);
+
+    assert_eq!(viewer.project_label, "bifrost-dev");
+    assert_eq!(viewer.project_key, project_key(&source.key));
+    let json = serde_json::to_string(&viewer).expect("serialize viewer session");
+    assert!(!json.contains("BrokkAi"));
+    assert!(!json.contains("github.com"));
+}
+
+// A phone groups and filters by the lifecycle category, so the mapping
+// from the controller's precise state has to be the controller's own.
+
+// Resume compatibility travels as the set the browser can offer, so it
+// never has to subtract one list from another and never offers a target
+// the controller would refuse.
+
+/// The viewer renders a control because a capability says so. An action
+/// whose capability is false is refused at the boundary, so a forged
+/// request gets the same answer a well-behaved viewer would never ask for.
+#[tokio::test]
+async fn actions_are_refused_when_their_capability_is_false() {
+    for (body, capability) in [
+        (
+            r#"{"action":"interrupt-turn","session_id":"session-1"}"#,
+            "cancel_turn",
+        ),
+        (
+            r#"{"action":"set-plan-mode","session_id":"session-1","active":true}"#,
+            "set_plan_mode",
+        ),
+        (
+            r#"{"action":"set-config","session_id":"session-1","key":"model","value":"x"}"#,
+            "set_config",
+        ),
+        (
+            r#"{"action":"change-workspace","session_id":"session-1","workspace_id":"workspace-2"}"#,
+            "change_workspace",
+        ),
+        (
+            r#"{"action":"set-container-settings","session_id":"session-1","cpus":"2","memory":"4g","mounts":[{"source":"/srv/data","destination":"/data","read_only":true}]}"#,
+            "container_settings",
+        ),
+        (
+            r#"{"action":"restart","session_id":"session-1"}"#,
+            "restart",
+        ),
+        (
+            r#"{"action":"interrupt-all","session_id":"session-1"}"#,
+            "interrupt_all",
+        ),
+    ] {
+        let (app, mut actions, _, _, _) = app();
+        let response = post_action(app, cookie(), body.to_owned()).await;
+        assert!(
+            response.status().is_client_error(),
+            "{capability} was accepted while false: {}",
+            response.status()
+        );
+        assert!(
+            actions.try_recv().is_err(),
+            "{capability} reached the controller while false"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_away_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"set-operator-away","away":true}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::SetOperatorAway { away: true }
+    );
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn operator_activity_action_is_sessionless_and_reaches_controller() {
+    let (app, mut actions, _, _, _) =
+        app_with_snapshot(|snapshot| snapshot.sessions = Default::default());
+    let cookie = login_cookie(&app).await;
+    let posted = tokio::spawn(post_action(
+        app,
+        cookie,
+        r#"{"action":"record-operator-activity"}"#.into(),
+    ));
+    let request = actions.recv().await.unwrap();
+    assert_eq!(request.action, ControllerAction::RecordOperatorActivity);
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
+    use agent_client_protocol::v1::schema::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigSelectOptions,
+    };
+    use mj_core::config::HarnessKind;
+    let mode_option = |current: &str, values: &[&str]| {
+        SessionConfigOption::select(
+            "mode",
+            "Mode",
+            current.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new(value.to_string(), value.to_string())
+                    })
+                    .collect(),
+            ),
+        )
+        .category(SessionConfigOptionCategory::Mode)
+    };
+    // Muse container images built before muse-acp 0.10 carry the approval
+    // policy on `mode` instead of `approval_mode`; the worker enforces it
+    // there, so that is the selector the policy owns.
+    let auto_review = || {
+        SessionConfigOption::select(
+            "auto_review",
+            "Auto review",
+            "on",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("on", "On"),
+                SessionConfigSelectOption::new("off", "Off"),
+            ]),
+        )
+    };
+    for (harness, raw, value) in [
+        (
+            HarnessKind::Claude,
+            vec![mode_option(
+                "auto",
+                &["default", "auto", "bypassPermissions"],
+            )],
+            "bypassPermissions",
+        ),
+        (
+            HarnessKind::Muse,
+            vec![
+                mode_option("promptUnmatched", &["promptUnmatched", "allowAll"]),
+                auto_review(),
+            ],
+            "allowAll",
+        ),
+    ] {
+        let enforcement = harness.resolve_execution_enforcement(
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            mj_core::config::ApprovalChoices::default(),
+        );
+        let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.harness_kind = harness.id().into();
+            session.capabilities.set_config = true;
+            session.execution_enforcement = enforcement;
+            let facts = mj_core::acp::AcpSessionFacts::from_operational(
+                harness,
+                &Default::default(),
+                &raw,
+                None,
+            );
+            session.config_options = viewer_config_options(&raw, &facts);
+            session.policy_config_keys =
+                filter_policy_config_options(&mut session.config_options, enforcement, &raw);
+            assert!(session.config_options.is_empty(), "{harness:?}");
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions/session-1/row")
+                    .header(COOKIE, cookie())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let row: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            row["row"]
+                .get("config_options")
+                .is_none_or(|options| options.as_array().unwrap().is_empty()),
+            "{harness:?}"
+        );
+        let response = post_action(
+            app,
+            cookie(),
+            format!(
+                r#"{{"action":"set-config","session_id":"session-1","key":"mode","value":"{value}"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{harness:?}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("permission policy"));
+        assert!(actions.try_recv().is_err());
+    }
+}
+
+/// A setting the harness never advertised is not a setting. Forwarding one
+/// asks the agent to refuse something the viewer should never have offered.
+#[tokio::test]
+async fn a_config_key_the_harness_never_advertised_is_refused() {
+    let capable = |snapshot: &mut ViewerSnapshot| {
+        snapshot.sessions[0].capabilities.set_config = true;
+        snapshot.sessions[0].config_options = vec![ViewerConfigOption {
+            key: "model".into(),
+            label: "model".into(),
+            current: None,
+            choices: vec![ViewerConfigChoice {
+                value: "sonnet".into(),
+                name: "Sonnet".into(),
+                description: None,
+            }],
+        }];
+    };
+
+    for (body, why) in [
+        (
+            r#"{"action":"set-config","session_id":"session-1","key":"effort","value":"high"}"#,
+            "an unadvertised key",
+        ),
+        (
+            r#"{"action":"set-config","session_id":"session-1","key":"model","value":"gpt-9"}"#,
+            "an unoffered value",
+        ),
+    ] {
+        let (app, mut actions, _, _, _) = app_with_snapshot(capable);
+        let response = post_action(app, cookie(), body.to_owned()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{why} was accepted"
+        );
+        assert!(actions.try_recv().is_err(), "{why} reached the controller");
+    }
+
+    // The value the harness did advertise is forwarded unchanged.
+    let (app, mut actions, _, _, _) = app_with_snapshot(capable);
+    let response = tokio::spawn(post_action(
+        app,
+        cookie(),
+        r#"{"action":"set-config","session_id":"session-1","key":"model","value":"sonnet"}"#
+            .to_owned(),
+    ));
+    let action = actions
+        .recv()
+        .await
+        .expect("the action reached the controller");
+    assert!(
+        matches!(
+            action.action,
+            ControllerAction::SetConfig { ref key, ref value, .. }
+                if key == "model" && value == "sonnet"
+        ),
+        "the advertised value was not forwarded unchanged"
+    );
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+/// A dirty-worktree acknowledgement names the repositories the person was
+/// shown. A bare yes could be replayed against a set they never saw.
+#[tokio::test]
+async fn a_dirty_acknowledgement_is_bounded_and_names_repositories() {
+    let oversized = (0..40)
+        .map(|index| format!(r#""repo-{index}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    for (ack, why) in [
+        (oversized.as_str(), "an unbounded acknowledgement"),
+        (r#""""#, "an empty repository name"),
+    ] {
+        let (app, mut actions, _, _, _) = app();
+        let body = format!(
+            r#"{{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"hel","target_id":"podman","dirty_ack":[{ack}]}}"#
+        );
+        let response = post_action(app, cookie(), body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{why}");
+        assert!(actions.try_recv().is_err(), "{why} reached the controller");
+    }
+}
+
+// A session created without a title still gets one, derived the way the
+// terminal derives it, so the two surfaces name a session alike.
+
+/// Two phones must not share stored state, and one phone's state must
+/// survive its own re-login. Neither is true of a cookie that signs only
+/// an expiry, which is what this replaced.
+#[test]
+fn a_cookie_names_one_viewer_and_two_cookies_never_collide() {
+    let key = b"01234567890123456789012345678901";
+    let expiry = now_unix().saturating_add(3600);
+    let first = signed_cookie_value(key, "viewer-a", expiry);
+    let second = signed_cookie_value(key, "viewer-b", expiry);
+    assert_ne!(
+        first, second,
+        "two viewers unlocking in the same second share a cookie"
+    );
+    assert_eq!(
+        cookie_viewer(key, &first, now_unix()),
+        Some("viewer-a".to_owned())
+    );
+    assert_eq!(
+        cookie_viewer(key, &second, now_unix()),
+        Some("viewer-b".to_owned())
+    );
+}
+
+/// A forged or tampered cookie names nobody.
+#[test]
+fn a_tampered_cookie_is_refused() {
+    let key = b"01234567890123456789012345678901";
+    let expiry = now_unix().saturating_add(3600);
+    let honest = signed_cookie_value(key, "viewer-a", expiry);
+    let swapped = honest.replacen("viewer-a", "viewer-b", 1);
+    assert_eq!(cookie_viewer(key, &swapped, now_unix()), None);
+    assert_eq!(cookie_viewer(key, "nonsense", now_unix()), None);
+    assert_eq!(cookie_viewer(key, &format!("{expiry}."), now_unix()), None);
+}
+
+/// A composer is for a prompt. The bound exists so one viewer cannot fill
+/// the daemon's database with text it never sent.
+#[tokio::test]
+async fn an_oversized_draft_is_refused_with_a_stable_code() {
+    let (app, _, _, _, mut stored) = app();
+    let draft = "x".repeat(MAX_DRAFT_BYTES + 1);
+    let response = app
+        .oneshot(
+            Request::put("/api/sessions/session-1/draft")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "draft": draft }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(stored.try_recv().is_err(), "an oversized draft was stored");
+}
+
+/// A search that is not a search is refused before it reaches a database.
+#[tokio::test]
+async fn prompt_history_refuses_an_unknown_scope() {
+    let (app, _, _, _, mut stored) = app();
+    let response = app
+        .oneshot(
+            Request::get("/api/sessions/session-1/history?q=ship&scope=everything")
+                .header(COOKIE, cookie())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        stored.try_recv().is_err(),
+        "the search reached the controller"
+    );
+}
+
+/// A preflight starts nothing. It answers the questions a person needs
+/// before committing, and it refuses an impossible combination there
+/// rather than after the commit.
+/// Every preflight test in this module asks about a new session; a resume
+/// preflight shares the channel but never these fixtures.
+fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
+    match request {
+        PreflightRequest::New(request) => request,
+        other => panic!("expected a new-session preflight, got {other:?}"),
+    }
+}
+
+/// The browser's mount JSON must survive both HTTP boundaries unchanged,
+/// including the legacy read_only representation for copy-on-write.
+#[tokio::test]
+async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
+    let mounts = serde_json::json!([
+        {"source": "/srv/reference", "destination": "/reference", "read_only": true},
+        {"source": "/srv/cache", "destination": "/cache", "read_only": false},
+        {"source": "/srv/work", "destination": "/work", "read_only": false, "access": "rw"}
+    ]);
+    let expected: Vec<AdditionalMount> = serde_json::from_value(mounts.clone()).unwrap();
+    let body = serde_json::json!({
+        "profile_id": "codex-1", "bundle_id": "hel", "target_id": "podman",
+        "additional_mounts": mounts,
+    });
+    let (app, _, _, mut preflights, _) = app();
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/preflight/new")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        ),
+    );
+    let request = new_preflight(preflights.recv().await.unwrap());
+    assert_eq!(request.additional_mounts, expected);
+    request
+        .reply
+        .send(Err(PreflightFailure::InvalidMount))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body_bytes).unwrap(),
+        serde_json::json!({"error": "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host"})
+    );
+
+    let (app, mut actions, _, _, _) = self::app();
+    let mut body = body;
+    body["action"] = "new".into();
+    let response = tokio::spawn(post_action(app, cookie(), body.to_string()));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        additional_mounts,
+        remember_launch_choices,
+        ..
+    } = &request.action
+    else {
+        panic!("expected New");
+    };
+    assert_eq!(additional_mounts, &expected);
+    assert!(*remember_launch_choices);
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("created".into()),
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+/// Refuse unsafe or unsupported mounts before either endpoint asks the daemon
+/// to inspect a host or launch a session.
+#[tokio::test]
+async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
+    for endpoint in ["/api/preflight/new", "/api/actions"] {
+        for (target, directory, mounts) in [
+            (
+                "raw",
+                Some("/project"),
+                serde_json::json!([
+                    {"source": "/srv/data", "destination": "/data", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "relative", "destination": "/data", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "/srv/data", "destination": "/data/../private", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "/srv/one", "destination": "/data", "read_only": true},
+                    {"source": "/srv/two", "destination": "/data", "read_only": false}
+                ]),
+            ),
+        ] {
+            let (app, mut actions, _, mut preflights, _) = app();
+            let mut body = serde_json::json!({
+                "profile_id": "codex-1", "bundle_id": "hel", "target_id": target,
+                "project_directory": directory, "additional_mounts": mounts,
+            });
+            if endpoint == "/api/actions" {
+                body["action"] = "new".into();
+            }
+            let response = app
+                .oneshot(
+                    Request::post(endpoint)
+                        .header(COOKIE, cookie())
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{endpoint}: {body}"
+            );
+            assert!(actions.try_recv().is_err());
+            assert!(preflights.try_recv().is_err());
+        }
+    }
+}
+
+// A bare target opens a directory the person named. The controller still
+// validates that directory before answering, because the server's state
+// projection cannot inspect the filesystem or an SSH host.
+
+// The resume card cannot warn about a checkout it has not asked about.
+// The route has to reach the controller and hand the answer back whole.
+
+/// A session the projection does not have never reaches the controller.
+#[tokio::test]
+async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_controller() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = app
+        .oneshot(
+            Request::post("/api/preflight/resume")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"session_id":"missing","target_id":"podman"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(preflights.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = tokio::spawn(app.oneshot(
+        Request::post("/api/preflight/new")
+            .header(COOKIE, cookie())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"/private/project"}"#,
+            ))
+            .unwrap(),
+    ));
+    let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
+    request
+        .reply
+        .send(Err(PreflightFailure::Validation))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "error": "project validation failed; check that the directory exists and is accessible, and that Git can inspect it if it is a Git project"
+        })
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("/private/project"));
+}
+
+#[tokio::test]
+async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/preflight/new")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"podman"}"#,
+                ))
+                .unwrap(),
+        ),
+    );
+    let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
+    request
+        .reply
+        .send(Err(PreflightFailure::Controller(
+            "private /source/hel details".into(),
+        )))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"error": "the controller could not check this project"})
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("/source/hel"));
+}
+
+// An isolated bundle preflight returns the network clone plan so the
+// person can review it before creation.
+
+// The browser names a target and a kind; the controller has to be asked
+// about that machine, not the controller's own disk, and the candidates
+// have to reach the browser unchanged.
+
+/// Neither an unknown target nor an implausible prefix is worth a shell.
+#[tokio::test]
+async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
+    let long_prefix = "/".repeat(4097);
+    for (body, why) in [
+        (
+            r#"{"target_id":"missing","prefix":"/srv/"}"#.to_owned(),
+            "an unknown target",
+        ),
+        (
+            serde_json::json!({ "prefix": long_prefix }).to_string(),
+            "an oversized prefix",
+        ),
+    ] {
+        let (app, _, _, mut preflights, _) = app();
+        let response = app
+            .oneshot(
+                Request::post("/api/paths/complete")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{why}");
+        assert!(
+            preflights.try_recv().is_err(),
+            "{why} reached the controller"
+        );
+    }
+}
+
+/// Completion lists directories on the controller's machines, so it lives
+/// behind the viewer cookie like every other controller question.
+#[tokio::test]
+async fn a_path_completion_requires_a_session() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = app
+        .oneshot(
+            Request::post("/api/paths/complete")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"prefix":"/srv/"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(preflights.try_recv().is_err());
+}
+
+/// Saving the Git author rewrites this host's global Git configuration, so it
+/// lives behind the viewer cookie. The body is one the handler would refuse,
+/// so a regression that exposed the route still could not touch the host.
+#[tokio::test]
+async fn saving_the_git_identity_requires_a_session() {
+    let (app, _, _, _, _) = app();
+    let response = app
+        .oneshot(
+            Request::post("/api/git-identity")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"","email":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Everything an agent writes goes through the Markdown renderer, so the
+/// renderer is where injection is stopped. These checks run the shipped
+/// module against a fake DOM: structure has to come out as elements, and
+/// markup an agent typed has to come out as text.
+#[test]
+fn the_markdown_renderer_builds_structure_and_refuses_injection() {
+    run_web_check(
+        "markdown",
+        r#"import { installDocument, elements, only, check, checkEqual } from './test-dom.js';
+installDocument();
+const { renderMarkdown, renderDiffSummary, safeHref } = await import('./markdown.js');
+
+const render = source => {
+  const host = document.createElement('section');
+  host.append(renderMarkdown(source));
+  return host;
+};
+
+// Headings
+checkEqual(only(render('# Title'), 'h1').textContent, 'Title', 'h1');
+checkEqual(only(render('### Deep'), 'h3').textContent, 'Deep', 'h3');
+
+// Nested lists
+const nested = render('- one\n  - inner\n- two');
+check(elements(nested, 'ul').length === 2, 'nested list produced ' + elements(nested, 'ul').length + ' lists');
+check(elements(elements(nested, 'ul')[0], 'li').length >= 2, 'outer list lost items');
+
+// Ordered lists
+checkEqual(elements(render('1. a\n2. b'), 'ol').length, 1, 'ordered list');
+
+// Fenced code stays unparsed
+const fenced = render('```rust\nlet x = *y*;\n```');
+checkEqual(only(fenced, 'code').textContent, 'let x = *y*;', 'fenced code');
+check(elements(fenced, 'span').some(s => s.className === 'tok-kw'), 'fenced rust untinted');
+checkEqual(elements(fenced, 'em').length, 0, 'fence emphasised its contents');
+checkEqual(only(fenced, 'pre').dataset.lang, 'rust', 'fence language');
+
+// Inline code beats emphasis
+checkEqual(only(render('`*not em*`'), 'code').textContent, '*not em*', 'inline code');
+checkEqual(elements(render('`*not em*`'), 'em').length, 0, 'inline code emphasised');
+
+// Emphasis
+checkEqual(only(render('**bold**'), 'strong').textContent, 'bold', 'strong');
+checkEqual(only(render('*it*'), 'em').textContent, 'it', 'em');
+checkEqual(only(render('~~gone~~'), 'del').textContent, 'gone', 'del');
+
+// Tables
+const table = render('| a | b |\n| --- | ---: |\n| 1 | 2 |');
+checkEqual(elements(table, 'table').length, 1, 'table');
+checkEqual(elements(table, 'th').length, 2, 'table header cells');
+checkEqual(elements(table, 'td').length, 2, 'table body cells');
+checkEqual(elements(table, 'th')[1].className, 'align-right', 'table alignment class');
+checkEqual(only(table, 'div').className, 'scroll-x', 'table scroll wrapper');
+
+// Blockquote and rule
+checkEqual(elements(render('> quoted'), 'blockquote').length, 1, 'blockquote');
+checkEqual(elements(render('---'), 'hr').length, 1, 'rule');
+
+// XSS: markup is text, never elements
+const injected = render('<img src=x onerror=alert(1)>');
+checkEqual(elements(injected, 'img').length, 0, 'raw HTML became an element');
+check(injected.textContent.includes('<img src=x onerror=alert(1)>'), 'raw HTML lost its text');
+
+// XSS: refused link schemes
+for (const target of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', 'data:text/html,<script>', 'vbscript:x']) {
+  const out = render(`[click](${target})`);
+  checkEqual(elements(out, 'a').length, 0, `link scheme ${JSON.stringify(target)} was allowed`);
+  check(out.textContent.includes('click'), `link scheme ${JSON.stringify(target)} lost its label`);
+}
+
+// Accepted schemes keep their href and carry safe rel/target
+for (const target of ['https://example.com', 'http://example.com/a', 'mailto:someone@example.com']) {
+  const anchor = only(render(`[click](${target})`), 'a');
+  checkEqual(anchor.getAttribute('href'), target, 'href');
+  checkEqual(anchor.getAttribute('rel'), 'noreferrer noopener', 'rel');
+  checkEqual(anchor.getAttribute('target'), '_blank', 'target');
+}
+
+// safeHref directly
+checkEqual(safeHref('javascript:alert(1)'), null, 'safeHref allowed javascript:');
+checkEqual(safeHref(' https://x.test '), 'https://x.test', 'safeHref cleaned value');
+
+// Inline markup inside a link label
+checkEqual(only(render('[**bold link**](https://x.test)'), 'strong').textContent, 'bold link', 'link label markup');
+
+// An unclosed delimiter is literal, not markup
+checkEqual(render('a * b').textContent, 'a * b', 'unclosed emphasis');
+checkEqual(elements(render('a * b'), 'em').length, 0, 'unclosed emphasis made an element');
+
+// Diff summaries: the real format from format_diffstat, two spaces and U+2212
+const diff = renderDiffSummary(['src/main.rs  +12 −3', 'unparseable line']);
+const items = elements(diff, 'li');
+checkEqual(items.length, 2, 'diffstat rows');
+checkEqual(elements(items[0], 'span')[0].textContent, 'src/main.rs', 'diffstat path');
+checkEqual(elements(items[0], 'span')[1].textContent, '+12', 'diffstat additions');
+checkEqual(elements(items[0], 'span')[2].textContent, '−3', 'diffstat deletions');
+checkEqual(elements(items[1], 'span').length, 1, 'unparseable diffstat produced counts');
+checkEqual(elements(items[1], 'span')[0].textContent, 'unparseable line', 'unparseable diffstat lost its text');
+
+console.log('all markdown checks passed');
+"#,
+    );
+}
+
+/// Tool output is not prose, and rendering it as prose loses the parts
+/// that matter: which words in a command are the program and which are
+/// paths, where a JSON payload begins, and whether a five-thousand-line
+/// dump has to be paid for before anyone asks to see it.
+#[test]
+fn tool_output_is_tinted_folded_and_never_read_as_markdown() {
+    run_web_check(
+        "tool-output",
+        r#"import { installDocument, elements, only, check, checkEqual, openFold } from './test-dom.js';
+installDocument();
+const { renderToolOutput, codeBlock, detectLang, appendCommandTokens, isPathLike } = await import(
+  './tool-output.js'
+);
+
+const classes = root => elements(root, 'span').map(s => s.className);
+
+// A shell command is told apart into program, subcommand, flag and path.
+const line = document.createElement('pre');
+appendCommandTokens(line, 'cargo test --workspace src/lib.rs');
+const seen = classes(line);
+check(seen.includes('cmd-program'), 'no program: ' + seen);
+check(seen.includes('cmd-subcommand'), 'no subcommand: ' + seen);
+check(seen.includes('cmd-flag'), 'no flag: ' + seen);
+check(seen.includes('cmd-path'), 'no path: ' + seen);
+checkEqual(line.textContent, 'cargo test --workspace src/lib.rs', 'command text changed');
+
+// An operator starts the program count again, so both programs are found.
+const piped = document.createElement('pre');
+appendCommandTokens(piped, 'git status && cargo build');
+checkEqual(classes(piped).filter(c => c === 'cmd-program').length, 2, 'pipeline reset');
+
+// Prose with a slash is not a path; a real path is.
+check(!isPathLike('and/or'), '"and/or" read as a path');
+check(isPathLike('src/lib/thing.rs'), 'a real path did not');
+check(isPathLike('./x'), 'a relative path did not');
+check(isPathLike('Cargo.toml'), 'a file with an extension did not');
+
+// JSON is pretty-printed and tinted, keys apart from values.
+const json = renderToolOutput('{"name":"hel","count":3,"ok":true}');
+const jsonClasses = classes(json);
+check(jsonClasses.includes('tok-key'), 'no JSON key: ' + jsonClasses);
+check(jsonClasses.includes('tok-str'), 'no JSON string: ' + jsonClasses);
+check(jsonClasses.includes('tok-num'), 'no JSON number: ' + jsonClasses);
+check(jsonClasses.includes('tok-kw'), 'no JSON keyword: ' + jsonClasses);
+check(json.textContent.includes('"name"'), 'JSON lost its content');
+
+// Rust is tinted; an unknown language is not.
+const rust = codeBlock('pub fn main() {\n    let x = 1;\n}', 'rust');
+check(classes(rust).includes('tok-kw'), 'rust keywords untinted');
+checkEqual(only(rust, 'pre').dataset.lang, 'rust', 'rust data-lang');
+const plain = codeBlock('nothing in particular here', 'brainfuck');
+checkEqual(classes(plain).length, 0, 'unknown language was tinted');
+
+// Sniffing is conservative: a log stays plain, real code does not.
+checkEqual(detectLang('12:03 INFO started\n12:04 INFO done\n12:05 INFO stopped'), '', 'a log was sniffed');
+checkEqual(
+  detectLang('fn a() {}\nfn b() {}\nlet mut x = 1;\nuse std::fmt;\nimpl Foo {}\nlet y = x.unwrap();'),
+  'rust',
+  'rust was not sniffed',
+);
+checkEqual(detectLang('--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new'), 'diff', 'diff was not sniffed');
+
+// A long dump is one closed fold that has built nothing yet.
+const long = Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n');
+const folded = renderToolOutput(long);
+checkEqual(folded.nodeName, 'DETAILS', 'a 400-line dump was not folded');
+checkEqual(elements(folded, 'pre').length, 0, 'a closed fold built its content anyway');
+check(only(folded, 'summary').textContent.includes('400 lines'), 'fold summary: ' + only(folded, 'summary').textContent);
+openFold(folded);
+checkEqual(elements(folded, 'pre').length, 1, 'an opened fold built nothing');
+check(elements(folded, 'pre')[0].textContent.includes('line 399'), 'the fold lost its content');
+
+// Opening twice builds once.
+openFold(folded);
+checkEqual(elements(folded, 'pre').length, 1, 'reopening rebuilt the content');
+
+// A short dump is not folded.
+checkEqual(renderToolOutput('one\ntwo').nodeName, 'PRE', 'a short dump was folded');
+
+// Tool output is never parsed as Markdown, so an underscore is an underscore.
+const literal = renderToolOutput('a _b_ c <img src=x>');
+checkEqual(elements(literal, 'em').length, 0, 'tool output was emphasised');
+checkEqual(elements(literal, 'img').length, 0, 'tool output produced an element');
+check(literal.textContent.includes('<img src=x>'), 'tool output lost its text');
+
+console.log('all tool-output checks passed');
+"#,
+    );
+}
+
+/// The renderer's guarantee is structural — this code cannot inject markup
+/// because it never builds markup — and a single stray assignment would
+/// quietly replace it with no guarantee at all. `escapeHtml` uses
+/// `innerHTML` on a detached node to escape text, which is safe but is
+/// also exactly the shape this test exists to stop spreading, so it is
+/// named rather than pattern-matched.
+#[test]
+fn no_web_module_builds_markup_from_a_string() {
+    const SINKS: [&str; 5] = [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "new Function",
+    ];
+    // There is no allowance. Every one of these sinks was removed in
+    // Milestone 2, and the point of the test is that none comes back.
+    const ALLOWED: [(&str, &str); 0] = [];
+    for (name, source) in [
+        ("viewer.js", VIEWER_JS),
+        ("markdown.js", MARKDOWN_JS),
+        ("tool-output.js", TOOL_OUTPUT_JS),
+    ] {
+        for (number, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            for sink in SINKS {
+                if !trimmed.contains(sink) {
+                    continue;
+                }
+                assert!(
+                    ALLOWED
+                        .iter()
+                        .any(|(file, allowed)| *file == name && trimmed == *allowed),
+                    "{name}:{} builds markup from a string: {trimmed}",
+                    number + 1
+                );
+            }
+        }
+    }
+}
+
+/// The card cache is the fix for answers vanishing under snapshot polls, so
+/// it is exercised as JavaScript: the render source is lifted out of
+/// `src/web/viewer.js` and run against a stub DOM.
+// Hard-won: a6567c51: snapshot polling erased typed elicitation answers before submission.
+#[test]
+fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function reconcileChildren(", "function epochMs("),
+        viewer_source(
+            "const elicitationCards = new Map()",
+            "async function submitElicitation",
+        ),
+    );
+    let dom = r#"
+let replaceCalls = 0;
+function makeEl(tag) {
+  return {
+tagName: tag.toUpperCase(),
+children: [],
+options: [],
+selectedOptions: [],
+className: "",
+textContent: "",
+disabled: false,
+required: false,
+value: "",
+appendChild(child) {
+  this.children.push(child);
+  if (this.tagName === "SELECT") this.options.push(child);
+  return child;
+},
+append(...kids) {
+  this.children.push(...kids);
+},
+replaceChildren(...kids) {
+  replaceCalls += 1;
+  this.children = kids;
+},
+removeChild(child) {
+  replaceCalls += 1;
+  this.children.splice(this.children.indexOf(child), 1);
+  return child;
+},
+insertBefore(child, reference) {
+  if (this.children.includes(child)) this.removeChild(child);
+  replaceCalls += 1;
+  const index = reference == null ? this.children.length : this.children.indexOf(reference);
+  this.children.splice(index, 0, child);
+  return child;
+},
+addEventListener() {},
+setAttribute(name, value) { this[name] = value; },
+querySelectorAll(selector) {
+  const found = [];
+  const visit = node => {
+    for (const child of node.children) {
+      if (child.tagName === "INPUT" && (selector === "input" || child.checked)) found.push(child);
+      visit(child);
+    }
+  };
+  visit(this);
+  return found;
+},
+querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+setCustomValidity() {},
+reportValidity() {
+  return true;
+},
+  };
+}
+const created = [];
+const document = {
+  createElement(tag) {
+const el = makeEl(tag);
+created.push(el);
+return el;
+  },
+};
+const elicitations = makeEl("div");
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className || "";
+  node.textContent = text || "";
+  return node;
+}
+async function submitElicitation() {}
+"#;
+    let checks = r#"
+const request = {
+  id: "elicitation-1",
+  message: "Which CI architecture?",
+  title: "CI",
+  fields: [
+{
+  id: "question_0",
+  title: "CI architecture",
+  required: false,
+  kind: "single_select",
+  options: [{ value: "reusable", title: "Reusable" }, { value: "matrix", title: "Matrix" }],
+},
+{ id: "question_0_custom", title: "Other", required: false, kind: "text" },
+  ],
+};
+const session = { id: "session-1", pending_elicitations: [request] };
+renderElicitations(session);
+const card = elicitations.children[0];
+const radio = created.find((el) => el.tagName === "INPUT" && el.value === "reusable");
+const text = created.find((el) => el.tagName === "INPUT" && el.type === "text");
+radio.checked = true;
+text.value = "keep me";
+const attachments = replaceCalls;
+renderElicitations(session);
+if (elicitations.children[0] !== card) {
+  throw new Error("a snapshot rebuilt the pending card");
+}
+if (!radio.checked || text.value !== "keep me") {
+  throw new Error("a snapshot wiped the half-filled answer");
+}
+if (replaceCalls !== attachments) {
+  throw new Error("a snapshot re-attached an unchanged card and dropped focus");
+}
+sentElicitations.add(elicitationKey("session-1", request.id));
+renderElicitations(session);
+if (elicitations.children[0] !== card) {
+  throw new Error("a sent answer rebuilt the card");
+}
+if (!radio.disabled || !text.disabled) {
+  throw new Error("a sent answer left the controls live");
+}
+if (!radio.checked) {
+  throw new Error("a sent answer wiped the reply");
+}
+renderElicitations({ id: "session-1", pending_elicitations: [] });
+if (elicitations.children.length !== 0 || elicitationCards.size !== 0) {
+  throw new Error("an answered request stayed rendered");
+}
+if (sentElicitations.size !== 0) {
+  throw new Error("a resolved request kept its sent marker");
+}
+"#;
+    run_viewer_script(
+        "elicitation-rendering",
+        &format!("{dom}\n{source}\n{checks}"),
+    );
+}
+
+fn sample_image(pixels: usize) -> ViewerPromptImage {
+    ViewerPromptImage {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(vec![7_u8; pixels]),
+        mime_type: "image/png".into(),
+        width: 32,
+        height: 24,
+        attachment: None,
+    }
+}
+
+fn sample_valid_image() -> ViewerPromptImage {
+    ViewerPromptImage {
+        data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            .into(),
+        mime_type: "image/png".into(),
+        width: 1,
+        height: 1,
+        attachment: None,
+    }
+}
+
+fn image_capable(snapshot: &mut ViewerSnapshot) {
+    snapshot.sessions[0].prompt_images_supported = true;
+}
+
+async fn post_action(app: Router, cookie: String, body: String) -> Response<Body> {
+    app.oneshot(
+        Request::post("/api/actions")
+            .header(COOKIE, cookie)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+const ISOLATED_STORE_CHILD: &str = "MJ_SERVER_ISOLATED_STORE_CHILD";
+
+/// Run the named test alone, with a data directory of its own: image routes
+/// store attachments under the data directory. Returns whether this process
+/// is that run.
+fn in_isolated_store(test: &str) -> bool {
+    if std::env::var_os(ISOLATED_STORE_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    mj_controller::controller::test_support::IsolatedTest::new(
+        mj_controller::controller::test_support::test_name(module_path!(), test),
+    )
+    .env(ISOLATED_STORE_CHILD, "1")
+    .isolated_store(directory.path())
+    .run();
+    false
+}
+
+#[tokio::test]
+async fn browser_attachment_upload_returns_a_stored_reference_without_inline_bytes() {
+    if !in_isolated_store(
+        "browser_attachment_upload_returns_a_stored_reference_without_inline_bytes",
+    ) {
+        return;
+    }
+    let (app, _, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::post("/api/sessions/session-1/attachments")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "image/png")
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
+    assert!(image.data_base64.is_empty());
+    let reference = image.attachment.expect("upload should return a reference");
+    assert_eq!(reference.mime_type, "image/png");
+    assert_eq!(reference.width, 1);
+    assert_eq!(reference.height, 1);
+    assert!(reference.size <= 700 * 1024);
+}
+
+/// Base64 inflates an upload by a third, so two ordinary photographs pass
+/// the general body limit even when each one fits it. The action route
+/// carries prompts, so it is the route that gets the larger bound.
+#[tokio::test]
+async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
+    if !in_isolated_store("multi_image_prompts_are_accepted_over_the_general_body_limit") {
+        return;
+    }
+    let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    let image = sample_valid_image();
+    let mut body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: None,
+        session_id: "session-1".into(),
+        text: "look at these".into(),
+        images: vec![image.clone(), image],
+    })
+    .unwrap();
+    body.push_str(&" ".repeat(MAX_BODY_BYTES));
+    assert!(body.len() > MAX_BODY_BYTES);
+    assert!(body.len() < MAX_PROMPT_BODY_BYTES);
+    let response = tokio::spawn(post_action(app, cookie, body));
+    let action = actions.recv().await.unwrap();
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn a_body_over_the_prompt_limit_is_still_refused() {
+    let (app, _actions, _, _, _) = app_with_snapshot(image_capable);
+    let cookie = login_cookie(&app).await;
+    let image = sample_image(MAX_PROMPT_BODY_BYTES);
+    let body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: None,
+        session_id: "session-1".into(),
+        text: String::new(),
+        images: vec![image],
+    })
+    .unwrap();
+    assert!(body.len() > MAX_PROMPT_BODY_BYTES);
+    let response = post_action(app, cookie, body).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn malformed_image_payloads_never_reach_the_controller() {
+    let cases = [
+        ("aW1hZ2U=", "text/plain", 32, 24),
+        ("aW1hZ2U=", "image/png", 0, 24),
+        ("not base64!", "image/png", 32, 24),
+        ("", "image/png", 32, 24),
+    ];
+    for (data, mime, width, height) in cases {
+        let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
+        let cookie = login_cookie(&app).await;
+        let body = serde_json::to_string(&ControllerAction::Prompt {
+            command_id: None,
+            session_id: "session-1".into(),
+            text: String::new(),
+            images: vec![ViewerPromptImage {
+                data_base64: data.into(),
+                mime_type: mime.into(),
+                width,
+                height,
+                attachment: None,
+            }],
+        })
+        .unwrap();
+        let response = post_action(app, cookie, body).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "expected {data:?}/{mime} {width}x{height} to be refused"
+        );
+        assert!(actions.try_recv().is_err());
+    }
+}
+
+/// The session actions the viewer mirrors from the terminal are refused
+/// without their published capability and accepted with it, the same gate
+/// every other session action here validates against.
+#[test]
+fn terminal_session_actions_validate_against_their_published_capabilities() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    for id in ["workspace-1", "workspace-2"] {
+        snapshot.workspaces.push(ViewerWorkspace {
+            id: id.into(),
+            name: id.into(),
+            last_opened_at: String::new(),
+        });
+    }
+    let change_workspace = |workspace_id: &str| ControllerAction::ChangeWorkspace {
+        session_id: "session-1".into(),
+        workspace_id: workspace_id.into(),
+    };
+    let container_settings = || ControllerAction::SetContainerSettings {
+        session_id: "session-1".into(),
+        resource_allocation: None,
+        mounts: Vec::new(),
+    };
+    let restart = || ControllerAction::Restart {
+        session_id: "session-1".into(),
+        acknowledge_container_recreation: false,
+    };
+    let interrupt_all = || ControllerAction::InterruptAll {
+        session_id: "session-1".into(),
+    };
+
+    // Without the capabilities every one is refused, interrupt all with the
+    // same 409 the terminal's "nothing is running" answer maps to.
+    assert!(validate_action(&change_workspace("workspace-2"), &snapshot).is_err());
+    assert!(validate_action(&container_settings(), &snapshot).is_err());
+    assert!(validate_action(&restart(), &snapshot).is_err());
+    let error = validate_action(&interrupt_all(), &snapshot).unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+
+    let capabilities = &mut snapshot.sessions[0].capabilities;
+    capabilities.change_workspace = true;
+    capabilities.container_settings = true;
+    capabilities.restart = true;
+    capabilities.interrupt_all = true;
+    validate_action(&change_workspace("workspace-2"), &snapshot).unwrap();
+    validate_action(&container_settings(), &snapshot).unwrap();
+    validate_action(&restart(), &snapshot).unwrap();
+    validate_action(&interrupt_all(), &snapshot).unwrap();
+
+    // An unknown session is still unknown.
+    let error = validate_action(
+        &ControllerAction::Restart {
+            session_id: "not-managed".into(),
+            acknowledge_container_recreation: false,
+        },
+        &snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+}
+
+// The four actions parse from exactly the wire names the viewer posts, and
+// the session projection carries the new fields under exactly these keys,
+// omitted while empty. The capability flags travel even while false.
+
+/// The composer holds a DOM, not a string, so the text a prompt sends is
+/// whatever this reader makes of that DOM. Run it as JavaScript.
+#[test]
+fn embedded_viewer_reads_multiline_composer_text_out_of_its_dom() {
+    let source = viewer_source("function composerText()", "function setComposerText(");
+    let harness = r##"
+const Node = { TEXT_NODE: 3 };
+function textNode(value) {
+  return { nodeType: 3, nodeValue: value, nodeName: "#text", childNodes: [], dataset: {} };
+}
+function element(name, children = [], dataset = {}) {
+  const node = { nodeType: 1, nodeName: name, dataset, childNodes: children };
+  children.forEach((child, index) => {
+child.nextSibling = children[index + 1] || null;
+  });
+  return node;
+}
+let promptText = null;
+function read(children) {
+  promptText = element("DIV", children);
+  return composerText();
+}
+"##;
+    let checks = r#"
+const plain = read([textNode("ship it")]);
+if (plain !== "ship it") throw new Error(`plain text became ${JSON.stringify(plain)}`);
+
+const broken = read([textNode("first"), element("BR"), textNode("second")]);
+if (broken !== "first\nsecond") throw new Error(`line break became ${JSON.stringify(broken)}`);
+
+// The trailing break a browser leaves behind to keep the caret on a new line
+// is scaffolding, not a line the user typed.
+const filler = read([
+  textNode("first"),
+  element("BR"),
+  element("BR", [], { composerFiller: "true" }),
+]);
+if (filler !== "first\n") throw new Error(`filler break became ${JSON.stringify(filler)}`);
+
+const blocks = read([
+  textNode("first"),
+  element("DIV", [textNode("second")]),
+  element("DIV", [textNode("third")]),
+]);
+if (blocks !== "first\nsecond\nthird") throw new Error(`blocks became ${JSON.stringify(blocks)}`);
+
+const carriage = read([textNode("first\r\nsecond")]);
+if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(carriage)}`);
+"#;
+    run_viewer_script("composer-reader", &format!("{harness}\n{source}\n{checks}"));
+}
+
+// A page that declares no icon makes every browser request
+// `/favicon.ico`, which this server does not have. The page therefore has
+// to name an icon, and that icon has to be served.
+
+#[tokio::test]
+async fn confirmed_move_action_forwards_the_fingerprinted_request() {
+    let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].capabilities.move_session = true;
+    });
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/actions")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"move","request":{"preparation":{"selection":{"session_id":"session-1","profile_id":"codex-1","target_template_id":"podman","clear_resource_allocation":false,"additional_mounts":null,"resource_allocation":null},"source_profile_id":"codex-1","source_target_template_id":"podman","cross_harness":false,"active":false,"queued_commands":[],"fingerprint":"fingerprint","operation_id":"move-1"},"queue":null,"acknowledge_interruption":false}}"#,
+                ))
+                .unwrap(),
+        ),
+    );
+    let action = actions.recv().await.expect("move action reached daemon");
+    assert!(matches!(action.action, ControllerAction::Move { .. }));
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
+#[test]
+fn shell_action_validation_reserves_bang_prompts_and_checks_cancellation_ids() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(
+        validate_action(
+            &ControllerAction::Prompt {
+                command_id: None,
+                session_id: "session-1".into(),
+                text: "!cargo test".into(),
+                images: Vec::new(),
+            },
+            &snapshot,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_action(
+            &ControllerAction::RunShell {
+                command_id: None,
+                session_id: "session-1".into(),
+                command: "cargo test".into(),
+            },
+            &snapshot,
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_action(
+            &ControllerAction::CancelShell {
+                session_id: "session-1".into(),
+                shell_command_id: "shell-1".into(),
+            },
+            &snapshot,
+        )
+        .is_err()
+    );
+
+    snapshot.sessions[0]
+        .active_user_shells
+        .push(ViewerUserShell {
+            id: "shell-1".into(),
+            command: "cargo test".into(),
+            started_at_ms: Some(10),
+        });
+    assert!(
+        validate_action(
+            &ControllerAction::CancelShell {
+                session_id: "session-1".into(),
+                shell_command_id: "shell-1".into(),
+            },
+            &snapshot,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn new_action_requires_project_directory_exactly_for_bare_targets() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
+        remember_launch_choices: true,
+        remember_container_size: true,
+        review: None,
+        no_project_memory: false,
+        no_github_events: false,
+        no_github_credentials: false,
+        at: None,
+        branch: None,
+        base: None,
+        no_later_history: false,
+        subagents: None,
+        create_managed_worktree: None,
+        workspace_id: String::new(),
+        profile_id: "codex-1".into(),
+        bundle_id: "hel".into(),
+        target_id: target_id.into(),
+        resource_allocation: None,
+        title: Some("New work".into()),
+        project_directory,
+        additional_mounts: Vec::new(),
+        dirty_ack: Vec::new(),
+    };
+
+    assert!(validate_action(&action("podman", None), &snapshot).is_ok());
+    assert_eq!(
+        validate_action(&action("podman", Some("/work".into())), &snapshot)
+            .unwrap_err()
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        validate_action(&action("raw", None), &snapshot)
+            .unwrap_err()
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        validate_action(&action("raw", Some("relative".into())), &snapshot)
+            .unwrap_err()
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        validate_action(&action("raw", Some("/work/../secret".into())), &snapshot)
+            .unwrap_err()
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(validate_action(&action("raw", Some("/work/project".into())), &snapshot).is_ok());
+}
+
+// Hard-won: #1375: the HTTP pre-check refused cgroup ceilings and CPU overcommit.
+#[test]
+fn new_action_validates_allocation_kind_and_reported_container_limits() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let podman = snapshot
+        .targets
+        .iter_mut()
+        .find(|target| target.id == "podman")
+        .unwrap();
+    podman.container_host_limits = Some(mj_core::state::HostContainerSize {
+        cpus: 8,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+    });
+    podman.container_capacity = Some(mj_core::state::HostContainerCapacity {
+        total: mj_core::state::HostContainerSize {
+            cpus: 8,
+            memory_bytes: 32 * 1024 * 1024 * 1024,
+        },
+        reserved: mj_core::state::HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        },
+        committed: mj_core::state::HostContainerSize {
+            cpus: 4,
+            memory_bytes: 12 * 1024 * 1024 * 1024,
+        },
+        remaining: mj_core::state::HostContainerSize {
+            cpus: 4,
+            memory_bytes: 20 * 1024 * 1024 * 1024,
+        },
+        complete: true,
+    });
+    let action =
+        |target_id: &str,
+         resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
+            ControllerAction::New {
+                oracle: None,
+                oracle_choice: None,
+                remember_launch_choices: true,
+                remember_container_size: true,
+                review: None,
+                no_project_memory: false,
+                no_github_events: false,
+                no_github_credentials: false,
+                at: None,
+                branch: None,
+                base: None,
+                no_later_history: false,
+                subagents: None,
+                create_managed_worktree: None,
+                workspace_id: String::new(),
+                profile_id: "codex-1".into(),
+                bundle_id: "hel".into(),
+                target_id: target_id.into(),
+                resource_allocation: resource_allocation.map(Box::new),
+                title: Some("Sized work".into()),
+                project_directory: None,
+                additional_mounts: Vec::new(),
+                dirty_ack: Vec::new(),
+            }
+        };
+
+    let within_limits = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 16 * 1024 * 1024 * 1024,
+    };
+    assert!(validate_action(&action("podman", Some(within_limits.clone())), &snapshot).is_ok());
+    assert!(validate_action(&action("raw", Some(within_limits)), &snapshot).is_err());
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::AwsEc2 {
+                    instance_type: "c7i.2xlarge".into(),
+                    vcpus: 8,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 9,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 5,
+                    memory_bytes: 8 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_ok()
+    );
+    // The same projected policy applies on the API boundary: only the Apple
+    // RAM flag changes aggregate admission; per-session physical limits stay.
+    let ram_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 24 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(ram_overcommit.clone())), &snapshot).is_ok());
+    snapshot
+        .targets
+        .iter_mut()
+        .find(|target| target.id == "podman")
+        .unwrap()
+        .container_memory_hard_limit = true;
+    let refusal = validate_action(&action("podman", Some(ram_overcommit)), &snapshot).unwrap_err();
+    assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+    assert!(refusal.message.contains("20 GiB left"));
+    let cpu_overcommit = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 5,
+        memory_bytes: 8 << 30,
+    };
+    assert!(validate_action(&action("podman", Some(cpu_overcommit)), &snapshot).is_ok());
+}
+
+#[tokio::test]
+async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
+    let (mut config, state) = sample_config_state();
+    config.profiles.insert(
+        "claude-1".into(),
+        HarnessProfile {
+            ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, "/secret/claude")
+        },
+    );
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot.workspaces.push(ViewerWorkspace {
+        id: "workspace-1".into(),
+        name: "One".into(),
+        last_opened_at: String::new(),
+    });
+    validate_action(
+        &ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: "workspace-1".into(),
+            profile_id: "claude-1".into(),
+            target_id: "podman".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        },
+        &snapshot,
+    )
+    .unwrap();
+
+    let error = validate_action(
+        &ControllerAction::Suspend {
+            session_id: "not-managed".into(),
+            acknowledge_unpublished_work: false,
+        },
+        &snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+}
+
+/// A review reaches the phone with the single reviewer status and findings.
+#[test]
+fn a_running_review_projects_to_the_phone() {
+    use mj_client::review::{RuntimeReviewView, VerdictKind, VerdictView};
+    use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
+
+    let review = RuntimeReviewView {
+        child_session_id: None,
+        session_id: "session-1".into(),
+        questions: Vec::new(),
+        phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
+            synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),
+            evidence: Default::default(),
+        }),
+        roles: vec![
+            RoleStatus {
+                role: "reviewer".into(),
+                label: "Reviewer".into(),
+                state: RoleState::Findings,
+                child_session_id: Some("reviewer-child".into()),
+            },
+            RoleStatus {
+                role: "reviewer-2".into(),
+                label: "Reviewer 2".into(),
+                state: RoleState::Failed,
+                child_session_id: Some("second-child".into()),
+            },
+        ],
+        status: "Enter to act".into(),
+        verdict: Some(VerdictView {
+            kind: VerdictKind::Findings,
+            text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
+            allowed: Vec::new(),
+        }),
+    };
+
+    let projected = ViewerTurnReview::from_runtime(&review);
+
+    assert_eq!(
+        projected
+            .roles
+            .iter()
+            .map(|role| (
+                role.label.as_str(),
+                role.state.as_str(),
+                role.child_session_id.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Reviewer", "findings", Some("reviewer-child")),
+            ("Reviewer 2", "failed", Some("second-child"))
+        ]
+    );
+    assert!(
+        serde_json::to_value(&projected)
+            .unwrap()
+            .get("tier")
+            .is_none()
+    );
+    let verdict = projected.verdict.expect("a findings verdict travels");
+    assert_eq!(verdict.kind, "findings");
+    assert!(verdict.text.contains("unbounded retry"));
+}
+
+#[test]
+fn resume_action_refuses_a_target_the_session_cannot_use() {
+    let (mut config, state) = sample_config_state();
+    // A project that only exists on GitHub cannot become a checkout on this
+    // machine, so the bare target stays out of reach for its sessions.
+    config.bundles.get_mut("hel").unwrap().repositories[0].local = None;
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot.workspaces.push(ViewerWorkspace {
+        id: "workspace-1".into(),
+        name: "One".into(),
+        last_opened_at: String::new(),
+    });
+    assert_eq!(
+        snapshot.sessions[0].incompatible_resume_targets,
+        Arc::<[Arc<str>]>::from(vec![Arc::from("raw")])
+    );
+
+    let error = validate_action(
+        &ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: "workspace-1".into(),
+            profile_id: "codex-1".into(),
+            target_id: "raw".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        },
+        &snapshot,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    // The refusal names the target and carries the controller's reason, but
+    // the wire projection still publishes ids only.
+    let reason = mj_controller::controller::resume_compatibility(
+        &state.sessions["session-1"],
+        &config,
+        "raw",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("\"raw\""), "{}", error.message);
+    assert!(error.message.contains(&reason), "{}", error.message);
+    assert!(
+        !serde_json::to_string(&snapshot).unwrap().contains(&reason),
+        "the reason must not leave the process"
+    );
+}
+
+#[test]
+fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot.sessions[0].capabilities.move_session = true;
+    let selection = MoveSelection {
+        oracle: None,
+        oracle_choice: None,
+        subagents: None,
+        workspace: Default::default(),
+        clear_resource_allocation: false,
+        session_id: "session-1".into(),
+        profile_id: Some("codex-1".into()),
+        target_template_id: Some("podman".into()),
+        additional_mounts: None,
+        resource_allocation: None,
+    };
+    let preparation = MovePreparation {
+        destination_checks: Default::default(),
+        workspace: None,
+        in_place: false,
+        stops_subagents: true,
+        source_unavailable: false,
+        conversion: None,
+        selection,
+        sized_by_destination_default: false,
+        source_profile_id: "codex-1".into(),
+        source_target_template_id: "podman".into(),
+        cross_harness: false,
+        active: true,
+        queued_commands: vec![mj_core::state::MaterializedQueuedPrompt {
+            accepted_ordinal: None,
+            command_id: "command-1".into(),
+            kind: mj_core::state::QueuedCommandKind::Prompt,
+            content: vec![serde_json::json!({"type": "text", "text": "continue"})],
+            queued_at_ms: 1,
+        }],
+        fingerprint: "fingerprint".into(),
+        operation_id: "move-1".into(),
+    };
+    let request = |queue, acknowledge_interruption| MoveSessionRequest {
+        preparation: preparation.clone(),
+        queue,
+        acknowledge_interruption,
+    };
+    assert_eq!(
+        validate_action(
+            &ControllerAction::Move {
+                request: Box::new(request(Some(ResumeQueueDisposition::Discard), false)),
+            },
+            &snapshot,
+        )
+        .unwrap_err()
+        .status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        validate_action(
+            &ControllerAction::Move {
+                request: Box::new(request(None, true)),
+            },
+            &snapshot,
+        )
+        .unwrap_err()
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    validate_action(
+        &ControllerAction::Move {
+            request: Box::new(request(Some(ResumeQueueDisposition::Discard), true)),
+        },
+        &snapshot,
+    )
+    .unwrap();
+}
+
+/// Finding G-3: the login page used to learn it was signed out from a
+/// `GET /api/snapshot` 401, which every browser logs as a console error. The
+/// page asks this route instead, which answers 200 either way.
+// Hard-won: 69a3c1d3: signed-out loads hit the protected snapshot and logged a 401.
+#[tokio::test]
+async fn session_status_answers_signed_out_without_an_error_status() {
+    let (app, _, _, _, _) = app();
+    let status = |cookie: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::get("/auth/session");
+            if let Some(cookie) = cookie {
+                request = request.header(COOKIE, cookie);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    assert_eq!(
+        status(None).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    assert_eq!(
+        status(Some("mj_viewer=forged".into())).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    let cookie = login_cookie(&app).await;
+    assert_eq!(
+        status(Some(cookie)).await,
+        serde_json::json!({ "signed_in": true })
+    );
+}
+
+#[tokio::test]
+async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| snapshot.server_time_ms = 1);
+    let cookie = login_cookie(&app).await;
+    for _ in 0..2 {
+        let before = mj_core::clock::epoch_millis();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/snapshot")
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let server_time_ms = snapshot["server_time_ms"].as_i64().unwrap();
+        assert!(server_time_ms >= before);
+        assert!(server_time_ms <= mj_core::clock::epoch_millis());
+    }
+}
+
+#[tokio::test]
+async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_interned_fields() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.notices.push(mj_client::daemon::RuntimeNotice {
+            id: 1,
+            session_id: "removed-session".into(),
+            text: "Cleanup failed; resources may remain.".into(),
+        });
+    });
+    let cookie = login_cookie(&app).await;
+    let snapshot_response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    assert_eq!(snapshot_response.headers()[CACHE_CONTROL], "no-store");
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &snapshot_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["operator_away"], false);
+    assert_eq!(snapshot["notices"][0]["session_id"], "removed-session");
+    assert_eq!(
+        snapshot["notices"][0]["text"],
+        "Cleanup failed; resources may remain."
+    );
+    assert_eq!(snapshot["cursor"]["sequence"], 1);
+    assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
+    let snapshot_row = &snapshot["sessions"][0];
+    let capabilities_key = snapshot_row["capabilities_ref"].as_str().unwrap();
+    assert!(snapshot["interned"].get(capabilities_key).is_some());
+
+    let detail_response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/sessions/session-1/row")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    assert_eq!(detail_response.headers()[CACHE_CONTROL], "no-store");
+    let detail: serde_json::Value = serde_json::from_slice(
+        &detail_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(detail["revision"], snapshot["cursor"]["sequence"]);
+    assert_eq!(detail["row"]["id"], "session-1");
+    assert!(detail["row"]["capabilities"].is_object());
+    assert!(detail["row"].get("capabilities_ref").is_none());
+    assert!(detail["row"].get("detail").is_none());
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/sessions/unknown-session/row")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
+    let transcript = BrowserTranscript {
+        latest_seq: 8,
+        presentation_key: "key-1".into(),
+        window_start_seq: 3,
+        reset: false,
+        entries: vec![
+            BrowserTranscriptEntry {
+                stable_id: None,
+                command_id: None,
+                id: 3,
+                updated_seq: 3,
+                role: "user",
+                label: "You".into(),
+                recorded_at_ms: None,
+                tool_ended_at_ms: None,
+                lines: vec!["retained history ".repeat(10_000)],
+                mailbox_events: Vec::new(),
+                generated: false,
+                glyph: "\u{276f}",
+                tone: "user",
+                tool_status: None,
+                diffstats: Vec::new(),
+            },
+            BrowserTranscriptEntry {
+                stable_id: None,
+                command_id: None,
+                id: 7,
+                updated_seq: 8,
+                role: "agent",
+                label: "Agent".into(),
+                recorded_at_ms: None,
+                tool_ended_at_ms: None,
+                lines: vec!["live".into()],
+                mailbox_events: Vec::new(),
+                generated: false,
+                glyph: "\u{25cf}",
+                tone: "agent",
+                tool_status: None,
+                diffstats: Vec::new(),
+            },
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+    };
+    let (app, _, _, _, _) =
+        app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/conversations/session-1?after_seq=3")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["latest_seq"], 8);
+    assert_eq!(body["reset"], false);
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(body["entries"][0]["lines"][0], "live");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/conversations/session-1?after_seq=8&presentation_key=key-1")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        body.len() < 1024,
+        "an unchanged large conversation returns only metadata"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["reset"], false);
+    assert!(body["entries"].as_array().unwrap().is_empty());
+
+    let response = app
+        .oneshot(
+            Request::get("/api/conversations/session-1?after_seq=8&presentation_key=stale-key")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["reset"], true);
+    assert_eq!(body["presentation_key"], "key-1");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
+    let transcript = BrowserTranscript {
+        latest_seq: 1,
+        presentation_key: "key-1".into(),
+        window_start_seq: 1,
+        reset: false,
+        entries: vec![BrowserTranscriptEntry {
+            stable_id: None,
+            command_id: None,
+            id: 1,
+            updated_seq: 1,
+            role: "agent",
+            label: "Agent".into(),
+            recorded_at_ms: None,
+            tool_ended_at_ms: None,
+            lines: vec!["stale".into()],
+            mailbox_events: Vec::new(),
+            generated: false,
+            glyph: "●",
+            tone: "agent",
+            tool_status: None,
+            diffstats: Vec::new(),
+        }]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+    };
+    let (app, _, _, _, _) = app_with(
+        BTreeMap::from([("session-1".into(), transcript)]),
+        |snapshot| snapshot.sessions[0].transitioning = true,
+    );
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/conversations/session-1")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+// Hard-won: feddc733: receipt feedback loop consumed action slots and rejected real actions.
+#[tokio::test]
+async fn conversation_read_receipt_never_contends_with_a_running_action() {
+    let (app, mut actions, mut receipts, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    // A prompt for the same session stays in flight for the whole test, so
+    // a receipt that still travelled the action pipeline would either
+    // queue behind it or be rejected for the occupied session slot.
+    let prompt = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/api/actions")
+                .header(COOKIE, cookie.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"prompt","session_id":"session-1","text":"ship it"}"#,
+                ))
+                .unwrap(),
+        ),
+    );
+    let action = actions.recv().await.unwrap();
+
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/conversations/session-1/read")
+                .header(COOKIE, cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"through":42}"#))
+                .unwrap(),
+        ),
+    );
+    let receipt = receipts.recv().await.unwrap();
+    assert_eq!(receipt.session_id, "session-1");
+    assert_eq!(receipt.through, 42);
+    receipt.reply.send(Ok(())).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        actions.try_recv().is_err(),
+        "a read receipt must not queue a controller action"
+    );
+
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(
+        prompt.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
+// Hard-won: bff62757: phone requests timed out during long actions and showed failure while the action kept running.
+#[tokio::test]
+async fn each_rejected_action_keeps_its_own_status_and_guidance() {
+    for (outcome, status, guidance) in [
+        (
+            ActionOutcome::SessionBusy,
+            StatusCode::CONFLICT,
+            "another operation is already running",
+        ),
+        (
+            ActionOutcome::NotCancellable,
+            StatusCode::CONFLICT,
+            "no cancellable operation",
+        ),
+        (
+            ActionOutcome::Failed {
+                reference: "4321-9".to_owned(),
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the controller could not start this action: The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first. Reference 4321-9.",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(
+                "this instance has no workspace yet; create one before starting a session",
+            )),
+            StatusCode::CONFLICT,
+            "no workspace yet",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::unusable(
+                "no target named laptop is configured",
+            )),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no target named laptop",
+        ),
+        (
+            ActionOutcome::Refused(
+                mj_core::refusal::Refusal::unusable(
+                    "Selected subagent model \"x\" is unavailable.",
+                )
+                .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "is unavailable",
+        ),
+    ] {
+        let (app, mut actions, _, _, _) = app();
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/actions")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"action":"suspend","session_id":"session-1"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        request.reply.send(outcome.clone()).unwrap();
+
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), status, "{outcome:?}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains(guidance), "{outcome:?} answered {error:?}");
+        // A refusal's code reaches the viewer, so it can add its own remedy.
+        let expected_code = match &outcome {
+            ActionOutcome::Refused(refusal) => refusal.code(),
+            _ => None,
+        };
+        assert_eq!(body["code"].as_str(), expected_code, "{body}");
+    }
+}
+
+// Hard-won: bff62757: mobile networks dropped long accepted-action requests while later session failures were only visible in snapshots.
+#[tokio::test]
+async fn the_viewer_shows_a_session_whose_action_failed_after_it_was_accepted() {
+    // An accepted action reports its outcome only through snapshots, so
+    // the application has to react to `has_error` for a late failure to be
+    // visible at all.
+    let (app, _, _, _, _) = app();
+    let script = fetch_text(app, "/viewer.js").await;
+    assert!(script.contains("has_error"), "viewer ignores has_error");
+}
+
+/// Every response, not only the page, carries the policy. A header that
+/// depends on which handler answered is a header somebody will forget.
+#[tokio::test]
+async fn every_response_carries_the_security_headers() {
+    for path in [
+        "/",
+        "/viewer.js",
+        "/viewer.css",
+        "/manifest.webmanifest",
+        "/api/snapshot",
+    ] {
+        let (app, _, _, _, _) = app();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let headers = response.headers();
+        let policy = headers
+            .get(CONTENT_SECURITY_POLICY_HEADER)
+            .unwrap_or_else(|| panic!("{path} carries no content-security policy"))
+            .to_str()
+            .unwrap();
+        assert!(
+            policy.starts_with("default-src 'none';"),
+            "{path} does not refuse unlisted sources: {policy}"
+        );
+        assert!(
+            policy.contains("script-src 'self'") && !policy.contains("unsafe-inline"),
+            "{path} permits inline script: {policy}"
+        );
+        assert!(
+            policy.contains("frame-ancestors 'none'"),
+            "{path} can be framed: {policy}"
+        );
+        assert_eq!(
+            headers.get(X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff",
+            "{path} permits content sniffing"
+        );
+        assert_eq!(
+            headers.get(REFERRER_POLICY).unwrap(),
+            "no-referrer",
+            "{path} leaks a referrer"
+        );
+    }
+}
+
+/// The policy forbids inline script and style, so the page must contain
+/// neither. A page that did would simply fail to run in a browser, which
+/// no Rust test would otherwise notice.
+#[tokio::test]
+async fn the_page_carries_no_inline_script_or_style() {
+    let (app, _, _, _, _) = app();
+    let page = fetch_text(app, "/").await;
+    assert!(
+        !page.contains("<script>") && !page.contains("<style>"),
+        "the page inlines script or style, which the policy blocks"
+    );
+    assert!(
+        page.contains(r#"src="/viewer.js""#) && page.contains(r#"href="/viewer.css""#),
+        "the page does not load its script and style as separate assets"
+    );
+}
+
+/// A cached API answer is a lie about live session state, and a cached
+/// service worker is what keeps a phone on a superseded application.
+#[tokio::test]
+async fn live_state_and_the_service_worker_are_never_stored() {
+    for path in ["/service-worker.js", "/api/snapshot"] {
+        let (app, _, _, _, _) = app();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{path} may be stored"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shell_assets_revalidate_with_strong_content_etags() {
+    for path in [
+        "/push-sync.js",
+        "/",
+        "/viewer.css",
+        "/viewer.js",
+        "/markdown.js",
+        "/tool-output.js",
+        "/manifest.webmanifest",
+        "/service-worker.js",
+        "/icon.svg",
+        "/icon-192.png",
+        "/icon-512.png",
+        "/maskable-512.png",
+        "/apple-touch-icon.png",
+        "/fonts/jetbrains-mono.woff2",
+    ] {
+        let (app, _, _, _, _) = app();
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let etag = response.headers()["etag"].clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let digest = Sha256::digest(&body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let expected = format!("\"{digest}\"");
+        assert_eq!(etag, expected, "{path} has a non-content ETag");
+
+        let response = app
+            .oneshot(
+                Request::get(path)
+                    .header("if-none-match", etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{path}");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn viewer_responses_negotiate_fast_compression() {
+    let (app, _, _, _, _) = app();
+    for (encoding, expected) in [("gzip", "gzip"), ("br", "br")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/viewer.js")
+                    .header("accept-encoding", encoding)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-encoding"], expected);
+        assert!(
+            response.headers()["vary"]
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("accept-encoding")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            body.len() < VIEWER_JS.len(),
+            "{encoding} did not reduce the asset"
+        );
+        let digest = Sha256::digest(&body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let etag = format!("\"{digest}\"");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/viewer.js")
+                    .header("accept-encoding", encoding)
+                    .header("if-none-match", &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()["etag"], etag);
+        assert!(!response.headers().contains_key(CONTENT_ENCODING));
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+
+    let cookie = login_cookie(&app).await;
+    let raw = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let compressed = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .header("accept-encoding", "br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(compressed.headers()["content-encoding"], "br");
+    let compressed_body = compressed.into_body().collect().await.unwrap().to_bytes();
+    assert!(compressed_body.len() < raw.len());
+}
+
+#[tokio::test]
+async fn server_sent_events_stay_uncompressed_and_yield_the_first_event() {
+    let (app, _, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/events")
+                .header(COOKIE, cookie)
+                .header("accept-encoding", "gzip, br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+    assert!(response.headers().get("content-encoding").is_none());
+    let first = tokio::time::timeout(Duration::from_secs(1), response.into_body().frame())
+        .await
+        .expect("the first SSE event was buffered")
+        .expect("the SSE stream ended before its first event")
+        .expect("the first SSE frame failed");
+    let data = first.data_ref().expect("the first SSE frame has no data");
+    assert!(data.starts_with(b"event: revision\ndata: "));
+}
+
+/// The worker must leave live state alone entirely rather than caching it
+/// and hoping the cache is fresh.
+#[test]
+fn the_service_worker_declines_to_handle_live_state() {
+    assert!(
+        SERVICE_WORKER.contains("url.pathname.startsWith('/api/')"),
+        "the service worker does not exclude the API"
+    );
+    assert!(
+        SERVICE_WORKER.contains("url.pathname.startsWith('/auth/')"),
+        "the service worker does not exclude authentication"
+    );
+    assert!(
+        SERVICE_WORKER.contains("caches.delete"),
+        "the service worker never deletes a superseded cache"
+    );
+}
+
+// The vendored assets have to reach the browser, not merely exist in the
+// repository: the manifest names them and a phone installs from it.
+
+/// Fetch one unauthenticated asset and return it as text. Serving the
+/// application from several files means a check about the application has
+/// to name the file it is about.
+async fn fetch_text(app: Router, path: &str) -> String {
+    let response = app
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{path} is not served");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(body.to_vec()).expect("assets are UTF-8")
+}
+
+#[tokio::test]
+async fn repeated_wrong_codes_lock_the_login_endpoint() {
+    let (app, _, _, _, _) = app();
+    let attempt = |code: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::post("/auth/session")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(r#"{{"code":"{code}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    for _ in 0..MAX_CODE_FAILURES {
+        assert_eq!(attempt("000000").await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(attempt("000000").await, StatusCode::TOO_MANY_REQUESTS);
+    // Even the right code waits out the lockout, so guessing cannot be
+    // hidden behind a correct-looking attempt.
+    assert_eq!(attempt("123456").await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[test]
+fn viewer_code_lockouts_lengthen_instead_of_resetting_after_every_wait() {
+    let serve_one_lockout = |guard: &mut CodeGuard, now: Instant| {
+        for _ in 0..MAX_CODE_FAILURES {
+            assert!(!guard.locked_at(now));
+            guard.record_failure_at(now);
+        }
+        assert!(guard.locked_at(now));
+        guard.locked_until.expect("the guard is locked") - now
+    };
+
+    let start = Instant::now();
+    let mut guard = CodeGuard::default();
+    let first = serve_one_lockout(&mut guard, start);
+    assert_eq!(first, CODE_LOCKOUT_BASE);
+
+    // Waiting out a lockout buys another run of attempts, not another
+    // equally short lockout: a guard that reset here gave an attacker
+    // MAX_CODE_FAILURES guesses every CODE_LOCKOUT_BASE for ever.
+    let second_round = start + first;
+    let second = serve_one_lockout(&mut guard, second_round);
+    assert_eq!(second, CODE_LOCKOUT_BASE * 2);
+    let third = serve_one_lockout(&mut guard, second_round + second);
+    assert_eq!(third, CODE_LOCKOUT_BASE * 4);
+    assert_eq!(code_lockout(u32::MAX), CODE_LOCKOUT_CAP);
+
+    // A correct code clears the history, so one mistyped digit tomorrow
+    // still costs only the shortest wait.
+    let mut recovered = CodeGuard::default();
+    assert_eq!(serve_one_lockout(&mut recovered, start), CODE_LOCKOUT_BASE);
+}
+
+// Hard-won: feddc733: server restart regenerated the signing key and signed every phone out.
+#[test]
+fn persisted_cookie_key_survives_a_restart_and_stays_owner_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+
+    let first = load_or_create_cookie_key(&path).unwrap();
+    assert!(first.len() >= COOKIE_KEY_BYTES);
+    assert_eq!(std::fs::read(&path).unwrap(), first);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // Two server processes started from the same key file honour each
+    // other's cookies; a process that kept its generated key would not.
+    let mut restarted = detached_options();
+    restarted
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let mut original = detached_options();
+    original.set_cookie_key(first.clone()).unwrap();
+    let cookie = signed_cookie_value(&original.cookie_key, "test-viewer", 200);
+    assert!(session_cookie_valid(&restarted.cookie_key, &cookie, 100));
+    assert!(!session_cookie_valid(
+        &detached_options().cookie_key,
+        &cookie,
+        100
+    ));
+
+    // Deleting the key file is the explicit sign-everyone-out gesture.
+    std::fs::remove_file(&path).unwrap();
+    let rotated = load_or_create_cookie_key(&path).unwrap();
+    assert_ne!(rotated, first);
+    assert!(!session_cookie_valid(&rotated, &cookie, 100));
+}
+
+// Two callers that find no key must not each create one: the phone server
+// starting while sessions launch and renew would otherwise end with different
+// keys, and records signed with the loser's stop verifying.
+#[test]
+fn concurrent_first_uses_of_the_cookie_key_end_with_one_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested").join("phone-cookie-key");
+    let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let keys = (0..16)
+        .map(|_| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                load_or_create_cookie_key(&path).unwrap()
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+
+    let stored = std::fs::read(&path).unwrap();
+    assert!(
+        keys.iter().all(|key| *key == stored),
+        "callers ended with different keys"
+    );
+}
+
+#[test]
+fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    std::fs::write(&path, b"short").unwrap();
+
+    let key = load_or_create_cookie_key(&path).unwrap();
+
+    assert!(key.len() >= COOKIE_KEY_BYTES);
+    assert_eq!(std::fs::read(&path).unwrap(), key);
+    assert_eq!(load_or_create_cookie_key(&path).unwrap(), key);
+}
+
+#[tokio::test]
+async fn bookmarked_qr_login_survives_restart_and_is_revoked_with_the_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    for _ in 0..2 {
+        let mut restarted = detached_options();
+        restarted
+            .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+            .unwrap();
+        let app = router(restarted);
+        let response = app
+            .clone()
+            .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[LOCATION], "/");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let cookie = response.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let snapshot = app
+            .oneshot(
+                Request::get("/api/snapshot")
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+    }
+    std::fs::remove_file(&path).unwrap();
+    let mut rotated = detached_options();
+    rotated
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let response = router(rotated)
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn authenticated_requests_renew_cookies_without_changing_viewer_identity() {
+    for ttl in [Duration::from_secs(3600), Duration::ZERO] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let mut options = detached_options();
+            options.session_ttl = ttl;
+            let key = options.cookie_key.clone();
+            let now = now_unix();
+            let old_expiry = now + 60;
+            let viewer = if ttl.is_zero() {
+                "session:existing-viewer"
+            } else {
+                "phone:existing-viewer"
+            };
+            let old_cookie = signed_cookie_value(&key, viewer, old_expiry);
+            let response = router(options)
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={old_cookie}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            let header = response.headers()[SET_COOKIE].to_str().unwrap();
+            let renewed = cookie_value(header, COOKIE_NAME).unwrap();
+            assert_eq!(
+                cookie_viewer(&key, renewed, old_expiry).as_deref(),
+                Some(viewer)
+            );
+            let expiry = renewed.split('.').nth(1).unwrap().parse::<u64>().unwrap();
+            let validity = if ttl.is_zero() {
+                EPHEMERAL_SESSION_TTL
+            } else {
+                ttl
+            };
+            assert!(expiry >= now + validity.as_secs());
+            assert!(expiry <= now_unix() + validity.as_secs());
+            assert!(header.contains("HttpOnly"));
+            assert!(header.contains("SameSite=Strict"));
+            assert!(header.contains("Secure"));
+            assert_eq!(header.contains("Max-Age="), !ttl.is_zero());
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejected_cookies_are_not_renewed_and_bearer_auth_does_not_mint_a_cookie() {
+    let mut options = detached_options();
+    let key = options.cookie_key.clone();
+    options.set_api_token("test-bearer".into());
+    let app = router(options);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for value in [
+            None,
+            Some("malformed".to_owned()),
+            Some(signed_cookie_value(&key, "expired-viewer", now_unix())),
+            Some(signed_cookie_value(
+                b"wrong-key",
+                "wrong-viewer",
+                now_unix() + 3600,
+            )),
+        ] {
+            let mut request = Request::get(route);
+            if let Some(value) = value {
+                request = request.header(COOKIE, format!("{COOKIE_NAME}={value}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/sessions")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() {
+    let (app, mut bundles) = app_with_bundle_receiver();
+    let cookie = login_cookie(&app).await;
+    let other_viewer = login_cookie(&app).await;
+    let early = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let early_cookie = early.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let pending = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/api/bundles")
+                .header(COOKIE, &cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"source":"owner/repo"}"#))
+                .unwrap(),
+        ),
+    );
+    let bundle = bundles.recv().await.unwrap();
+    let logout = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert!(
+        logout.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    bundle
+        .reply
+        .send(Err(BundleFailure::InvalidSource))
+        .unwrap();
+    let late = pending.await.unwrap().unwrap();
+    assert!(
+        !late.headers().contains_key(SET_COOKIE),
+        "a delayed response must not renew after logout"
+    );
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for revoked in [&cookie, &early_cookie] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, revoked)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, &other_viewer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
+    let options = detached_options();
+    let key = options.cookie_key.clone();
+    // Cookies from the retired desktop shell remain valid until expiry.
+    let desktop = signed_cookie_value(&key, "retired-desktop-viewer", now_unix() + 3600);
+    let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
+    let app = router(options);
+    for value in [desktop, legacy] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={value}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+}
+
+#[tokio::test]
+async fn logout_survives_restart_without_revoking_the_bookmarked_login_url() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .load_cookie_credentials(path.clone())
+        .await
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    let app = router(original);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let logout = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted.load_cookie_credentials(path).await.unwrap();
+    let restarted = router(restarted);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        let denied = restarted
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    let fresh = restarted
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::SEE_OTHER);
+    let new_cookie = fresh.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let accepted = restarted
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, new_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_reports_persistence_failure_and_revokes_in_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut options = detached_options();
+    options.load_cookie_credentials(path).await.unwrap();
+    let url = format!("/auth/login?token={}", options.login_token());
+    // A directory at the ledger path deterministically refuses the atomic write.
+    std::fs::create_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let app = router(options);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    std::fs::remove_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let retried = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted
+        .load_cookie_credentials(directory.path().join("phone-cookie-key"))
+        .await
+        .unwrap();
+    let denied = router(restarted)
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
+
+// so rather than showing an idle clock that belongs to a live session.
+
+/// precision-3260: a session on a full disk showed only as unreachable. Its
+/// card now names the disk.
+// Hard-won: 540c9202: a real full-disk outage appeared only as unreachable to users.
+#[test]
+fn embedded_viewer_says_when_a_session_s_disk_is_full() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const problem = 'disk full: precision-3260 has 0 B free on /';
+const session = { lifecycle: 'live', state: 'disconnected', storage_problem: problem, activity_details: { kind: 'idle' } };
+if (sessionActivityLabel(session, 60000) !== problem) throw Error('a full disk is not named');
+"#;
+    run_viewer_script("storage-full", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[test]
+fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const session = { lifecycle: 'live', quota_recovery: { retry_at_ms: 120000 } };
+if (!sessionActivityLabel(session, 60000).startsWith('Quota limit · resumes ')) throw Error('missing quota deadline');
+session.quota_recovery.retry_at_ms = null;
+if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown') throw Error('missing unknown reset');
+"#;
+    run_viewer_script("quota-recovery", &format!("{setup}\n{source}\n{checks}"));
+}
+
+#[tokio::test]
+async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
+    let (app, _, _, mut preflights, _) = app();
+    let make_request = || {
+        Request::post("/api/projects/discover")
+            .header(COOKIE, cookie())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"kind":"github","query":""}"#))
+            .unwrap()
+    };
+    let response = tokio::spawn(app.clone().oneshot(make_request()));
+    let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
+        panic!("discovery");
+    };
+    let message = "GitHub login is unavailable or expired. Run gh auth login on the machine running discovery, then retry.";
+    request.reply.send(Err(message)).unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains(message));
+
+    let response = tokio::spawn(app.oneshot(make_request()));
+    let PreflightRequest::DiscoverProjects(mut request) = preflights.recv().await.unwrap() else {
+        panic!("discovery");
+    };
+    response.abort();
+    assert!(response.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(2), request.reply.closed())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bundle_endpoint_rejects_conflicting_empty_or_oversized_source_sets() {
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"source": "example/app", "sources": ["example/app"]}),
+        serde_json::json!({"sources": []}),
+        serde_json::json!({"sources": ["  "]}),
+        serde_json::json!({"sources": ["x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)]}),
+        serde_json::json!({"sources": vec!["example/app"; 33]}),
+    ] {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let response = app
+            .oneshot(
+                Request::post("/api/bundles")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(bundles.try_recv().is_err());
+    }
+}
+
+/// A quiet runtime produces no update that could incidentally release a dead
+/// stream. Disconnect and daemon shutdown must release it themselves.
+#[tokio::test]
+async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
+    for format in ["changes", "revision"] {
+        for shutdown in [false, true] {
+            let (snapshots, snapshot_rx) = watch::channel(ViewerSnapshot::default());
+            let (_, conversation_rx) = watch::channel(mj_core::snapshot_map::SnapshotMap::new());
+            let options = test_options(
+                snapshot_rx,
+                conversation_rx,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+            )
+            .with_test_credentials("123456", b"01234567890123456789012345678901");
+            let cancellation = options.shutdown.clone();
+            let app = router(options);
+            let cookie = login_cookie(&app).await;
+            let response = app
+                .oneshot(
+                    Request::get(format!("/api/events?format={format}"))
+                        .header(COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body();
+            let initial = tokio::time::timeout(Duration::from_secs(2), body.frame())
+                .await
+                .expect("stream starts")
+                .expect("initial frame")
+                .unwrap();
+            if format == "changes" {
+                let bytes = initial.into_data().expect("SSE event is a data frame");
+                let event = String::from_utf8_lossy(&bytes);
+                assert!(event.lines().any(|line| line.starts_with("id: ")));
+                assert!(event.lines().any(|line| line == "event: runtime"));
+            }
+            if shutdown {
+                cancellation.cancel();
+            } else {
+                drop(body);
+            }
+            tokio::time::timeout(Duration::from_secs(2), snapshots.closed())
+                .await
+                .expect("idle stream must release its snapshot without another publication");
+        }
+    }
+}
+
+#[test]
+fn browser_move_selection_keeps_sizes_and_capacity_in_sync() {
+    let source = viewer_source("function moveFileKey", "function renderMoveFiles");
+    run_viewer_script(
+        "move-file-selection",
+        &format!(
+            r#"{source}
+const assessment = {{ required_bytes: 50, files: [
+  {{ location: {{repository:'repo',path:'.agents/build/large'}}, bytes:1_000_000_000 }},
+  {{ location: {{repository:'repo',path:'.agents/build/small'}}, bytes:1234 }},
+], storage: [{{location:'Source', available_bytes:100_000_000, copies:1}}] }};
+const draft = {{ preparation: {{workspace:assessment}}, workspaceSelection: {{exclusions:[]}} }};
+if (moveBytes(1_000_000_000) !== '1.00 GB') throw Error('wrong GB label');
+if (moveBytes(1234) !== '1.2 KB') throw Error('wrong file size label');
+if (moveSelectedBytes(draft, assessment) !== 1_000_001_284) throw Error('wrong selected size');
+if (moveStorageProblems(draft).length !== 1) throw Error('missing space warning');
+draft.workspaceSelection.exclusions = [{{repository:'repo',path:'.agents/build/large'}}];
+if (moveStorageProblems(draft).length) throw Error('excluding the large file did not clear the space warning');
+if (!moveFileIncluded(draft, assessment.files[1].location)) throw Error('excluding a sibling changed another selection');
+if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'other',path:'.agents/build/large'}})) throw Error('selection crossed repositories');
+"#
+        ),
+    );
+}
+
+#[test]
+fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
+    let source = format!(
+        "{}\n{}\n{}",
+        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
+        viewer_source(
+            "function workingChildCount(",
+            "function sessionInWorkspace("
+        ),
+        viewer_source(
+            "function moveSubagentChange(",
+            "function moveQueueItemText("
+        ),
+    );
+    let setup = r#"
+let newDraft = null;
+const snapshot = { subagents_configured: true, profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }, { id: "dsh", harness_kind: "dsh" }] };
+const sessions = {
+  parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
+  parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
+  running: { id: "running", lifecycle: "live", chat_phase: "running" },
+  gone: { id: "gone", lifecycle: "suspended" },
+};
+function sessionById(id) { return sessions[id]; }
+"#;
+    let checks = r#"
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
+assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
+snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
+assert(moveSubagentChange(draft) === null, "changing profile defaults must retain the session policy");
+draft.subagents = { mode: "mjolnir" };
+assert(moveSubagentChange(draft).mode === "mjolnir", "an explicit session edit is submitted");
+draft.subagents = structuredClone(draft.storedSubagents);
+draft.profileId = "kimi";
+assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
+draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
+draft.subagents = structuredClone(draft.storedSubagents);
+assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
+assert(moveStoppedChildren(sessions.parent, { stops_subagents: true }) === 1, "only a child still at its task is counted; a parked one has handed back");
+assert(moveStoppedChildren(sessions.parent, { in_place: true, stops_subagents: false }) === 0, "an in-place Move that keeps its children stops none");
+// DSH has no sub-agents of its own: a stored Native reads as None and stays.
+const dsh = { profileId: "dsh", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
+assert(moveSubagentChange(dsh) === null, "a stored Native that DSH shows as None is untouched");
+dsh.subagents = { mode: "none" };
+assert(moveSubagentChange(dsh) === null, "choosing the None DSH already shows changes nothing");
+dsh.subagents = { mode: "mjolnir" };
+assert(moveSubagentChange(dsh).mode === "mjolnir", "DSH can choose Mjolnir");
+dsh.profileId = "codex";
+dsh.subagents = { mode: "native" };
+assert(moveSubagentChange(dsh) === null, "Codex keeps the stored Native");
+"#;
+    run_viewer_script(
+        "viewer-move-subagents",
+        &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+#[test]
+fn viewer_move_controls_use_global_availability_for_delegation() {
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
+        viewer_source(
+            "function moveSubagentChange(",
+            "function moveStoppedChildren("
+        )
+    );
+    run_web_check(
+        "viewer-move-controls",
+        &format!(
+            r#"
+import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
+installDocument();
+let newDraft = null;
+const snapshot = {{ subagents_configured: false, targets: [], profiles: [{{ id:'parent', harness_kind:'codex' }}, {{ id:'dsh', harness_kind:'dsh' }}] }};
+function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
+{source}
+const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
+let edits = 0;
+function render() {{ const body = el('div'); renderSubagentFields(body, draft, 'move', () => {{}}, () => edits++); return elements(body, 'select'); }}
+let fields = render();
+checkEqual(fields.length, 1, 'only delegation picker remains');
+checkEqual(fields[0].childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir,none', 'delegation choices');
+check(fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'unconfigured Mjolnir disabled');
+snapshot.subagents_configured = true;
+fields = render();
+check(!fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'configured Mjolnir available');
+fields[0].value = 'mjolnir'; fields[0].onchange();
+checkEqual(moveSubagentChange(draft).mode, 'mjolnir', 'explicit policy submitted');
+checkEqual(subagentSelectionError(draft), '', 'configured choice valid');
+checkEqual(edits, 1, 'edit reported');
+fields[0].value = 'none'; fields[0].onchange();
+checkEqual(moveSubagentChange(draft).mode, 'none', 'None policy submitted');
+checkEqual(subagentSelectionError(draft), '', 'None needs no configured models');
+const dshDraft = {{ profileId:'dsh', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
+const dshBody = el('div');
+renderSubagentFields(dshBody, dshDraft, 'move', () => {{}}, () => {{}});
+const dshField = elements(dshBody, 'select')[0];
+checkEqual(dshField.childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'mjolnir,none', 'DSH does not offer Native');
+checkEqual(dshField.value, 'none', 'a stored Native reads as None on DSH');
+checkEqual(moveSubagentChange(dshDraft), null, 'the untouched DSH policy is retained');
+"#
+        ),
+    );
+}
+
+/// One request to a settings route, as the viewer sends it.
+async fn settings_request(
+    app: &Router,
+    cookie: &str,
+    uri: &str,
+    body: Option<&serde_json::Value>,
+) -> (StatusCode, String) {
+    let builder = match body {
+        Some(_) => Request::post(uri),
+        None => Request::get(uri),
+    }
+    .header(COOKIE, cookie)
+    .header(CONTENT_TYPE, "application/json");
+    let response = app
+        .clone()
+        .oneshot(
+            builder
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The settings routes over a configuration file in an isolated store: what
+/// the viewer is sent for a draft holding literal secrets, a page, an
+/// accepted and a refused edit, and the save. The recorded exchange is also
+/// the fixture the browser test replays, so both sides agree on its shape.
+// Hard-won: isolated children inherited MJ_INSTANCE from the test process, which moved the default viewer port in the golden.
+#[tokio::test]
+async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model() {
+    if !in_isolated_store("settings_routes_hide_literal_secrets_and_save_through_the_shared_model")
+    {
+        return;
+    }
+    const SECRET: &str = "sk-literal-secret-6c1f2a";
+    const RUNTIME_SECRET: &str = "runtime-literal-secret-91d0";
+    let path = mj_core::config::config_path();
+    let directory = path.parent().unwrap().to_path_buf();
+    let home = directory.join("claude-home");
+    let home_toml = toml::Value::String(home.display().to_string()).to_string();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {version}\n\n\
+             [profiles.claude]\nkind = \"claude\"\nhome = {home_toml}\n\n\
+             [profiles.claude.environment]\nANTHROPIC_API_KEY = \"{SECRET}\"\n\
+             PROXY_TOKEN = {{ from_secret = \"PROXY_TOKEN\" }}\n\n\
+             [targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
+             [targets.lab.environment]\nLAB_TOKEN = \"{RUNTIME_SECRET}\"\n\n\
+             [targets.apple-container]\nkind = \"apple-container\"\nimage = \"example.test/apple:1\"\n\n\
+             [targets.localhost]\nkind = \"bare\"\n",
+            version = mj_core::config::CONFIG_VERSION,
+        ),
+    )
+    .unwrap();
+    // The daemon has discovered what the profile offers, keyed by its
+    // configured installation, which includes the environment the browser
+    // never sees.
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot =
+        serde_json::from_value(serde_json::json!({"profiles": {identity: {
+            "choices": {"status": "ready", "value": {"model": null, "observed_at": 0, "efforts": [],
+                "models": [
+                    {"value": "opus", "name": "Opus", "description": null},
+                    {"value": "sonnet", "name": "Sonnet", "description": null},
+                ]}},
+            "efforts": {"opus": {"status": "ready", "value": [
+                {"value": "high", "name": "High", "description": null},
+                {"value": "max", "name": "Max", "description": null},
+            ]}},
+        }}}))
+        .unwrap();
+    let (app, ..) =
+        app_with_snapshot(move |snapshot| snapshot.profile_capabilities = capabilities.into());
+    let cookie = login_cookie(&app).await;
+
+    // The agents' bearer token reaches `/api/v1`, never Settings.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/settings")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-api-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let environments = |value: &serde_json::Value| {
+        serde_json::json!({
+            "profiles.claude": value["profiles"]["claude"]["environment"],
+            "targets.lab": value["targets"]["lab"]["environment"],
+        })
+    };
+    let mut exchange = Vec::new();
+    let mut bodies = Vec::new();
+    let mut record = |uri: &str, request: serde_json::Value, status: StatusCode, body: &str| {
+        bodies.push(body.to_owned());
+        let response: serde_json::Value = serde_json::from_str(body).unwrap();
+        let mut summary = serde_json::Map::new();
+        for field in ["original", "draft"] {
+            if let Some(value) = response.get(field) {
+                summary.insert(format!("{field}_environments"), environments(value));
+            }
+        }
+        for field in ["page", "subagent_options", "notice", "error"] {
+            if let Some(value) = response.get(field) {
+                summary.insert(field.to_owned(), value.clone());
+            }
+        }
+        exchange.push(serde_json::json!({
+            "uri": uri,
+            "request": request,
+            "status": status.as_u16(),
+            "response": summary,
+        }));
+        response
+    };
+
+    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let opened = record("/api/settings", serde_json::Value::Null, status, &body);
+    let original = opened["original"].clone();
+    let mut draft = opened["draft"].clone();
+    let original_file = std::fs::read(&path).unwrap();
+
+    // The requests a browser makes, in its order: open a page, then edit on
+    // it, and save from the page it is on. Each sends the draft the
+    // previous answer returned.
+    let root = || ("/api/settings/page", serde_json::json!({"path": []}));
+    let steps = [
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["profiles", "claude"]}),
+        ),
+        root(),
+        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
+        ),
+        root(),
+        (
+            "/api/settings/page",
+            serde_json::json!({"path": ["subagents"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "max_concurrent"], "text": "99"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "subtle", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "model"], "choice": "opus"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "set", "path": ["subagents", "yolo", "straightforward", "effort"], "choice": "high"}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["subagents"], "edit": {"kind": "toggle", "path": ["subagents", "use_same_on_all_targets"]}}),
+        ),
+        (
+            "/api/settings/save",
+            serde_json::json!({"page": ["subagents"]}),
+        ),
+    ];
+    for (uri, sent) in steps {
+        let mut request = sent.clone();
+        request["draft"] = draft.clone();
+        if uri == "/api/settings/save" {
+            request["original"] = original.clone();
+        }
+        let (status, body) = settings_request(&app, &cookie, uri, Some(&request)).await;
+        let subtle_only_save =
+            uri == "/api/settings/save" && draft["subagents"]["straightforward"]["model"].is_null();
+        if subtle_only_save {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(std::fs::read(&path).unwrap(), original_file);
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let answer = record(uri, sent, status, &body);
+        if let Some(next) = answer.get("draft") {
+            draft = next.clone();
+        }
+    }
+
+    for body in &bodies {
+        assert!(
+            !body.contains(SECRET),
+            "a literal secret reached the browser: {body}"
+        );
+        assert!(
+            !body.contains(RUNTIME_SECRET),
+            "a literal secret reached the browser: {body}"
+        );
+    }
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(SECRET), "{saved}");
+    assert!(saved.contains(RUNTIME_SECRET), "{saved}");
+    let saved = Config::load_from(&path).unwrap();
+    assert!(!saved.phone.enabled);
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
+        "opus"
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["effort"],
+        "high"
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.subagents).unwrap()["subtle"]["model"],
+        "opus"
+    );
+    assert!(!saved.subagents.use_same_on_all_targets);
+    assert_eq!(
+        saved.subagents.yolo.straightforward.as_ref().unwrap().model,
+        "opus"
+    );
+    assert_eq!(
+        saved
+            .subagents
+            .yolo
+            .straightforward
+            .as_ref()
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high")
+    );
+
+    let rendered_home = serde_json::to_string(&home.display().to_string()).unwrap();
+    let rendered_home = rendered_home.trim_matches('"');
+    let text = serde_json::to_string_pretty(&exchange)
+        .unwrap()
+        .replace(rendered_home, "<home>");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "viewer-settings-exchange",
+        &text,
+    );
+}
+
+/// A viewer's draft goes stale when another client saves first. A field both
+/// changed is a conflict, and a hidden value the file no longer holds cannot
+/// be put back; either way the save is refused and the file is untouched.
+#[tokio::test]
+async fn settings_save_refuses_a_stale_draft_without_writing() {
+    if !in_isolated_store("settings_save_refuses_a_stale_draft_without_writing") {
+        return;
+    }
+    let path = mj_core::config::config_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n\n[targets.lab]\nkind = \"podman\"\nimage = \"example.test/lab:1\"\n\n\
+             [targets.lab.environment]\nLAB_TOKEN = \"first-literal\"\n",
+            mj_core::config::CONFIG_VERSION,
+        ),
+    )
+    .unwrap();
+    let (app, ..) = app();
+    let cookie = login_cookie(&app).await;
+    let (_, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let edit = serde_json::json!({
+        "draft": opened["draft"],
+        "page": ["phone"],
+        "edit": {"kind": "set", "path": ["phone", "bind"], "text": "127.0.0.1:4000"},
+    });
+    let (_, body) = settings_request(&app, &cookie, "/api/settings/edit", Some(&edit)).await;
+    let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let save = serde_json::json!({"original": opened["original"], "draft": edited["draft"]});
+
+    Config::update_to(&path, |config| {
+        config.phone.bind = "127.0.0.1:5000".parse().unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let (status, body) = settings_request(&app, &cookie, "/api/settings/save", Some(&save)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("changed in another client"), "{body}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("LAB_TOKEN = \"first-literal\"\n", "");
+    std::fs::write(&path, text).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let unrelated = serde_json::json!({"original": opened["original"], "draft": opened["draft"]});
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/settings/save", Some(&unrelated)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Resume and change-workspace ask the store whether the workspace exists. The
+/// snapshot's copy of the workspace list lagged the store: it was read before
+/// the first session landed in the hidden `default` workspace and republished
+/// only by a few daemon actions.
+// Hard-won: #1334: `mj resume` answered "unknown workspace" for a session in `default` until a daemon restart, because the check read a published list that was empty when the daemon started.
+#[tokio::test]
+async fn resume_validates_the_workspace_against_the_store_not_the_published_list() {
+    if !in_isolated_store("resume_validates_the_workspace_against_the_store_not_the_published_list")
+    {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    assert!(
+        mj_controller::database::list_workspaces()
+            .unwrap()
+            .is_empty(),
+        "an empty `default` is not listed, so the daemon starts with no workspace"
+    );
+    // The snapshot the server holds was built from that empty list.
+    let (app, mut actions, ..) = app_with_backend(
+        BTreeMap::new(),
+        |snapshot| assert!(snapshot.workspaces.is_empty()),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let mut session = mj_controller::controller::test_support::checkpoint_test_session("session-1");
+    session.state = SessionState::Stopped;
+    mj_controller::database::save_session(&session).unwrap();
+
+    let resume = |workspace_id: &str| {
+        serde_json::to_string(&ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: workspace_id.into(),
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        })
+        .unwrap()
+    };
+    let response = tokio::spawn(post_action(app.clone(), cookie.clone(), resume("default")));
+    // A refusal never reaches the controller, so bound the wait for the action.
+    let request = tokio::time::timeout(Duration::from_secs(10), actions.recv()).await;
+    let Ok(Some(request)) = request else {
+        panic!(
+            "the resume was refused: {:?}",
+            response.await.unwrap().status()
+        );
+    };
+    assert!(matches!(request.action, ControllerAction::Resume { .. }));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+
+    let response = post_action(app, cookie, resume("nosuch")).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(actions.try_recv().is_err());
+}
+
+struct SettingsReviewBackend;
+
+impl api::SubagentBackend for SettingsReviewBackend {
+    fn session_handle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<mj_client::session::SessionHandle>>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn prompt(&self, _: String, _: String) -> futures::future::BoxFuture<'_, anyhow::Result<u64>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn turn_state(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TurnState>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn turn_summary(
+        &self,
+        _: String,
+        _: api::TurnSpan,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<api::TurnSummary>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_followup(
+        &self,
+        _: String,
+        _: api::StartFollowup,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { anyhow::bail!("unused") })
+    }
+    fn start_status(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::StartStatus>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn transcript(
+        &self,
+        _: String,
+        _: u64,
+        _: usize,
+        _: Vec<mj_core::transcript::TranscriptRole>,
+        _: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Option<api::TranscriptPage>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn diff(
+        &self,
+        _: String,
+        _: api::DiffOptions,
+    ) -> futures::future::BoxFuture<'_, Result<String, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn read_file(
+        &self,
+        _: String,
+        _: std::path::PathBuf,
+        _: mj_checkpoint::archive::FetchMode,
+    ) -> futures::future::BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, api::ExportError>>
+    {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn push_branch(
+        &self,
+        _: String,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::PushedBranch, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+    fn bundle(
+        &self,
+        _: String,
+    ) -> futures::future::BoxFuture<'_, Result<api::BundleExport, api::ExportError>> {
+        Box::pin(async { Err(api::ExportError::Refused("unused".into())) })
+    }
+
+    fn profile_config(
+        &self,
+        _profile: String,
+        model: Option<String>,
+        _refresh: bool,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: model.clone(),
+                models: vec![mj_core::acp::SessionConfigChoice {
+                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
+                    name: "Sonnet 4.5".into(),
+                    description: None,
+                }],
+                efforts: vec![mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                }],
+                observed_at: 0,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
+    if !in_isolated_store("settings_review_autoconfigure_returns_preset_draft_without_saving") {
+        return;
+    }
+    let path = mj_core::config::config_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n[profiles.claude]\nkind = \"claude\"\nhome = \"/tmp/test-claude\"\n[review]\ntrigger = \"push\"\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+    let stored = std::fs::read(&path).unwrap();
+    let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
+    let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot = serde_json::from_value(serde_json::json!({"profiles": {identity: {
+        "choices": {"status": "ready", "value": {"model": "claude-sonnet-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
+            "models": [{"value": "claude-sonnet-4.5", "name": "Sonnet 4.5", "description": null}]}},
+        "efforts": {"claude-sonnet-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
+    }}})).unwrap();
+    let (app, ..) = app_with_backend(
+        BTreeMap::new(),
+        move |snapshot| snapshot.profile_capabilities = capabilities.into(),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let (status, body) = settings_request(&app, &cookie, "/api/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let request = serde_json::json!({"draft": opened["draft"], "page": ["review"], "edit": {"kind": "action", "id": "review.autoconfigure"}});
+    let (status, body) =
+        settings_request(&app, &cookie, "/api/settings/edit", Some(&request)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        reply["draft"]["review"]["reviewers"],
+        serde_json::json!([
+            {"model": "claude-sonnet-4.5", "effort": "high"},
+            {"model": "claude-sonnet-4.5", "effort": "high"}
+        ])
+    );
+    assert!(reply["draft"]["review"].get("profile").is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), stored);
+}
+
+#[tokio::test]
+async fn github_relevance_daemon_notices_snapshot_golden() {
+    use mj_github_relevance::github_relevance::Notices;
+    use mj_github_relevance::github_student::{
+        StudentDevice, StudentDeviceFallbackReason, StudentFailureKind, StudentNotice,
+    };
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = notices.clone();
+    let sink = Notices::new(move |text| {
+        let mut notices = capture.lock().unwrap();
+        let id = notices.len() as u64 + 1;
+        notices.push(mj_client::daemon::RuntimeNotice {
+            id,
+            session_id: String::new(),
+            text,
+        });
+    });
+    sink.observe(Some((
+        Some(StudentFailureKind::Download),
+        "private download details",
+    )));
+    sink.observe(Some((Some(StudentFailureKind::Download), "same episode")));
+    sink.observe(None);
+    for notice in [
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::Cuda,
+            reason: StudentDeviceFallbackReason::Slower {
+                gpu_ms: 20,
+                cpu_ms: 10,
+            },
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::CoreMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Load),
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::DirectMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Inference),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "private inference details".into(),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "same episode".into(),
+        },
+        StudentNotice::InferenceRecovered,
+        StudentNotice::CudaLibrariesMissing {
+            missing: vec!["libcudnn.so.9".into()],
+        },
+        StudentNotice::GpuAfterRestart,
+        StudentNotice::PlatformUnsupported,
+        StudentNotice::WindowsRuntimeMissing {
+            missing: vec!["MSVCP140.dll".into()],
+        },
+    ] {
+        sink.student_notice(notice);
+    }
+    let notices = notices.lock().unwrap().clone();
+    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!snapshot["notices"].to_string().contains("private"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "github-relevance-notices",
+        &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
+    );
+}
+
+// A worker without open requests (relay protocol before 64) has no question
+// target, so its question is the last thing the agent wrote.
+#[test]
+fn notification_message_for_a_legacy_worker_falls_back_to_the_last_agent_message() {
+    use mj_core::notification_message::{NotificationKind, NotificationMessageFacts};
+    let facts = |supports_open_request| NotificationMessageFacts {
+        pending_request: None,
+        review_activity: None,
+        question_message: None,
+        supports_open_request,
+    };
+    let read = |facts| {
+        super::handlers::notification_message_text(
+            NotificationKind::NeedsInput,
+            &facts,
+            |_| unreachable!("no question target"),
+            || Ok(Some("the agent's last words".to_owned())),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read(facts(false)).as_deref(),
+        Some("the agent's last words")
+    );
+    assert_eq!(read(facts(true)), None);
+}
+
+// An `!` card names its message by ReadThrough ordinal: a different or missing
+// boundary is a conflict, never the latest reply.
+#[tokio::test]
+async fn notification_message_for_an_important_card_requires_its_read_through_boundary() {
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].attention = mj_core::attention::SessionAttention::Important;
+        snapshot.sessions[0].notification_dismissal =
+            Some(mj_core::attention::NotificationDismissal::ReadThrough(3));
+    });
+    let cookie = login_cookie(&app).await;
+    for stale in [
+        "holder=session-1&through=4",
+        "holder=session-1",
+        "holder=session-1&through=3&requests=x",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{stale}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{stale}");
+    }
+}
+
+// Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
+#[tokio::test]
+async fn notification_message_reads_only_entries_on_the_current_card() {
+    use mj_client::runtime_feed::NotificationCard;
+    use mj_core::attention::{EntryMessage, NotificationKind, NotificationStackEntry};
+    use mj_core::state::{
+        MaterializedSession, MaterializedTurnOutcome, TranscriptBody, TranscriptItem,
+        TurnOutcomeKind,
+    };
+    use mj_core::storage::MaterializedSessionMutation;
+
+    const NAME: &str = "notification_message_reads_only_entries_on_the_current_card";
+    const CHILD: &str = "MJ_TEST_NOTIFICATION_CARD_MESSAGE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        mj_controller::controller::test_support::IsolatedTest::new(
+            mj_controller::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let (_, state) = sample_config_state();
+    mj_controller::database::save_session(&state.sessions["session-1"]).unwrap();
+    let mut history = MaterializedSession::empty("session-1");
+    history.applied_event_ordinal = 4;
+    history.applied_event_digest = format!("{:064x}", 4);
+    for (ordinal, message) in [(1, "exact"), (4, "bounded")] {
+        history.transcript.push(Arc::new(TranscriptItem {
+            stable_id: format!("agent:{ordinal}"),
+            position: ordinal,
+            latest_content_event_ordinal: Some(ordinal),
+            created_at_ms: ordinal as i64,
+            last_changed_at_ms: ordinal as i64,
+            body: TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text","text":message}})],
+                streaming: false,
+            },
+        }));
+    }
+    mj_controller::database::save_materialized_session(&history).unwrap();
+    let outcome = |name: &str, start, completed| MaterializedTurnOutcome {
+        command_id: name.into(),
+        accepted_ordinal: Some(start),
+        turn_start_position: Some(start),
+        completed_ordinal: completed,
+        completed_at_ms: completed as i64,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    };
+    mj_controller::database::apply_projection_event(
+        "session-1",
+        5,
+        "",
+        &format!("{:064x}", 5),
+        &MaterializedSessionMutation {
+            last_turn_outcome: Some(outcome("with-text", 3, 5)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    history.applied_event_ordinal = 9;
+    history.applied_event_digest = format!("{:064x}", 9);
+    history.last_turn_outcome = Some(outcome("without-text", 8, 9));
+    history.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "agent:7".into(),
+        position: 7,
+        latest_content_event_ordinal: Some(7),
+        created_at_ms: 7,
+        last_changed_at_ms: 7,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content":{"type":"text","text":"unlisted"}})],
+            streaming: false,
+        },
+    }));
+    mj_controller::database::save_materialized_session(&history).unwrap();
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.sessions[0].notification_card = Some(NotificationCard {
+            since_ms: 0,
+            badge: NotificationKind::Important,
+            entries: vec![
+                NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 2,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::Found("agent:1".into()),
+                },
+                NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 5,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
+                NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 9,
+                    kind: NotificationKind::Important,
+                    message: EntryMessage::None,
+                },
+            ],
+            dismissal: None,
+            holder: None,
+            form: None,
+        });
+    });
+    let cookie = login_cookie(&app).await;
+    for (query, text) in [
+        ("message_id=agent%3A1", Some(Some("exact"))),
+        ("through=5", Some(Some("bounded"))),
+        ("through=9", Some(None)),
+        ("message_id=agent%3A7", None),
+        ("through=2", None),
+        ("through=8", None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/sessions/session-1/notification-message?{query}"
+                ))
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        if let Some(text) = text {
+            assert_eq!(response.status(), StatusCode::OK, "{query}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"session_id": "session-1", "text": text})
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{query}");
+        }
+    }
+
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
+        "agent:1"
+    );
+}

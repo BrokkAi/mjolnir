@@ -60,9 +60,9 @@ pub enum ParkOutcome {
 
 /// An executor for stopping what a failed unpark started. The unpark's own
 /// executor may be the reason it failed, cancelled by a close of the child.
-pub(crate) const FAILED_STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+pub const FAILED_STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) fn failed_launch_cleanup_executor() -> targets::CancellableProcessExecutor {
+pub fn failed_launch_cleanup_executor() -> targets::CancellableProcessExecutor {
     targets::CancellableProcessExecutor::with_timeout(FAILED_STARTUP_CLEANUP_TIMEOUT)
 }
 
@@ -383,7 +383,7 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker-source");
-        std::fs::write(&worker, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+        std::fs::write(&worker, mj_core::worker_build::worker_build_stamp()).unwrap();
         IsolatedTest::new(test_name(module_path!(), test))
             .env(MARKER, "1")
             .env("MJ_WORKER_BINARY", worker)
@@ -801,7 +801,7 @@ mod tests {
         let controller = waking_controller(root.path(), 0);
         let profile = controller.config.profiles["codex"].clone();
         let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
-        let staged = std::path::PathBuf::from(crate::controller::target_profile_home_for_test(
+        let staged = std::path::PathBuf::from(crate::targets::target_profile_home(
             &backend,
             LATCH_RELAY_SESSION,
             &profile,

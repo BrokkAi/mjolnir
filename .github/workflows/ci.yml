@@ -119,11 +119,10 @@ jobs:
       run: |
         node scripts/check-crate-boundaries.mjs
 
-    # mj-controller is being split into layered crates
-    # (.agents/plans/split-mj-controller-by-layer.md). This keeps the layers
-    # that are already separated from growing back together.
-    - name: Check mj-controller layer boundaries
-      run: python3 scripts/check-controller-layers.py
+    # Cargo compiles a crate as one mostly serial unit, so crate size sets the
+    # floor for every build (.agents/plans/fan-out-crates-under-size-budget.md).
+    - name: Check crate sizes against the budget
+      run: python3 scripts/check-crate-size.py
 
     - name: Check crate package contents and build
       run: |
@@ -133,8 +132,8 @@ jobs:
         # Assemble the file list for each published crate and confirm the
         # licence text ships with it. `--list` does not build, so a crate whose
         # path dependencies are not on the registry yet still works here.
-        for package in brokk-mj-core brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-worker \
-          brokk-mj-client brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
+        for package in brokk-mj-core brokk-mj-build-id brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-worker-runtime brokk-mj-worker \
+          brokk-mj-client brokk-mj-targets brokk-mj-session-types brokk-mj-store brokk-mj-accounts brokk-mj-import brokk-mj-sessionwiki brokk-mj-build-cache brokk-mj-worker-staging brokk-mj-github-relevance brokk-mj-controller brokk-mj-setup brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"
         done
@@ -195,30 +194,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        # mj-controller's tests take 8 to 9 minutes to run on one runner, after
-        # a 6 minute build, so three runners each build the crate and run a
-        # part of them. `select` names the part: see "Run tests".
+        # mj-controller's tests take several minutes to run on one runner,
+        # after the build, so two runners each build the crate and run a part
+        # of them. `select` names the part: see "Run tests".
         - name: controller, controller modules
           lane: tests-controller
           tests: -p brokk-mj-controller
           select: first
-        - name: controller, daemon and server modules
-          lane: tests-controller
-          tests: -p brokk-mj-controller
-          select: second
         - name: controller, other modules
           lane: tests-controller
           tests: -p brokk-mj-controller
           select: rest
+        - name: server
+          lane: tests-server
+          tests: -p brokk-mj-server
+        - name: daemon
+          lane: tests-daemon
+          tests: -p brokk-mj-daemon
         - name: worker-cli
           lane: tests-worker-cli
-          tests: -p brokk-mj-worker -p brokk-mjolnir
+          tests: -p brokk-mj-worker-runtime -p brokk-mj-worker -p brokk-mjolnir
         # mj-core has tests behind `test-hooks`, which only the crates in the
         # other shards enable.
         - name: libraries
           lane: tests-libraries
           tests: >-
-            --workspace --exclude brokk-mj-controller --exclude brokk-mj-worker
+            --workspace --exclude brokk-mj-controller --exclude brokk-mj-server --exclude brokk-mj-daemon
+            --exclude brokk-mj-worker-runtime --exclude brokk-mj-worker
             --exclude brokk-mjolnir --exclude brokk-mj-voice-worker
             --features brokk-mj-core/test-hooks
 
@@ -252,12 +254,10 @@ jobs:
         SELECT: ${{ matrix.select }}
       run: |
         first='controller::'
-        second='daemon:: server'
         case "$SELECT" in
           '') set -- ;;
           first) set -- $first ;;
-          second) set -- $second ;;
-          rest) set --; for name in $first $second; do set -- "$@" --skip "$name"; done ;;
+          rest) set --; for name in $first; do set -- "$@" --skip "$name"; done ;;
           *) echo "unknown test selection: $SELECT" >&2; exit 2 ;;
         esac
         cargo test --no-fail-fast ${{ matrix.tests }} -- "$@"

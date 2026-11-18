@@ -28,7 +28,7 @@ pub(crate) fn terminal_for_reconnect(state: mj_core::state::SessionState) -> boo
 /// published its socket, and the retry can end in `Running`. The relay actor
 /// may stop on `StartupCleanup` (nothing answers on the socket meanwhile), but
 /// whoever waits on the session's outcome must not treat it as ended.
-pub(crate) fn session_has_ended(state: mj_core::state::SessionState) -> bool {
+pub fn session_has_ended(state: mj_core::state::SessionState) -> bool {
     state != mj_core::state::SessionState::StartupCleanup && terminal_for_reconnect(state)
 }
 

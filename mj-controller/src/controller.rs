@@ -1,52 +1,59 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
-pub(crate) mod backend;
-mod cache_host;
-pub(crate) use cache_host::CacheHost;
-pub(crate) mod checkpoint;
+pub mod backend;
+pub use cache_host::CacheHost;
+pub(crate) use mj_build_cache::cache_host;
+pub mod checkpoint;
 mod container_upgrade;
-pub(crate) mod environment;
-pub(crate) use environment::StoppedWorker;
-mod git_cache;
+pub mod environment;
+pub use crate::database::SessionResumeOptions;
+pub(crate) use mj_build_cache::git_cache;
 mod github_app;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
-mod lifecycle;
-pub(crate) use lifecycle::LifecycleFailureReason;
+pub mod lifecycle;
+pub use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;
-pub(crate) mod mbx;
+pub use mj_build_cache::mbx;
 pub mod move_session;
 mod network_git;
 mod new_session_preflight;
-mod tool_cache;
+pub(crate) use mj_build_cache::tool_cache;
 pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
 pub mod profile_config;
 mod provisioning;
-pub(crate) mod publication;
+pub mod publication;
 mod readiness;
-pub(crate) use network_git::workspace_root;
-pub(crate) use readiness::HarnessPreparationFailure;
-pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
+pub use readiness::HarnessPreparationFailure;
+pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
-mod resume;
+pub mod resume;
 mod reviewer;
 mod subagent_park;
 pub use subagent_park::ParkOutcome;
-pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
+pub use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
-pub(crate) use subagents::recover_registered_subagent_startup;
-#[cfg(test)]
-pub(crate) mod test_support;
+pub use subagents::recover_registered_subagent_startup;
+// Shared fixtures; the `test-support` feature lends them to mj-daemon's tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
 pub mod update;
-mod worker_binary;
+pub(crate) use mj_worker_staging::worker_binary;
+mod worker_launch;
+mod worker_project_memory;
 mod worker_restart;
+#[cfg(test)]
+mod worker_staging_tests;
 mod worktree;
-pub(crate) use worktree::RemoteGitExecutor;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+
+pub(crate) use crate::targets::{removable_profile_root, target_profile_home};
+pub(crate) use mj_targets::command_checks::{check_output, execute_checked};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -56,8 +63,8 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
+use crate::import::github_repository_from_origin;
 use crate::import::{RepositoryIdentity, setup_style_id};
-use crate::setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -80,36 +87,36 @@ use mj_core::state::{
     new_session_id, normalize_session_title,
 };
 
-use crate::targets::{
-    self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
-};
+#[cfg(test)]
+use crate::targets::CommandSpec;
+use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 
-pub(crate) use backend::backend_locator;
+pub use crate::targets::image_refresh_plan;
+pub use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
-pub use backend::image_refresh_plan;
-pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub use backend::validate_resource_allocation;
+pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
-pub(crate) use github_app::{
+pub use github_app::{
     GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
     renew_session_github_app_token,
 };
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
-pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
-pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
+pub use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
+pub use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
 pub use mbx::{MBX_VERSION, preview_build_cache};
 pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
 };
-pub(crate) use worker_binary::{
-    image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
+pub use worker_binary::{
+    ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
-pub(crate) use worktree::path_exists_on_managed_target;
+pub use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
@@ -120,13 +127,13 @@ pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
-pub(crate) use resume::InPlaceRestartError;
+pub use resume::InPlaceRestartError;
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
-pub(crate) use worker_binary::ensure_microvm_engine;
+pub use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     ssh_worker_binary_prerequisite, warm_worker_binary_sources,
@@ -431,7 +438,7 @@ pub fn create_bundle_from_sources_in_config(
 
 #[derive(Debug, Clone)]
 enum RepositorySourceKind {
-    Github(crate::setup::GithubRepository),
+    Github(crate::import::GithubRepository),
     Local(PathBuf),
 }
 
@@ -622,13 +629,6 @@ pub struct SessionLaunchOptions {
     pub session_title_override: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct SessionResumeOptions {
-    pub additional_mounts: Option<Vec<AdditionalMount>>,
-    pub resource_allocation: Option<SessionResourceAllocation>,
-    pub discard_queue: bool,
-}
-
 fn selected_host_container_size(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
@@ -648,19 +648,13 @@ fn selected_host_container_size(
 
 impl Controller {
     pub fn load() -> Result<Self> {
-        // A configuration the person has to fix, such as an entry whose secret
-        // is missing, is the reason a request fails, not an internal error.
-        let config = Config::load().map_err(|error| {
-            let refusal = mj_core::refusal::Refusal::precondition(format!("{error:#}"));
-            error.context(refusal)
-        })?;
-        let state = crate::database::load_state()?;
+        let (config, state) = crate::database::load_config_and_state()?;
         Ok(Self { config, state })
     }
 
     /// Startup-only traversal for legacy metadata and configuration diagnostics.
     /// Ordinary readers consume the writer's committed snapshot directly.
-    pub(crate) fn prepare_persisted_sessions(&mut self) -> Result<()> {
+    pub fn prepare_persisted_sessions(&mut self) -> Result<()> {
         // Missing session dependencies must not lock users out of the tools
         // needed to repair them. Operations validate the session they act on.
         self.state.validate()?;
@@ -1581,74 +1575,6 @@ fn finish_config_map_rename<T>(
     Ok(())
 }
 
-/// Where this session's harness reads and writes its profile inside the target.
-///
-/// This is the per-session root [`removable_profile_root`] names, on every
-/// target: a session always runs from a staged copy of its profile, never from
-/// the profile home itself. A harness with a nested home keeps its state in a
-/// subdirectory of the root named after it, the leaf its XDG configuration
-/// directory must have.
-#[cfg(test)]
-pub(crate) fn target_profile_home_for_test(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    target_profile_home(locator, session_id, profile)
-}
-
-fn target_profile_home(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    let root = removable_profile_root(locator, session_id, profile);
-    if profile.kind.nested_home() {
-        mj_core::target_path::text(&mj_core::target_path::join(
-            Path::new(&root),
-            Path::new(profile.kind.id()),
-        ))
-    } else {
-        root
-    }
-}
-
-/// The per-session profile directory a session's harness home lives in, which
-/// the session owns and an in-place harness replacement or teardown may delete.
-///
-/// This is the root that [`target_profile_home`] derives its answer from, not
-/// that answer itself: a harness with an XDG-nested home keeps its home in a
-/// subdirectory of a per-session root under the data directory, and the whole
-/// root is what belongs to the session.
-pub(super) fn removable_profile_root(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    match locator {
-        targets::TargetLocator::LocalBare { .. } if profile.kind.nested_home() => {
-            targets::local_nested_profile_root(session_id)
-                .to_string_lossy()
-                .into_owned()
-        }
-        targets::TargetLocator::LocalBare { worker_root } => mj_core::target_path::text(
-            &mj_core::target_path::join(Path::new(worker_root), Path::new("profile")),
-        ),
-        targets::TargetLocator::LocalPodman { .. }
-        | targets::TargetLocator::LocalDocker { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. } => {
-            format!("/var/lib/hel/profiles/{session_id}")
-        }
-        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            format!(".local/share/hel/profiles/{session_id}")
-        }
-    }
-}
-
 /// Resolve the login home on the machine that owns an editable path.
 pub fn resolve_target_input_path(
     target: &TargetTemplate,
@@ -1676,43 +1602,6 @@ pub fn resolve_machine_input_path(
     // this screen can resolve is this machine's.
     let host = cache_host::CacheHost::for_path_machine(machine)?;
     mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
-}
-
-fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {
-    let output = executor.execute(&command)?;
-    check_output(&command, output)
-}
-
-/// `output` of `command` when it succeeded, otherwise the error its stderr
-/// describes.
-fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
-    if let Some(error) = targets::step_script_error(&output) {
-        bail!("{error}");
-    }
-    if output.status != 0 {
-        let detail = command_error_detail(&output.stderr);
-        if detail.is_empty() {
-            bail!("{} failed with status {}", command.purpose, output.status);
-        }
-        bail!("{detail}");
-    }
-    Ok(output)
-}
-
-fn command_error_detail(stderr: &[u8]) -> String {
-    let reported = String::from_utf8_lossy(stderr);
-    let reported = reported.trim();
-    let detail = reported
-        .rsplit_once("\nCaused by:\n")
-        .map_or(reported, |(_, causes)| causes);
-    let detail = detail.strip_prefix("Error: ").unwrap_or(detail);
-    detail
-        .lines()
-        .map(|line| line.strip_prefix("    ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
 }
 
 fn now() -> String {
@@ -1776,5 +1665,5 @@ pub fn config_only_controller(config: Config) -> Controller {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use mbx::install::MBX_TEST_RELEASE_URL;
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub use mbx::install::MBX_TEST_RELEASE_URL;
