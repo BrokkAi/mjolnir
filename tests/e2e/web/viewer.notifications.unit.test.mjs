@@ -449,10 +449,12 @@ test('Go to Session opens a pending form\'s holder and returns here on Back', ()
   assert.equal(view.nodes.body.textContent, 'Pick an option');
   assert.equal(view.nodes.position.textContent, '2 of 2');
   assert.deepEqual(view.requests, [], 'the card already carries the form text');
+  view.nodes.open.onclick();
+  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
   view.nodes.previous.onclick();
   assert.equal(view.requests.at(-1).url, '/api/sessions/parent/notification-message?through=2');
   view.nodes.open.onclick();
-  assert.deepEqual(plain(view.nav), [{ name: 'conversation', sessionId: 'child', from: 'notifications' }]);
+  assert.deepEqual(plain(view.nav).at(-1).sessionId, 'parent');
   // Both the history entry and the viewer's own back control follow the route.
   assert.equal(view.read('routeHash(nav[0])'), '#notifications/child');
   assert.deepEqual(plain(view.read('parseRoute("#notifications/child")')), { name: 'conversation', sessionId: 'child', from: 'notifications' });
@@ -602,19 +604,28 @@ test('launch failures are cards after the ! cards, counted, openable and dismiss
   assert.equal(view.nodes.clearAll.textContent, 'Clear all ! (1)', 'only the ! card counts for Clear all !');
 });
 
-test('text, Quick reply and Go to Session all name the form holder', async () => {
-  const view = screen([row('parent', 'needs_input', 3, { form_holder: 'child' }),
+test('selected stack entries target the parent and the live form targets its holder', async () => {
+  const card = stack('needs_input', 3, [message(2, 'important', 'none')], {
+    holder: 'child', form: { request_id: 'r1', message: 'Please decide' },
+  });
+  const view = screen([row('parent', 'needs_input', 3, { notification_card: card }),
     row('child', 'working', 1, { subagent_parent_id: 'parent', pending_elicitation_ids: ['r1'] })]);
   view.render();
+  assert.equal(view.read('inboxDestination(inboxEntries()[0], 0)'), 'parent');
+  view.nodes.previous.onclick();
   view.nodes.input.value = 'yes';
   view.nodes.input.oninput();
-  assert.equal(view.read('inboxDrafts.has("child")'), true, 'the draft belongs to the destination');
+  assert.equal(view.read('inboxDrafts.has("parent")'), true, 'the selected entry reply belongs to parent');
   view.nodes.reply.onsubmit({ preventDefault() {} });
   await settle();
-  assert.equal(view.requests.find(r => r.body?.action === 'prompt').body.session_id, 'child');
+  assert.equal(view.requests.find(r => r.body?.action === 'prompt').body.session_id, 'parent');
+  view.nodes.open.onclick();
+  assert.equal(plain(view.nav).at(-1).sessionId, 'parent');
+  view.nodes.next.onclick();
+  view.render();
+  assert.equal(view.read('inboxDestination(inboxEntries()[0], 1)'), 'child');
   view.nodes.open.onclick();
   assert.equal(plain(view.nav).at(-1).sessionId, 'child');
-  assert.equal(view.read('inboxDestination(inboxEntries()[0])'), 'child');
 });
 
 // Hard-won: review of 045f5fe81: persistent buttons acted on the new first card after a snapshot reordered the stack.

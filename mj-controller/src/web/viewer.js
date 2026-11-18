@@ -1269,9 +1269,13 @@ function inboxSessionFailed(entry) {
 /// Quick reply sends to this session and Go to Session opens it. A parent
 /// promoted by a child's pending request opens the form holder. A launch
 /// failure opens the session it was for, when there is one.
-function inboxDestination(entry) {
+function inboxDestination(entry, selectedIndex = null) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
-  if (entry.notification_card) return entry.notification_card.holder ?? entry.id;
+  if (entry.notification_card) {
+    const stack = entry.notification_card;
+    const index = selectedIndex ?? stack.entries.length + Number(Boolean(stack.form)) - 1;
+    return stack.form && index >= stack.entries.length ? stack.holder ?? entry.id : entry.id;
+  }
   if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
   return holder && sessionById(holder) ? holder : entry.id;
@@ -1838,6 +1842,7 @@ function renderInbox() {
   const retained = inboxSelection?.sessionId === entry.id ? itemIds.indexOf(inboxSelection.itemId) : -1;
   const count = itemIds.length;
   const index = retained >= 0 ? retained : count - 1;
+  card.destination = inboxDestination(entry, index);
   if (!count) inboxSelection = null;
   else if (retained < 0) inboxSelection = { sessionId: entry.id, itemId: itemIds[index] };
   nodes.pager.hidden = !count;

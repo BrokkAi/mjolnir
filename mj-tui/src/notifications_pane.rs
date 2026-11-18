@@ -531,10 +531,9 @@ impl DashboardState {
 
     fn notification_destination(&self, entry: &NotificationEntry) -> String {
         match &entry.published {
-            Some(card) => card
-                .holder
-                .clone()
-                .unwrap_or_else(|| entry.session_id.clone()),
+            Some(card) if self.selected_notification_item(entry) >= card.entries.len() => card
+                .holder.clone().unwrap_or_else(|| entry.session_id.clone()),
+            Some(_) => entry.session_id.clone(),
             None => self.notification_content_session(&entry.session_id, entry.level),
         }
     }
@@ -1598,6 +1597,11 @@ pub(crate) mod tests {
             dashboard.displayed_notification_session_id().as_deref(),
             Some("q2")
         );
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q2",
+            "the selected live form targets its holder"
+        );
 
         let newest = drawn(&mut dashboard, 120, 44);
         assert!(newest.iter().any(|line| line.contains("2 of 2")));
@@ -1616,6 +1620,11 @@ pub(crate) mod tests {
         );
         dashboard.sync_notification_message_read(Some(item.clone()), true);
         dashboard.handle_key(alt(KeyCode::PageUp));
+        assert_eq!(
+            dashboard.notification_destination(&dashboard.notification_entries()[0]),
+            "q1",
+            "the selected stack entry targets its own session"
+        );
         assert_eq!(dashboard.wanted_notification_message(), Some(item.clone()));
         assert!(
             drawn(&mut dashboard, 120, 44)
