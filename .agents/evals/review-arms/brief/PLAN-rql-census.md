@@ -18,7 +18,7 @@ A positive result shows that the information helps when it's delivered this way.
 - Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs. Clones that share history (a common commit or root, such as forks, renamed repos or subtrees) count as one repo; the screen groups them by shared candidate commits and root commits, and keeps the member with the most candidates. Repos come from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
 - Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/scan.py`, then `yield_rank.py`, which turns the capped samples into per-repo yields: upper bound × bug precision 0.85 × admission rate 31/67; results in `yield.json` and `corpus-yield-summary.md`). The screen applies the corpus size rule (goldens, fixtures and lock files don't count) and rejects merge commits as introductions. Incompletely traced fixes never count as strong, and the ranker refuses to rank while any planned draw lacks a trace record. File paths come from Git's NUL-separated name list, not patch headers. Functions are counted from the old file's `fn` signatures, so the screen doesn't depend on a repo's diff drivers. Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output. The screen only orders repos: its multi-site proxy over-counts (for example, inline `#[cfg(test)]` hunks in production files), so a repo enters the test set only after tracing admits at least 8 relation diffs, going down the ranked list. Inputs are reproducible: `stage_a.py` derives `stage_a_candidates.jsonl.gz` from the SFT lists, then `scan.py` and `yield_rank.py` run on it.
 - Rank and measure at least 16 repos: one cold Bifrost index and one incremental re-index each, at a representative revision. Take the 12 that qualify with the most expected admitted bugs per indexing hour, at most one per shared-history group. Every member of a group stays ranked, so a related clone remains eligible if the yield leader is costly to index or disqualified. Reaching ±10 needs about 12 repos if the between-repo SD is 10 points, and about 16 if it is 15. More bugs per repo can't substitute for more repos. If fewer than 12 qualify, use all that do; a wider interval then reads as the bands below say.
-- A repo counts only if it has at least 8 admitted relation diffs, decided before any reviewer runs on it.
+- A repo counts only if it has at least 8 distinct admitted relation diffs, decided before any reviewer runs on it. Diffs are counted by introducing change: several fixes of one introduction form one diff, carrying the union of their decisive facts. The corpus spread rule (at most two diffs per feature or commit series) still applies.
 
 **Bugs.**
 - Candidates come from each selected repo's full git history: fix commits that change non-test code and add or change a test. The brokkbench SFT lists only seeded the screen, and they are a model-screened subset capped at 1,000 commits per repo.
@@ -79,7 +79,7 @@ It reports:
 - **Prescience:** decisive-row recall within 10 points of other-row recall. The pilot can only bound this gap to about ±20, which the readout says.
 - **On failure:** on development data (the pilot), a failing step is removed before the freeze. After the freeze the menu doesn't change: test-repo fidelity only qualifies the readout, which reports the step at its measured recall. Decisive-row recall on test bugs never feeds back into the menu.
 - **Test repos:** measure fidelity on each test repo too, with about 10 gold queries per step per repo, before any reviewer outcome. A failing repo is reported at its measured recall, not dropped.
-- **Realistic recall:** ask Bifrost's query-surface owner what recall each step could really reach. If that is about 75% or less, add arm D below.
+- **Realistic recall:** ask Bifrost's query-surface owner what recall each step could really reach, per mechanical candidate and per value-flow hop, the units D drops. If the owner can give only recall of returned rows, D's per-hop rate is calibrated so its mean returned-row recall on the pilot matches that figure. If returned-row recall is about 75% or less, add arm D below.
 
 **Arms.** All writers are Sol/high; all arms run in the same window on the same image (`driver --same-image`), interleaved per diff. Every writer and the H helper get the reviewers' isolation, as in `PLAN.md`'s blind brief: a checkout at the introducing commit with no later history, a Podman target, no network, memory, GitHub, builds or helper agents beyond the arm's own, and no corpus records. So no writer can read the fix.
 - **N:** no brief.
@@ -99,7 +99,7 @@ It reports:
 **Reviewers and judging.**
 - Terra/high reviewers. Each brief arm gets 2 briefs per diff with 2 reviewers per brief. N gets 4 reviewers per diff.
 - One Opus/high judge per output, plus a hand check of every caught or partial verdict and of a seeded random 20% of misses per arm.
-- **Missed catches in the estimate:** the checked misses give each arm's false-miss rate (the share of judge misses the hand check upgrades). Each unchecked miss counts as a catch with probability equal to its arm's rate, by inverse-probability weighting within arm and repo. The repo-level interval comes from a bootstrap that also resamples which misses were checked, so the correction's uncertainty is in the interval. Raw corrected labels without the weighting are a sensitivity check, and per-arm false-miss rates are reported.
+- **Missed catches in the estimate:** the checked misses give each arm's false-miss rate (the share of judge misses the hand check upgrades). Each unchecked miss counts as a catch with probability equal to its arm's rate, by inverse-probability weighting within arm and repo. The correction's uncertainty enters the governing t interval as its audit variance (see Reading). Raw corrected labels without the weighting are a sensitivity check, and per-arm false-miss rates are reported.
 - Harm controls: the non-relation census bugs and the existing ordinary-diff controls, for R against G (retention of confirmed findings), plus brief size per arm.
 
 ## Pilot, then test
@@ -116,9 +116,9 @@ These set the test-phase sample. Pilot effects are development data and are neve
 
 ## Reading
 
-- **Primary:** R − G catch rate on relation diffs. Take the paired difference per diff, average within each repo, and put a t interval over repo means (repos − 1 degrees of freedom, equal weights).
+- **Primary:** R − G catch rate on relation diffs, using the miss-corrected labels below. Take the paired difference per diff, average within each repo, and put a t interval over repo means (repos − 1 degrees of freedom, equal weights). This one interval governs every decision band in the plan. Its variance is the between-repo variance of the corrected repo means, plus the audit variance: the variance of the overall corrected mean when the checked misses are resampled with repos held fixed. The same construction applies to R − R0, R0 − G and R − H.
 - **Sensitivity checks:**
-  - a cluster bootstrap;
+  - a cluster bootstrap (including the audit resampling);
   - a mixed logistic model with a repo intercept, a repo arm slope and a diff intercept;
   - the after-cutoff subset.
 - **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo selected the same way. The repos were chosen for bug yield per indexing hour, with indexing hazards excluded, so neither the interval nor the prediction interval covers Rust projects the screen excludes.
@@ -128,6 +128,8 @@ Decision bands on R − G, which decide whether complete RQL is worth building f
 - **Build the features:** estimate at least +10 and lower bound above 0.
 - **Partial:** lower bound above 0, estimate below +10, and upper bound at least +10.
 - **Inconclusive:** anything else, including too few qualifying repos.
+
+Fidelity on test governs credit: a Build or Partial reading of R − G, R − R0 or R0 − G recommends engine work only if every step R (or R0) serves passes the fidelity gate on the pooled test repos, decisive-versus-other recall gap included. Otherwise the contrast is reported as the effect of the answers actually served, at their measured fidelity, and recommends nothing.
 
 Precedence for the engine decision: the helper comparison below can override R − G. If the R − H readout is "helper wins" or "equivalent", a Build or Partial R − G doesn't by itself justify engine work. The decision becomes a cost comparison: build only if real RQL can deliver the same rows at lower cost and latency than the helper's measured tokens and time per diff. Otherwise, R − G governs.
 

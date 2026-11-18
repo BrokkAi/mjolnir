@@ -64,12 +64,19 @@ def main():
         sys.exit(f"dates unavailable for {failed[:5]}: {date_err[failed[0]]}")
     n = collections.Counter()
     undated = 0
+    unaccounted = []
     for c in cands:
         t = dates.get((c["repo"], c["hash"]))
         if t is None:
             undated += 1
+            if f"{c['repo']} {c['hash']}" not in undatable:
+                unaccounted.append(f"{c['repo']} {c['hash']}")
             continue
         n[(c["repo"], window(t))] += 1
+    if unaccounted:
+        # A failed retry after a partial success would otherwise shrink the repo's candidate pool
+        # silently: every candidate must be dated or recorded as undatable.
+        sys.exit(f"{len(unaccounted)} candidates are neither dated nor recorded undatable, e.g. {unaccounted[:3]}")
     # Only the current plan's sampled commits count; failed draws stay in the denominator.
     current = set(json.load(open(scan / "plan.json"))["sample_ids"])
     present = set()
