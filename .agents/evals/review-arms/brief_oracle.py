@@ -870,9 +870,10 @@ def noleak_gate_build(n):
         require_strict_judges(n, bug, r["verdicts"])
         records[bug] = r
     for bug, r in records.items():
-        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]) \
-                or any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
-            # A verdict without a rationale cannot be cause-checked; the gate fails it in collect.
+        if r["label"] == "missed" and any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
+            # Malformed, not evidence: the verdict must be rejudged before the gate can run.
+            raise SystemExit(f"{bug}: a round {n} missed verdict has no rationale; rejudge it")
+        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             continue
         for v in r["verdicts"]:
             unit.mkdir(parents=True, exist_ok=True)
@@ -924,7 +925,7 @@ def noleak_gate_collect(n):
         if r["label"] != "missed":
             results[bug] = {"pass": False, "gate": "leak", "why": f"leak label {r['label']}"}
         elif any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
-            results[bug] = {"pass": False, "gate": "cause", "why": "a missed verdict has no rationale to check"}
+            raise SystemExit(f"{bug}: a round {n} missed verdict has no rationale; rejudge it")
         elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             results[bug] = {"pass": False, "gate": "leak", "why": "a missed verdict below high confidence: " +
                             ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}

@@ -371,6 +371,15 @@ JUDGES = a.judges.split(",")
 if a.kind == "judge" and (not JUDGES or set(JUDGES) - {"A", "B"} or len(set(JUDGES)) != len(JUDGES)):
     p.error("--judges must name A, B or both")
 units = [(b, j) for b in batches for j in (JUDGES if a.kind == "judge" else [None])]
+if a.kind == "judge":
+    import fcntl
+    # A judge output that is absent (never run, or moved aside for a rejudge) makes the combined
+    # aggregate stale: retire it under the aggregate lock so no collector reads the old round.
+    with open(V / "workflow-out.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+                   for b in batches for j in ("A", "B")):
+            (V / "workflow-out.json").unlink(missing_ok=True)
 failed = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
     futures = {pool.submit(run, b, j): (b, j) for b, j in units}
