@@ -172,7 +172,15 @@ def build(arms, per_batch):
                 unobserved += 1
         if len(images) != 1:
             raise SystemExit(f"ON and AF ran on more than one image: {sorted(images)}")
-        IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved})
+        # The review window of each arm, from launch intent to finish, for the readout to report.
+        window = {}
+        for arm in ("ON", "AF"):
+            spans = [(json.loads((ROOT / "runs" / b / arm / "launch-intent.json").read_text())["time_ns"],
+                      json.loads((ROOT / "runs" / b / arm / "done.json").read_text())["finished_ns"])
+                     for b in {r["bug"] for r in rows if r["arm"] == arm}]
+            window[arm] = {"first_launch_ns": min(s for s, _ in spans), "last_finish_ns": max(e for _, e in spans)}
+        IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved,
+                            "review_window": window})
     if REFERENCE_ROUND:
         # Check the reference before freezing the round: score compares the same sessions, and
         # finding a mismatch only then would orphan completed verdicts.

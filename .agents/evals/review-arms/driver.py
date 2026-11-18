@@ -220,10 +220,14 @@ def image_pin_mismatch(place):
     if IMAGE_PIN is None:
         return None
     with IMAGE_PIN_LOCK:
-        if IMAGE_PIN.exists():
+        # O_EXCL makes the first writer the only one, across threads and driver processes alike.
+        try:
+            fd = os.open(IMAGE_PIN, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
             pinned = json.loads(IMAGE_PIN.read_text())["image"]
             return None if place["image"] == pinned else pinned
-        save(IMAGE_PIN, {"image": place["image"], "time_ns": time.time_ns()})
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"image": place["image"], "time_ns": time.time_ns()}) + "\n")
         return None
 
 
