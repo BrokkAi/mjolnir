@@ -896,6 +896,12 @@ def noleak_gate_collect(n):
         got = {r.get("id"): r for r in rows}
         if set(got) != set(keymap) or len(rows) != len(keymap):
             raise SystemExit("cause check must answer each verdict exactly once")
+        # Validate every answer before any gate decision is recorded: a malformed row is an error to
+        # fix and rerun, not evidence for or against a brief.
+        bad = [t for t, r in got.items() if r.get("answer") not in ("yes", "no", "unclear")
+               or not isinstance(r.get("why"), str) or not r["why"].strip()]
+        if bad:
+            raise SystemExit(f"cause check rows without a valid answer and quoted reason: {bad}")
         causes = {f"{keymap[t]['bug']}-{keymap[t]['judge']}": {**got[t], "judge": keymap[t]["judge"],
                                                                 "verdicts_sha256": keymap[t]["verdicts_sha256"]}
                   for t in keymap}

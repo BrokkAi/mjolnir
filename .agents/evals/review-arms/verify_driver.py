@@ -245,6 +245,19 @@ def fetch_output(sid):
 
 
 def run(batch_path, judge=None):
+    """One unit (a task, or one judge side of a batch), owned by exactly one invocation at a time."""
+    import fcntl
+    n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
+    tag = n if judge is None else f"{n}-{judge}"
+    with open(V / "sessions" / f"unit-{tag}.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f"unit {tag} is being run by another invocation") from None
+        return run_unit(batch_path, judge)
+
+
+def run_unit(batch_path, judge=None):
     n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
     tag = n if judge is None else f"{n}-{judge}"
     out_path = V / "out" / (f"task-{n}.json" if a.kind == "task" else
@@ -318,7 +331,7 @@ def run(batch_path, judge=None):
         mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
         rec_path.rename(V / "sessions" / f"quota-batch-{tag}-{sid[:12]}.json")
         print(json.dumps({"batch": tag, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
-        return run(batch_path, judge)
+        return run_unit(batch_path, judge)
     out = fetch_output(sid)
     problems = {} if a.kind == "task" else check(batch_path, out)
     if any(problems.values()):
