@@ -1,0 +1,160 @@
+{
+  "means": {
+    "TS": {
+      "P": 0.2222222222222222,
+      "S": 0.3333333333333333,
+      "PS": 0.2424242424242424
+    },
+    "BT": {
+      "P": 0.5555555555555556,
+      "S": 0.41666666666666663,
+      "PS": 0.5303030303030303
+    },
+    "NB": {
+      "P": 0.2037037037037037,
+      "S": 0.3333333333333333,
+      "PS": 0.22727272727272727
+    }
+  },
+  "paired_bootstrap_10000_seed_20261116": {
+    "P": {
+      "point": 0.01851851851851852,
+      "ci95_floor": [
+        -0.0925925925925926,
+        0.16666666666666666
+      ]
+    },
+    "S": {
+      "point": 0.0,
+      "ci95_floor": [
+        0.0,
+        0.0
+      ]
+    },
+    "PS": {
+      "point": 0.015151515151515154,
+      "ci95_floor": [
+        -0.07575757575757576,
+        0.13636363636363635
+      ]
+    }
+  },
+  "K_J_same_session_label_comparison": {
+    "BT": {
+      "sessions": 66,
+      "K_caught": 35,
+      "J_caught": 35,
+      "different_labels": 0
+    },
+    "NB": {
+      "sessions": 72,
+      "K_caught": 15,
+      "J_caught": 15,
+      "different_labels": 0
+    }
+  },
+  "validation": {
+    "jobs": 22,
+    "unique_children": 66,
+    "expected_TS_session_keys": 66,
+    "keys_equal": true
+  },
+  "summary_primary_compare": {
+    "computed": {
+      "TS": 0.2222222222222222,
+      "BT": 0.5555555555555556,
+      "NB": 0.2037037037037037
+    },
+    "summary": {
+      "TS": 0.2222222222222222,
+      "BT": 0.5555555555555556,
+      "no-brief": 0.2037037037037037
+    },
+    "KJ_computed_all22": {
+      "BT": {
+        "sessions": 66,
+        "K_caught": 35,
+        "J_caught": 35,
+        "different_labels": 0
+      },
+      "NB": {
+        "sessions": 72,
+        "K_caught": 15,
+        "J_caught": 15,
+        "different_labels": 0
+      }
+    },
+    "summary_consistency": {
+      "BT": {
+        "sessions": 66,
+        "rates": {
+          "brief-judge-k": {
+            "catch_rate": 0.5303030303030303,
+            "partial_rate": 0.0
+          },
+          "brief-judge-j": {
+            "catch_rate": 0.5303030303030303,
+            "partial_rate": 0.0
+          }
+        },
+        "difference_points": 0.0,
+        "differs_over_10_points": false
+      },
+      "no-brief": {
+        "sessions": 72,
+        "rates": {
+          "brief-judge-k": {
+            "catch_rate": 0.22727272727272727,
+            "partial_rate": 0.01515151515151515
+          },
+          "brief-judge-j": {
+            "catch_rate": 0.22727272727272727,
+            "partial_rate": 0.01515151515151515
+          }
+        },
+        "difference_points": 0.0,
+        "differs_over_10_points": false
+      }
+    }
+  },
+  "both_paired_contrasts_verified_against_summary": {
+    "P": {
+      "TS-BT": {
+        "difference": -0.3333333333333333,
+        "ci95": [
+          -0.5370370370370371,
+          -0.14814814814814814
+        ]
+      },
+      "TS-no-brief": {
+        "difference": 0.01851851851851852,
+        "ci95": [
+          -0.09259259259259259,
+          0.16666666666666666
+        ]
+      }
+    },
+    "S": {
+      "TS-BT": {
+        "difference": -0.08333333333333333,
+        "ci95": [
+          -0.25,
+          0
+        ]
+      },
+      "TS-no-brief": {
+        "difference": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    }
+  },
+  "source_sha256": {
+    "private/key-brief-judge-k.json": "76f9ef2e37aabb23a17291faf4c5eef93e857c7d84e4dd2b7ef9cd0864f6006c",
+    "brief-judge-k/merged.jsonl": "c0854f3f0603f2db0756e19550a47eee6c8a2c4b67eb89555c9979a55c2e8267",
+    "brief-judge-k/handcheck-decisions.json": "a0890b45884be346b702d8f14e0b34eee769945683de849de6845bed90f62b7b",
+    "writer-terra-diffs.txt": "f1ed5deda90ea68b08913c839bf0ec308e0fd95216ef6d0ff6b6184bff006131"
+  }
+}

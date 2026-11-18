@@ -5442,6 +5442,50 @@ fn borrowed_child_locator() -> TargetLocator {
     }
 }
 
+// Hard-won: #1580: project-memory frames on the Control master blocked every other session's relay RPCs
+#[test]
+fn project_memory_relay_rides_the_bulk_lane_while_the_live_relay_stays_on_control() {
+    // The lane is the only difference: both connect to the same worker proxy.
+    let ssh_locators = [
+        TargetLocator::SshBare {
+            worker_id: None,
+            ssh: ssh(),
+            workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        },
+        TargetLocator::SshPodman {
+            borrowed_from: None,
+            ssh: ssh(),
+            container_id: resource_name(SESSION).unwrap(),
+            workspace_storage: Default::default(),
+        },
+    ];
+    for locator in ssh_locators {
+        let live = reconnect_plan(&locator, SESSION)
+            .unwrap()
+            .commands
+            .remove(0);
+        let mut memory = project_memory_relay_command(&locator, SESSION).unwrap();
+        assert_eq!(
+            live.ssh_session.as_ref().map(|request| request.class),
+            Some(SshTrafficClass::Control)
+        );
+        assert_eq!(
+            memory.ssh_session.as_ref().map(|request| request.class),
+            Some(SshTrafficClass::Bulk)
+        );
+        memory.ssh_session = live.ssh_session.clone();
+        assert_eq!(memory, live);
+    }
+    // A target without SSH has no lane; the same worker proxy is used.
+    let local = TargetLocator::LocalBare {
+        worker_root: format!("/var/lib/hel/workers/{SESSION}"),
+    };
+    assert_eq!(
+        project_memory_relay_command(&local, SESSION).unwrap(),
+        reconnect_plan(&local, SESSION).unwrap().commands.remove(0)
+    );
+}
+
 #[test]
 fn whole_target_plans_refuse_a_borrowed_container() {
     let locator = borrowed_child_locator();

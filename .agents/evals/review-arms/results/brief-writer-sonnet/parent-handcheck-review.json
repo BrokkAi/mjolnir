@@ -1,0 +1,9 @@
+{
+  "reviewed": 87,
+  "manual_comparison": "Read the five split outputs and sole partial against both match rules. The split outputs describe overbroad file-read access but do not describe wrong or missing relative exports. The partial discusses model selector loss, not ignored effort selection. Accepted the proposal as delivered.",
+  "decisions": {
+    "caught": 81,
+    "missed": 5,
+    "partial": 1
+  }
+}

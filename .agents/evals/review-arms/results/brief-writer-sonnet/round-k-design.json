@@ -1,0 +1,35 @@
+{
+  "round": "brief-judge-k",
+  "judge_model": "gpt-6.1-sol",
+  "judge_effort": "high",
+  "profile": "codex4",
+  "judges_per_batch": 2,
+  "counts": {
+    "no-brief/gpt-6.1-terra": 72,
+    "no-brief/gpt-6.1-sol": 66,
+    "blind-sonnet/gpt-6.1-terra": 66,
+    "blind/gpt-6.1-terra": 66
+  },
+  "same_round_j_terra_controls": 138,
+  "batches": [
+    {
+      "name": "batch-0.json",
+      "diffs": 8,
+      "outputs": 98,
+      "sha256": "2a573674040981c8947316b958b3048356d643255e9874e0d1cd7024df353133"
+    },
+    {
+      "name": "batch-1.json",
+      "diffs": 8,
+      "outputs": 98,
+      "sha256": "c51e66cc3ea77aa37f5927f4c1c8cf919ff19a7133a718d823df09813291ca0c"
+    },
+    {
+      "name": "batch-2.json",
+      "diffs": 6,
+      "outputs": 74,
+      "sha256": "f114f73a85c9211fc8726df312ff63bec8964f447151a9de75d9c77220680616"
+    }
+  ],
+  "quota_floor": "claude5=25,codex4=25"
+}

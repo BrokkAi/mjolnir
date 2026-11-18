@@ -1250,7 +1250,7 @@ pub(crate) async fn run_server(
                     };
                     let ControllerRequest { action, reply } = request;
                     // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
-                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
+                    let upgrade_work = match match &action { ControllerAction::SetOperatorAway { .. } => crate::upgrade::activity("operator away setting").map(Some), ControllerAction::Move { .. } | ControllerAction::Resume { .. } => Ok(None), /* registration holds "session admission"; the create wait holds no daemon work */ ControllerAction::New { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
@@ -1279,7 +1279,7 @@ pub(crate) async fn run_server(
                         action_sessions.insert(action_id, session_id.clone());
                     }
                     let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }
-                        | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
+                        | ControllerAction::Resume { .. } | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
                         | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }) {
                         Some(reply)
                     } else {
@@ -1316,6 +1316,18 @@ pub(crate) async fn run_server(
                                     ControllerAction::Move { request } => {
                                         anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
                                         Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
+                                    }
+                                    ControllerAction::Resume { session_id, workspace_id, profile_id, target_id, queue, additional_mounts, resource_allocation } => {
+                                        Some(mj_core::runtime::block_on(daemon_runtime.start_resume_session(ResumeSessionRequest {
+                                            session_id: session_id.clone(),
+                                            workspace_id: workspace_id.clone(),
+                                            profile_id: profile_id.clone(),
+                                            target_template_id: target_id.clone(),
+                                            additional_mounts: additional_mounts.clone(),
+                                            resource_allocation: resource_allocation.clone(),
+                                            discard_queue: *queue == ResumeQueueDisposition::Discard,
+                                            repository_preflight: None,
+                                        }, control.lifecycle.clone().expect("Resume has a lifecycle control")))??)
                                     }
                                     ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
                                     _ => None,

@@ -1,0 +1,101 @@
+{
+  "definition": "Estimated API-equivalent cost from recorded usage. Carrier sessions and orchestration are outside the subtotal.",
+  "writer_comparison": [
+    {
+      "kind": "blind",
+      "briefs": 22,
+      "median": {
+        "cost_usd": 0.1977842,
+        "total_tokens": 507276.0,
+        "wall_s": 197.05,
+        "turns": 1.0
+      },
+      "total_cost_usd": 4.37,
+      "known_cost_usd": 4.37,
+      "unknown_cost": 0
+    },
+    {
+      "kind": "blind-terra",
+      "briefs": 22,
+      "median": {
+        "cost_usd": 0.0514892,
+        "total_tokens": 233994.0,
+        "wall_s": 103.7,
+        "turns": 1.0
+      },
+      "total_cost_usd": 1.18,
+      "known_cost_usd": 1.18,
+      "unknown_cost": 0
+    },
+    {
+      "kind": "blind-sonnet",
+      "briefs": 22,
+      "median": {
+        "cost_usd": 0.20578285000000002,
+        "total_tokens": 536261.0,
+        "wall_s": 304.1,
+        "turns": 2.0
+      },
+      "total_cost_usd": 5.06,
+      "known_cost_usd": 5.06,
+      "unknown_cost": 0
+    }
+  ],
+  "sonnet_writers": {
+    "samples": 22,
+    "known": 22,
+    "total_usd": 5.0638702,
+    "known_subtotal_usd": 5.0638702
+  },
+  "TS_reviewers": {
+    "samples": 66,
+    "known": 66,
+    "total_usd": 2.7284632,
+    "known_subtotal_usd": 2.7284632
+  },
+  "grading_and_rewrites": {
+    "contains": {
+      "samples": 1,
+      "known": 1,
+      "total_usd": 0.4156284,
+      "known_subtotal_usd": 0.4156284
+    },
+    "handcheck": {
+      "samples": 1,
+      "known": 1,
+      "total_usd": 0.2801332,
+      "known_subtotal_usd": 0.2801332
+    },
+    "leak-0": {
+      "samples": 2,
+      "known": 2,
+      "total_usd": 0.424328,
+      "known_subtotal_usd": 0.424328
+    },
+    "leak-1": {
+      "samples": 2,
+      "known": 2,
+      "total_usd": 0.19426759999999998,
+      "known_subtotal_usd": 0.19426759999999998
+    },
+    "rewrite": {
+      "samples": 4,
+      "known": 4,
+      "total_usd": 0.251496,
+      "known_subtotal_usd": 0.251496
+    },
+    "round-k": {
+      "samples": 6,
+      "known": 6,
+      "total_usd": 1.001568,
+      "known_subtotal_usd": 1.001568
+    }
+  },
+  "all_grading_and_rewrites": {
+    "samples": 16,
+    "known": 16,
+    "total_usd": 2.5674212,
+    "known_subtotal_usd": 2.5674212
+  },
+  "study_subtotal_writers_reviewers_grading_usd": 10.3597546
+}

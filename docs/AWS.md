@@ -52,8 +52,9 @@ mj ec2 create c8id.4xlarge --zone us-east-1a --name builder \
 
 `/tmp` and `/home/ubuntu` are bind-mounted onto `/mnt/ebs` by filesystem UUID,
 keeping repository caches, staged uploads, and temporary files off the OS disk.
-Every Podman host gets mj's pinned `mbx` and `mold` (`path:/usr/bin/mold`);
-without local NVMe SSDs, Podman uses rootless native OverlayFS under
+Every Podman host gets mj's pinned `mbx` with no linker selection, because
+containers read the host's mbx configuration as-is (see
+[Build cache](/containers/#build-cache-mbx)). Without local NVMe SSDs, Podman uses rootless native OverlayFS under
 `/home/ubuntu/.local/share/containers/storage` and `mbx` uses `/mnt/ebs/mbx` on
 the XFS EBS volume.
 
@@ -67,7 +68,7 @@ The pool mounts at `/mnt/nvme` with lz4 compression, 128 KiB records,
 volumes live at `/mnt/nvme/podman`, using rootless OverlayFS through
 `fuse-overlayfs`. Each mj container has its own Podman volume mounted at `/tmp`,
 so both its workspace layer and temporary files use NVMe. On local-NVMe hosts, `mbx` lives at
-`/mnt/nvme/mbx`. The standard agent image includes mold too.
+`/mnt/nvme/mbx`.
 
 Local SSD contents survive a reboot but are lost on stop/start, hibernation,
 or termination, including all container workspaces and `/tmp` volumes. Suspend

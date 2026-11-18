@@ -404,6 +404,7 @@ pub(crate) enum Confirmation {
         error: Option<String>,
         /// Whether an environment can be repaired or a verified archive restored.
         recoverable: bool,
+        retry_launch: bool,
     },
     /// A resume that moves a local checkout into an isolated workspace. The
     /// preflight already produced the receipt and the preview; this asks the

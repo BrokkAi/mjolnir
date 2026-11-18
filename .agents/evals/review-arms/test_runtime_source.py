@@ -184,7 +184,9 @@ class RuntimeSourceChecks(unittest.TestCase):
                         (unit / "batch.json").write_text("[]")
                     else:
                         (unit / "batch-0.json").write_text('[{"outputs":[{"output_id":"o1"}]}]')
-                    args = ["checks", "--kind", kind, "--profiles", "codex4", "--model", "gpt-6.1-sol"]
+                    # Hard-won: be74a5cb9: parallel judges raced on the fake's single state file.
+                    args = ["checks", "--kind", kind, "--profiles", "codex4", "--model", "gpt-6.1-sol",
+                            "--concurrency", "1"]
                     if kind == "task": args += ["--output", "label-out.json"]
                     if bundle: args += ["--bundle", bundle, "--repo-commit", "pinned-history"]
                     result = self.run_cli(scripts, env, "verify_driver.py", *args)

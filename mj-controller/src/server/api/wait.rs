@@ -356,6 +356,14 @@ pub(super) fn build_observation(
     durable: Option<&TurnState>,
     start_status: Option<StartStatus>,
 ) -> WaitObservation {
+    let launch_failure = (session.lifecycle != ViewerLifecycleCategory::Live)
+        .then(|| {
+            snapshot
+                .launch_failures
+                .iter()
+                .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
+        })
+        .flatten();
     let mut observation = WaitObservation {
         activity: session
             .activity_state
@@ -363,10 +371,13 @@ pub(super) fn build_observation(
             .unwrap_or(mj_core::activity::ActivityState::Unrecognized),
         pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
-        resuming: session
-            .operation
-            .as_ref()
-            .is_some_and(|operation| operation.kind == crate::server::ViewerOperationKind::Resume),
+        resuming: session.operation.as_ref().is_some_and(|operation| {
+            matches!(
+                operation.kind,
+                crate::server::ViewerOperationKind::Create
+                    | crate::server::ViewerOperationKind::Resume
+            )
+        }),
         // The projection forces a close-requested session to `Closing` from
         // the moment the controller takes the request, so this covers the gap
         // before the lifecycle operation itself is registered.
@@ -380,18 +391,13 @@ pub(super) fn build_observation(
             .filter(|_| session.operation.is_none())
             .cloned(),
         cannot_take_prompt: !session.capabilities.prompt,
-        launch_failed: snapshot
-            .launch_failures
-            .iter()
-            .any(|failure| failure.session_id.as_deref() == Some(session.id.as_str())),
-        // Prefer the reason the failing action recorded on the workspace
-        // notice; fall back to the session's own launch error text.
-        launch_error: snapshot
-            .launch_failures
-            .iter()
-            .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
-            .and_then(|failure| failure.error.clone())
-            .or_else(|| session.launch_error.clone()),
+        launch_failed: launch_failure.is_some(),
+        // The durable row describes this attempt. A workspace notice may
+        // still describe an earlier launch of the same session.
+        launch_error: session
+            .launch_error
+            .clone()
+            .or_else(|| launch_failure.and_then(|failure| failure.error.clone())),
         capacity_retry: session.capacity_retry.as_deref().cloned(),
         quota_recovery: session.quota_recovery.as_deref().cloned(),
         start_status,
