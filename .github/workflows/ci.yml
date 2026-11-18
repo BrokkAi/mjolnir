@@ -119,6 +119,12 @@ jobs:
       run: |
         node scripts/check-crate-boundaries.mjs
 
+    # mj-controller is being split into layered crates
+    # (.agents/plans/split-mj-controller-by-layer.md). This keeps the layers
+    # that are already separated from growing back together.
+    - name: Check mj-controller layer boundaries
+      run: python3 scripts/check-controller-layers.py
+
     - name: Check crate package contents and build
       run: |
         set -euo pipefail

@@ -11,8 +11,8 @@ After this work the same code lives in three crates stacked by dependency: a sto
 ## Progress
 
 - [x] (2026-11-18 05:45Z) Measured the current build and the references that cross each proposed boundary (see Context and Surprises).
-- [x] (2026-11-18 06:05Z) Added `scripts/check-controller-layers.py`, which lists the upward reference sites (not yet run in CI).
-- [ ] Milestone 1: cut every reference from lower modules up into the top layer, inside the existing crate, and enforce the check (completed: the pure helpers, `ProfileCatalog`, the startup-step types and the session predicates, 125 sites down to 54; remaining: the modules that take the daemon's `RuntimeState`, the HTTP API types named by lower code, and lower tests that drive top-layer code, listed under Surprises).
+- [x] (2026-11-18 06:05Z) Added `scripts/check-controller-layers.py`, which lists the upward reference sites.
+- [x] (2026-11-18 07:10Z) Milestone 1: no production code below the top layer names it (125 sites at the start). The check enforces this in the `licenses` job of `.github/workflows/ci.yml`. 23 test-only references remain and are Milestone 2 work: each such test moves to `mj-daemon` with the fixtures it needs.
 - [ ] Owner publishes placeholder `brokk-mj-daemon` and `brokk-mj-store` crates and configures their trusted publishers (blocks Milestones 2 and 4 from landing on master; see Decision Log).
 - [ ] Milestone 2: move the top layer into `mj-daemon` (`brokk-mj-daemon`).
 - [ ] Milestone 3: cut every reference from the storage modules up into the rest, inside `mj-controller`.
@@ -33,6 +33,9 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - Observation: a `crate::` path count understates the work, because a file that imports a name once and uses it fifty times counts as one site. The compiler is the real check once files move.
   Evidence: `github_watch/service.rs` has one counted site and about 40 uses of `state`.
 
+- Observation: three kinds of cut were needed in Milestone 1, and only the first was foreseen. Pure helpers and plain types moved down (`ProfileCatalog`, the startup-step types, the wait policy with the five types it reads, the signing key, the retry delay). Files that were daemon services filed under lower modules moved up whole or in part (`review_host`, `github_watch`, `observe`, the mbx reconcile loop, and the delivery loops of `web_push` and `mailbox_outbox`). Credential sync could do neither: its tests are interleaved with the rest of `worker_client`'s, so it now reads the daemon's six facts through the `CredentialSyncRuntime` trait, which `RuntimeState` implements.
+  Evidence: commits `b5539b1bf` through `2bfd3b2ac` on master.
+
 ## Decision Log
 
 - Decision: split by layer into three crates, not by feature area.
@@ -51,6 +54,9 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - Decision: the new crates are `brokk-mj-store` and `brokk-mj-daemon`, and both names must exist on crates.io, with a trusted publisher configured, before the commit that creates either crate reaches master.
   Rationale: `.github/workflows/publish.yml` authenticates with `rust-lang/crates-io-auth-action`, that is, crates.io trusted publishing, which is configured in the settings of a crate that already exists. `nightly.yml` releases master automatically, and `publish.yml` publishes crates in dependency order and stops at the first failure, so a crate the workflow may not publish would leave a release with `brokk-mj-core` published and `brokk-mj-controller` and `brokk-mjolnir` missing. The owner publishes a `0.0.0` placeholder of each name with a personal token, then adds the trusted publisher (repository `BrokkAi/mjolnir`, workflow `publish.yml`, environment `crates-io`) and the same owners as `brokk-mj-controller`. Both names were free on 2026-11-18.
   Date/Author: 2026-11-18, Ryan Svihla confirmed the split and raised the manual first publish; Claude checked the workflow.
+- Decision: a trait for credential sync, against the earlier rule of preferring a move.
+  Rationale: moving `worker_client/credential_sync.rs` up would have meant separating its tests from a 6,100-line shared test file by hand. The daemon still owns every fact and sync still asks at the moment it acts, so no state is copied; `server_runtime::api::ExportRuntime` is an existing trait of the same kind in this crate.
+  Date/Author: 2026-11-18, Claude.
 
 ## Outcomes & Retrospective
 
@@ -64,13 +70,13 @@ A "reference site" is one place in a source file that names an item from another
 
 The three layers, with lines of code plus lines in dedicated test files:
 
-The top layer, to become `mj-daemon`: `daemon` (32,734 + 18,853), `server` (16,370 + 13,593), `server_runtime` (16,198 + 10,606), `pollers` (4,509 + 4,157), `web_viewer`, `recovery` and `worker_upgrade`. About 72k + 47k lines. `doctor` stays in the middle because `setup` uses it.
+The top layer, to become `mj-daemon`: `daemon` (which now also holds the mailbox, web push and mbx delivery loops), `server`, `server_runtime`, `pollers`, `web_viewer`, `recovery`, `worker_upgrade`, `review_host`, `github_watch` and `observe`. The authoritative list is `TOP` in `scripts/check-controller-layers.py`. `doctor` stays in the middle because `setup` uses it.
 
 The storage layer, to become `mj-store`: `database` (33,023 + 8,935), `targets` (8,481 + 5,763), `upgrade`, `recovery_gate`, `worker_lifecycle`, `target_storage`, `image_pull_gate`, `streamed_child`, `termination`, `launch_timing` and `test_log`. About 46k + 15k lines.
 
 The middle layer stays in `mj-controller`: `controller` (63,165 + 38,956), `session_manager`, `worker_client`, `review_host`, `doctor`, `setup`, `quota`, `import`, `sessionwiki` and the remaining small modules. About 135k + 67k lines.
 
-Upward references into the top layer today, by the item named: `daemon::RuntimeState` (about 20 sites, in `worker_client`, `review_host`, `controller`, `github_watch`, `mailbox_outbox`, `web_push`); `server_runtime::profile_catalog::ProfileCatalog` (about 40, mostly `ProfileCatalog::new` in `controller` tests); `daemon::StartupStep` and `daemon::startup_followup` (about 12, in `database`, `controller`, `review_host`); `daemon::delegation::deliver` (4, `controller`); `server::api` types `StartFollowup`, `SubagentCandidates`, `SubagentBackend`, `WaitObservation`, `ApiSession`, `ViewerSnapshot`, `ViewerMoveRecovery` (about 25); `server_runtime::api::{ExportRuntime, ApiBackend, agent_working_directory_at}` (5); `pollers` helpers `session_target_is_pollable`, `interrupted_lifecycle_cause`, `refresh_host_image`, `credential_sync_target_is_current`, `QUOTA_REFRESH_INTERVAL` (about 10); `server::{install_rustls_crypto_provider, load_or_create_cookie_key, cookie_key_path}` (8); `recovery::backoff_delay` (1). Regenerate this list with the check script from Milestone 1; the numbers move as others commit.
+Milestone 1 removed every production reference into the top layer. Run `python3 scripts/check-controller-layers.py` for what remains: test-only references into the top layer, and the references out of the storage layer that Milestone 3 removes.
 
 Outside the crate, `mj-cli` names `mj_controller::{database, server, controller, doctor, targets, session_manager, import, pollers, recovery_gate, review_host, ...}`, `mj-worker` tests name `mj_controller::targets`, and `mj-core` mentions `pollers` in two comments. The package name appears in `.github/workflows/ci.yml` (the package list in the `licenses` job and the test shards), `.github/workflows/publish.yml` (publication order), `.github/workflows/windows.yml`, `scripts/check-crate-boundaries.mjs` (allowed dependencies per crate), `licenses/deny.toml`, `CONTRIBUTING.md`, the root `Cargo.toml` and `mj-worker/Cargo.toml`.
 
