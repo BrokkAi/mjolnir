@@ -92,7 +92,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Rationale: older refs only make the delta larger, which beats aborting. Restore fails visibly only if origin has since deleted objects the delta left out.
   Date/Author: 2026-11-18, user.
 
-- Decision: managed checkouts (Mjolnir-created clones) require an `origin` remote.
+- Decision: managed checkouts (Mjolnir-created clones) require an `origin` remote. This is enforced when the session is created (`create_managed_clone` today accepts a source without `remote.origin.url`), not first discovered at suspend. A new isolated session on a repository without an origin is refused before launch with a choice offered in the same surface: "This repository has no origin, which isolated sessions need. Run in this checkout directly instead, or add an origin." The surface offers "Run in this checkout" as an action, so the user is never stuck.
 
   This applies to new sessions. Existing managed clones were allowed to start from a source repository without an origin, and some legacy linked-worktree archives depend on commits that exist only in the local source repository. Those sessions keep working on their own target: capture and restore treat the source repository's path as their origin, through `origin_override`, so they round-trip there but cannot move to another target.
   Rationale: the snapshot is defined relative to origin. Existing sessions must not be stranded by the upgrade (`AGENTS.md`, Upgrades).
@@ -370,7 +370,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    - the pinned SHAs: kept refs, every checkout's HEAD commit (attached or detached, primary and nested), working-state commits, and kept (or replaced) stash commits. A raw session that started on a branch with commits origin lacks, and only edited tracked files, depends on those commits;
    - a `--not` line;
    - the exclusions, chosen by what step 2 learned:
-     - **Origin reachable:** exactly the SHAs origin advertises (`git ls-remote origin`, heads and tags) that exist locally, and never stale remote-tracking refs. A raw checkout's `refs/remotes/origin/*` may point at history origin has force-pushed away. A fresh clone fetches origin's heads and tags, so their history need not travel.
+     - **Origin reachable:** exactly the SHAs origin advertises under `refs/heads/*` and `refs/tags/*` (`git ls-remote origin`) that exist locally, and never stale remote-tracking refs. Other namespaces such as `refs/pull/*`, `refs/changes/*` or `refs/merge-requests/*` are ignored, because a clone plus `fetch --tags` never retrieves them. A raw checkout's `refs/remotes/origin/*` may point at history origin has force-pushed away. A fresh clone fetches origin's heads and tags, so their history need not travel.
      - **Origin unreachable:** the existing `refs/remotes/origin/*` only, with `remote_refs_stale` set.
 
      For a managed checkout, the two rules coincide in practice, because it has just fetched with `--prune`.
@@ -448,7 +448,7 @@ Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal a
 1. **Early consent check.** Run the preflight inventory against the request's consent, changing nothing. Nearly every refusal happens here, while the session is still running untouched.
 2. **Interrupt the turn and stop every session process.** This uses today's teardown ownership in `mj-worker/src/worker_stop.rs` and the existing process-group teardown, extended to cover:
    - the harness and the process groups the worker tracks;
-   - the worker's descendants. On Linux the worker sets `PR_SET_CHILD_SUBREAPER` at startup. It then also owns reaping adopted orphans: one reaper reaps any exited child the worker did not launch through its own subprocess helpers, and leaves the exit statuses of its own launched children to their existing waits (check with `waitid(..., WNOWAIT)` before reaping), so adopted processes never pile up as zombies (new in this milestone; today only a microVM test sets it), so a descendant that daemonizes is reparented to the worker and stays in its tree. Sessions whose processes started under an older worker lack that, and rely on the marker and the open-file check;
+   - the worker's descendants. On Linux the worker sets `PR_SET_CHILD_SUBREAPER` at startup. It then also owns reaping adopted orphans: one reaper reaps any exited child the worker did not launch through its own subprocess helpers, and leaves the exit statuses of its own launched children to their existing waits, so adopted processes never pile up as zombies. Launch and reaping are serialized the way the microVM guest reaper already does it (`mj-worker/src/microvm/guest_agent.rs`, around lines 195–206). Every spawn holds a shared lock across `spawn` and registration of the child's PID, and the reaper takes the lock exclusively before deciding that an exited PID is an unregistered orphan. A child that exits before it is registered therefore never has its status taken by the reaper (new in this milestone; today only a microVM test sets it), so a descendant that daemonizes is reparented to the worker and stays in its tree. Sessions whose processes started under an older worker lack that, and rely on the marker and the open-file check;
    - every process on the host carrying this session's marker (`MJ_SESSION_ID`), which the worker's process observer in `mj-worker/src/work_facts.rs` already finds, including `setsid`-detached ones.
 
    Each process is verified before it is signaled, by its start time and its marker or tree membership. On Linux this goes through a `pidfd` (`pidfd_open`, then `pidfd_send_signal`), so verification and signal refer to the same process. macOS has no pidfd, so the identity is re-read immediately before `kill`; say so in a code comment. The worker repeats enumerate-and-terminate until an enumeration finds no live attributable process. A `/proc` scan alone cannot prove that, though: a parent can fork and exit between reading the directory and reading its state. So on Linux, quiescence of the worker's own tree is decided by the kernel. Because the worker is a subreaper, every orphaned descendant becomes its child, so once `waitid(P_ALL, …, WEXITED | WNOHANG | WNOWAIT)` reports `ECHILD` the worker has no descendants at all. The worker runs its own helper subprocesses for capture only after that point. The marker scan covers session processes outside the tree, which predate the subreaper or run on macOS. Quiescence holds when the worker has no children and a marker scan then finds no marked process. A process in uninterruptible sleep (state `D`) can delay that indefinitely, so the wait is cancellable, and the suspend's progress names the processes still running. There is no guessed timeout.
@@ -872,13 +872,14 @@ In `mj-checkpoint/src/snapshot.rs`, define:
 
 In `mj-checkpoint/src/checkpoint.rs`, add `CheckpointRepositoryCapture::OriginDelta { ownership: CheckoutOwnership }` and raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that use it.
 
-The suspend request gains `discard_untracked` (`"any"` or `{"shown": [items]}`, where each item is `{"repository": ..., "path": ...}` or `{"repository": ..., "stash": <commit>}`; absent for none), `abort_operations` (`"any"` or `{"shown": [{"repository", "path", "kind", "identity"}]}`) and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked`, `--abort-operation` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
+The suspend request gains `discard_untracked` (`"any"` or `{"shown": [items]}`, where each item is `{"repository": ..., "path": ..., "identity": ...}` (untracked files, and `.mj/keep/` files with `"keep": true`) or `{"repository": ..., "stash": <commit>}`; absent for none. The dialog echoes back exactly the items, with their identities, that the preflight returned and it displayed.), `abort_operations` (`"any"` or `{"shown": [{"repository", "path", "kind", "identity"}]}`) and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked`, `--abort-operation` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
 
     {
-      "untracked": [{"repository": ..., "path": ..., "bytes": ...}],
+      "untracked": [{"repository": ..., "path": ..., "bytes": ..., "identity": ...}],   // identity = opaque file identity token the request echoes back
       "untracked_stashes": [{"repository": ..., "commit": ..., "message": ...}],   // `git stash -u`/`-a` payloads that will not be kept
       "operations": [{"repository": ..., "path": ..., "kind": ..., "identity": ...}],
       "raw": bool,
+      "keep": [{"path": ..., "bytes": ..., "identity": ...}],   // files in a managed checkout's .mj/keep/<session-id>/ that suspend will not keep (empty for raw checkouts and for Move)
       "keep_bytes": ...,
       "interrupting": bool,
       "subagents_not_handed_back": [...]
@@ -1090,3 +1091,11 @@ Revision note (2026-11-18, review 22):
 - Cancelled stops defer the agent restart until the old harness exits.
 - Consent binds untracked paths to file identity.
 - ACP sends absent consent fields.
+
+Revision note (2026-11-18, review 23): the preflight and request carry file identities and individual `.mj/keep/` entries, so dialogs can send exactly the consent capture checks. Advertised exclusions are limited to heads and tags.
+
+Revision note (2026-11-18, review 24):
+- Orphan reaping is serialized with child launch by the guest reaper's lock.
+- The origin requirement is enforced at managed-session creation, with an in-surface alternative.
+- The preflight and request carry file identities and keep entries.
+- Override recorded: a harness change on a same-target Move takes the old harness's process group with it, as any agent restart does.
