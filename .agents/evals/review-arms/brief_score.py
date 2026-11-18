@@ -403,11 +403,12 @@ READINGS = {
     # brief/PLAN-bifrost-oracle-strict.md: OS against its same-image fresh no-brief AF2 (primary), and
     # round M's ON and AF; AF2 - AF compares the two fresh no-brief cohorts. No stored A. Fewer than 8
     # retained diffs reads Inconclusive; the reference is round M's ON/AF labels.
-    "bifrost-oracle-strict": {"subject": "OS", "arms": ("OS", "AF2", "ON", "AF"), "others": ("AF2", "ON", "AF"),
+    # The plan's "OS" arm is OX here: OS already names stage A's Sol oracle arm.
+    "bifrost-oracle-strict": {"subject": "OX", "arms": ("OX", "AF2", "ON", "AF"), "others": ("AF2", "ON", "AF"),
                               "primary": "AF2", "extra": (("AF2", "AF"),), "diffs": None,
                               "diffs_rule": "1 to 17", "min_diffs": 8, "baseline": False,
                               "report_key": "bifrost_oracle_strict", "reference_arms": ("ON", "AF"),
-                              "same_image": ("OS", "AF2")},
+                              "same_image": ("OX", "AF2")},
 }
 
 

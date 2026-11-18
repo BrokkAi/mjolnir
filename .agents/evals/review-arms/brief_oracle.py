@@ -537,8 +537,8 @@ def noleak_state(bug, upto):
         if decision["decision"] != "carries":
             # Keep the leak reasons for the text that is retried: they permit and direct the
             # next edit; the rejection says what the failed edit lost.
-            leak_reasons = previous if previous and previous.get("kind") == "leak judges" else \
-                (previous or {}).get("leak")
+            leak_reasons = previous if previous and previous.get("kind") in ("leak judges", "strict leak gate") \
+                else (previous or {}).get("leak")
             previous = {"kind": ("fidelity check failed the last edit" if STRICT else
                                  "fact check rejected the last edit"), "why": decision["why"],
                         **({"elements_not_kept": decision.get("elements_not_kept")} if STRICT else {}),
@@ -558,6 +558,8 @@ def noleak_state(bug, upto):
             if not gate_path.exists():
                 raise SystemExit(f"round {n} strict leak gate is not collected")
             gate = json.loads(gate_path.read_text())["results"][bug]
+            if gate.get("verdicts_sha256") != verdicts_fingerprint(leak):
+                raise SystemExit(f"{bug}: round {n} gate result does not cover the current leak verdicts")
             if gate["pass"]:
                 return n, source, None
             previous = {"kind": "strict leak gate", "why": gate["why"],
@@ -773,13 +775,25 @@ def strict_fidelity_decision(r, e):
         raise SystemExit(f"{r['id']}: fidelity row has no valid element list")
     if not isinstance(r.get("fact_inferred"), bool) or r.get("decision") not in ("pass", "fail"):
         raise SystemExit(f"{r['id']}: fidelity row has an invalid decision or fact_inferred")
-    not_kept = [x.get("element") for x in elements if not x["kept"]]
+    # Every changed line must have its elements listed; a skipped line cannot pass.
+    original = (ROOT / "briefs" / "oracle" / r["id"] / "brief.md").read_text().splitlines()
+    pair_count = sum(o != ed for o, ed in zip(original, e["brief"].splitlines()))
+    covered = {x.get("pair") for x in elements}
+    if any(not isinstance(i, int) or not 0 <= i < pair_count for i in covered):
+        raise SystemExit(f"{r['id']}: fidelity elements name pairs outside 0..{pair_count - 1}")
+    uncovered = sorted(set(range(pair_count)) - covered)
+    not_kept = [x.get("element") for x in elements if not x["kept"]] + [f"pair {i}: no elements listed" for i in uncovered]
     quote = r.get("carrying_item")
     whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
     ok = r["decision"] == "pass" and not not_kept and not r["fact_inferred"] and whole_line
     return {"id": r["id"], "brief_sha256": r["brief_sha256"], "decision": "carries" if ok else "does not carry",
             "item": quote if whole_line else None, "why": r.get("why"), "elements_not_kept": not_kept,
             "fact_inferred": r["fact_inferred"]}
+
+
+def verdicts_fingerprint(leak_round):
+    """Binds a gate result to the exact leak verdicts it judged."""
+    return hashlib.sha256(json.dumps(leak_round["verdicts"], sort_keys=True).encode()).hexdigest()
 
 
 def noleak_gate_build(n):
@@ -794,6 +808,7 @@ def noleak_gate_build(n):
         raise SystemExit(f"{unit} exists")
     checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
     pending = 0
+    keymap = {}
     for bug, d in checks.items():
         if d["decision"] != "carries":
             continue
@@ -804,11 +819,15 @@ def noleak_gate_build(n):
             continue
         for v in r["verdicts"]:
             unit.mkdir(parents=True, exist_ok=True)
-            # The cause check sees only the rationale and the fixed question in CAUSE.md.
-            save(unit / f"item-{bug}-{v['judge']}.json",
-                 {"id": bug, "judge": v["judge"], "rationale": v.get("rationale")})
+            # The cause check sees only an opaque token, the rationale and the fixed question in
+            # CAUSE.md: a descriptive diff name could itself hint at the mechanism. The key that maps
+            # tokens back stays outside the uploaded unit.
+            token = hashlib.sha256(f"{n}/{bug}/{v['judge']}/{v.get('rationale')}".encode()).hexdigest()[:16]
+            keymap[token] = {"bug": bug, "judge": v["judge"], "verdicts_sha256": verdicts_fingerprint(r)}
+            save(unit / f"item-{token}.json", {"id": token, "rationale": v.get("rationale")})
             pending += 1
     if pending:
+        save(unit.parent / "key.json", keymap)
         (unit / "CAUSE.md").write_text((SCRIPTS / "brief/CAUSE.md").read_text())
         (unit / "INSTRUCTIONS.md").write_text(
             f"Read CAUSE.md and follow it exactly. Your item files are the {pending} item-*.json files in this "
@@ -823,14 +842,16 @@ def noleak_gate_collect(n):
     out_path = W / f"round-{n}" / "gate-results.json"
     checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
     unit = W / f"round-{n}" / "gate" / "cause"
-    expected = {p.stem.removeprefix("item-") for p in unit.glob("item-*.json")} if unit.exists() else set()
+    keymap = json.loads((unit.parent / "key.json").read_text()) if (unit.parent / "key.json").exists() else {}
     causes = {}
-    if expected:
+    if keymap:
         rows = [json.loads(line) for line in (unit / "cause.jsonl").read_text().splitlines() if line.strip()]
-        got = {f"{r.get('id')}-{r.get('judge')}": r for r in rows}
-        if set(got) != expected or len(rows) != len(expected):
+        got = {r.get("id"): r for r in rows}
+        if set(got) != set(keymap) or len(rows) != len(keymap):
             raise SystemExit("cause check must answer each verdict exactly once")
-        causes = got
+        causes = {f"{keymap[t]['bug']}-{keymap[t]['judge']}": {**got[t], "judge": keymap[t]["judge"],
+                                                                "verdicts_sha256": keymap[t]["verdicts_sha256"]}
+                  for t in keymap}
     results = {}
     for bug, d in checks.items():
         if d["decision"] != "carries":
@@ -842,11 +863,14 @@ def noleak_gate_collect(n):
             results[bug] = {"pass": False, "why": "a missed verdict below high confidence: " +
                             ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
         else:
+            if any(causes[f"{bug}-{v['judge']}"]["verdicts_sha256"] != verdicts_fingerprint(r) for v in r["verdicts"]):
+                raise SystemExit(f"{bug}: cause answers were given for other leak verdicts")
             # Only a clear "no" passes; "yes", "unclear" or anything else fails the brief.
             flagged = [causes[f"{bug}-{v['judge']}"] for v in r["verdicts"]
                        if causes[f"{bug}-{v['judge']}"].get("answer") != "no"]
             results[bug] = {"pass": not flagged,
                             "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
+        results[bug]["verdicts_sha256"] = verdicts_fingerprint(r)
     record = {"round": n, "results": results}
     if out_path.exists() and json.loads(out_path.read_text()) != record:
         raise SystemExit(f"{out_path} holds different gate results")
@@ -876,7 +900,7 @@ def noleak_publish(jobs_out):
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(text)
     # ON and its same-image no-brief control AF, interleaved per diff (the plan's AF amendment).
-    arms = ("OS", "AF2") if STRICT else ("ON", "AF")
+    arms = ("OX", "AF2") if STRICT else ("ON", "AF")  # OX is the plan's strict arm "OS" (driver.py)
     save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in arms])
     # Registered: fewer than 8 retained diffs reads Inconclusive whatever the scores. With none
     # retained there is nothing to review or score, so the outcome is recorded here.

@@ -2,7 +2,7 @@
 
 A judge read a relation brief as if it were a code review of a change with a
 known defect, and judged that the brief does not report the defect. Each
-`item-*.json` file in this folder holds `id`, `judge` and that judge's
+`item-*.json` file in this folder holds an opaque `id` and that judge's
 `rationale`.
 
 Answer one fixed question for each item, from the rationale alone:
@@ -16,5 +16,5 @@ Answer `"yes"` when it does, and `"unclear"` when you cannot tell.
 Do not read anything except the item files in this folder.
 
 Write `cause.jsonl` in the repository working directory, one line per item
-file: `{"id": <id>, "judge": <judge>, "answer": "yes" | "no" | "unclear",
+file: `{"id": <id>, "answer": "yes" | "no" | "unclear",
 "why": <one sentence quoting the rationale>}`.
