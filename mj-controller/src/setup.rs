@@ -99,8 +99,11 @@ pub struct RuntimeProbe {
 }
 
 impl RuntimeProbe {
+    /// A warning means sessions start with a caveat (for example unenforced
+    /// cpu limits), so the runtime is offered; doctor and Settings still show
+    /// the caveat.
     pub fn usable(&self) -> bool {
-        self.status == CheckStatus::Ready
+        matches!(self.status, CheckStatus::Ready | CheckStatus::Warning)
     }
 }
 
