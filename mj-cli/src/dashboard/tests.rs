@@ -212,11 +212,18 @@ fn route(dashboard: &mut DashboardState, keys: &[crossterm::event::KeyEvent]) ->
 
 #[test]
 fn escape_cancels_opening_without_stealing_modal_or_quit_keys() {
-    assert!(opening_cancel_event(&escape(), true, false));
-    assert!(!opening_cancel_event(&escape(), true, true));
-    assert!(!opening_cancel_event(&escape(), false, false));
+    assert!(opening_cancel_event(&escape(), true, false, false));
+    assert!(!opening_cancel_event(&escape(), true, true, false));
+    assert!(!opening_cancel_event(&escape(), false, false, false));
+    // Hard-won: 4c23909e0: attaching a conversation stole Esc from the focused inline form.
+    assert!(!opening_cancel_event(
+        &Event::Key(plain_key(KeyCode::Esc)),
+        true,
+        false,
+        true
+    ));
     let quit = Event::Key(plain_key(KeyCode::Char('q')));
-    assert!(!opening_cancel_event(&quit, true, false));
+    assert!(!opening_cancel_event(&quit, true, false, false));
     let mut dashboard = populated_dashboard();
     assert_eq!(
         route(
@@ -351,6 +358,10 @@ async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
     attachment.release_pane(&dashboard, pane, "session-1");
     assert!(!attachment.pending());
     assert!(!attachment.select("session-1"));
+    // Hard-won: 4c23909e0: discarding the last notification completion rearmed a cancelled pane.
+    attachment.defer();
+    attachment.observe_pane(&dashboard, pane, "session-1");
+    assert!(!attachment.select_for_pane(pane, "session-1"));
     attachment.bind_notification(true);
     assert!(attachment.select("session-1"));
     attachment.bind_notification(false);

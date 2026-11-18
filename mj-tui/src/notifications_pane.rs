@@ -25,7 +25,7 @@ pub(crate) struct NotificationsPane {
     pub(crate) message_read: Option<NotificationMessageRead>,
     replies: std::collections::BTreeMap<String, QuickReply>,
     form_errors: std::collections::BTreeMap<String, String>,
-    form_area: Option<Rect>,
+    pub(crate) form_area: Option<Rect>,
     scroll: u16,
     /// The last displayed card, used to match the selected item across publications.
     scroll_card: Option<CardIdentity>,
@@ -648,8 +648,37 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn notification_form_owns_keyboard(&self) -> bool {
+    pub fn notification_form_owns_keyboard(&self) -> bool {
         self.focus == Focus::Notifications && self.notifications.form_area.is_some()
+    }
+
+    /// Some(false) is message/chrome in this presentation: another
+    /// conversation's geometry must not claim text that is drawn here.
+    pub fn notification_form_mouse_ownership(
+        &self,
+        chats: &std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+        mouse: crossterm::event::MouseEvent,
+    ) -> Option<bool> {
+        if self.modal_open() {
+            return None;
+        }
+        let area = self.notifications.form_area?;
+        let session = self.notification_form_session()?;
+        let chat = chats.get(&session)?;
+        if !chat.has_elicitation() {
+            return None;
+        }
+        match chat.elicitation_pointer_surface() {
+            Some(mj_chat::chat::ElicitationSurface::Notification) => Some(true),
+            Some(mj_chat::chat::ElicitationSurface::Conversation) => None,
+            None if area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) => {
+                Some(chat.elicitation_component_handles_mouse_in(
+                    mj_chat::chat::ElicitationSurface::Notification,
+                    mouse,
+                ))
+            }
+            None => None,
+        }
     }
 
     /// Apply notification input to the owning chat's ordinary event dispatcher.
@@ -1293,7 +1322,7 @@ pub(crate) fn render(
         inner.height.saturating_sub(if inline_form { 2 } else { 6 }),
     );
     if inline_form {
-        dashboard.notifications.form_area = Some(body);
+        dashboard.notifications.form_area = (body.width > 0 && body.height > 0).then_some(body);
         dashboard.notifications.text_rows = None;
         let surfaces = chat.as_mut().unwrap().draw_elicitation_in(
             frame,
@@ -1732,6 +1761,146 @@ pub(crate) mod tests {
 
     fn alt(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
+    }
+
+    // Hard-won: 4c23909e0: selection consumed inline checkbox presses, and a size warning retained invisible form input geometry.
+    #[tokio::test]
+    async fn inline_form_controls_precede_selection_and_hidden_frames_release_input() {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEventKind};
+        for conversation_visible in [false, true] {
+            let mut dashboard = dashboard_with_session(running_session());
+            serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
+            let mut request = question("session-1");
+            request.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+                default: Some(false),
+            };
+            dashboard
+                .session_details
+                .get_mut("session-1")
+                .unwrap()
+                .pending_elicitations = vec![request.clone()];
+            dashboard.set_current_session(if conversation_visible {
+                Some("session-1")
+            } else {
+                None
+            });
+            dashboard.focus = Focus::Notifications;
+            dashboard.notifications.size = PaneSize::Maximized;
+            let (chat, mut answers) = form_chat("session-1", request);
+            let mut chats = std::collections::BTreeMap::from([("session-1".into(), chat)]);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 44)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let card = dashboard.notifications_area.unwrap();
+            let (column, offset) = point(
+                &lines[usize::from(card.y)..usize::from(card.bottom())],
+                mj_chat::components::Checkbox::marker(false),
+            );
+            let mut selection = mj_chat::selection::SelectionState::new();
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                let mouse = crossterm::event::MouseEvent {
+                    kind,
+                    column,
+                    row: card.y + offset,
+                    modifiers: KeyModifiers::NONE,
+                };
+                let owns = dashboard
+                    .notification_form_mouse_ownership(&chats, mouse)
+                    .unwrap();
+                if !owns && matches!(kind, MouseEventKind::Down(_)) {
+                    selection.on_mouse_down(column, card.y + offset, dashboard.frame_surfaces());
+                }
+                assert!(owns);
+                assert!(selection.active_surface().is_none());
+                assert!(
+                    dashboard
+                        .handle_notification_form_event(&mut chats, &Event::Mouse(mouse))
+                        .unwrap()
+                        .consumed
+                );
+            }
+            let mut tiny =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 5)).unwrap();
+            tiny.draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+            assert!(!dashboard.notification_form_owns_keyboard());
+            for code in [KeyCode::Enter, KeyCode::Esc] {
+                assert!(
+                    dashboard
+                        .handle_notification_form_event(&mut chats, &Event::Key(key(code)))
+                        .is_none()
+                );
+            }
+            assert!(chats["session-1"].has_elicitation());
+            assert!(answers.try_recv().is_err());
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Key(key(KeyCode::Enter)))
+                .unwrap();
+            let (_, response) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), answers.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                response,
+                ElicitationResponse::Accept {
+                    content: [(
+                        "path".into(),
+                        mj_core::elicitation::ElicitationValue::Boolean(true)
+                    )]
+                    .into_iter()
+                    .collect()
+                }
+            );
+            // Replacing the chat leaves an old host rectangle until redraw;
+            // only the newly owned dialog knows that it has not been shown.
+            let mut next = question("session-1");
+            next.id = "not-yet-rendered".into();
+            next.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+                default: Some(true),
+            };
+            let (chat, mut next_answers) = form_chat("session-1", next);
+            chats.insert("session-1".into(), chat);
+            let result = dashboard
+                .handle_notification_form_event(&mut chats, &Event::Key(key(KeyCode::Enter)))
+                .unwrap();
+            assert!(!result.consumed);
+            assert!(chats["session-1"].has_elicitation());
+            assert!(next_answers.try_recv().is_err());
+        }
     }
 
     pub(crate) fn dashboard() -> DashboardState {

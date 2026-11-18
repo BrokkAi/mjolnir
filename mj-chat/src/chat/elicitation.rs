@@ -90,6 +90,8 @@ pub struct ElicitationDraft {
     active_custom_fields: BTreeSet<usize>,
     #[serde(default, skip_serializing_if = "ElicitationSurface::is_conversation")]
     surface: ElicitationSurface,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    viewports: Option<ElicitationViewports>,
     focus: usize,
     message_scroll: u16,
     /// `(source line, grapheme offset)` at the top of the viewport. Both
@@ -102,6 +104,20 @@ pub struct ElicitationDraft {
     current_question: Option<usize>,
     #[serde(default)]
     confirmed: BTreeSet<usize>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ElicitationViewport {
+    message_scroll: u16,
+    message_anchor: Option<(usize, usize)>,
+    message_anchor_width: u16,
+    focus_scroll: u16,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ElicitationViewports {
+    conversation: ElicitationViewport,
+    notification: ElicitationViewport,
 }
 
 impl ElicitationDraft {
@@ -191,6 +207,28 @@ struct OptionClick {
 }
 
 impl ElicitationView {
+    fn viewport(&self, page: (usize, bool)) -> ElicitationViewport {
+        // An inactive presentation can still describe the previous page.
+        // Its geometry would be reset on selection; its saved viewport must
+        // follow that same rule rather than transfer the old page's scroll.
+        if self.page != Some(page) {
+            return ElicitationViewport::default();
+        }
+        ElicitationViewport {
+            message_scroll: self.message_scroll.get(),
+            message_anchor: self.message_anchor.get(),
+            message_anchor_width: self.message_anchor_width.get(),
+            focus_scroll: self.focus_scroll.get(),
+        }
+    }
+
+    fn restore_viewport(&self, viewport: ElicitationViewport) {
+        self.message_scroll.set(viewport.message_scroll);
+        self.message_anchor.set(viewport.message_anchor);
+        self.message_anchor_width.set(viewport.message_anchor_width);
+        self.focus_scroll.set(viewport.focus_scroll);
+    }
+
     fn new() -> Self {
         Self {
             form: RefCell::new(Form::new()),
@@ -344,12 +382,23 @@ impl ElicitationDialog {
     }
 
     pub(super) fn draft(&self) -> ElicitationDraft {
+        let (conversation, notification) = if self.surface == ElicitationSurface::Conversation {
+            (&self.view, &self.other_view)
+        } else {
+            (&self.other_view, &self.view)
+        };
         ElicitationDraft {
             request: self.request.clone(),
             values: self.values.clone(),
             option_cursors: self.option_cursors.clone(),
             active_custom_fields: self.active_custom_fields.clone(),
             surface: self.surface,
+            viewports: notification.page.is_some().then(|| ElicitationViewports {
+                conversation: conversation
+                    .viewport((self.current_question, self.confirming_unanswered)),
+                notification: notification
+                    .viewport((self.current_question, self.confirming_unanswered)),
+            }),
             focus: self.focus_index(),
             message_scroll: self.view.message_scroll.get(),
             message_anchor: self.view.message_anchor.get(),
@@ -367,6 +416,8 @@ impl ElicitationDialog {
         {
             return None;
         }
+        let viewports = draft.viewports;
+        let surface = draft.surface;
         let mut dialog = Self::new(request);
         dialog.values = draft.values;
         dialog.option_cursors = draft.option_cursors;
@@ -387,6 +438,13 @@ impl ElicitationDialog {
         dialog.view.message_anchor = Cell::new(draft.message_anchor);
         dialog.view.message_anchor_width = Cell::new(draft.message_anchor_width);
         dialog.view.focus_scroll = Cell::new(draft.focus_scroll);
+        if let Some(viewports) = viewports {
+            dialog.select_surface(ElicitationSurface::Conversation);
+            dialog.view.restore_viewport(viewports.conversation);
+            dialog.select_surface(ElicitationSurface::Notification);
+            dialog.view.restore_viewport(viewports.notification);
+            dialog.select_surface(surface);
+        }
         Some(dialog)
     }
 
@@ -654,6 +712,34 @@ impl ElicitationDialog {
             _ => {}
         }
         None
+    }
+
+    pub(super) fn was_rendered_in(&self, surface: ElicitationSurface) -> bool {
+        let view = if self.surface == surface {
+            &self.view
+        } else {
+            &self.other_view
+        };
+        view.rendered_area.get().is_some()
+            && view
+                .message_area
+                .get()
+                .is_some_and(|area| area.height > 0 && area.width > 0)
+    }
+
+    pub(super) fn component_handles_mouse_in(
+        &self,
+        surface: ElicitationSurface,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let view = if self.surface == surface {
+            &self.view
+        } else {
+            &self.other_view
+        };
+        let form = view.form.borrow();
+        form.captures_pointer() || form.contains(column, row)
     }
 
     pub(super) fn component_handles_mouse_at(&self, column: u16, row: u16) -> bool {
@@ -1520,7 +1606,13 @@ fn render_elicitation_body(
     // more valuable to the message and focused control, which can each scroll
     // their content independently.
     let button_rows = if inner.height <= 4 { 1 } else { 2 };
-    let buttons_height = inner.height.saturating_sub(footer_height).min(button_rows);
+    // With only two content rows, preserve the question and answer control.
+    // Enter and Esc still use the ordinary dialog handlers without a button bar.
+    let buttons_height = if inner.height < 3 {
+        0
+    } else {
+        inner.height.saturating_sub(footer_height).min(button_rows)
+    };
     let body_height = inner.height.saturating_sub(footer_height + buttons_height);
     let (message_height, focus_height) = if dialog.confirming_unanswered {
         (body_height, 0)

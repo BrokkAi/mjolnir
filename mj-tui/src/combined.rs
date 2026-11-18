@@ -141,14 +141,30 @@ fn allocate_combined_heights(
     desired_prompt: u16,
     sizes: [(SupportPane, PaneSize); 4],
 ) -> CombinedAllocation {
-    let required = sessions
+    let other_minimum = sessions
         .minimum
         .saturating_add(TRANSCRIPT_MINIMUM)
         .saturating_add(PROMPT_MINIMUM)
         .saturating_add(targets.minimum)
         .saturating_add(quota.minimum)
-        .saturating_add(notifications.minimum)
         .saturating_add(FOOTER_HEIGHT);
+    // A form's readable height is a preference above the notification
+    // band's structural minimum. Spend only the space this frame has left;
+    // a newly attached question must not turn a usable dashboard into a
+    // resize screen. Minimized bands retain their existing one-row minimum.
+    let notification_floor = notifications
+        .minimum
+        .min(if sizes[3].1 == PaneSize::Minimized {
+            notifications.minimum
+        } else {
+            PANE_MINIMUM
+        });
+    let notification_minimum = notifications.minimum.min(
+        frame_height
+            .saturating_sub(other_minimum)
+            .max(notification_floor),
+    );
+    let required = other_minimum.saturating_add(notification_minimum);
     if frame_height < required {
         return CombinedAllocation::TooSmall {
             required_frame_height: required,
@@ -160,7 +176,7 @@ fn allocate_combined_heights(
         prompt: PROMPT_MINIMUM,
         targets: targets.minimum,
         quota: quota.minimum,
-        notifications: notifications.minimum,
+        notifications: notification_minimum,
         footer: FOOTER_HEIGHT,
     };
     let mut surplus = frame_height.saturating_sub(required);
@@ -2836,7 +2852,7 @@ mod tests {
         );
 
         inline.notifications.size = PaneSize::Standard;
-        for height in [31, 39] {
+        for height in [21, 25, 31, 39] {
             let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
             crate::with_no_color_override_for_test(true, || {
                 terminal
@@ -2859,9 +2875,15 @@ mod tests {
                     .iter()
                     .any(|line| line.contains("Which deployment path should be used?"))
             );
+            // Hard-won: 4c23909e0: attaching a form replaced an otherwise usable short dashboard with the resize screen.
+            assert!(lines.iter().any(|line| line.contains("Workspaces")));
             append_combined_golden(
                 &mut output,
-                "standard notification form keeps its question readable",
+                if height >= 31 {
+                    "standard notification form keeps its question readable"
+                } else {
+                    "short notification form keeps the dashboard usable"
+                },
                 120,
                 height,
                 &lines,

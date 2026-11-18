@@ -834,7 +834,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                         context.draw()?;
                         context.loop_stalls.phase(loop_stalls::Phase::Arm);
                     }
-                    if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open()) {
+                    if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open(), context.dashboard.notification_form_owns_keyboard()) {
                         context.cancel_chat_open();
                         context.dashboard.focus_sessions();
                         context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
@@ -2341,9 +2341,15 @@ fn record_terminal_draft_state(
     ))
 }
 
-fn opening_cancel_event(event: &Event, opening: bool, modal: bool) -> bool {
+fn opening_cancel_event(
+    event: &Event,
+    opening: bool,
+    modal: bool,
+    form_owns_keyboard: bool,
+) -> bool {
     opening
         && !modal
+        && !form_owns_keyboard
         && matches!(event, Event::Key(key) if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release)
 }
 

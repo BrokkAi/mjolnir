@@ -167,7 +167,7 @@ impl DashboardContext {
                     .attachments
                     .entry(session.clone())
                     .or_default()
-                    .select(&session)
+                    .select_for_pane(pane, &session)
             {
                 self.open_chat_session_into(pane, &session);
             }
@@ -183,6 +183,7 @@ impl DashboardContext {
         }
         let wanted = self.wanted_chat_sessions();
         for (session, attachment) in &mut self.attachments {
+            attachment.release_unowned_task(&self.dashboard, session);
             if !wanted.contains(session) {
                 attachment.defer();
             }

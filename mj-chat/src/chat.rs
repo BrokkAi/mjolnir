@@ -1317,6 +1317,15 @@ impl ChatState {
         true
     }
 
+    fn restore_failed_elicitation(&mut self, request: ElicitationRequest, error: String) {
+        self.restore_elicitation(request.clone());
+        if let Some(dialog) = self.elicitation.as_mut()
+            && dialog.request() == &request
+        {
+            dialog.set_response_error(error);
+        }
+    }
+
     fn restore_elicitation(&mut self, request: ElicitationRequest) {
         if self.elicitation.is_none() {
             self.elicitation = Some(ElicitationDialog::new(request));

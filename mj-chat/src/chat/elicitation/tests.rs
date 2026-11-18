@@ -1331,6 +1331,7 @@ fn empty_forms_still_submit_and_button_focus_keeps_the_question_visible() {
     let mut empty = paired_request(0, false);
     empty.message = "Continue?".into();
     let mut dialog = ElicitationDialog::new(empty);
+    assert!(buffer_text(&rendered_in_pane(&dialog, 60, 4)).contains("Continue?"));
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -1572,6 +1573,8 @@ fn simultaneous_surfaces_keep_hitboxes_capture_and_scroll_independent() {
     dialog.select_surface(ElicitationSurface::Notification);
     assert_eq!(dialog.view.message_scroll.get(), notification_scroll);
     // Hard-won: a882023b6: a notification-only draft restored its scroll into the conversation slot.
+    // Hard-won: 4c23909e0: the conversation's later render overwrote the notification viewport in the saved draft.
+    dialog.select_surface(ElicitationSurface::Conversation);
     let stored = serde_json::to_string(&dialog.draft()).unwrap();
     let mut restored = ElicitationDialog::from_draft(
         dialog.request().clone(),

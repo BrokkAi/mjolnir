@@ -1208,10 +1208,7 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         } => {
             chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
             if !answered {
-                chat.restore_elicitation(request);
-                if let Some(dialog) = chat.elicitation.as_mut() {
-                    dialog.set_response_error(format!("Answer was not sent: {error}"));
-                }
+                chat.restore_failed_elicitation(request, format!("Answer was not sent: {error}"));
             }
             chat.conversation_notice(if answered {
                 format!("Answer sent; follow-up failed: {error}")
@@ -1382,12 +1379,10 @@ pub(super) fn queue_chat_remote_operation(
                 }
                 ChatRemoteOperation::RespondElicitation { request, .. } => {
                     chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
-                    chat.restore_elicitation(request);
-                    if let Some(dialog) = chat.elicitation.as_mut() {
-                        dialog.set_response_error(
-                            "Answer was not sent: session command queue is full".into(),
-                        );
-                    }
+                    chat.restore_failed_elicitation(
+                        request,
+                        "Answer was not sent: session command queue is full".into(),
+                    );
                 }
                 ChatRemoteOperation::Cancel { intent, .. } => {
                     chat.turn_control_submitting = false;
@@ -1433,6 +1428,50 @@ mod tests {
         transcript_text(chat, 100)
             .iter()
             .any(|line| line.contains(text))
+    }
+
+    // Hard-won: 4c23909e0: a late rejected answer labeled the next request with the old request's failure.
+    #[test]
+    fn rejected_elicitation_does_not_label_a_newer_form() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let old = ElicitationRequest {
+            id: "old".into(),
+            message: "Old approval".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+            tool_permission: None,
+        };
+        let mut new = old.clone();
+        new.id = "new".into();
+        new.message = "New approval".into();
+        chat.restore_elicitation(new.clone());
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::RespondElicitation {
+                request: old,
+                desired_plan_active: None,
+                answered: false,
+                result: Err("late rejection".into()),
+            },
+        );
+        assert_eq!(chat.elicitation.as_ref().unwrap().request(), &new);
+        let lines = crate::chat::test_support::drawn_transcript(&mut chat, 100, 24);
+        let form_start = chat
+            .frame_surfaces
+            .surface(crate::selection::SurfaceId::ElicitationMessage)
+            .unwrap()
+            .rect
+            .y as usize;
+        assert!(
+            !lines[form_start..]
+                .iter()
+                .any(|line| line.contains("Answer was not sent"))
+        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Answer was not sent: late rejection"
+        ));
     }
 
     #[test]

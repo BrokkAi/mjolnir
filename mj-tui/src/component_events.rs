@@ -95,6 +95,7 @@ impl DashboardState {
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
+        self.notifications.form_area = None;
         self.surface_form.get_mut().reset_geometry();
         if let Some(modal) = self.active_modal_mut() {
             modal.reset_geometry();

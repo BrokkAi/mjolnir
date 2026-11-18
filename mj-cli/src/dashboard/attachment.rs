@@ -223,6 +223,26 @@ impl SessionAttachment {
         true
     }
 
+    pub(super) fn release_unowned_task(
+        &mut self,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) {
+        if self.pending() && !self.has_surface_interest(dashboard, session) {
+            self.cancel();
+        }
+    }
+
+    pub(super) fn select_for_pane(&mut self, pane: PaneId, session: &str) -> bool {
+        if !matches!(
+            self.assignments.get(&pane),
+            Some(PaneInterest::Requested(_))
+        ) {
+            return false;
+        }
+        self.select(session)
+    }
+
     pub(super) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if let Some(task) = self.task.take() {

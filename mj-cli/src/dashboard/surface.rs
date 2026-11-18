@@ -328,9 +328,15 @@ impl DashboardContext {
     pub(super) fn route_selection(&mut self, event: Event) -> SelectionRouting {
         let chat_owns_pointer = !self.dashboard.modal_open()
             && match &event {
-                Event::Mouse(mouse) => self
-                    .visible_chat()
-                    .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                Event::Mouse(mouse) => match self
+                    .dashboard
+                    .notification_form_mouse_ownership(&self.chats, *mouse)
+                {
+                    Some(owns) => owns,
+                    None => self
+                        .visible_chat()
+                        .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                },
                 _ => false,
             };
         let Self {

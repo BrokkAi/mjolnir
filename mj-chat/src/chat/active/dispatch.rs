@@ -20,6 +20,16 @@ impl ActiveChat {
 
     /// The host routes notification input through the same action dispatcher.
     pub fn handle_elicitation_event(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        // Geometry belongs to this dialog instance, so a newly arrived form
+        // cannot consume keys against the previous form's card rectangle.
+        if self.state.elicitation.as_ref().is_none_or(|dialog| {
+            !dialog.was_rendered_in(super::super::ElicitationSurface::Notification)
+        }) {
+            return EventResult {
+                consumed: false,
+                action: None,
+            };
+        }
         self.select_elicitation_surface(super::super::ElicitationSurface::Notification);
         self.handle_surface_event(event)
     }

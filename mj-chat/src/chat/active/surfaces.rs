@@ -45,6 +45,16 @@ impl ActiveChat {
         self.state.elicitation.is_some()
     }
 
+    pub fn elicitation_component_handles_mouse_in(
+        &self,
+        surface: super::super::ElicitationSurface,
+        mouse: crossterm::event::MouseEvent,
+    ) -> bool {
+        self.state.elicitation.as_ref().is_some_and(|dialog| {
+            dialog.component_handles_mouse_in(surface, mouse.column, mouse.row)
+        })
+    }
+
     pub fn elicitation_pointer_surface(&self) -> Option<super::super::ElicitationSurface> {
         self.state
             .elicitation
