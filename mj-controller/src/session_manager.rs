@@ -85,6 +85,7 @@ mod client_backend;
 use client_backend::*;
 mod actor_types;
 use actor_types::*;
+pub(crate) use actor_types::{RELAY_JOB_LEASED, RELAY_JOB_RECONNECTING};
 pub use actor_types::{RelayConnectionJob, RelayJobDeferred};
 mod remote;
 pub use remote::*;

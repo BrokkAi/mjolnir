@@ -780,6 +780,10 @@ pub struct RelayOperationalState {
     /// that; absent from older workers, which never resubmit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication_retry_waiting: Option<String>,
+    /// Identity observed in the session's credential store. Claude reports
+    /// its access-token hash; other harnesses report the credential file hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_login_fingerprint: Option<String>,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2010,6 +2014,7 @@ impl RelaySnapshot {
                 )
             }) || self.retry_assessment.is_some(),
             authentication_retry_waiting: None,
+            held_login_fingerprint: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

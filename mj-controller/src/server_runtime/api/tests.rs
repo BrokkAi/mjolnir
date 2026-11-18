@@ -59,8 +59,8 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         "an older completed turn cannot answer the new prompt"
     );
     assert_eq!(
-        progress.failed_turn.as_ref().map(|(state, _)| *state),
-        Some("interrupted")
+        progress.failure_message.as_deref(),
+        Some("owned failure details")
     );
     assert_eq!(progress.report_dir.as_deref(), Some("/reports/child"));
     let mut harness = committed.turns.get("child").unwrap().clone();
@@ -95,7 +95,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
             "other",
             &mj_core::subagent::Liveness::Known(None)
         )
-        .failed_turn,
+        .failure_message,
         None
     );
 }
@@ -919,6 +919,7 @@ fn ready_view_waiting(model: &str, waiting: Option<String>) -> ManagedSessionVie
         capacity_retry: None,
         retry_assessment_pending: false,
         authentication_retry_waiting: waiting,
+        held_login_fingerprint: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,
@@ -2110,7 +2111,6 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
     let progress =
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
-                turn_pending: false,
                 finished_span: None,
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
@@ -2120,9 +2120,15 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                     turn.accepted_ordinal = Some(ordinal);
                     turn
                 }),
-                failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
-                login_failure: None,
-                provider_failure: None,
+                state: failed.map_or(ChildState::NoFailure, |(state, reason)| {
+                    ChildState::Failed {
+                        state,
+                        reason: reason.to_owned(),
+                        provider_failure: false,
+                    }
+                }),
+                failure_message: None,
+                wake_error: None,
                 report_dir: None,
             }
         };
@@ -2186,7 +2192,6 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         interruption_event_ordinals: Vec::new(),
     };
     let progress = ChildProgress {
-        turn_pending: false,
         finished_span: None,
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
@@ -2196,12 +2201,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
             turn.accepted_ordinal = Some(20);
             turn
         }),
-        failed_turn: Some((
-            "failed",
-            "Your access token could not be refreshed. Please log out and sign in again.".into(),
-        )),
-        login_failure: Some("codex4".into()),
-        provider_failure: None,
+        state: ChildState::Refused {
+            profile_id: "codex4".into(),
+        },
+        failure_message: None,
+        wake_error: None,
         report_dir: None,
     };
     let expected = "profile codex4: the login is no longer valid; run `mj login --profile codex4` and spawn again";
@@ -2222,81 +2226,6 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         "{entry}"
     );
 
-    // #1508: a session-load refusal has no new failed turn. Its lifecycle
-    // failure must take precedence over the previous delivered answer.
-    let mut parked = record.clone();
-    parked.state = SessionState::Parked;
-    let mut old_login_failure = finished_turn("previous-login-failure");
-    old_login_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
-        stop_reason: "authentication_error".into(),
-    };
-    assert!(mj_core::subagent::turn_failed_on_login(&old_login_failure));
-    let mut old_provider_failure = finished_turn("previous-provider-failure");
-    old_provider_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
-        stop_reason: "error".into(),
-    };
-    old_provider_failure.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
-        message: "the old provider outage".into(),
-        code: Some("service".into()),
-        http_status: Some(503),
-        reset_at: None,
-        login_fingerprint: None,
-    });
-    assert!(provider_failure(&old_provider_failure).is_some());
-    for old_failure in [&old_login_failure, &old_provider_failure] {
-        for (failure, login_invalid) in [
-            (
-                "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex4` for target ec2",
-                true,
-            ),
-            (
-                "could not start the parked sub-agent: process exhaustion (Cannot fork)",
-                false,
-            ),
-        ] {
-            parked.last_error = Some(failure.into());
-            let current = project_child_failure(
-                child_failure_source(Some(&parked), Some(old_failure)),
-                Some("codex4"),
-                Some("old turn summary"),
-            );
-            assert!(current.failed_turn.is_none());
-            assert!(current.provider_failure.is_none());
-            let lifecycle_progress = ChildProgress {
-                login_failure: current.login_failure,
-                failed_turn: current.failed_turn,
-                provider_failure: current.provider_failure,
-                report: ReportState::Delivered("previous answer".into()),
-                answer: None,
-                ..progress.clone()
-            };
-            let (state, output, finished) = subagent_status(
-                Some(&parked),
-                Some(&summary),
-                None,
-                None,
-                false,
-                &lifecycle_progress,
-            );
-            assert_eq!(state, "failed", "{failure}");
-            assert!(finished, "{failure}");
-            let entry = super::wait_agent_entry(
-                "child",
-                &state,
-                output,
-                finished,
-                &lifecycle_progress,
-                false,
-            );
-            assert_eq!(entry["output"], failure);
-            if login_invalid {
-                assert_eq!(entry["failure"]["kind"], "login_invalid");
-            } else {
-                assert!(entry.get("failure").is_none(), "{entry}");
-            }
-        }
-    }
-
     // A report the child did hand back is still its report.
     let delivered = ChildProgress {
         report: ReportState::Delivered("done".into()),
@@ -2308,103 +2237,371 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     );
 }
 
-/// The renewed login here is the profile's `.credentials.json`. On a Mac the
-/// Keychain is the only Claude login (#1491), so the file renews nothing there,
-/// and running this would read the real Keychain.
-// Hard-won: #1547: a sub-agent whose turn failed on a renewed login was reported failed and parked before the pushed login could reach it.
+// Hard-won: #1581: a child with a renewed login was reported as login_invalid when its worker stopped publishing its retry wait.
 #[cfg(not(target_os = "macos"))]
 #[tokio::test]
-async fn a_child_failed_on_a_renewed_login_is_held_only_while_its_worker_waits_for_the_new_login() {
-    let home = tempfile::tempdir().unwrap();
-    let login = |token: &str| {
-        serde_json::to_vec(&serde_json::json!({
-            "claudeAiOauth": {"accessToken": token, "expiresAt": 1}
-        }))
-        .unwrap()
+async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
+    if !isolated_parked_test("renewed_child_login_without_a_worker_hold_is_reported_as_retryable") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    {
+        let mut rejected = fixture.rejected.lock().unwrap();
+        rejected.accept("helper", fixture.result.trigger.as_ref().unwrap());
+        rejected.observe(&fixture.result, &fixture.profile);
+    }
+
+    let waiting = fixture.backend(
+        fixture
+            .result
+            .trigger
+            .as_ref()
+            .unwrap()
+            .login_fingerprint
+            .clone(),
+    );
+    assert!(matches!(
+        waiting
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::NotFinished
+    ));
+
+    let backend = fixture.backend(None);
+    let target = mj_core::credentials::CredentialSyncTarget {
+        session_id: "child-1".into(),
+        profile_id: "helper".into(),
+        harness: fixture.profile.kind,
+        profile_home: fixture.profile.home.clone(),
+        aws_credentials: None,
+        skips_login_file_sync: false,
+        sync_github_token: false,
+        github: Default::default(),
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
+        spec: mj_core::targets::CommandSpec::new("unused", Vec::<String>::new()),
     };
-    std::fs::write(home.path().join(".credentials.json"), login("renewed")).unwrap();
-    let fingerprint =
-        |token: &str| mj_core::credentials::claude_access_token_fingerprint(&login(token));
-    let catalog = ProfileCatalog::with_probe(counting_probe(Default::default()));
-    let mut config = test_config(&[("claude6", HarnessKind::Claude)]);
-    config
-        .profiles
-        .get_mut("claude6")
-        .unwrap()
-        .home
-        .clone_from(&home.path().to_path_buf());
-    catalog.sync_now(&config).await;
-    // The child's worker publishes `waiting`, as its own retry rule decides.
-    let backend = |waiting: Option<String>| {
-        Arc::new(
-            ApiBackend::new(
-                SessionControl::new(FakeControl(FakeSession {
-                    session_id: "child".into(),
-                    accepted_ordinal: 1,
-                    submitted: mpsc::unbounded_channel().0,
-                    view: Some(ready_view_waiting("m", waiting)),
-                })),
-                running_states(),
-                Arc::new(ParentExports(parent_record("child", "claude6"))),
-            )
-            .with_profile_catalog(catalog.clone()),
+    let Some(mj_core::credentials::LoginFingerprint::AccessToken(renewed)) =
+        mj_core::credentials::LoginFingerprint::read_file(
+            fixture.profile.kind,
+            &fixture.profile.authentication_marker(),
         )
+        .unwrap()
+    else {
+        panic!("expected the fixture to have a renewed login");
     };
-    let failed_on = |token: &str| {
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .start_delivery(&target, &renewed);
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::NotFinished
+    ));
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .observe_held_login("helper", "child-1", Some(&renewed));
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert!(report.failure.is_none(), "{report:?}");
+    assert_eq!(report.promptable, Some(true));
+    let output = report.output.unwrap();
+    assert!(
+        output.contains("helper") && output.contains("login was renewed"),
+        "{output}"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn pending_child_login_reconciliation_blocks_reporting_until_current_login_is_refused() {
+    if !isolated_parked_test(
+        "pending_child_login_reconciliation_blocks_reporting_until_current_login_is_refused",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("same", "same").await;
+    let cause = fixture.result.trigger.as_ref().unwrap();
+    let (targets, _) = tokio::sync::watch::channel(Vec::new());
+    let (triggers, mut queued) = mpsc::unbounded_channel();
+    let sync = mj_core::credentials::CredentialSyncHandle {
+        targets: Arc::new(targets),
+        triggers,
+    };
+    let mut tracker = crate::pollers::CredentialSyncSignalTracker::default();
+    tracker.observe(
+        &cause.session_id,
+        "helper",
+        mj_core::credentials::CredentialSyncSignal {
+            ordinal: cause.ordinal,
+            reason: cause.reason,
+            login_fingerprint: cause.login_fingerprint.clone(),
+        },
+    );
+    crate::pollers::schedule_due_credential_syncs(
+        &mut tracker,
+        &sync,
+        &fixture.rejected,
+        std::time::Instant::now(),
+    );
+    assert_eq!(queued.try_recv().unwrap().cause.as_ref(), Some(cause));
+    let backend = fixture.backend(None);
+    let (_, children) = backend.notification_children("parent-1").await.unwrap();
+    assert_eq!(children[0].state, "running");
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::NotFinished
+    ));
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .observe(&fixture.result, &fixture.profile);
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.failure.unwrap()["kind"], "login_invalid");
+    assert_eq!(report.promptable, None);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn child_login_failure_without_a_registry_record_is_promptable_after_restart() {
+    if !isolated_parked_test(
+        "child_login_failure_without_a_registry_record_is_promptable_after_restart",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("same", "same").await;
+    let backend = fixture.backend_with_view(None);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert!(report.failure.is_none(), "{report:?}");
+    assert_eq!(report.promptable, Some(true));
+    assert!(report.output.unwrap().contains("no result for this turn"));
+}
+
+// Hard-won: #1581: text from a failed wake was treated as proof the current login was refused.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn failed_wake_requires_typed_evidence_for_the_current_login() {
+    use mj_core::credentials::LoginFingerprint;
+    use mj_core::subagent::WakeFailure;
+
+    if !isolated_parked_test("failed_wake_requires_typed_evidence_for_the_current_login") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("current", "older").await;
+    fixture.exports.set_child_state(SessionState::Parked);
+    let backend = fixture.backend(None);
+    let detail = "login_invalid: workspace routing discovery unauthorized (401)";
+    let current = LoginFingerprint::read_file(
+        HarnessKind::Claude,
+        &fixture.profile.authentication_marker(),
+    )
+    .unwrap()
+    .unwrap();
+    let stale = LoginFingerprint::AccessToken(
+        fixture
+            .result
+            .trigger
+            .as_ref()
+            .unwrap()
+            .login_fingerprint
+            .clone()
+            .unwrap(),
+    );
+    for (staged_login, refused) in [(Some(current), true), (Some(stale), false), (None, false)] {
+        let error = staged_login.map_or_else(
+            || detail.to_owned(),
+            |staged_login| {
+                WakeFailure::Authentication {
+                    profile_id: "helper".into(),
+                    staged_login,
+                }
+                .encode(detail)
+                .unwrap()
+            },
+        );
+        {
+            let mut records = fixture.exports.records.lock().unwrap();
+            let record = records.get_mut("child-1").unwrap();
+            record.last_error = Some(error);
+            crate::database::save_session(record).unwrap();
+        }
+        let (_, children) = backend.notification_children("parent-1").await.unwrap();
+        let child = &children[0];
+        let mut entry = wait_agent_entry(
+            "child-1",
+            &child.state,
+            child.output.clone(),
+            child.finished,
+            &child.progress,
+            false,
+        );
+        mark_promptable(
+            &mut entry,
+            &child.state,
+            &child.progress,
+            child.record.as_ref(),
+        );
+        assert_eq!(entry["state"], "failed", "{entry}");
+        assert_eq!(
+            entry["failure"]["kind"] == "login_invalid",
+            refused,
+            "{entry}"
+        );
+        assert_eq!(entry["promptable"] == true, !refused, "{entry}");
+        assert!(
+            !entry["output"].as_str().unwrap().contains("wake evidence"),
+            "{entry}"
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct ChildLoginReportFixture {
+    _home: tempfile::TempDir,
+    profile: mj_core::config::HarnessProfile,
+    result: mj_core::credentials::CredentialSyncResult,
+    rejected: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
+    catalog: Arc<ProfileCatalog>,
+    conversation: mj_core::state::MaterializedSession,
+    exports: Arc<ParkingExports>,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl ChildLoginReportFixture {
+    async fn new(current: &str, failed: &str) -> Self {
+        use mj_core::credentials::*;
+        let home = tempfile::tempdir().unwrap();
+        let login = |token| {
+            serde_json::to_vec(&serde_json::json!({
+                "claudeAiOauth": {"accessToken": token, "expiresAt": 1}
+            }))
+            .unwrap()
+        };
+        let login_fingerprint = claude_access_token_fingerprint(&login(failed));
+        let current_login = login(current);
+        std::fs::write(home.path().join(".credentials.json"), &current_login).unwrap();
+        let catalog = ProfileCatalog::with_probe(counting_probe(Default::default()));
+        let mut config = test_config(&[("helper", HarnessKind::Claude)]);
+        let profile = config.profiles.get_mut("helper").unwrap();
+        profile.home = home.path().into();
+        let profile = profile.clone();
+        catalog.sync_now(&config).await;
+
+        store_parent_and_child("child-1");
+        let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+        conversation.applied_event_ordinal = 9;
+        conversation.applied_event_digest = format!("{:064x}", 9);
         let mut turn = finished_turn("task");
         turn.outcome = mj_core::state::TurnOutcomeKind::Completed {
             stop_reason: "error".into(),
         };
         turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
             code: Some(agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()),
-            login_fingerprint: fingerprint(token),
+            login_fingerprint: login_fingerprint.clone(),
             ..mj_core::diagnostic::TurnDiagnostic::from_provider(
                 &serde_json::json!({"message": "Authentication required"}),
             )
             .unwrap()
         });
-        let mut progress = ChildProgress::settled(ReportState::Fallback);
-        progress.login_failure = Some("claude6".into());
-        progress.failed_turn = Some(("failed", "Authentication required".into()));
-        progress.answer = Some(turn);
-        vec![("child".to_owned(), None, progress)]
-    };
-    let held = |children: &Vec<(String, Option<_>, ChildProgress)>| {
-        let progress = &children[0].2;
-        assert_eq!(progress.login_failure.is_none(), progress.turn_pending);
-        progress.turn_pending
-    };
-
-    // Failed on a token since renewed, and the worker waits for the new login.
-    let mut children = failed_on("revoked");
-    backend(fingerprint("revoked"))
-        .settle_renewed_login_failures(&mut children)
-        .await
-        .unwrap();
-    assert!(held(&children), "the child waits for its pushed login");
-    assert!(children[0].2.failed_turn.is_none());
-
-    // The worker stopped waiting (a driver attached, a question arrived, an
-    // older worker): the parent hears of the failure.
-    for waiting in [None, fingerprint("some other turn")] {
-        let mut children = failed_on("revoked");
-        backend(waiting)
-            .settle_renewed_login_failures(&mut children)
-            .await
-            .unwrap();
-        assert!(!held(&children));
-        assert_eq!(children[0].2.login_failure.as_deref(), Some("claude6"));
-        assert!(children[0].2.failed_turn.is_some());
+        conversation.last_turn_outcome = Some(turn);
+        crate::database::save_materialized_session(&conversation).unwrap();
+        let result = CredentialSyncResult {
+            profile_id: "helper".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "child-1".into(),
+                ordinal: 9,
+                reason: CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint,
+            }),
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "child-1".into(),
+                unchanged_login: Some(CredentialSnapshot::of(HarnessKind::Claude, &current_login)),
+                current_access_token: claude_access_token_fingerprint(&current_login),
+                outcome: Ok(vec![]),
+                step_failures: vec![],
+            }],
+            partial: false,
+        };
+        Self {
+            _home: home,
+            result,
+            profile,
+            catalog,
+            rejected: Default::default(),
+            conversation,
+            exports: ParkingExports::new(SessionState::Running, None),
+        }
     }
 
-    // Failed on the profile's current token: a real refusal, whatever the worker says.
-    let mut children = failed_on("renewed");
-    backend(fingerprint("renewed"))
-        .settle_renewed_login_failures(&mut children)
-        .await
-        .unwrap();
-    assert!(!held(&children));
-    assert!(children[0].2.failed_turn.is_some());
+    fn backend(&self, waiting: Option<String>) -> ApiBackend {
+        let mut view = ready_view_waiting("m", waiting);
+        view.snapshot.as_mut().unwrap().materialized = self.conversation.clone();
+        self.backend_with_view(Some(view))
+    }
+
+    fn backend_with_view(&self, view: Option<ManagedSessionView>) -> ApiBackend {
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "child-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view,
+            })),
+            running_states(),
+            self.exports.clone(),
+        )
+        .with_profile_catalog(self.catalog.clone())
+        .with_rejected_logins(self.rejected.clone())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn child_login_mailbox_report() -> mj_core::mailbox::SubagentFinishedReport {
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    *report
 }
 
 /// Once the credential sync has found a profile's login refused, a spawn on it
@@ -2428,6 +2625,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             profile_id: "codex-high".into(),
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "child-1".into(),
+                ordinal: 1,
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: None,
             }),

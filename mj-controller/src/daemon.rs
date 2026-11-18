@@ -266,6 +266,7 @@ pub struct RuntimeState {
     /// backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:
         std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
+    pub(crate) rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,

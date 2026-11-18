@@ -106,6 +106,7 @@ pub(super) async fn run_session_actor(
 ) {
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
+    let mut wake_credentials_on_connect = false;
     let mut failures = 0_u32;
     let mut unreachable = false;
     let mut harness_readiness = HarnessStartupWatch::default();
@@ -138,6 +139,9 @@ pub(super) async fn run_session_actor(
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        if connection.is_some() && std::mem::take(&mut wake_credentials_on_connect) {
+            updates.session_gate.wake_credentials(&target.session_id);
+        }
         // The connection's owner invalidates the wait on every loss or lease,
         // including failures in commands whose display error is deferred.
         if connection.is_none() || lifecycle.is_leased() {
@@ -1107,16 +1111,15 @@ pub(super) async fn run_session_actor(
                         if let Some((_, lease)) = &lifecycle.active_lease {
                             job.deferred_by_lease(lease);
                             job.refuse(
-                                RelayJobDeferred(
-                                    "a lifecycle operation holds the relay connection",
-                                )
-                                .into(),
+                                RelayJobDeferred(crate::session_manager::RELAY_JOB_LEASED).into(),
                             );
                             continue;
                         }
                         let Some(connection) = connection.as_mut() else {
+                            wake_credentials_on_connect |= job.deferred_by_reconnect();
                             job.refuse(
-                                RelayJobDeferred("the relay connection is reconnecting").into(),
+                                RelayJobDeferred(crate::session_manager::RELAY_JOB_RECONNECTING)
+                                    .into(),
                             );
                             continue;
                         };

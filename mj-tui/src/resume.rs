@@ -692,9 +692,9 @@ pub(crate) fn unresumable_notice(reason: &str) -> String {
 /// The zone resume times display in: local time, except UTC under test so
 /// goldens do not follow the machine's time zone.
 #[cfg(not(test))]
-type DisplayZone = chrono::Local;
+pub(crate) type DisplayZone = chrono::Local;
 #[cfg(test)]
-type DisplayZone = chrono::Utc;
+pub(crate) type DisplayZone = chrono::Utc;
 
 pub(crate) fn display_now() -> chrono::DateTime<DisplayZone> {
     DisplayZone::now()

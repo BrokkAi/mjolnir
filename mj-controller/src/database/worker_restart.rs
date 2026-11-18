@@ -166,7 +166,8 @@ fn finish_worker_restart_with(
 pub(crate) fn fail_subagent_unpark(
     session_id: &str,
     operation_id: &str,
-    failure: &str,
+    detail: &str,
+    evidence: Option<&mj_core::subagent::WakeFailure>,
 ) -> Result<()> {
     let owner = crate::worker_lifecycle::require(session_id)?;
     ensure!(
@@ -175,7 +176,10 @@ pub(crate) fn fail_subagent_unpark(
     );
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
-    let failure = failure.to_owned();
+    let failure = match evidence {
+        Some(evidence) => evidence.encode(detail)?,
+        None => detail.to_owned(),
+    };
     submit_database_write("fail_subagent_unpark", move |connection| {
         let tx = connection.transaction()?;
         ensure!(tx.execute(

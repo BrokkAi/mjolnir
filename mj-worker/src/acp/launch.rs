@@ -11,6 +11,7 @@ struct ClaudeLoginState {
     #[cfg_attr(not(unix), allow(dead_code))]
     installation: tokio::sync::Mutex<()>,
     observed: Mutex<(u64, Option<String>)>,
+    file_fingerprint: Mutex<Option<String>>,
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -45,6 +46,22 @@ impl ClaudeLoginIdentity {
             .checked_add(1)
             .expect("Claude login revision exhausted");
         observed.1 = fingerprint;
+    }
+
+    pub(crate) fn file_fingerprint(&self) -> Option<String> {
+        self.0
+            .file_fingerprint
+            .lock()
+            .expect("worker credential identity lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn observe_file(&self, fingerprint: Option<String>) {
+        *self
+            .0
+            .file_fingerprint
+            .lock()
+            .expect("worker credential identity lock poisoned") = fingerprint;
     }
 
     pub(crate) async fn installation(&self) -> tokio::sync::MutexGuard<'_, ()> {

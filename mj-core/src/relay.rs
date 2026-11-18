@@ -167,8 +167,10 @@ pub const RELAY_WORK_LIVENESS_PROTOCOL: u32 = 67;
 /// for a prompted turn. The settlement's bytes change, so an older reader would
 /// fail the event's digest.
 pub const RELAY_HARNESS_TURN_FACTS_PROTOCOL: u32 = 68;
-/// 69 reports the notification stack and accepts exact Clear and read pruning.
-pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 69;
+/// The worker publishes the fingerprint of its held harness login.
+pub const RELAY_HELD_LOGIN_PROTOCOL: u32 = 69;
+/// 70 reports the notification stack and accepts exact Clear and read pruning.
+pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 70;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NOTIFICATION_STACK_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;

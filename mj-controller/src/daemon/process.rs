@@ -1354,6 +1354,11 @@ pub(super) fn spawn_manager_target_refresher(
                     });
                     // Same lock as the install, so a view is published only
                     // while its actor is still wanted.
+                    state
+                        .rejected_logins
+                        .lock()
+                        .expect("rejected logins poisoned")
+                        .retain_held_logins(|id| retained.contains(id));
                     owner.install_relay_sessions(retained.clone())
                 };
                 if views_dropped {
@@ -1415,6 +1420,7 @@ pub(super) fn spawn_manager_target_refresher(
                     &closing,
                     prepared,
                     &state.credential_targets,
+                    Some(&state.worker_background_gate()),
                 ) {
                     continue;
                 }

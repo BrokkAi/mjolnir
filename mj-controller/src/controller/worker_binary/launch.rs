@@ -189,6 +189,7 @@ impl Controller {
             WorkerFilePreparation::Install,
             history,
         )
+        .map(|_| ())
     }
 
     pub(in crate::controller) fn prepare_worker_files_for(
@@ -199,22 +200,23 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
-    ) -> Result<()> {
-        if let Some(launch) = self.stage_worker_files_for(
+    ) -> Result<Option<mj_core::credentials::LoginFingerprint>> {
+        let (launch, staged_login) = self.stage_worker_files_for(
             session_id,
             backend,
             worker_root,
             executor,
             preparation,
             history,
-        )? {
+        )?;
+        if let Some(launch) = launch {
             prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
         }
-        Ok(())
+        Ok(staged_login)
     }
 
-    /// Return the pending harness preflight so a new checkout can finish first.
-    /// Existing callers complete that preflight through `prepare_worker_files_for`.
+    /// Return the pending harness preflight so a new checkout can finish first,
+    /// and the login identity when refreshing the profile for an existing worker.
     pub(in crate::controller) fn stage_worker_files_for(
         &self,
         session_id: &str,
@@ -223,7 +225,10 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
         history: LaunchHistory<'_>,
-    ) -> Result<Option<WorkerLaunchConfig>> {
+    ) -> Result<(
+        Option<WorkerLaunchConfig>,
+        Option<mj_core::credentials::LoginFingerprint>,
+    )> {
         let _timing =
             crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
         let owner = crate::worker_lifecycle::require(session_id)?;
@@ -393,6 +398,19 @@ impl Controller {
         }
         let shared_login = shared_profile_login(profile, backend);
         if preparation != WorkerFilePreparation::Install {
+            // A shared symlink stays live across boot. Only a copied login
+            // identifies the credentials staged for this specific launch.
+            let staged_login = if preparation == WorkerFilePreparation::RefreshProfileOnly
+                && profile.auth_scheme().uses_native_login_file()
+                && shared_login.is_none()
+            {
+                mj_core::credentials::LoginFingerprint::read_file(
+                    profile.kind,
+                    &mj_core::config::harness_authentication_marker(profile.kind, &profile_stage),
+                )?
+            } else {
+                None
+            };
             clear_profile_configuration(
                 executor,
                 backend,
@@ -417,9 +435,9 @@ impl Controller {
             if upgrade_retained_worker {
                 let worker = WorkerInstall::for_target(backend, executor)?;
                 install_worker_binary(executor, backend, session_id, &worker, "hel")?;
-                return Ok(Some(launch));
+                return Ok((Some(launch), staged_login));
             }
-            return Ok(None);
+            return Ok((None, staged_login));
         }
         let worker = WorkerInstall::for_target(backend, executor)?;
         install_worker_files(
@@ -439,7 +457,7 @@ impl Controller {
             self.install_build_cache_shim(session, backend, &launch, executor)
                 .context("install shared machine build cache configuration")?;
         }
-        Ok(Some(launch))
+        Ok((Some(launch), None))
     }
 
     /// Refresh and verify the shared-cache copy, then install marked launchers

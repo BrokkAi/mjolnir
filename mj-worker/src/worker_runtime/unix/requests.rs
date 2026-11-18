@@ -253,14 +253,11 @@ pub(crate) async fn credential_response(
             let endpoint = endpoint.clone();
             let github_token_path = relay_root.join("github-token");
             let result = match &envelope.request {
-                RelayRequest::InstallCredentials { .. }
-                    if endpoint.harness.keeps_logins_in_database() =>
-                {
-                    let request = envelope.request.clone();
-                    tokio::task::spawn_blocking(move || {
-                        apply_credential_request_at(&endpoint, &github_token_path, &request)
-                    })
-                    .await
+                RelayRequest::CredentialState => {
+                    let _installation = login_identity.installation().await;
+                    Ok(read_held_login(&endpoint, login_identity)
+                        .await
+                        .map(|snapshot| credential_state_payload(&snapshot)))
                 }
                 RelayRequest::InstallCredentials { data } => {
                     Ok(apply_install_credentials(&endpoint, data, login_identity).await)
@@ -310,9 +307,6 @@ async fn apply_install_credentials(
     use base64::engine::general_purpose::STANDARD as BASE64;
     use mj_core::credentials::{MAX_CREDENTIAL_BYTES, validate_credential_payload};
 
-    if endpoint.harness.keeps_logins_in_database() {
-        bail!("database-backed credentials require the authoritative install path");
-    }
     if data.len() > MAX_CREDENTIAL_BYTES * 2 {
         bail!("credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
     }
@@ -323,21 +317,66 @@ async fn apply_install_credentials(
     // File commit and identity publication have the same owner and order,
     // including when several clients install credentials concurrently.
     let _installation = login_identity.installation().await;
-    let installed = mj_core::credentials::install_session_credentials(
-        endpoint.harness,
-        &endpoint.marker,
-        &bytes,
-    )
-    .await
-    .with_context(|| format!("install credentials at {}", endpoint.marker.display()))?;
-    if endpoint.harness == HarnessKind::Claude
-        && installed.snapshot.fingerprint == mj_core::credentials::credential_fingerprint(&bytes)
-    {
-        login_identity.installed(mj_core::credentials::claude_access_token_fingerprint(
+    let written = if endpoint.harness.keeps_logins_in_database() {
+        let marker = endpoint.marker.clone();
+        let harness = endpoint.harness;
+        tokio::task::spawn_blocking(move || {
+            mj_core::credentials::write_credential_file(harness, &marker, &bytes)
+        })
+        .await
+        .context("credential write task stopped")
+        .and_then(|result| result)
+    } else {
+        mj_core::credentials::install_session_credentials(
+            endpoint.harness,
+            &endpoint.marker,
             &bytes,
-        ));
+        )
+        .await
+        .map(|_| ())
+    };
+    let read_back = read_held_login(endpoint, login_identity).await;
+    written.with_context(|| format!("install credentials at {}", endpoint.marker.display()))?;
+    read_back.map(|snapshot| credential_state_payload(&snapshot))
+}
+
+/// Read what the harness holds under the same worker lock as installation.
+/// A failed read clears the observation so a previously held login cannot
+/// masquerade as evidence about the result of this install.
+async fn read_held_login(
+    endpoint: &CredentialEndpoint,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
+) -> Result<mj_core::credentials::CredentialSnapshot> {
+    let marker = endpoint.marker.clone();
+    let kind = endpoint.harness;
+    let read = tokio::task::spawn_blocking(move || {
+        mj_core::credentials::read_credential_file(kind, &marker)
+    })
+    .await
+    .context("credential read-back task stopped")
+    .and_then(|result| result);
+    if kind == HarnessKind::Claude {
+        login_identity.installed(
+            read.as_ref().ok().and_then(|(_, bytes)| {
+                mj_core::credentials::claude_access_token_fingerprint(bytes)
+            }),
+        );
+    } else {
+        login_identity.observe_file(
+            read.as_ref()
+                .ok()
+                .and_then(|(snapshot, _)| snapshot.present.then(|| snapshot.fingerprint.clone())),
+        );
     }
-    Ok(credential_state_payload(&installed.snapshot))
+    read.map(|(snapshot, _)| snapshot)
+}
+
+pub(crate) async fn observe_initial_login(
+    endpoint: &CredentialEndpoint,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
+) -> Result<()> {
+    let _installation = login_identity.installation().await;
+    read_held_login(endpoint, login_identity).await.map(|_| ())
 }
 
 /// Snapshot and install project memory off the socket task. These payloads
@@ -1073,6 +1112,13 @@ mod tests {
             marker: marker.clone(),
         };
         let data = base64::engine::general_purpose::STANDARD.encode(incoming);
+        let relay_root = tempfile::tempdir().unwrap();
+        let relay =
+            crate::relay::DurableRelay::open(relay_root.path(), "credential-lock-race", "fixture")
+                .unwrap();
+        let identity = relay.login_identity.clone();
+        identity.observe_file(Some(mj_core::credentials::credential_fingerprint(&initial)));
+        let worker_identity = identity.clone();
         let mut install = tokio::spawn(async move {
             credential_response(
                 RelayRequestEnvelope {
@@ -1082,7 +1128,7 @@ mod tests {
                 },
                 &Ok(endpoint.clone()),
                 &endpoint.home,
-                &Default::default(),
+                &worker_identity,
             )
             .await
         });
@@ -1111,6 +1157,10 @@ mod tests {
         assert_eq!(
             fingerprint,
             mj_core::credentials::credential_fingerprint(&latest)
+        );
+        assert_eq!(
+            relay.operational_state().held_login_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
         );
         assert_eq!(std::fs::read(marker).unwrap(), latest);
     }
