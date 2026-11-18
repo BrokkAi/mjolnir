@@ -3726,7 +3726,33 @@ fn quota_provider_reads_harness_configuration() {
         "OPENAI_BASE_URL".into(),
         "https://api.deepseek.com/v1".into(),
     );
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"a"}}"#,
+    )
+    .unwrap();
+    assert_eq!(profile.quota_provider(), QuotaProvider::OpenAI);
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#,
+    )
+    .unwrap();
     assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+
+    // Custom table names cannot split one service's quota or impersonate another.
+    for (id, endpoint) in [
+        ("anthropic", "https://api.z.ai/api/coding/paas/v4"),
+        ("another-table", "https://open.bigmodel.cn/api/paas/v4"),
+    ] {
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "model_provider = '{id}'\n[model_providers.{id}]\nbase_url = '{endpoint}'\nwire_api = 'responses'\nenv_key = 'ZAI_API_KEY'\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(profile.quota_provider(), QuotaProvider::Zai);
+    }
 
     std::fs::write(
         home.path().join("opencode.jsonc"),
@@ -3746,4 +3772,13 @@ fn quota_provider_reads_harness_configuration() {
         "https://api.deepseek.com/anthropic".into(),
     );
     assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+    // An unrecognised proxy is its own provider, not the default vendor's pool.
+    profile.environment.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        "https://openrouter.ai/api".into(),
+    );
+    assert_eq!(
+        profile.quota_provider(),
+        QuotaProvider::Other("openrouter.ai".into())
+    );
 }

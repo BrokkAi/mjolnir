@@ -109,6 +109,98 @@ impl ProviderDiscovery {
 pub(crate) struct PoolKey {
     pub provider: QuotaProvider,
     pub scope: Option<String>,
+    pub period: PoolPeriod,
+}
+
+/// Period identity keeps unrelated rolling and long-running allowances apart.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PoolPeriod {
+    Week,
+    FiveHour,
+    Other { label: String, seconds: Option<i64> },
+}
+
+impl PoolPeriod {
+    fn of(report: &ProfileQuota, window: &QuotaWindow) -> Self {
+        if report.weekly_window() == Some(window)
+            && matches!(
+                window.label.to_ascii_lowercase().as_str(),
+                "week" | "weekly" | "7d"
+            )
+            && window.duration_seconds.is_none_or(|s| s == 604800)
+        {
+            Self::Week
+        } else if report.five_hour_window() == Some(window)
+            && window.duration_seconds.is_none_or(|s| s == 18000)
+        {
+            Self::FiveHour
+        } else {
+            Self::Other {
+                label: window.label.clone(),
+                seconds: window.duration_seconds,
+            }
+        }
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        match self {
+            Self::Week => "week",
+            Self::FiveHour => "5H",
+            Self::Other { label, .. } => label,
+        }
+    }
+
+    pub(crate) fn marker(&self) -> char {
+        match self {
+            Self::Week => 'W',
+            Self::FiveHour => '5',
+            Self::Other { .. } => 'R',
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QuotaRow {
+    Pool(PoolKey),
+    Profile(String),
+    Lane(PoolKey, String),
+}
+
+impl QuotaRow {
+    pub(crate) fn pool(&self) -> Option<&PoolKey> {
+        match self {
+            Self::Pool(key) | Self::Lane(key, _) => Some(key),
+            Self::Profile(_) => None,
+        }
+    }
+}
+
+pub(crate) fn selectable_rows(
+    providers: &[ProviderQuota],
+    expanded: &std::collections::BTreeSet<PoolKey>,
+) -> Vec<QuotaRow> {
+    providers
+        .iter()
+        .flat_map(|provider| {
+            provider
+                .pools
+                .iter()
+                .flat_map(|pool| {
+                    std::iter::once(QuotaRow::Pool(pool.key.clone())).chain(
+                        pool.members
+                            .iter()
+                            .filter(|_| expanded.contains(&pool.key))
+                            .map(|member| QuotaRow::Lane(pool.key.clone(), member.id.clone())),
+                    )
+                })
+                .chain(
+                    provider
+                        .text
+                        .iter()
+                        .map(|(id, _)| QuotaRow::Profile(id.clone())),
+                )
+        })
+        .collect()
 }
 
 pub(crate) struct ProviderQuota {
@@ -131,6 +223,7 @@ pub(crate) struct PoolMember {
     pub reset: Option<i64>,
     pub banked: Option<u64>,
     pub five_hour: Option<QuotaWindow>,
+    pub five_hour_idle: bool,
     pub fable: Option<u8>,
     pub note: Option<String>,
 }
@@ -158,7 +251,10 @@ pub(crate) fn provider_pools(
                 text: Vec::new(),
             });
         let Some(quota) = quotas.get(id) else {
-            group.text.push((id.into(), "unavailable".into()));
+            group.text.push((
+                id.into(),
+                format!("refreshing{}", mj_chat::theme::glyphs().ellipsis),
+            ));
             continue;
         };
         let label = if quota.is_usage_priced() {
@@ -169,7 +265,8 @@ pub(crate) fn provider_pools(
             Some(
                 quota
                     .refused_check_without_reading(now)
-                    .unwrap_or_else(|| "unavailable".into()),
+                    .or_else(|| quota.error_label())
+                    .expect("errored report has a label"),
             )
         } else {
             None
@@ -193,7 +290,7 @@ pub(crate) fn provider_pools(
         };
         let mut added = false;
         for (scope, report) in reports {
-            let Some(window) = report.weekly_window().or_else(|| report.five_hour_window()) else {
+            let Some(window) = report.summary_window() else {
                 continue;
             };
             let Some(remaining) = quota_remaining_percent(window) else {
@@ -203,6 +300,7 @@ pub(crate) fn provider_pools(
             let key = PoolKey {
                 provider: group.provider.clone(),
                 scope: scope.clone(),
+                period: PoolPeriod::of(&report, window),
             };
             let index = group
                 .pools
@@ -228,6 +326,9 @@ pub(crate) fn provider_pools(
                 reset: window.resets_at_epoch_seconds,
                 banked: quota.banked_resets,
                 five_hour: report.five_hour_window().cloned(),
+                // Claude omits the short window until first use; other adapters
+                // do not define an absent window as idle.
+                five_hour_idle: profile.kind == HarnessKind::Claude,
                 fable: quota
                     .fable_weekly_window()
                     .and_then(quota_remaining_percent),
@@ -243,7 +344,17 @@ pub(crate) fn provider_pools(
         group
             .pools
             .sort_by_key(|pool| pool.key.scope.as_deref() != Some("gemini"));
+        let multiple_periods = group.pools.iter().any(|pool| {
+            group.pools.iter().any(|other| {
+                other.key.scope == pool.key.scope && other.key.period != pool.key.period
+            })
+        });
         for pool in &mut group.pools {
+            if multiple_periods {
+                pool.label = format!("{} {}", pool.label, pool.key.period.label())
+                    .trim()
+                    .to_owned();
+            }
             pool.members.sort_by(|a, b| {
                 a.reset
                     .unwrap_or(i64::MAX)

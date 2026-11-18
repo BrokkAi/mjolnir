@@ -15,9 +15,9 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄   □ ╮
 │                                      ││ANTHROPIC                                                                     ▐
-│                                      ││  claude-1: unavailable                                                       ▐
+│                                      ││  claude-1: refreshing…                                                       ▐
 │                                      ││OPENAI                                                                        ▐
-│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -40,9 +40,9 @@ Transient dashboard message
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄   □ ╮
 │                                      ││ANTHROPIC                                                                     ▐
-│                                      ││  claude-1: unavailable                                                       ▐
+│                                      ││  claude-1: refreshing…                                                       ▐
 │                                      ││OPENAI                                                                        ▐
-│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -65,9 +65,9 @@ Transient dashboard message
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                                ││ANTHROPIC                                                                                                                           ▐
-│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││  claude-1: refreshing…                                                                                                             ▐
 │                                                                ││OPENAI                                                                                                                              ▐
-│                                                                ││  codex-1: unavailable                                                                                                              │
+│                                                                ││  codex-1: refreshing…                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -90,9 +90,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                                ││ANTHROPIC                                                                                                                           ▐
-│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││  claude-1: refreshing…                                                                                                             ▐
 │                                                                ││OPENAI                                                                                                                              ▐
-│                                                                ││  codex-1: unavailable                                                                                                              │
+│                                                                ││  codex-1: refreshing…                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -115,9 +115,9 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                                ││ANTHROPIC                                                                                                                           ▐
-│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││> claude-1: refreshing…                                                                                                             ▐
 │                                                                ││OPENAI                                                                                                                              ▐
-│                                                                ││  codex-1: unavailable                                                                                                              │
+│                                                                ││  codex-1: refreshing…                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -140,9 +140,9 @@ Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then 
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                                ││ANTHROPIC                                                                                                                           ▐
-│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││  claude-1: refreshing…                                                                                                             ▐
 │                                                                ││OPENAI                                                                                                                              ▐
-│                                                                ││  codex-1: unavailable                                                                                                              │
+│                                                                ││  codex-1: refreshing…                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -2031,9 +2031,9 @@ Need at least 60 columns.
 ╰──────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                 ▐
-│  claude-1: unavailable                                   ▐
+│  claude-1: refreshing…                                   ▐
 │OPENAI                                                    ▐
-│  codex-1: unavailable                                    │
+│  codex-1: refreshing…                                    │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                         │
@@ -2062,9 +2062,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰───────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                  ▐
-│  claude-1: unavailable                                    ▐
+│  claude-1: refreshing…                                    ▐
 │OPENAI                                                     ▐
-│  codex-1: unavailable                                     │
+│  codex-1: refreshing…                                     │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                          │
@@ -2093,9 +2093,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                   ▐
-│  claude-1: unavailable                                     ▐
+│  claude-1: refreshing…                                     ▐
 │OPENAI                                                      ▐
-│  codex-1: unavailable                                      │
+│  codex-1: refreshing…                                      │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                           │
@@ -2124,9 +2124,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                    ▐
-│  claude-1: unavailable                                      ▐
+│  claude-1: refreshing…                                      ▐
 │OPENAI                                                       ▐
-│  codex-1: unavailable                                       │
+│  codex-1: refreshing…                                       │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                            │
@@ -2155,9 +2155,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                     ▐
-│  claude-1: unavailable                                       ▐
+│  claude-1: refreshing…                                       ▐
 │OPENAI                                                        ▐
-│  codex-1: unavailable                                        │
+│  codex-1: refreshing…                                        │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                             │
@@ -2186,9 +2186,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                      ▐
-│  claude-1: unavailable                                        ▐
+│  claude-1: refreshing…                                        ▐
 │OPENAI                                                         ▐
-│  codex-1: unavailable                                         │
+│  codex-1: refreshing…                                         │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                              │
@@ -2217,9 +2217,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                       ▐
-│  claude-1: unavailable                                         ▐
+│  claude-1: refreshing…                                         ▐
 │OPENAI                                                          ▐
-│  codex-1: unavailable                                          │
+│  codex-1: refreshing…                                          │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                               │
@@ -2248,9 +2248,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                        ▐
-│  claude-1: unavailable                                          ▐
+│  claude-1: refreshing…                                          ▐
 │OPENAI                                                           ▐
-│  codex-1: unavailable                                           │
+│  codex-1: refreshing…                                           │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                │
@@ -2279,9 +2279,9 @@ Enter open │ ctrl+b then : / ? palette
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                         ▐
-│  claude-1: unavailable                                           ▐
+│  claude-1: refreshing…                                           ▐
 │OPENAI                                                            ▐
-│  codex-1: unavailable                                            │
+│  codex-1: refreshing…                                            │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                 │
@@ -2310,9 +2310,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                          ▐
-│  claude-1: unavailable                                            ▐
+│  claude-1: refreshing…                                            ▐
 │OPENAI                                                             ▐
-│  codex-1: unavailable                                             │
+│  codex-1: refreshing…                                             │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                  │
@@ -2341,9 +2341,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                           ▐
-│  claude-1: unavailable                                             ▐
+│  claude-1: refreshing…                                             ▐
 │OPENAI                                                              ▐
-│  codex-1: unavailable                                              │
+│  codex-1: refreshing…                                              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                   │
@@ -2372,9 +2372,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                            ▐
-│  claude-1: unavailable                                              ▐
+│  claude-1: refreshing…                                              ▐
 │OPENAI                                                               ▐
-│  codex-1: unavailable                                               │
+│  codex-1: refreshing…                                               │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                    │
@@ -2403,9 +2403,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                             ▐
-│  claude-1: unavailable                                               ▐
+│  claude-1: refreshing…                                               ▐
 │OPENAI                                                                ▐
-│  codex-1: unavailable                                                │
+│  codex-1: refreshing…                                                │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                     │
@@ -2434,9 +2434,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                              ▐
-│  claude-1: unavailable                                                ▐
+│  claude-1: refreshing…                                                ▐
 │OPENAI                                                                 ▐
-│  codex-1: unavailable                                                 │
+│  codex-1: refreshing…                                                 │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                      │
@@ -2465,9 +2465,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                               ▐
-│  claude-1: unavailable                                                 ▐
+│  claude-1: refreshing…                                                 ▐
 │OPENAI                                                                  ▐
-│  codex-1: unavailable                                                  │
+│  codex-1: refreshing…                                                  │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                       │
@@ -2496,9 +2496,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                ▐
-│  claude-1: unavailable                                                  ▐
+│  claude-1: refreshing…                                                  ▐
 │OPENAI                                                                   ▐
-│  codex-1: unavailable                                                   │
+│  codex-1: refreshing…                                                   │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                        │
@@ -2527,9 +2527,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                 ▐
-│  claude-1: unavailable                                                   ▐
+│  claude-1: refreshing…                                                   ▐
 │OPENAI                                                                    ▐
-│  codex-1: unavailable                                                    │
+│  codex-1: refreshing…                                                    │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                         │
@@ -2558,9 +2558,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                  ▐
-│  claude-1: unavailable                                                    ▐
+│  claude-1: refreshing…                                                    ▐
 │OPENAI                                                                     ▐
-│  codex-1: unavailable                                                     │
+│  codex-1: refreshing…                                                     │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                          │
@@ -2589,9 +2589,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                   ▐
-│  claude-1: unavailable                                                     ▐
+│  claude-1: refreshing…                                                     ▐
 │OPENAI                                                                      ▐
-│  codex-1: unavailable                                                      │
+│  codex-1: refreshing…                                                      │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                           │
@@ -2620,9 +2620,9 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                    ▐
-│  claude-1: unavailable                                                      ▐
+│  claude-1: refreshing…                                                      ▐
 │OPENAI                                                                       ▐
-│  codex-1: unavailable                                                       │
+│  codex-1: refreshing…                                                       │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                            │
@@ -2650,10 +2650,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: unavailable                                                       │
+│  claude-1: refreshing…                                                       │
 │OPENAI                                                                        │
-│  codex-1: unavailable                                                        │
-│  codex-2: unavailable                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -2692,10 +2692,10 @@ Sessions prefix action: Consumed
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2733,10 +2733,10 @@ Sessions prefix action: Consumed
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2775,10 +2775,10 @@ Prompt prefix action: Consumed
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2816,10 +2816,10 @@ Prompt prefix action: Consumed
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │

@@ -20,10 +20,10 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -61,10 +61,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -102,10 +102,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -143,10 +143,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││ANTHROPIC                                                                                                                                                     │
-│                                                                              ││  claude-1: unavailable                                                                                                                                       │
+│                                                                              ││  claude-1: refreshing…                                                                                                                                       │
 │                                                                              ││OPENAI                                                                                                                                                        │
-│                                                                              ││  codex-1: unavailable                                                                                                                                        │
-│                                                                              ││  codex-2: unavailable                                                                                                                                        │
+│                                                                              ││  codex-1: refreshing…                                                                                                                                        │
+│                                                                              ││  codex-2: refreshing…                                                                                                                                        │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││Nothing needs you                                                                                                                                             │
@@ -184,10 +184,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -226,10 +226,10 @@ Unicode title markers: ('×', '·')
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: unavailable                                                       |
+|                                      ||  claude-1: refreshing..                                                      |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: unavailable                                                        |
-|                                      ||  codex-2: unavailable                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -267,10 +267,10 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: unavailable                                                       |
+|                                      ||  claude-1: refreshing..                                                      |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: unavailable                                                        |
-|                                      ||  codex-2: unavailable                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -308,10 +308,10 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Profiles v (not refreshed)---------------------------------------------------------------------------------------------------------------------------- -   = +
 |                                                                              ||ANTHROPIC                                                                                                                                                     |
-|                                                                              ||  claude-1: unavailable                                                                                                                                       |
+|                                                                              ||  claude-1: refreshing..                                                                                                                                      |
 |                                                                              ||OPENAI                                                                                                                                                        |
-|                                                                              ||  codex-1: unavailable                                                                                                                                        |
-|                                                                              ||  codex-2: unavailable                                                                                                                                        |
+|                                                                              ||  codex-1: refreshing..                                                                                                                                       |
+|                                                                              ||  codex-2: refreshing..                                                                                                                                       |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Notifications (0) ------------------------------------------------------------------------------------------------------------------------------------ -   = +
 |                                                                              ||Nothing needs you                                                                                                                                             |
@@ -349,10 +349,10 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||ANTHROPIC                                                                     |
-|                                      ||  claude-1: unavailable                                                       |
+|                                      ||  claude-1: refreshing..                                                      |
 |                                      ||OPENAI                                                                        |
-|                                      ||  codex-1: unavailable                                                        |
-|                                      ||  codex-2: unavailable                                                        |
+|                                      ||  codex-1: refreshing..                                                       |
+|                                      ||  codex-2: refreshing..                                                       |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -391,10 +391,10 @@ ASCII title markers: ('x', '-')
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: unavailable                                                       │
+│  claude-1: refreshing…                                                       │
 │OPENAI                                                                        │
-│  codex-1: unavailable                                                        │
-│  codex-2: unavailable                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -432,10 +432,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: unavailable                                                       │
+│  claude-1: refreshing…                                                       │
 │OPENAI                                                                        │
-│  codex-1: unavailable                                                        │
-│  codex-2: unavailable                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -473,10 +473,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -514,10 +514,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │ANTHROPIC                                                                     ││                                      │
-│  claude-1: unavailable                                                       ││                                      │
+│  claude-1: refreshing…                                                       ││                                      │
 │OPENAI                                                                        ││                                      │
-│  codex-1: unavailable                                                        ││                                      │
-│  codex-2: unavailable                                                        ││                                      │
+│  codex-1: refreshing…                                                        ││                                      │
+│  codex-2: refreshing…                                                        ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │Nothing needs you                                                             ││                                      │
@@ -555,10 +555,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││ANTHROPIC                                                                                                             │
-│                                                          ││  claude-1: unavailable                                                                                               │
+│                                                          ││  claude-1: refreshing…                                                                                               │
 │                                                          ││OPENAI                                                                                                                │
-│                                                          ││  codex-1: unavailable                                                                                                │
-│                                                          ││  codex-2: unavailable                                                                                                │
+│                                                          ││  codex-1: refreshing…                                                                                                │
+│                                                          ││  codex-2: refreshing…                                                                                                │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││Nothing needs you                                                                                                     │
@@ -596,10 +596,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │ANTHROPIC                                                                                                             ││                                                          │
-│  claude-1: unavailable                                                                                               ││                                                          │
+│  claude-1: refreshing…                                                                                               ││                                                          │
 │OPENAI                                                                                                                ││                                                          │
-│  codex-1: unavailable                                                                                                ││                                                          │
-│  codex-2: unavailable                                                                                                ││                                                          │
+│  codex-1: refreshing…                                                                                                ││                                                          │
+│  codex-2: refreshing…                                                                                                ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │Nothing needs you                                                                                                     ││                                                          │
@@ -637,10 +637,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: unavailable                                                       │
+│  claude-1: refreshing…                                                       │
 │OPENAI                                                                        │
-│  codex-1: unavailable                                                        │
-│  codex-2: unavailable                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -682,10 +682,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -731,7 +731,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ─────────────── ▁   ▄ ─
+│                  │─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -776,7 +776,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── local 42% ───────────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── Anthropic 63%, codex-1 unavailable, codex-2 unavailable ────────────────────── ▁   ▄ ─
+│                  │─ Profiles ── Anthropic 63%, codex-1 refreshing…, codex-2 refreshing… ────────────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

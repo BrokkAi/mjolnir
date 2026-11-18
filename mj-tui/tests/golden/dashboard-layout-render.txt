@@ -28,10 +28,10 @@
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (2) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││! Important update · hel · age unknown                  1 of 1 Previous  Next │
@@ -72,10 +72,10 @@ Alt+g session · Ctrl+Enter send · Alt+n next · Alt+s skip · Alt+c all ! · A
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││ANTHROPIC                                                                     │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (2) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? Newest question · hel · age unknown 2 of 2 Previous Alt+PgUp  Next Alt+PgDn │
@@ -112,10 +112,10 @@ open Rename action: None
 │                       ╰──────────────────────────────────────────────────────────────────────╯  ─────────────────────╯
 │                                                                                                 ────────────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      ││  claude-1: unavailable                                                       │
+│                                      ││  claude-1: refreshing…                                                       │
 │                                      ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -145,10 +145,10 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │                                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      ▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │  · ACP pretty name               ◇ ⋯ ▐│ANTHROPIC                                                                     │
-│  Idle  podman [2]  codex-1           ▐│  claude-1: unavailable                                                       │
+│  Idle  podman [2]  codex-1           ▐│  claude-1: refreshing…                                                       │
 │  │ No messages yet                   ▐│OPENAI                                                                        │
-│  │                                   ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│  │                                   ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │[3] proj02 ───────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │  Idle  podman [1]  codex-1           ││Nothing needs you                                                             │
@@ -186,7 +186,7 @@ compact pane preset action: None
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ─────────────── ▁   ▄ ─
+│                  │─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────────── ▁   ▄ ─
 ╰──────────────────╯ Notifications (0) ────────────────────────────────────────────────────────────────────────── ▁   ▄
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 compact transcript area at height 32: Rect { x: 20, y: 0, width: 100, height: 24 }
@@ -215,10 +215,10 @@ restore pane preset action: None
 │  │                                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      ▐╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │  · ACP pretty name               ◇ ⋯ ▐│ANTHROPIC                                                                     │
-│  Idle  podman [2]  codex-1           ▐│  claude-1: unavailable                                                       │
+│  Idle  podman [2]  codex-1           ▐│  claude-1: refreshing…                                                       │
 │  │ No messages yet                   ▐│OPENAI                                                                        │
-│  │                                   ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│  │                                   ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │[3] proj02 ───────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │  Idle  podman [1]  codex-1           ││Nothing needs you                                                             │
@@ -261,10 +261,10 @@ restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 14
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │  Idle  podman [2]  codex-1           ││ANTHROPIC                                                                     │
-│  │ No messages yet                   ││  claude-1: unavailable                                                       │
+│  │ No messages yet                   ││  claude-1: refreshing…                                                       │
 │  │                                   ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -314,7 +314,7 @@ compact pane preset action: None
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ─────────────── ▁   ▄ ─
+│                  │─ Profiles ── claude-1 refreshing…, codex-1 refreshing…, codex-2 refreshing… ─────────────── ▁   ▄ ─
 ╰──────────────────╯ Notifications (0) ────────────────────────────────────────────────────────────────────────── ▁   ▄
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
 compact transcript area at height 44: Rect { x: 20, y: 0, width: 100, height: 36 }
@@ -355,10 +355,10 @@ restore pane preset action: None
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │  Idle  podman [2]  codex-1           ││ANTHROPIC                                                                     │
-│  │ No messages yet                   ││  claude-1: unavailable                                                       │
+│  │ No messages yet                   ││  claude-1: refreshing…                                                       │
 │  │                                   ││OPENAI                                                                        │
-│                                      ││  codex-1: unavailable                                                        │
-│                                      ││  codex-2: unavailable                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -420,9 +420,9 @@ dashboard geometry at 59 columns: (None, None, false)
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                           ▐
-│  claude-1: unavailable                                             ▐
+│  claude-1: refreshing…                                             ▐
 │OPENAI                                                              ▐
-│  codex-1: unavailable                                              │
+│  codex-1: refreshing…                                              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                   │
@@ -451,10 +451,10 @@ dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │ANTHROPIC                                                                     │
-│  claude-1: unavailable                                                       │
+│  claude-1: refreshing…                                                       │
 │OPENAI                                                                        │
-│  codex-1: unavailable                                                        │
-│  codex-2: unavailable                                                        │
+│  codex-1: refreshing…                                                        │
+│  codex-2: refreshing…                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │

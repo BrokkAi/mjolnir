@@ -1509,6 +1509,13 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
         targets(&drawn(&mut dashboard, 120, 44))
     );
 
+    // No quota report yet is distinct from a failed probe.
+    let pending = drawn(&mut dashboard, 120, 44).join("\n");
+    assert!(pending.contains("claude-1 refreshing"), "{pending}");
+    let mut failed = weekly_and_five_hour_quota("claude-1", 0, 0);
+    failed.windows.clear();
+    failed.error = Some("unavailable".into());
+    dashboard.apply_quota(failed);
     // A quota that failed to refresh.
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
@@ -4186,7 +4193,7 @@ fn golden_dashboard_resource_panels() {
         BTreeMap::from([("agy".into(), agy_quota)]),
     );
     dashboard.focus = Focus::Quota;
-    dashboard.quota_index = 1;
+    dashboard.set_selection_for(Focus::Quota, 1);
     append_dashboard_golden(
         &mut output,
         "Antigravity Gemini and Claude quota pools",

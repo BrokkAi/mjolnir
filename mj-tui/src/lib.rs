@@ -1078,7 +1078,7 @@ pub struct DashboardState {
     /// Last rendered Disks button bounds, indexed like `capacity_details`.
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
-    pub(crate) quota_index: usize,
+    pub(crate) quota_selection: Option<render::quota_pools::QuotaRow>,
     pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
     pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
@@ -1272,7 +1272,7 @@ struct WorkspaceViewState {
     targets_scroll: usize,
     quota_scroll: usize,
     capacity_index: usize,
-    quota_index: usize,
+    quota_selection: Option<render::quota_pools::QuotaRow>,
     pane_sizes: PaneSizes,
     conversation_layout: mj_core::workspace::ConversationLayout,
     collapsed_project_keys: BTreeSet<String>,
@@ -1287,7 +1287,7 @@ impl WorkspaceViewState {
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
             capacity_index: dashboard.capacity_index,
-            quota_index: dashboard.quota_index,
+            quota_selection: dashboard.quota_selection.clone(),
             pane_sizes: dashboard.pane_sizes,
             conversation_layout: dashboard.export_conversation_layout(),
             collapsed_project_keys: dashboard.collapsed_project_keys.clone(),
@@ -1402,7 +1402,7 @@ impl DashboardState {
             recenter_on_selection: Cell::new(None),
             sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
-            quota_index: 0,
+            quota_selection: None,
             quota_expanded: Default::default(),
             focus: Focus::Sessions,
             pane_sizes: PaneSizes {

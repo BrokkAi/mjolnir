@@ -1,31 +1,31 @@
 === nested repository failure, checkpoint=false (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions ─                                                                                       │
-│ Create   O                                                                                       │
-│hel ───────  ╭ × Suspension could not complete ─────────────────────────────────────╮  on.        │
+│ Create   O                                                                            on.        │
+│hel ───────  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
 │› ■ ACP pre  │Session: ACP pretty name                                              │             │
 │  Stopped    │                                                                      │             │
 │  │ No mess  │Suspension failed: export target checkpoint failed with status 1:     │             │
-│  │          │repository 'bifrost': cannot checkpoint nested Git repository         │             │
-│             │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │  ───────────╯
-│             │for a disposable scratch worktree, exclude this path using the outer  │  ───────────╮
-│             │repository's .git/info/exclude; otherwise preserve its work separately│             │
-│             │                                                                      │  o open.    │
-│             │Ignore and Suspend omits untracked nested Git repositories from the   │  ───────────╯
-│             │recovery copy.                                                        │  ──── ▁   ▄ ╮
-│             │Files inside them will not be recoverable after suspension removes the│             │
-│             │environment.                                                          │  ───────────╯
-│             │                                                                      │  ──── ▁   ▄ ╮
-│             │c Cancel  ·  i Ignore and Suspend                                     │   Resets    │
-│             │                                                                      │             │
-│             │  Cancel     Ignore and Suspend                                       │             │
-│             ╰──────────────────────────────────────────────────────────────────────╯             │
-│                                                                                       ───────────╯
-│                                                                                       ──── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│  │          │repository 'bifrost': cannot checkpoint nested Git repository         │  ───────────╯
+│             │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │  ───────────╮
+│             │for a disposable scratch worktree, exclude this path using the outer  │             │
+│             │repository's .git/info/exclude; otherwise preserve its work separately│  o open.    │
+╰───────────  │                                                                      │  ───────────╯
+╭ Targets ▾   │Ignore and Suspend omits untracked nested Git repositories from the   │  ──── ▁   ▄ ╮
+│  Host / fl  │recovery copy.                                                        │             │
+╰───────────  │Files inside them will not be recoverable after suspension removes the│  ───────────╯
+╭ Profiles ▾  │environment.                                                          │  ──── ▁   ▄ ╮
+│ANTHROPIC    │                                                                      │             │
+│  claude-1:  │c Cancel  ·  i Ignore and Suspend                                     │             │
+│OPENAI       │                                                                      │             │
+│  codex-1:   │  Cancel     Ignore and Suspend                                       │             │
+│  codex-2:   ╰──────────────────────────────────────────────────────────────────────╯             │
+╰───────────                                                                            ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 
@@ -34,29 +34,29 @@ action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 │ default                                                                                          │
 ╰───────────                                                                                       │
 ╭ Sessions ─  ╭ × Suspension could not complete ─────────────────────────────────────╮             │
-│ Create   O  │Session: ACP pretty name                                              │             │
-│hel ───────  │                                                                      │  on.        │
+│ Create   O  │Session: ACP pretty name                                              │  on.        │
+│hel ───────  │                                                                      │             │
 │› ■ ACP pre  │Suspension failed: export target checkpoint failed with status 1:     │             │
 │  Stopped    │repository 'bifrost': cannot checkpoint nested Git repository         │             │
 │  │ No mess  │directory at /workspace/bifrost/.scratch/s47-landing/master-check/:   │             │
-│  │          │for a disposable scratch worktree, exclude this path using the outer  │             │
-│             │repository's .git/info/exclude; otherwise preserve its work separately│  ───────────╯
-│             │                                                                      │  ───────────╮
-│             │Ignore and Suspend omits untracked nested Git repositories from the   │             │
-│             │recovery copy.                                                        │  o open.    │
-│             │Files inside them will not be recoverable after suspension removes the│  ───────────╯
-│             │environment.                                                          │  ──── ▁   ▄ ╮
+│  │          │for a disposable scratch worktree, exclude this path using the outer  │  ───────────╯
+│             │repository's .git/info/exclude; otherwise preserve its work separately│  ───────────╮
 │             │                                                                      │             │
-│             │c Cancel  ·  d Discard changes since checkpoint…  ·  i Ignore and     │  ───────────╯
-│             │Suspend                                                               │  ──── ▁   ▄ ╮
-│             │                                                                      │   Resets    │
-│             │  Cancel                                                              │             │
-│             │  Discard changes since checkpoint…                                   │             │
-│             │  Ignore and Suspend                                                  │             │
-│             ╰──────────────────────────────────────────────────────────────────────╯  ───────────╯
-│                                                                                       ──── ▁   ▄ ╮
-│                                                                                                  │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│             │Ignore and Suspend omits untracked nested Git repositories from the   │  o open.    │
+╰───────────  │recovery copy.                                                        │  ───────────╯
+╭ Targets ▾   │Files inside them will not be recoverable after suspension removes the│  ──── ▁   ▄ ╮
+│  Host / fl  │environment.                                                          │             │
+╰───────────  │                                                                      │  ───────────╯
+╭ Profiles ▾  │c Cancel  ·  d Discard changes since checkpoint…  ·  i Ignore and     │  ──── ▁   ▄ ╮
+│ANTHROPIC    │Suspend                                                               │             │
+│  claude-1:  │                                                                      │             │
+│OPENAI       │  Cancel                                                              │             │
+│  codex-1:   │  Discard changes since checkpoint…                                   │             │
+│  codex-2:   │  Ignore and Suspend                                                  │             │
+╰───────────  ╰──────────────────────────────────────────────────────────────────────╯  ───────────╯
+╭ Notificati                                                                            ──── ▁   ▄ ╮
+│Nothing nee                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: IgnoreNestedRepositoriesAndSuspend { session_id: "session-1" }
 action: None
@@ -67,30 +67,30 @@ action: None
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                                                                                                   │
 │                                                                                                                      │
 │                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
 │                │podman                   local Podman                                               │                │
 │                │                                                                                    │                │
 │                │                                                                                    │                │
-│                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ──────────────╮
 │                │                                                                                    │                │
 │                │                                                                                    │                │
-│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╯
-│                │  Rename     Test     Settings                                                      │  ─────── ▁   ▄ ╮
-│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ─────── ▁   ▄ ╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -104,30 +104,30 @@ action: TestTarget { target_id: "podman" }
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                                                                                                   │
 │                                                                                                                      │
 │                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
 │                │podman                   local Podman                                               │                │
 │                │                                                                                    │                │
 │                │podman: ready                                                                       │                │
-│                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ──────────────╮
 │                │                                                                                    │                │
 │                │                                                                                    │                │
-│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╯
-│                │  Rename     Test     Settings                                                      │  ─────── ▁   ▄ ╮
-│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ─────── ▁   ▄ ╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -140,30 +140,30 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                       ╭ × Rename target ID ──────────────────────────────────────────────────╮                       │
 │                       │Current target ID: podman                                             │                       │
+│                       │                                                                      │  ─────────────────────╯
+│                       │podman                                                                │  ─────────────────────╮
 │                       │                                                                      │                       │
-│                       │podman                                                                │  ─────────────────────╯
-│                       │                                                                      │  ─────────────────────╮
 │                       │                                                                      │                       │
-│                       │  Cancel     Save                                                     │                       │
-│                       ╰──────────────────────────────────────────────────────────────────────╯  ─────────────────────╯
-│                                                                                                 ────────────── ▁   ▄ ╮
+│                       │  Cancel     Save                                                     │  ─────────────────────╯
+│                       ╰──────────────────────────────────────────────────────────────────────╯  ────────────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                 ─────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -176,30 +176,30 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                       ╭ × Rename target ID ──────────────────────────────────────────────────╮                       │
 │                       │Current target ID: podman                                             │                       │
+│                       │                                                                      │  ─────────────────────╯
+│                       │podman-v2                                                             │  ─────────────────────╮
 │                       │                                                                      │                       │
-│                       │podman-v2                                                             │  ─────────────────────╯
-│                       │                                                                      │  ─────────────────────╮
 │                       │                                                                      │                       │
-│                       │  Cancel     Save                                                     │                       │
-│                       ╰──────────────────────────────────────────────────────────────────────╯  ─────────────────────╯
-│                                                                                                 ────────────── ▁   ▄ ╮
+│                       │  Cancel     Save                                                     │  ─────────────────────╯
+│                       ╰──────────────────────────────────────────────────────────────────────╯  ────────────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                 ─────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -215,30 +215,30 @@ action: None
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                                                                              │
 │  │                                                                                                                   │
 │                                                                                                                      │
 │                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
 │                │podman                   local Podman                                               │                │
 │                │                                                                                    │                │
 │                │                                                                                    │                │
-│                │                                                                                    │                │
 │                │                                                                                    │  ──────────────╯
 │                │                                                                                    │  ──────────────╮
 │                │                                                                                    │                │
 │                │                                                                                    │                │
-│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╯
-│                │  Rename     Test     Settings                                                      │  ─────── ▁   ▄ ╮
-│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ─────── ▁   ▄ ╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                                                                                                      │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -257,19 +257,19 @@ action: ProbeGitStatus { session_id: "session-1" }
 │  Idle   ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮  ───────╮
 │  │ No   │Reading the checkout…                                                         │         │
 │  │      │                                                                              │  en.    │
-│         │                                                                              │  ───────╯
-│         │                                                                              │   ▁   ▄ ╮
-│         │                                                                              │         │
-│         │                                                                              │  ───────╯
-│         │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
-│         ╰──────────────────────────────────────────────────────────────────────────────╯  ets    │
-│                                                                                                  │
-│                                                                                                  │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰───────  │                                                                              │  ───────╯
+╭ Target  │                                                                              │   ▁   ▄ ╮
+│  Host   │                                                                              │         │
+╰───────  │                                                                              │  ───────╯
+╭ Profil  │  Refresh (r)     Close                                                       │   ▄   □ ╮
+│ANTHROP  ╰──────────────────────────────────────────────────────────────────────────────╯         ▐
+│  claud                                                                                           ▐
+│OPENAI                                                                                            ▐
+│  codex-1: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === changed files first page (100x24) ===
@@ -283,18 +283,18 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle   │modified src/module-02.rs         +3 −2                                      ▐│  ───────╮
 │  │ No   │modified src/module-03.rs         +4 −3                                      ▐│         │
 │  │      │modified src/module-04.rs         +5 −4                                      ▐│  en.    │
-│         │modified src/module-05.rs         +6 −5                                      ││  ───────╯
-│         │modified src/module-06.rs         +7 −6                                      ││   ▁   ▄ ╮
-│         │modified src/module-07.rs         +8 −7                                      ││         │
-│         │modified src/module-08.rs         +9 −8                                      ││  ───────╯
-│         │modified src/module-09.rs        +10 −9                                      ││   ▁   ▄ ╮
-│         │modified src/module-10.rs       +11 −10                                      ││  ets    │
-│         │modified src/module-11.rs       +12 −11                                      ││         │
-│         │modified src/module-12.rs       +13 −12                                      ││         │
-│         │modified src/module-13.rs       +14 −13                                       │         │
-│         │                                                                              │  ───────╯
-│         │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
-│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰───────  │modified src/module-05.rs         +6 −5                                      ││  ───────╯
+╭ Target  │modified src/module-06.rs         +7 −6                                      ││   ▁   ▄ ╮
+│  Host   │modified src/module-07.rs         +8 −7                                      ││         │
+╰───────  │modified src/module-08.rs         +9 −8                                      ││  ───────╯
+╭ Profil  │modified src/module-09.rs        +10 −9                                      ││   ▄   □ ╮
+│ANTHROP  │modified src/module-10.rs       +11 −10                                      ││         ▐
+│  claud  │modified src/module-11.rs       +12 −11                                      ││         ▐
+│OPENAI   │modified src/module-12.rs       +13 −12                                      ││         ▐
+│  codex  │modified src/module-13.rs       +14 −13                                       │         │
+╰───────  │                                                                              │  ───────╯
+╭ Notifi  │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
+│Nothing  ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                    ───────╯
 Enter op
 
@@ -309,18 +309,18 @@ Enter op
 │  Idle   │modified src/module-12.rs       +13 −12                                      ││  ───────╮
 │  │ No   │modified src/module-13.rs       +14 −13                                      ││         │
 │  │      │modified src/module-14.rs       +15 −14                                      ▐│  en.    │
-│         │modified src/module-15.rs       +16 −15                                      ▐│  ───────╯
-│         │modified src/module-16.rs       +17 −16                                      ▐│   ▁   ▄ ╮
-│         │modified src/module-17.rs       +18 −17                                      ▐│         │
-│         │modified src/module-18.rs       +19 −18                                      ││  ───────╯
-│         │modified src/module-19.rs       +20 −19                                      ││   ▁   ▄ ╮
-│         │modified src/module-20.rs       +21 −20                                      ││  ets    │
-│         │modified src/module-21.rs       +22 −21                                      ││         │
-│         │modified src/module-22.rs       +23 −22                                      ││         │
-│         │modified src/module-23.rs       +24 −23                                       │         │
-│         │                                                                              │  ───────╯
-│         │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
-│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰───────  │modified src/module-15.rs       +16 −15                                      ▐│  ───────╯
+╭ Target  │modified src/module-16.rs       +17 −16                                      ▐│   ▁   ▄ ╮
+│  Host   │modified src/module-17.rs       +18 −17                                      ▐│         │
+╰───────  │modified src/module-18.rs       +19 −18                                      ││  ───────╯
+╭ Profil  │modified src/module-19.rs       +20 −19                                      ││   ▄   □ ╮
+│ANTHROP  │modified src/module-20.rs       +21 −20                                      ││         ▐
+│  claud  │modified src/module-21.rs       +22 −21                                      ││         ▐
+│OPENAI   │modified src/module-22.rs       +23 −22                                      ││         ▐
+│  codex  │modified src/module-23.rs       +24 −23                                       │         │
+╰───────  │                                                                              │  ───────╯
+╭ Notifi  │  Refresh (r)     Close                                                       │   ▁   ▄ ╮
+│Nothing  ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                    ───────╯
 Enter op
 action: ProbeGitStatus { session_id: "session-1" }
@@ -337,110 +337,110 @@ action: None
 │  Idle  podman  codex-1               │╭ No conversation open ────────────────────────────────────╮
 │  │ No messages yet                   ││No conversation open.                                     │
 │  │                                   ││Press Tab for Sessions, then Enter on the one to open.    │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                         │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│ANTHROPIC                                                                                         ▐
+│  claude-1: refreshing…                                                                           ▐
+│OPENAI                                                                                            ▐
+│  codex-1: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === command palette search for recent messages (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                     ✦  M J O L N I R                     │
-│ Create   Open   Filter: _____________││                                                          │
-│hel ──────────────────────────────────││        Select a session to open its conversation.        │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
+│hel ──────────────────────────────────││                                                          │
 │› · ACP pretty name               ◇ ⋯ ││                                                          │
 │  Idle  podman  codex-1               ││                                                          │
 │  │ No mess                                                                                       │
-│  │                                                                                               │
-│             ╭ × ✦ Commands ───────────────────────────────────────────── 1 command ╮  ───────────╯
-│             │Recent messages                                                       │  ───────────╮
-│             │  Anywhere  ────────────────────────────────────────────────────────  │             │
-│             │› Recent messages                                                     │  o open.    │
-│             │Show the last notices the footer reported, newest first, including fai│  ───────────╯
-│             │  Run                                                                 │  ──── ▁   ▄ ╮
-│             ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯             │
-│                                                                                       ───────────╯
-│                                                                                       ──── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets    │
-│                                      ││  claude-1  Claude Code  refreshing…                      │
-│                                      ││  codex-1   Codex        refreshing…                      │
-│                                      ││  codex-2   Codex        refreshing…                      │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│  │                                                                                    ───────────╯
+│             ╭ × ✦ Commands ───────────────────────────────────────────── 1 command ╮  ───────────╮
+│             │Recent messages                                                       │             │
+│             │  Anywhere  ────────────────────────────────────────────────────────  │  o open.    │
+╰───────────  │› Recent messages                                                     │  ───────────╯
+╭ Targets ▾   │Show the last notices the footer reported, newest first, including fai│  ──── ▁   ▄ ╮
+│  Host / fl  │  Run                                                                 │             │
+╰───────────  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯  ───────────╯
+╭ Profiles ▾                                                                            ──── ▁   ▄ ╮
+│ANTHROPIC                                                                                         │
+│  claude-1: refreshing…                                                                           │
+│OPENAI                                                                                            │
+│  codex-1: refreshing…                                                                            │
+│  codex-2: refreshing…                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
 action: None
 
 === recent messages (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ × Recent messages ───────────────────────────────────────────────────────────╮         │
 │› · ACP  ????? ago Build step 11 failed: the remote worker could not start its checkout or│         │
 │  Idle   │load the requested profile                                                    │         │
 │  │ No   ????? ago Build step 10 failed: the remote worker could not start its checkout or│         │
-│  │      │load the requested profile                                                    │         │
-│         ????? ago Build step 09 failed: the remote worker could not start its checkout or│  ───────╯
-│         │load the requested profile                                                    │  ───────╮
-│         ????? ago Build step 08 failed: the remote worker could not start its checkout or│         │
-│         │load the requested profile                                                    │  en.    │
-│         ????? ago Build step 07 failed: the remote worker could not start its checkout or│  ───────╯
-│         │load the requested profile                                                    │   ▁   ▄ ╮
-│         ????? ago Build step 06 failed: the remote worker could not start its checkout or│         │
-│         │load the requested profile                                                    │  ───────╯
-│         ????? ago Build step 05 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
-│         │                                                                              │  ets    │
-│         │  Close                                                                       │         │
-│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                  │
-│                                                                                           ───────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│  │      │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 09 failed: the remote worker could not start its checkout or│  ───────╮
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 08 failed: the remote worker could not start its checkout or│  en.    │
+╰───────  │load the requested profile                                                    │  ───────╯
+╭ Target  ????? ago Build step 07 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
+│  Host   │load the requested profile                                                    │         │
+╰───────  ????? ago Build step 06 failed: the remote worker could not start its checkout or│  ───────╯
+╭ Profil  │load the requested profile                                                    │   ▁   ▄ ╮
+│ANTHROP  ????? ago Build step 05 failed: the remote worker could not start its checkout or│         │
+│  claud  │                                                                              │         │
+│OPENAI   │  Close                                                                       │         │
+│  codex  ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│  codex                                                                                           │
+╰───────                                                                                    ───────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
 
 === recent messages after paging down (100x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ × Recent messages ───────────────────────────────────────────────────────────╮         │
 │› · ACP  ????? ago Build step 06 failed: the remote worker could not start its checkout or│         │
 │  Idle   │load the requested profile                                                    │         │
 │  │ No   ????? ago Build step 05 failed: the remote worker could not start its checkout or│         │
-│  │      │load the requested profile                                                    │         │
-│         ????? ago Build step 04 failed: the remote worker could not start its checkout or│  ───────╯
-│         │load the requested profile                                                    │  ───────╮
-│         ????? ago Build step 03 failed: the remote worker could not start its checkout or│         │
-│         │load the requested profile                                                    │  en.    │
-│         ????? ago Build step 02 failed: the remote worker could not start its checkout or│  ───────╯
-│         │load the requested profile                                                    │   ▁   ▄ ╮
-│         ????? ago Build step 01 failed: the remote worker could not start its checkout or│         │
-│         │load the requested profile                                                    │  ───────╯
-│         ????? ago Build step 00 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
-│         │                                                                              │  ets    │
-│         │  Close                                                                       │         │
-│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
-│                                                                                                  │
-│                                                                                           ───────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+│  │      │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 04 failed: the remote worker could not start its checkout or│  ───────╮
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 03 failed: the remote worker could not start its checkout or│  en.    │
+╰───────  │load the requested profile                                                    │  ───────╯
+╭ Target  ????? ago Build step 02 failed: the remote worker could not start its checkout or│   ▁   ▄ ╮
+│  Host   │load the requested profile                                                    │         │
+╰───────  ????? ago Build step 01 failed: the remote worker could not start its checkout or│  ───────╯
+╭ Profil  │load the requested profile                                                    │   ▁   ▄ ╮
+│ANTHROP  ????? ago Build step 00 failed: the remote worker could not start its checkout or│         │
+│  claud  │                                                                              │         │
+│OPENAI   │  Close                                                                       │         │
+│  codex  ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│  codex                                                                                           │
+╰───────                                                                                    ───────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
 action: None
 
@@ -451,10 +451,10 @@ action: None
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │  · CPU session 06            11% ◇ ⋯ ││                                                                              │
-│  Idle  podman [5]  codex-1           ││                                                                              │
-│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
-│  │                                   ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
+│  Idle  podman [5]  codex-1           ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
 │  · CPU session 07            11% ◇ ⋯ ▐│                                                                              │
 │  Idle  podman [6]  codex-1           ▐│                                                                              │
 │  │ No message                                                                                                        │
@@ -462,20 +462,20 @@ action: None
 │                ╭ × ✦ Commands ─────────────────────────────────────────────────────────── 1 command ╮                │
 │  · CPU sessio  │CPU by session                                                                      │                │
 │  Idle  podman  │  Anywhere  ──────────────────────────────────────────────────────────────────────  │                │
-│  │ No message  │› CPU by session                                                                    │                │
-│  │             │Show live sessions grouped by machine, with each session's CPU share over about the │  ──────────────╯
-│                │  Run                                                                               │  ──────────────╮
+│  │ No message  │› CPU by session                                                                    │  ──────────────╯
+│  │             │Show live sessions grouped by machine, with each session's CPU share over about the │  ──────────────╮
+│                │  Run                                                                               │                │
 │  · CPU sessio  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│  Idle  podman                                                                                                        │
-│  │ No message                                                                                          ──────────────╯
-│  │                                   │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│› · ACP pretty name           23% ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
-│  Idle  podman [9]  codex-1           │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│  │ No messages yet                   ││            Harness      Weekly      Resets  5H Resets                        │
-│  │                                   ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│  · CPU session 10            11% ◇ ⋯ ││  codex-2   Codex        refreshing…                                          │
+│  Idle  podman                                                                                          ──────────────╯
+│  │ No message                                                                                          ─────── ▁   ▄ ╮
+│  │                                   ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│› · ACP pretty name           23% ◇ ⋯ │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│  Idle  podman [9]  codex-1           ││ANTHROPIC                                                                     │
+│  │ No messages yet                   ││  claude-1: refreshing…                                                       │
+│  │                                   ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│  · CPU session 10            11% ◇ ⋯ ││  codex-2: refreshing…                                                        │
 │  Idle  podman [10]  codex-1          │╰──────────────────────────────────────────────────────────────────────────────╯
 │  │ No messages yet                   │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │  │                                   ││Nothing needs you                                                             │
@@ -501,16 +501,16 @@ action: None
 │           │  CPU session 15  [codex-1]  9.5% hourly (process tree)                                       │           │
 │  · CPU s  │                                                                                              │           │
 │  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly (process tree)                                       │           │
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 13  [codex-1]  9.3% hourly (process tree)                                       │  ─────────╯
-│           │                                                                                              │  ─────────╮
+│  │ No me  │                                                                                              │  ─────────╯
+│  │        │  CPU session 13  [codex-1]  9.3% hourly (process tree)                                       │  ─────────╮
+│           │                                                                                              │           │
 │  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly (process tree)                                       │           │
-│  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly (process tree)                                       │  ─────────╯
-│  │        │                                                                                              │  ── ▁   ▄ ╮
-│           │  CPU session 10  [codex-1]  9.0% hourly (process tree)                                       │           │
-│› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │  ── ▁   ▄ ╮
+│  Idle  p  │                                                                                              │  ─────────╯
+│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly (process tree)                                       │  ── ▁   ▄ ╮
+│  │        │                                                                                              │           │
+│           │  CPU session 10  [codex-1]  9.0% hourly (process tree)                                       │  ─────────╯
+│› · ACP p  │                                                                                              │  ── ▁   ▄ ╮
+│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │           │
 │  │ No me  │                                                                                              │           │
 │  │        │  CPU session 08  [codex-1]  8.8% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
@@ -539,16 +539,16 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │           │  CPU session 11  [codex-1]  9.1% hourly (process tree)                                       │           │
 │  · CPU s  │                                                                                              │           │
 │  Idle  p  │  CPU session 10  [codex-1]  9.0% hourly (process tree)                                       │           │
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │  ─────────╯
-│           │                                                                                              │  ─────────╮
+│  │ No me  │                                                                                              │  ─────────╯
+│  │        │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │  ─────────╮
+│           │                                                                                              │           │
 │  · CPU s  │  CPU session 08  [codex-1]  8.8% hourly (process tree)                                       │           │
-│  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 07  [codex-1]  8.7% hourly (process tree)                                       │  ─────────╯
-│  │        │                                                                                              │  ── ▁   ▄ ╮
-│           │  CPU session 06  [codex-1]  8.6% hourly (process tree)                                       │           │
-│› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly (process tree)                                       │  ── ▁   ▄ ╮
+│  Idle  p  │                                                                                              │  ─────────╯
+│  │ No me  │  CPU session 07  [codex-1]  8.7% hourly (process tree)                                       │  ── ▁   ▄ ╮
+│  │        │                                                                                              │           │
+│           │  CPU session 06  [codex-1]  8.6% hourly (process tree)                                       │  ─────────╯
+│› · ACP p  │                                                                                              │  ── ▁   ▄ ╮
+│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly (process tree)                                       │           │
 │  │ No me  │                                                                                              │           │
 │  │        │  CPU session 04  [codex-1]  8.4% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
@@ -567,10 +567,10 @@ action: None
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                  Select a session to open its conversation.                  │
+│› · ACP pretty name               ◇ ⋯ ││                               ✦  M J O L N I R                               │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                  Select a session to open its conversation.                  │
+│  │                                   ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -578,20 +578,20 @@ action: None
 │                                      ││                                                                              │
 │                                     ╭Profiles──────────────────────────────────╮                                     │
 │                                     │Refresh                                   │                                     │
-│                                     │Settings…                                 │                                     │
-│                                     │Usage by session…                         │─────────────────────────────────────╯
-│                                     ╰──────────────────────────────────────────╯─────────────────────────────────────╮
-│                                      ││No conversation open.                                                         │
+│                                     │Settings…                                 │─────────────────────────────────────╯
+│                                     │Usage by session…                         │─────────────────────────────────────╮
+│                                     ╰──────────────────────────────────────────╯                                     │
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: refreshing…                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: refreshing…                                                        │
+│                                      ││  codex-2: refreshing…                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -616,7 +616,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │                                                                                                            │    │
 │    │Loading usage…                                                                                              │    │
 │    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ──╮
 │    │                                                                                                            │    │
@@ -626,6 +625,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
+│    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -654,16 +654,16 @@ Ent
 │    │                                                                                                            │    │
 │    │Primary agents  $7.200+                                                                                     │    │
 │    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
-│    │                                                                                                            │  ──╯
-│    │Subagents  $5.105+                                                                                          │  ──╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Subagents  $5.105+                                                                                          │    │
 │    │  gpt-6.1-sol  $5.000+                                                                                      │    │
-│    │  gpt-6-luna  $0.105+                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Reviewers  ?                                                                                                │  ▄ ╮
-│    │  claude-opus-5-5  $7.100+                                                                                  │    │
-│    │  custom-model  ?                                                                                           │  ──╯
+│    │  gpt-6-luna  $0.105+                                                                                       │  ──╯
 │    │                                                                                                            │  ▄ ╮
+│    │Reviewers  ?                                                                                                │    │
+│    │  claude-opus-5-5  $7.100+                                                                                  │  ──╯
+│    │  custom-model  ?                                                                                           │  ▄ ╮
+│    │                                                                                                            │    │
 │    │Write release notes [claude]  $8.200+                                                                       │    │
 │    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
 │    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
@@ -740,16 +740,16 @@ Ent
 │    │                                                                                                            │    │
 │    │Primary agents  $7.200+                                                                                     │    │
 │    │  claude-opus-5-5  $6.200+                                                                                  │    │
-│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
-│    │                                                                                                            │  ──╯
-│    │Subagents  $5.105+                                                                                          │  ──╮
+│    │  gpt-6.1-terra  $1.000+                                                                                    │  ──╯
+│    │                                                                                                            │  ──╮
+│    │Subagents  $5.105+                                                                                          │    │
 │    │  gpt-6.1-sol  $5.000+                                                                                      │    │
-│    │  gpt-6-luna  $0.105+                                                                                       │    │
-│    │                                                                                                            │  ──╯
-│    │Reviewers  ?                                                                                                │  ▄ ╮
-│    │  claude-opus-5-5  $7.100+                                                                                  │    │
-│    │  custom-model  ?                                                                                           │  ──╯
+│    │  gpt-6-luna  $0.105+                                                                                       │  ──╯
 │    │                                                                                                            │  ▄ ╮
+│    │Reviewers  ?                                                                                                │    │
+│    │  claude-opus-5-5  $7.100+                                                                                  │  ──╯
+│    │  custom-model  ?                                                                                           │  ▄ ╮
+│    │                                                                                                            │    │
 │    │Write release notes [claude]  $8.200+                                                                       │    │
 │    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
 │    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
@@ -778,16 +778,16 @@ Ent
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
 │    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Subagents  $3.105                                                                                           │  ──╯
-│    │  gpt-6.1-sol  $3.000                                                                                       │  ──╮
+│    │                                                                                                            │  ──╯
+│    │Subagents  $3.105                                                                                           │  ──╮
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
 │    │  gpt-6-luna  $0.105                                                                                        │    │
-│    │                                                                                                            │    │
-│    │Reviewers  ?                                                                                                │  ──╯
-│    │  custom-model  ?                                                                                           │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ?                                                                             │  ──╯
-│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │  ▄ ╮
+│    │                                                                                                            │  ──╯
+│    │Reviewers  ?                                                                                                │  ▄ ╮
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │  ──╯
+│    │Investigate recovery [codex]  ?                                                                             │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
 │    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
 │    │    custom-model  ?  tokens unknown                                                                         │    │
@@ -816,16 +816,16 @@ Ent
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
 │    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Subagents  $3.105                                                                                           │  ──╯
-│    │  gpt-6.1-sol  $3.000                                                                                       │  ──╮
+│    │                                                                                                            │  ──╯
+│    │Subagents  $3.105                                                                                           │  ──╮
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
 │    │  gpt-6-luna  $0.105                                                                                        │    │
-│    │                                                                                                            │    │
-│    │Reviewers  ?                                                                                                │  ──╯
-│    │  custom-model  ?                                                                                           │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ?                                                                             │  ──╯
-│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │  ▄ ╮
+│    │                                                                                                            │  ──╯
+│    │Reviewers  ?                                                                                                │  ▄ ╮
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │  ──╯
+│    │Investigate recovery [codex]  ?                                                                             │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
 │    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
 │    │    custom-model  ?  tokens unknown                                                                         │    │
@@ -854,16 +854,16 @@ Ent
 │    │                                                                                                            │    │
 │    │Primary agents  $1.000                                                                                      │    │
 │    │  gpt-6.1-terra  $1.000                                                                                     │    │
-│    │                                                                                                            │    │
-│    │Subagents  $3.105                                                                                           │  ──╯
-│    │  gpt-6.1-sol  $3.000                                                                                       │  ──╮
+│    │                                                                                                            │  ──╯
+│    │Subagents  $3.105                                                                                           │  ──╮
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
 │    │  gpt-6-luna  $0.105                                                                                        │    │
-│    │                                                                                                            │    │
-│    │Reviewers  ?                                                                                                │  ──╯
-│    │  custom-model  ?                                                                                           │  ▄ ╮
-│    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ? · suspended                                                                 │  ──╯
-│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │  ▄ ╮
+│    │                                                                                                            │  ──╯
+│    │Reviewers  ?                                                                                                │  ▄ ╮
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │  ──╯
+│    │Investigate recovery [codex]  ? · suspended                                                                 │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
 │    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │    │
 │    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
 │    │    custom-model  ?  tokens unknown                                                                         │    │
@@ -911,7 +911,6 @@ Ent
 │    │                                                                                                            │    │
 │    │Usage load failed: test store unavailable                                                                   │    │
 │    │Use Refresh to retry.                                                                                       │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ──╮
 │    │                                                                                                            │    │
@@ -921,6 +920,7 @@ Ent
 │    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
+│    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -945,19 +945,19 @@ notice while the check runs: Some("Still checking the Git identity on this host�
 │  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │  ─────────────────╮
 │  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
 │  │                │configuration.                                            │   one to open.    │
-│                   │                                                          │  ─────────────────╯
-│                   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
-│                   │Email: ada.example.com                                    │                   │
-│                   │                                                          │  ─────────────────╯
-│                   │                                                          │  ────────── ▁   ▄ ╮
-│                   │                                                          │  ts  5H Resets    │
-│                   │  Skip     Save                                           │                   │
-│                   ╰──────────────────────────────────────────────────────────╯                   │
-│                                                                                                  │
-│                                                                                 ─────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Targets ▾ ──────  │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │Email: ada.example.com                                    │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │                                                          │  ────── ▁   ▄   □ ╮
+│ANTHROPIC          │                                                          │                   ▐
+│  claude-1: refre  │  Skip     Save                                           │                   ▐
+│OPENAI             ╰──────────────────────────────────────────────────────────╯                   ▐
+│  codex-1: refres                                                                                 │
+╰─────────────────                                                                ─────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
 escape while saving: None
@@ -973,19 +973,19 @@ escape while saving: None
 │  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │  ─────────────────╮
 │  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
 │  │                │configuration.                                            │   one to open.    │
-│                   │                                                          │  ─────────────────╯
-│                   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
-│                   │Email: ada.example.com                                    │                   │
-│                   │                                                          │  ─────────────────╯
-│                   │Saving Git identity…                                      │  ────────── ▁   ▄ ╮
-│                   │                                                          │  ts  5H Resets    │
-│                   │  Skip     Save                                           │                   │
-│                   ╰──────────────────────────────────────────────────────────╯                   │
-│                                                                                                  │
-│                                                                                 ─────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Targets ▾ ──────  │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │Email: ada.example.com                                    │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │Saving Git identity…                                      │  ────── ▁   ▄   □ ╮
+│ANTHROPIC          │                                                          │                   ▐
+│  claude-1: refre  │  Skip     Save                                           │                   ▐
+│OPENAI             ╰──────────────────────────────────────────────────────────╯                   ▐
+│  codex-1: refres                                                                                 │
+╰─────────────────                                                                ─────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 
 === Git identity save failure keeps the fields (100x24) ===
@@ -999,19 +999,19 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  c  │Git on this host has no commit author, so sessions cannot │  ─────────────────╮
 │  │ No messages y  │commit. Mjolnir saves this to your global Git             │                   │
 │  │                │configuration.                                            │   one to open.    │
-│                   │                                                          │  ─────────────────╯
-│                   │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
-│                   │Email: ada.example.com                                    │                   │
-│                   │                                                          │  ─────────────────╯
-│                   │Git email "ada.example.com" needs an @                    │  ────────── ▁   ▄ ╮
-│                   │                                                          │  ts  5H Resets    │
-│                   │  Skip     Save                                           │                   │
-│                   ╰──────────────────────────────────────────────────────────╯                   │
-│                                                                                                  │
-│                                                                                 ─────────────────╯
-│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                                      ││Nothing needs you                                         │
-╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Targets ▾ ──────  │Name:  Ada Lovelace                                       │  ────────── ▁   ▄ ╮
+│  Host / fleet  T  │Email: ada.example.com                                    │                   │
+╰─────────────────  │                                                          │  ─────────────────╯
+╭ Profiles ▾ (not   │Git email "ada.example.com" needs an @                    │  ────── ▁   ▄   □ ╮
+│ANTHROPIC          │                                                          │                   ▐
+│  claude-1: refre  │  Skip     Save                                           │                   ▐
+│OPENAI             ╰──────────────────────────────────────────────────────────╯                   ▐
+│  codex-1: refres                                                                                 │
+╰─────────────────                                                                ─────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : / ? palette
 action: SaveGitIdentity { name: "Ada Lovelace", email: "ada.example.com" }
 follow-up after saving: None

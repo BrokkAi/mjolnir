@@ -397,7 +397,12 @@ impl DashboardState {
             if let Some(index) = hit {
                 self.focus = Focus::Quota;
                 self.set_selection_for(Focus::Quota, index);
-                self.toggle_quota_pool();
+                if matches!(
+                    self.selected_quota_row(),
+                    Some(crate::render::quota_pools::QuotaRow::Pool(_))
+                ) {
+                    self.toggle_quota_pool();
+                }
                 self.record_event_handled();
                 return DashboardAction::None;
             }

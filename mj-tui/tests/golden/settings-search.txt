@@ -10,7 +10,6 @@
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -20,6 +19,7 @@
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -43,16 +43,16 @@ matching paths: [["targets", "podman", "memory"]]
 │  │ No messages yet  │ Type                              Podman ▾                                                   │                     │
 │  │                  │ Machine                           local ▾                                                    │                     │
 │                     │ Container image                   ubuntu:24.04                                               │                     │
-│                     │ Download image policy             Pull if missing ▾                                          │                     │
-│                     │ CPU platform                      Default                                                    │  ───────────────────╯
-│                     │ CPU limit                         Default                                                    │  ───────────────────╮
+│                     │ Download image policy             Pull if missing ▾                                          │  ───────────────────╯
+│                     │ CPU platform                      Default                                                    │  ───────────────────╮
+│                     │ CPU limit                         Default                                                    │                     │
 │                     │ Memory limit                      Default                                                    │                     │
-│                     │   Environment variables           0 settings  ›                                              │                     │
-│                     │   Workspace storage               1 setting  ›                                               │  ───────────────────╯
-│                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │   Environment variables           0 settings  ›                                              │  ───────────────────╯
+│                     │   Workspace storage               1 setting  ›                                               │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -76,7 +76,6 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │  │ No messages yet  │ Context budget (bytes)          Agent Profiles › codex-1        262144 (256 KiB)             │                     │
 │  │                  │ Context budget (bytes)          Agent Profiles › codex-2        262144 (256 KiB)             │                     │
 │                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -86,6 +85,7 @@ landed page and focused setting: ["targets", "podman"] / Some(["targets", "podma
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -109,7 +109,6 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │  │ No messages yet  │ Download image policy           Runtimes › podman               Pull if missing ▾            │                     │
 │  │                  │ Container image                 Daemon                          Not set                      │                     │
 │                     │ Quota checks                                                    Auto · container when avail… │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -119,6 +118,7 @@ matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", 
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▄ ╮
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

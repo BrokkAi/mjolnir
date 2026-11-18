@@ -1098,7 +1098,7 @@ impl DashboardState {
                     targets_scroll: 0,
                     quota_scroll: 0,
                     capacity_index: 0,
-                    quota_index: 0,
+                    quota_selection: None,
                     pane_sizes: PaneSizes::default(),
                     conversation_layout: mj_core::workspace::ConversationLayout::default(),
                     collapsed_project_keys: BTreeSet::new(),
@@ -1443,18 +1443,38 @@ impl DashboardState {
         )
     }
 
-    pub(crate) fn quota_pool_rows(&self) -> Vec<crate::render::quota_pools::QuotaPool> {
-        self.quota_pools()
-            .into_iter()
-            .flat_map(|provider| provider.pools)
-            .collect()
+    pub(crate) fn quota_rows(&self) -> Vec<crate::render::quota_pools::QuotaRow> {
+        crate::render::quota_pools::selectable_rows(&self.quota_pools(), &self.quota_expanded)
+    }
+
+    pub(crate) fn selected_quota_row(&self) -> Option<crate::render::quota_pools::QuotaRow> {
+        use crate::render::quota_pools::QuotaRow;
+        let rows = self.quota_rows();
+        self.quota_selection
+            .as_ref()
+            .and_then(|selected| {
+                rows.iter().find(|row| *row == selected).or_else(|| {
+                    selected.pool().and_then(|key| {
+                        rows.iter().find(|row| **row == QuotaRow::Pool(key.clone()))
+                    })
+                })
+            })
+            .or_else(|| rows.first())
+            .cloned()
     }
 
     pub(crate) fn toggle_quota_pool(&mut self) {
-        if let Some(pool) = self.quota_pool_rows().get(self.quota_index) {
-            if !self.quota_expanded.remove(&pool.key) {
-                self.quota_expanded.insert(pool.key.clone());
+        use crate::render::quota_pools::QuotaRow;
+        if let Some(row) = self.selected_quota_row() {
+            let Some(key) = row.pool().cloned() else {
+                return;
+            };
+            if matches!(row, QuotaRow::Lane(..)) || self.quota_expanded.contains(&key) {
+                self.quota_expanded.remove(&key);
+            } else {
+                self.quota_expanded.insert(key.clone());
             }
+            self.quota_selection = Some(QuotaRow::Pool(key));
             self.recenter_on_selection.set(Some(Focus::Quota));
         }
     }
@@ -1463,7 +1483,7 @@ impl DashboardState {
         match focus {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
-            Focus::Quota => self.quota_pool_rows().len(),
+            Focus::Quota => self.quota_rows().len(),
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -1503,12 +1523,11 @@ impl DashboardState {
                 }
             }
             Focus::Quota => {
-                if self.quota_index != index {
-                    self.quota_index = index;
-                    true
-                } else {
-                    false
-                }
+                let next = self.quota_rows().get(index).cloned();
+                let changed = self.quota_selection != next;
+                self.quota_selection = next;
+                self.recenter_on_selection.set(Some(Focus::Quota));
+                changed
             }
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => false,
         }
@@ -1518,7 +1537,13 @@ impl DashboardState {
         match focus {
             Focus::Sessions => self.selected_visible_index().unwrap_or(0),
             Focus::Targets => self.capacity_index,
-            Focus::Quota => self.quota_index,
+            Focus::Quota => {
+                let selected = self.selected_quota_row();
+                self.quota_rows()
+                    .iter()
+                    .position(|row| Some(row) == selected.as_ref())
+                    .unwrap_or(0)
+            }
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -1563,9 +1588,11 @@ impl DashboardState {
         let project_keys = self.project_keys();
         self.collapsed_project_keys
             .retain(|key| project_keys.contains(key));
-        self.quota_index = self
-            .quota_index
-            .min(self.quota_pool_rows().len().saturating_sub(1));
+        let quota_selection = self.selected_quota_row();
+        if self.quota_selection != quota_selection && self.focus == Focus::Quota {
+            self.recenter_on_selection.set(Some(Focus::Quota));
+        }
+        self.quota_selection = quota_selection;
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));

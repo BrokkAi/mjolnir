@@ -7,7 +7,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{Environment, default_true, is_false, is_true, validate_id};
-use crate::codex_provider::{BuiltInCodexProvider, CodexProvider, CodexProviderDefinition};
+use crate::codex_provider::{
+    BuiltInCodexProvider, CodexProvider, CodexProviderDefinition, CodexProviderKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1332,6 +1334,7 @@ pub enum QuotaProvider {
     XAI,
     Moonshot,
     DeepSeek,
+    Zai,
     Other(String),
 }
 
@@ -1344,6 +1347,7 @@ impl QuotaProvider {
             Self::XAI => "xAI",
             Self::Moonshot => "Moonshot",
             Self::DeepSeek => "DeepSeek",
+            Self::Zai => "Z.ai",
             Self::Other(name) => name,
         }
     }
@@ -1352,35 +1356,43 @@ impl QuotaProvider {
         let host = endpoint
             .and_then(|url| url::Url::parse(url).ok())
             .and_then(|url| url.host_str().map(str::to_owned));
-        // The endpoint wins over an arbitrary local provider-table name.
-        for value in host.as_deref().into_iter().chain(std::iter::once(id)) {
-            let value = value.to_ascii_lowercase();
-            let domain = |suffix: &str| value == suffix || value.ends_with(&format!(".{suffix}"));
-            if domain("deepseek.com") || value == "deepseek" {
-                return Self::DeepSeek;
-            }
-            if domain("anthropic.com") || value == "anthropic" {
-                return Self::Anthropic;
-            }
-            if domain("openai.com") || value == "openai" {
-                return Self::OpenAI;
-            }
-            if domain("googleapis.com")
-                || matches!(value.as_str(), "google" | "gemini" | "google-vertex")
-            {
-                return Self::Google;
-            }
-            if domain("x.ai") || matches!(value.as_str(), "xai" | "grok") {
-                return Self::XAI;
-            }
-            if domain("moonshot.ai")
-                || domain("moonshot.cn")
-                || matches!(value.as_str(), "moonshot" | "kimi" | "kimi-for-coding")
-            {
-                return Self::Moonshot;
-            }
+        // The endpoint decides when there is one: an unrecognised host (a proxy,
+        // OpenRouter, a local server) is its own provider, never the table
+        // id's default vendor. Without an endpoint the provider id decides.
+        match host {
+            Some(host) => Self::recognise(&host).unwrap_or(Self::Other(host)),
+            None => Self::recognise(id).unwrap_or_else(|| Self::Other(id.to_owned())),
         }
-        Self::Other(id.to_owned())
+    }
+
+    fn recognise(value: &str) -> Option<Self> {
+        match CodexProviderKind::from_host(value) {
+            CodexProviderKind::Zai => return Some(Self::Zai),
+            CodexProviderKind::DeepSeek => return Some(Self::DeepSeek),
+            CodexProviderKind::Other => {}
+        }
+        let value = value.to_ascii_lowercase();
+        let domain = |suffix: &str| value == suffix || value.ends_with(&format!(".{suffix}"));
+        if value == "deepseek" {
+            Some(Self::DeepSeek)
+        } else if domain("anthropic.com") || value == "anthropic" {
+            Some(Self::Anthropic)
+        } else if domain("openai.com") || value == "openai" {
+            Some(Self::OpenAI)
+        } else if domain("googleapis.com")
+            || matches!(value.as_str(), "google" | "gemini" | "google-vertex")
+        {
+            Some(Self::Google)
+        } else if domain("x.ai") || matches!(value.as_str(), "xai" | "grok") {
+            Some(Self::XAI)
+        } else if domain("moonshot.ai")
+            || domain("moonshot.cn")
+            || matches!(value.as_str(), "moonshot" | "kimi" | "kimi-for-coding")
+        {
+            Some(Self::Moonshot)
+        } else {
+            None
+        }
     }
 }
 
@@ -1539,29 +1551,33 @@ impl HarnessProfile {
             HarnessKind::Grok => QuotaProvider::XAI,
             HarnessKind::Kimi => QuotaProvider::Moonshot,
             HarnessKind::Dsh => QuotaProvider::DeepSeek,
-            HarnessKind::Codex => match self.codex_provider() {
-                Ok(Some(provider)) => {
-                    let endpoint = provider
-                        .custom()
-                        .map(|custom| custom.base_url.as_str())
-                        .or_else(|| {
-                            (provider.built_in() == Some(BuiltInCodexProvider::OpenAi))
-                                .then(|| {
-                                    self.environment.get("OPENAI_BASE_URL").map(String::as_str)
-                                })
-                                .flatten()
-                        });
-                    QuotaProvider::from_endpoint(provider.id(), endpoint)
+            HarnessKind::Codex => {
+                // Use the launch path's environment policy: ChatGPT logins
+                // discard endpoint overrides as well as API-key credentials.
+                let mut environment = self.environment.resolved().clone();
+                self.exclude_harness_environment(&mut environment);
+                match self.codex_provider() {
+                    Ok(Some(provider)) => {
+                        let endpoint = provider
+                            .custom()
+                            .map(|custom| custom.base_url.as_str())
+                            .or_else(|| {
+                                (provider.built_in() == Some(BuiltInCodexProvider::OpenAi))
+                                    .then(|| environment.get("OPENAI_BASE_URL").map(String::as_str))
+                                    .flatten()
+                            });
+                        QuotaProvider::from_endpoint(provider.id(), endpoint)
+                    }
+                    Ok(None) => QuotaProvider::from_endpoint(
+                        "openai",
+                        environment.get("OPENAI_BASE_URL").map(String::as_str),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(home = %self.home.display(), %error, "read quota provider");
+                        QuotaProvider::Other("Codex (provider unavailable)".into())
+                    }
                 }
-                Ok(None) => QuotaProvider::from_endpoint(
-                    "openai",
-                    self.environment.get("OPENAI_BASE_URL").map(String::as_str),
-                ),
-                Err(error) => {
-                    tracing::warn!(home = %self.home.display(), %error, "read quota provider");
-                    QuotaProvider::Other("Codex (provider unavailable)".into())
-                }
-            },
+            }
             HarnessKind::OpenCode => {
                 let mut configuration = serde_json::json!({});
                 for name in ["opencode.json", "opencode.jsonc"] {

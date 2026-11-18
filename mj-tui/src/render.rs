@@ -50,9 +50,9 @@ const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 /// One fixed row at the top of Sessions for Create and Resume.
 pub(crate) const SESSION_ACTIONS_HEIGHT: u16 = 1;
 
-/// Whether the selection of `focus` moved by keyboard since the last frame.
-/// Only then does a table re-centre on it; a click or a refresh leaves the
-/// rows where they are.
+/// Whether this pane requested that its selected row be visible again.
+/// Sessions and Targets request this on keyboard movement; Quota also uses it
+/// when its selected identity moves during a refresh.
 fn take_selection_recenter(dashboard: &DashboardState, focus: Focus) -> bool {
     if dashboard.recenter_on_selection.get() == Some(focus) {
         dashboard.recenter_on_selection.set(None);

@@ -429,7 +429,7 @@
     "harness": "grok",
     "windows": [
       {
-        "label": "Week",
+        "label": "Period",
         "remaining_percent": 96,
         "used": null,
         "limit": null,
@@ -471,7 +471,122 @@
     "harness": "muse",
     "windows": [],
     "extra": null,
-    "error": "Muse subscription usage is unavailable",
+    "error": "login expired",
     "refreshed_at_epoch_seconds": 1795026369
+  },
+  "codex-short-full": {
+    "profile_id": "codex-short-full",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "5H",
+        "remaining_percent": 100,
+        "duration_seconds": 18000,
+        "used": null,
+        "limit": null,
+        "resets_at_epoch_seconds": 1795043365
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "codex-short-spent": {
+    "profile_id": "codex-short-spent",
+    "harness": "codex",
+    "windows": [
+      {
+        "label": "5H",
+        "remaining_percent": 0,
+        "duration_seconds": 18000,
+        "used": null,
+        "limit": null,
+        "resets_at_epoch_seconds": 1795043365
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse1": {
+    "profile_id": "muse1",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 0,
+        "resets_at_epoch_seconds": 1795028185
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse2": {
+    "profile_id": "muse2",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795029985
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse3": {
+    "profile_id": "muse3",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795031785
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse4": {
+    "profile_id": "muse4",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795033585
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse5": {
+    "profile_id": "muse5",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795035385
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "muse6": {
+    "profile_id": "muse6",
+    "harness": "muse",
+    "windows": [
+      {
+        "label": "Rolling",
+        "duration_seconds": 21600,
+        "remaining_percent": 70,
+        "resets_at_epoch_seconds": 1795037185
+      }
+    ],
+    "refreshed_at_epoch_seconds": 1795026385
+  },
+  "claude-login": {
+    "profile_id": "claude-login",
+    "harness": "claude",
+    "error": "login refused; sign in again",
+    "windows": [],
+    "refreshed_at_epoch_seconds": 1795026385
   }
 }

@@ -758,12 +758,16 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_profile_rename(&mut self) {
-        let Some(old_id) = self
-            .quota_pool_rows()
-            .get(self.quota_index)
-            .filter(|pool| pool.members.len() == 1)
-            .map(|pool| pool.members[0].id.clone())
-        else {
+        use crate::render::quota_pools::QuotaRow;
+        let Some(old_id) = self.selected_quota_row().and_then(|row| match row {
+            QuotaRow::Lane(_, id) | QuotaRow::Profile(id) => Some(id),
+            QuotaRow::Pool(key) => self
+                .quota_pools()
+                .into_iter()
+                .flat_map(|provider| provider.pools)
+                .find(|pool| pool.key == key && pool.members.len() == 1)
+                .map(|pool| pool.members[0].id.clone()),
+        }) else {
             self.begin_settings_section("profiles", None);
             return;
         };
