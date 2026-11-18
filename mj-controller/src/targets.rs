@@ -54,8 +54,8 @@ mod container_upgrade;
 mod nitro;
 pub(crate) use container::inspect_container_storage;
 use container::*;
-#[cfg(test)]
-pub(crate) use container_upgrade::container_upgrade_test_plan;
+#[cfg(any(test, feature = "test-support"))]
+pub use container_upgrade::container_upgrade_test_plan;
 pub(crate) use container_upgrade::{
     RetainedContainer, inspect_retained_container, recover_removed_container,
     retained_workspace_volume_exists,
@@ -71,7 +71,7 @@ pub use process_limit::*;
 /// Resolve the primary repository's directory on a target. Session indexing
 /// uses the same rule as API file exports so both surfaces name the agent's
 /// actual working directory.
-pub(crate) fn agent_working_directory_at(workspace_root: &str, destination: &Path) -> String {
+pub fn agent_working_directory_at(workspace_root: &str, destination: &Path) -> String {
     target_join(workspace_root, destination)
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn agent_working_directory_at(workspace_root: &str, destination: &Pat
 ///
 /// Target paths are POSIX text whatever this daemon runs on, so the components
 /// are spelled with `/` here rather than by the host's separator.
-pub(crate) fn target_join(root: &str, relative: &Path) -> String {
+pub fn target_join(root: &str, relative: &Path) -> String {
     let mut path = root.trim_end_matches('/').to_owned();
     for component in relative.components() {
         if let std::path::Component::Normal(part) = component {

@@ -19,7 +19,7 @@ pub enum CandidateQuota {
 }
 
 impl CandidateQuota {
-    pub(crate) fn from_report(report: Option<&crate::quota::ProfileQuota>) -> Self {
+    pub fn from_report(report: Option<&crate::quota::ProfileQuota>) -> Self {
         use mj_client::quota::QuotaBilling;
         let Some(report) = report else {
             return Self::Unknown;
@@ -81,7 +81,7 @@ impl AsRef<SubagentCandidate> for SubagentCandidate {
 /// ahead of the rest, in preference order, while their quota tier allows.
 /// `placement` decides whether profiles with a five-hour quota window keep
 /// that order.
-pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
+pub fn draw_candidates<T: AsRef<SubagentCandidate>>(
     candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
     prefer: &[String],
@@ -110,7 +110,7 @@ pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
 /// The ordering `draw_candidates` describes, with one uniform (0, 1] number
 /// per candidate in ranked order. Sorting by ln(u) / score is the
 /// Efraimidis–Spirakis weighted sample without replacement.
-pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
+pub fn order_by_draw<T: AsRef<SubagentCandidate>>(
     candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
     prefer: &[String],
@@ -178,7 +178,7 @@ fn preference_position(candidate: &SubagentCandidate, prefer: &[String]) -> usiz
 /// with quota left are ordered by price-weighted pace score. Then the optional
 /// anchor's profile and profile id, so the order never depends on how the
 /// configuration happens to list them.
-pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
+pub fn rank_candidates<T: AsRef<SubagentCandidate>>(
     candidates: &mut [T],
     ranking_anchor: Option<&str>,
     prefer: &[String],
@@ -216,7 +216,7 @@ pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
 /// usage-priced profiles keep billing. Sub-agent and reviewer spawns keep the
 /// plain quota order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Placement {
+pub enum Placement {
     TopLevel,
     Child,
 }
@@ -345,7 +345,7 @@ fn paid_weight(credits: Option<&mj_client::quota::PaidCredits>) -> Option<f64> {
 
 /// Why load balancing must not offer a candidate for `model`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ineligible {
+pub enum Ineligible {
     /// The subscription is out of quota for the model and has no paid credits.
     OutOfQuota,
     /// The subscription is out of quota; only paid credits remain, and the
@@ -356,7 +356,7 @@ pub(crate) enum Ineligible {
 impl Ineligible {
     /// "profile codex2 is out of subscription quota for model ..." with what
     /// the user can do about it.
-    pub(crate) fn describe(self, profile_id: &str, model: &str) -> String {
+    pub fn describe(self, profile_id: &str, model: &str) -> String {
         match self {
             Self::OutOfQuota => {
                 format!("profile {profile_id} is out of subscription quota for model {model:?}")
@@ -376,7 +376,7 @@ impl Ineligible {
 /// Usage-priced profiles bill per use by nature, and unknown quota is not
 /// evidence of exhaustion, so both stay eligible. A session pinned to a named
 /// profile is not load balancing and does not ask.
-pub(crate) fn ineligibility(
+pub fn ineligibility(
     candidate: &SubagentCandidate,
     model: &str,
     now_seconds: i64,

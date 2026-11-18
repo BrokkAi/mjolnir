@@ -107,11 +107,7 @@ impl StoreGate {
     }
 
     /// Take the gate if it is free, recording `session_id` and `purpose`.
-    pub(super) fn try_lock(
-        &self,
-        session_id: &str,
-        purpose: &'static str,
-    ) -> Option<GateGuard<'_>> {
+    pub fn try_lock(&self, session_id: &str, purpose: &'static str) -> Option<GateGuard<'_>> {
         let mut holder = self.holder();
         if holder.is_some() {
             return None;
@@ -304,7 +300,7 @@ fn collections() -> &'static Mutex<HashMap<String, Instant>> {
     LAST.get_or_init(Default::default)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) fn forget_collections() {
     collections()
         .lock()

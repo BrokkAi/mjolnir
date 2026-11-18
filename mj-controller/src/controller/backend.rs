@@ -471,7 +471,7 @@ pub(super) fn preflight_target(
 /// Whether a local container engine can run sessions, as the launch
 /// preflight and the dashboard's Targets pane judge it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalEngineReadiness {
+pub enum LocalEngineReadiness {
     Ready,
     /// The engine's command is not on this host.
     NotInstalled,
@@ -483,7 +483,7 @@ pub(crate) enum LocalEngineReadiness {
 /// kind (`local-podman`, `local-docker`, or `apple-container`).
 ///
 /// Answers `None` for any other kind: their readiness is not a local engine's.
-pub(crate) fn local_engine_readiness(
+pub fn local_engine_readiness(
     kind: &str,
     executor: &impl CommandExecutor,
 ) -> Option<LocalEngineReadiness> {
@@ -511,7 +511,7 @@ pub(crate) fn local_engine_readiness(
 }
 
 /// Whether a command failed because its program is not installed.
-pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
+pub fn is_missing_command(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -640,7 +640,7 @@ fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn backend_bundle(
     bundle: &ProjectBundle,
     executor: &impl CommandExecutor,
@@ -820,7 +820,7 @@ pub(crate) fn session_image_platform(
 
 /// Resolve the project assignment before preflight, creation, or recreation.
 /// A target without project images does not require an additional host probe.
-pub(crate) fn session_target(
+pub fn session_target(
     config: &Config,
     bundle_id: &str,
     target_id: &str,
@@ -1159,7 +1159,7 @@ fn backend_container_with(
     }
 }
 
-pub(crate) fn validate_resource_allocation(
+pub fn validate_resource_allocation(
     target_kind: impl Into<ResourceAllocationKind>,
     allocation: Option<&SessionResourceAllocation>,
 ) -> Result<()> {
@@ -1339,7 +1339,7 @@ pub(super) fn locator_after_provision_named(
 ///
 /// The mapping itself lives in `mj_core::targets`; this only pairs the stored
 /// locator with the target template the session was created against.
-pub(crate) fn backend_locator(
+pub fn backend_locator(
     locator: &TargetLocator,
     session: &SessionRecord,
     config: &Config,

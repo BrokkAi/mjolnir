@@ -1995,7 +1995,7 @@ impl DashboardContext {
             .state
             .sessions
             .get(&session_id)
-            .is_some_and(mj_controller::pollers::session_target_is_pollable)
+            .is_some_and(mj_daemon::pollers::session_target_is_pollable)
         {
             self.worker_diagnoses.observe(&session_id, true, None);
             self.worker_diagnoses.finish(&session_id, episode_id);

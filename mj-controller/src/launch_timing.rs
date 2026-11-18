@@ -3,14 +3,14 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
-pub(crate) struct LaunchPhaseTimer<'a> {
+pub struct LaunchPhaseTimer<'a> {
     session_id: Cow<'a, str>,
     phase: &'static str,
     started: Instant,
 }
 
 impl<'a> LaunchPhaseTimer<'a> {
-    pub(crate) fn new(session_id: &'a str, phase: &'static str) -> Self {
+    pub fn new(session_id: &'a str, phase: &'static str) -> Self {
         tracing::info!(session_id, phase, "session launch phase started");
         Self {
             session_id: Cow::Borrowed(session_id),
@@ -19,7 +19,7 @@ impl<'a> LaunchPhaseTimer<'a> {
         }
     }
 
-    pub(crate) fn set_session_id(&mut self, session_id: &str) {
+    pub fn set_session_id(&mut self, session_id: &str) {
         self.session_id = Cow::Owned(session_id.to_owned());
     }
 }

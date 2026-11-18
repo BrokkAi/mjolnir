@@ -337,7 +337,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<Vec<Conversion>> {
     Ok(changes)
 }
 
-pub(super) fn report(changes: Vec<Conversion>) {
+pub fn report(changes: Vec<Conversion>) {
     for change in changes {
         tracing::warn!(table = change.table, record_id = change.record_id, session_id = change.session_id, old_cpus = ?change.cpus, old_memory = ?change.memory, allocation = ?change.allocation, snapshot = ?change.snapshot, "converted or dropped legacy container size overrides");
     }

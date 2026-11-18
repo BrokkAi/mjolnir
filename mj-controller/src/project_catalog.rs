@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{controller::RemoteGitExecutor, database};
 
-pub(crate) fn snapshot(
+pub fn snapshot(
     bundle: &ProjectBundle,
     executor: &impl CommandExecutor,
     launch: bool,
@@ -467,7 +467,7 @@ fn migrate_memory(
 }
 
 #[derive(Default)]
-pub(crate) struct Catalog {
+pub struct Catalog {
     requested: AtomicBool,
     retry: AtomicBool,
     notify: tokio::sync::Notify,
@@ -475,7 +475,7 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    pub(crate) fn request(&self, retry: bool) {
+    pub fn request(&self, retry: bool) {
         if retry {
             self.retry.store(true, Ordering::Release);
         }
@@ -487,7 +487,7 @@ impl Catalog {
         self.notify.notify_one();
     }
 
-    pub(crate) fn view(&self) -> Result<ProjectCatalogView> {
+    pub fn view(&self) -> Result<ProjectCatalogView> {
         let mut view = database::read_project_catalog()?;
         for saved in &mut view.projects {
             for source in saved.project.network_sources.values_mut() {
@@ -507,7 +507,7 @@ impl Catalog {
         Ok(view)
     }
 
-    pub(crate) async fn run(self: Arc<Self>, shutdown: CancellationToken) {
+    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
         // Reconcile durable failures once at startup: an upgraded resolver or
         // restored checkout must recover without requiring a manual retry.
         self.request(true);

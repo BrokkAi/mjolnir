@@ -33,7 +33,7 @@ impl std::error::Error for DiscoveryError {}
 
 /// Only intentionally public sentences cross the HTTP boundary, even if a
 /// future implementation adds an error from another source.
-pub(crate) fn error_message(error: &anyhow::Error) -> &'static str {
+pub fn error_message(error: &anyhow::Error) -> &'static str {
     error
         .downcast_ref::<DiscoveryError>()
         .map_or("Project discovery failed. Retry the request.", |error| {
@@ -41,7 +41,7 @@ pub(crate) fn error_message(error: &anyhow::Error) -> &'static str {
         })
 }
 
-pub(crate) fn validate_request(request: &ProjectDiscoveryRequest) -> Result<()> {
+pub fn validate_request(request: &ProjectDiscoveryRequest) -> Result<()> {
     let inputs = match request {
         ProjectDiscoveryRequest::Github { query } => [query.as_str(), ""],
         ProjectDiscoveryRequest::Directory { path, filter } => [path.as_str(), filter.as_str()],

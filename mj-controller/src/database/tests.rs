@@ -531,67 +531,7 @@ fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
 }
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
-    SessionRecord {
-        oracle_choice: None,
-        oracle: true,
-        notifications_ignored: false,
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
-        archived: false,
-        id: id.into(),
-        title: "test session".into(),
-        harness_kind: HarnessKind::Codex,
-        last_profile: "codex".into(),
-        bundle_id: bundle.into(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        no_project_memory: false,
-        no_github_events: false,
-        no_github_credentials: false,
-        target_template_id: "local".into(),
-        resource_allocation: Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 32 * 1024 * 1024 * 1024,
-        }),
-        additional_mounts: vec![AdditionalMount {
-            source: PathBuf::from("/host/cache"),
-            destination: PathBuf::from("/mnt/cache"),
-            access: crate::targets::MountAccess::Cow,
-        }],
-        state: SessionState::Stopped,
-        target: Some(Box::new(TargetLocator::LocalPodman {
-            borrowed_from: None,
-            container_id: "container-1".into(),
-            workspace_storage: Default::default(),
-        })),
-        native_session_id: Some("native-1".into()),
-        acp_session_title: Some("Agent title".into()),
-        session_title_override: None,
-        created_at: "2026-08-12T00:00:00Z".into(),
-        updated_at: "2026-08-12T01:00:00Z".into(),
-        viewed_through_event_ordinal: 7,
-        draft_input: String::new(),
-        last_error: None,
-        dismissed_failure: None,
-        failure_generation: 0,
-        last_checkpoint_error: Some("temporary recovery failure".into()),
-        checkpoint: Some(Box::new(CheckpointMetadata {
-            archive_path: PathBuf::from("sessions/test.hel.zip"),
-            sha256: "a".repeat(64),
-            created_at: "2026-08-12T01:00:00Z".into(),
-            event_frontier: 6,
-        })),
-    }
+    super::test_session(id, bundle)
 }
 
 fn materialized_session(session_id: &str) -> MaterializedSession {

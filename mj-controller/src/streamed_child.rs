@@ -24,25 +24,25 @@ pub(crate) fn is_missing_program(error: &anyhow::Error) -> bool {
     })
 }
 
-pub(crate) struct ProxyStdio {
-    pub(crate) child: ProxyChild,
-    pub(crate) stdin: ProxyWriter,
-    pub(crate) stdout: ProxyReader,
-    pub(crate) stderr: ProxyReader,
+pub struct ProxyStdio {
+    pub child: ProxyChild,
+    pub stdin: ProxyWriter,
+    pub stdout: ProxyReader,
+    pub stderr: ProxyReader,
 }
 
 /// How a proxy ended: its exit code, or `None` when a signal ended it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProxyExit {
+pub struct ProxyExit {
     code: Option<i32>,
 }
 
 impl ProxyExit {
-    pub(crate) fn code(self) -> Option<i32> {
+    pub fn code(self) -> Option<i32> {
         self.code
     }
 
-    pub(crate) fn success(self) -> bool {
+    pub fn success(self) -> bool {
         self.code == Some(0)
     }
 }
@@ -59,7 +59,7 @@ impl std::fmt::Display for ProxyExit {
 /// The child and its process group. The group is killed once the child has
 /// exited, when the child is killed, and when this is dropped, so nothing the
 /// proxy started outlives it.
-pub(crate) struct ProxyChild {
+pub struct ProxyChild {
     child: tokio::process::Child,
     group: Option<ProcessGroupGuard>,
 }
@@ -71,7 +71,7 @@ impl ProxyChild {
         }
     }
 
-    pub(crate) async fn wait(&mut self) -> std::io::Result<ProxyExit> {
+    pub async fn wait(&mut self) -> std::io::Result<ProxyExit> {
         let status = self.child.wait().await?;
         self.kill_group();
         Ok(ProxyExit {
@@ -100,10 +100,7 @@ impl ProxyChild {
 ///
 /// The reader always drains to EOF so a child never blocks on a full pipe
 /// after the retained output reaches the limit.
-pub(crate) async fn collect_bounded(
-    mut reader: ProxyReader,
-    limit: usize,
-) -> std::io::Result<Vec<u8>> {
+pub async fn collect_bounded(mut reader: ProxyReader, limit: usize) -> std::io::Result<Vec<u8>> {
     let mut collected = Vec::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
@@ -189,7 +186,7 @@ impl<R> Drop for StripStart<R> {
 /// leased itself (`lease`). A command that prints the SSH start marker has it
 /// removed from the proxy's stdout, and the lease's gate learns when the
 /// session starts.
-pub(crate) async fn spawn_session_proxy(
+pub async fn spawn_session_proxy(
     spec: &CommandSpec,
     lease: Option<&SshSessionLease>,
 ) -> Result<ProxyStdio> {

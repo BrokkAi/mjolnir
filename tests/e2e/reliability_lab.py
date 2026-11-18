@@ -517,7 +517,7 @@ class Lab:
                 # adapter.
                 "XDG_CACHE_HOME": str(self.runtime_root / "cache"),
                 "MJ_CHAOS_ISOLATED": "1",
-                "RUST_LOG": "hel=debug,mj=debug,mj_controller=debug",
+                "RUST_LOG": "hel=debug,mj=debug,mj_controller=debug,mj_daemon=debug",
             }
         )
         env.pop("MJ_DAEMON_EXIT_WHEN_IDLE", None)

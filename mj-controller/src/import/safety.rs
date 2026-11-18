@@ -89,7 +89,7 @@ impl ImportControl<'_> {
         Ok(())
     }
 
-    pub(super) fn report(&self, progress: ImportArchiveProgress) -> Result<()> {
+    pub fn report(&self, progress: ImportArchiveProgress) -> Result<()> {
         self.check_cancelled()?;
         (self.progress)(progress);
         Ok(())

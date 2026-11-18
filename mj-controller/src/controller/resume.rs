@@ -1539,7 +1539,7 @@ impl Controller {
 
     // Keep the established resume arguments together with its admission hook.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn resume_session_controlled_with_repository_preflight_and_admission(
+    pub async fn resume_session_controlled_with_repository_preflight_and_admission(
         &mut self,
         session_id: &str,
         profile_id: &str,
@@ -2271,7 +2271,7 @@ impl Controller {
         Ok(error.context(detail))
     }
 
-    pub(super) fn rollback_failed_resume(
+    pub fn rollback_failed_resume(
         &mut self,
         session_id: &str,
         previous: &SessionRecord,
@@ -2411,7 +2411,7 @@ fn worktree_cleanup_notice(worktree_root: &Path, error: &anyhow::Error) -> Strin
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn apply_failed_resume_rollback(
     current: &mut SessionRecord,
     previous: &SessionRecord,
@@ -2990,7 +2990,7 @@ async fn utility_handoff_while_cancellable(
 
 mod in_place;
 mod repair;
-pub(crate) use in_place::InPlaceRestartError;
+pub use in_place::InPlaceRestartError;
 pub(super) use repair::RetainedWorker;
 
 #[cfg(test)]

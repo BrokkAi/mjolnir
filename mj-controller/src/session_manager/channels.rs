@@ -164,7 +164,7 @@ struct OrderedRequest {
 }
 
 impl RemoteSessionRequest {
-    pub(crate) fn reject(self, message: &str) {
+    pub fn reject(self, message: &str) {
         match self {
             Self::Submit { reply, .. } => {
                 let _ = reply.send(Err(message.to_owned().into()));
@@ -335,11 +335,11 @@ impl Drop for SessionManagerShutdown {
 }
 
 #[derive(Clone)]
-pub(crate) struct CoalescedUpdateSender {
+pub struct CoalescedUpdateSender {
     pub(crate) session_gate: Arc<crate::recovery_gate::RecoveryGate>,
     pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
-    pub(crate) pending_observations:
+    pub pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
     pub(super) last_raw_options:
         Arc<Mutex<Option<Arc<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>>,
@@ -491,7 +491,7 @@ impl CoalescedUpdateSender {
         });
     }
 
-    pub(crate) fn send(&self, mut update: SessionManagerUpdate) {
+    pub fn send(&self, mut update: SessionManagerUpdate) {
         if update.raw_observation.is_none() {
             update.raw_observation = self
                 .pending_observations
@@ -561,7 +561,7 @@ impl SessionManagerUpdates {
     }
 }
 
-pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
+pub fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
     let mailbox = Arc::new(Mutex::new(UpdateMailbox::default()));
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (

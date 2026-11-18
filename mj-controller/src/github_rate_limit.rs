@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 /// retried; `None` when it is not one. Covers the primary limit (remaining
 /// requests exhausted), HTTP 429, and secondary limits, which GitHub signals
 /// with `Retry-After` while requests remain.
-pub(crate) fn github_rate_limit_retry_at(
+pub fn github_rate_limit_retry_at(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     now: DateTime<Utc>,

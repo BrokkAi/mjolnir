@@ -35,7 +35,7 @@ fn failure_label(kind: StudentFailureKind) -> &'static str {
 
 /// Readiness, preparation/retry and inference concurrency belong to this owner.
 /// Scoring must run blocking inference off the async runtime.
-pub(crate) trait StudentOwner: Send + Sync {
+pub trait StudentOwner: Send + Sync {
     fn manifest_revision(&self) -> &str;
     fn score_segments<'a>(&'a self, item: &'a str, session: &'a str) -> ScoreFuture<'a>;
 }
@@ -68,18 +68,18 @@ pub(crate) enum Route {
     GlideProxy,
 }
 
-pub(crate) struct Notices {
+pub struct Notices {
     degraded: Mutex<bool>,
     notice: Box<dyn Fn(String) + Send + Sync>,
 }
 impl Notices {
-    pub(crate) fn new(notice: impl Fn(String) + Send + Sync + 'static) -> Self {
+    pub fn new(notice: impl Fn(String) + Send + Sync + 'static) -> Self {
         Self {
             degraded: Mutex::new(false),
             notice: Box::new(notice),
         }
     }
-    pub(crate) fn observe(&self, failure: Option<(Option<StudentFailureKind>, &str)>) {
+    pub fn observe(&self, failure: Option<(Option<StudentFailureKind>, &str)>) {
         let mut degraded = self.degraded.lock().unwrap_or_else(|p| p.into_inner());
         match (failure, *degraded) {
             (Some((kind, cause)), false) => {
@@ -97,7 +97,7 @@ impl Notices {
             _ => {}
         }
     }
-    pub(crate) fn student_notice(&self, notice: StudentNotice) {
+    pub fn student_notice(&self, notice: StudentNotice) {
         let text = match notice {
             StudentNotice::InferenceFailing { cause } => {
                 self.observe(Some((Some(StudentFailureKind::Inference), &cause)));
@@ -120,26 +120,23 @@ impl Notices {
     }
 }
 
-pub(crate) struct Classifier {
+pub struct Classifier {
     student: Option<Arc<dyn StudentOwner>>,
     notices: Arc<Notices>,
 }
 impl Classifier {
-    pub(crate) fn new(student: Option<Arc<dyn StudentOwner>>, notices: Arc<Notices>) -> Self {
+    pub fn new(student: Option<Arc<dyn StudentOwner>>, notices: Arc<Notices>) -> Self {
         Self { student, notices }
     }
 
-    pub(crate) async fn classify(
-        &self,
-        evidence: &GithubItemEvidence,
-    ) -> Result<GithubItemVerdict> {
+    pub async fn classify(&self, evidence: &GithubItemEvidence) -> Result<GithubItemVerdict> {
         self.classify_with(evidence, |e| {
             Box::pin(crate::github_item_verdict::classify_probability(e))
         })
         .await
     }
 
-    async fn classify_with<F>(
+    pub async fn classify_with<F>(
         &self,
         evidence: &GithubItemEvidence,
         glide: F,

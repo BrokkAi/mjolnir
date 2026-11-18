@@ -30,10 +30,10 @@ use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use mj_controller::server::api::{
+use mj_daemon::server::api::{
     ApiSession, StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
 };
-use mj_controller::server::{ViewerChatPhase, ViewerLifecycleCategory};
+use mj_daemon::server::{ViewerChatPhase, ViewerLifecycleCategory};
 use tokio_util::task::TaskTracker;
 
 use crate::api_client::ApiClient;
@@ -1049,7 +1049,7 @@ mod tests {
     use axum::{Json, Router};
     use futures::channel::mpsc;
     use futures::{SinkExt, StreamExt};
-    use mj_controller::server::api::{API_VERSION, API_VERSION_HEADER};
+    use mj_daemon::server::api::{API_VERSION, API_VERSION_HEADER};
     use serde_json::{Value, json};
     use std::time::Duration;
 

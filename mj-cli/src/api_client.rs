@@ -1,7 +1,7 @@
 //! A typed client for the daemon's documented `/api/v1` routes.
 //!
 //! The CLI subcommands are thin: they resolve the viewer URL and the bearer
-//! token, serialize the request structs `mj_controller::server::api`
+//! token, serialize the request structs `mj_daemon::server::api`
 //! exports, and print what comes back. Keeping the wire shapes in one crate
 //! means the CLI and the server cannot disagree about them.
 
@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mj_controller::server::api::{
+use mj_daemon::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
     PromptResponse, PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
@@ -310,7 +310,7 @@ impl ApiClient {
                 status,
                 message: "the Mjolnir daemon is being replaced by an upgrade".to_owned(),
                 busy: None,
-                code: Some(mj_controller::server::api::DAEMON_HANDOFF_CODE.to_owned()),
+                code: Some(mj_daemon::server::api::DAEMON_HANDOFF_CODE.to_owned()),
             }));
         }
         check_version(&response)?;
@@ -417,7 +417,7 @@ impl ApiClient {
             .send(
                 self.http
                     .get(self.url("/sessions"))
-                    .query(&mj_controller::server::api::SessionListQuery { workspace_id, all })
+                    .query(&mj_daemon::server::api::SessionListQuery { workspace_id, all })
                     .timeout(REQUEST_TIMEOUT),
             )
             .await?;
@@ -477,7 +477,7 @@ impl ApiClient {
     pub(crate) async fn set_config(
         &self,
         session: &str,
-        request: &mj_controller::server::api::SetConfigRequest,
+        request: &mj_daemon::server::api::SetConfigRequest,
     ) -> Result<ApiSession> {
         decode(
             self.send(
@@ -524,7 +524,7 @@ impl ApiClient {
     pub(crate) async fn wiki_restore(
         &self,
         wiki_id: &str,
-        request: &mj_controller::server::api::WikiRestoreBody,
+        request: &mj_daemon::server::api::WikiRestoreBody,
     ) -> Result<StartSessionResponse> {
         self.post_json(
             &format!("/wiki/sessions/{wiki_id}/restore"),
@@ -567,7 +567,7 @@ impl ApiClient {
     ) -> Result<PromptResponse> {
         self.post_json(
             &format!("/sessions/{session_id}/queued-prompts/clear"),
-            &mj_controller::server::api::ClearQueueRequest { command_id },
+            &mj_daemon::server::api::ClearQueueRequest { command_id },
             REQUEST_TIMEOUT,
         )
         .await
@@ -708,7 +708,7 @@ impl ApiClient {
         path: &str,
         bytes: Vec<u8>,
         overwrite: bool,
-    ) -> Result<mj_controller::server::api::WriteFileResponse> {
+    ) -> Result<mj_daemon::server::api::WriteFileResponse> {
         self.send(
             self.http
                 .put(self.url(&format!("/sessions/{session_id}/files")))
@@ -873,7 +873,7 @@ impl ApiClient {
     pub(crate) async fn start_review(
         &self,
         session_id: &str,
-    ) -> Result<mj_controller::server::api::StartReviewResponse> {
+    ) -> Result<mj_daemon::server::api::StartReviewResponse> {
         let response = self
             .send(
                 self.http
@@ -888,7 +888,7 @@ impl ApiClient {
     pub(crate) async fn review_status(
         &self,
         session_id: &str,
-    ) -> Result<mj_controller::server::api::ReviewStatusResponse> {
+    ) -> Result<mj_daemon::server::api::ReviewStatusResponse> {
         self.get_json(&format!("/sessions/{session_id}/review"))
             .await
     }
@@ -899,7 +899,7 @@ impl ApiClient {
         &self,
         session_id: &str,
         review_id: Option<&str>,
-    ) -> Result<mj_controller::server::api::FinishedReviewResponse> {
+    ) -> Result<mj_daemon::server::api::FinishedReviewResponse> {
         let mut request = self
             .http
             .get(self.url(&format!("/sessions/{session_id}/reviews")));
@@ -914,7 +914,7 @@ impl ApiClient {
         self.send(
             self.http
                 .post(self.url(&format!("/sessions/{session_id}/background-tasks/stop")))
-                .json(&mj_controller::server::api::StopBackgroundTaskRequest {
+                .json(&mj_daemon::server::api::StopBackgroundTaskRequest {
                     background_task_id: task_id.to_owned(),
                 })
                 .timeout(REQUEST_TIMEOUT),
@@ -1072,7 +1072,7 @@ fn is_handoff_refusal(response: &reqwest::Response) -> bool {
     response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
         && response
             .headers()
-            .get(mj_controller::server::UPGRADE_HEADER)
+            .get(mj_daemon::server::UPGRADE_HEADER)
             .is_some_and(|value| value == "pending")
 }
 
@@ -1092,7 +1092,7 @@ impl ApiClient {
 
 impl ApiError {
     fn into_error(self) -> anyhow::Error {
-        if self.code.as_deref() == Some(mj_controller::server::api::DAEMON_HANDOFF_CODE) {
+        if self.code.as_deref() == Some(mj_daemon::server::api::DAEMON_HANDOFF_CODE) {
             return anyhow::Error::new(DaemonHandoff);
         }
         let remedy = match self.code.as_deref() {
@@ -1231,7 +1231,7 @@ mod tests {
                             [
                                 ("content-type", "application/octet-stream"),
                                 (
-                                    mj_controller::server::api::FETCHED_PATH_HEADER,
+                                    mj_daemon::server::api::FETCHED_PATH_HEADER,
                                     "%2Fworkspace%2Fdocs%2FREADME.md",
                                 ),
                             ],
@@ -1558,7 +1558,7 @@ mod tests {
         authority: &str,
         certificate_authority: bool,
     ) -> (String, String, SocketAddr, Seen) {
-        mj_controller::server::install_rustls_crypto_provider();
+        mj_daemon::server::install_rustls_crypto_provider();
         let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
         if certificate_authority {
             // What `openssl req -x509` makes by default, as the lab does.
@@ -1567,7 +1567,7 @@ mod tests {
         let key = rcgen::KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
         let pin =
-            mj_controller::server::api::served_certificate_sha256(certificate.pem().as_bytes())
+            mj_daemon::server::api::served_certificate_sha256(certificate.pem().as_bytes())
                 .unwrap();
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
             certificate.pem().into_bytes(),

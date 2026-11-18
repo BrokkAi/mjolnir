@@ -490,7 +490,7 @@ fn process_managed_cache_root() -> Result<PathBuf, QueryError> {
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
     let install = managed_harness_install_dir(cache_root, HarnessKind::Codex);
     let launcher = install.join(CODEX_CLI_ENTRYPOINT);

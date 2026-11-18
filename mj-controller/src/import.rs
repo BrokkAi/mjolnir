@@ -4,7 +4,7 @@
 mod muse;
 #[cfg(test)]
 mod native_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_fixtures;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,7 +66,7 @@ pub use native_import::*;
 
 mod grok;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use grok::grok_decode_cwd_dirname;
 pub use grok::{list_grok_sessions, locate_grok_session, read_grok_transcript, scan_grok_sessions};
 

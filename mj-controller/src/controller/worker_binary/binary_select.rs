@@ -146,7 +146,7 @@ pub(in crate::controller) fn preflight_host_worker_binary(
 /// existing SSH host is asked its platform; a host that does not answer, or
 /// answers with a platform Mjolnir does not support, is not a worker-source
 /// problem and is left to the launch to report.
-pub(crate) fn worker_source_problem(
+pub fn worker_source_problem(
     template: &mj_core::config::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Option<String> {

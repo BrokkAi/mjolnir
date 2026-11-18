@@ -110,7 +110,7 @@ pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPref
 static APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The single gate shared by startup, launch readiness, and image refresh.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn apple_container_runtime_gate() -> &'static std::sync::Mutex<()> {
     &APPLE_CONTAINER_ENSURE
 }
@@ -734,21 +734,21 @@ fn probe_failure(
 
 impl PodmanProbe {
     /// Name of this probe in the batched remote script's output.
-    pub(super) fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Self::Version => "version",
             Self::Info => "info",
         }
     }
 
-    pub(super) fn args(self) -> &'static [&'static str] {
+    pub fn args(self) -> &'static [&'static str] {
         match self {
             Self::Version => &["podman", "--version"],
             Self::Info => &["podman", "info", "--format", "json"],
         }
     }
 
-    pub(super) fn purpose(self) -> &'static str {
+    pub fn purpose(self) -> &'static str {
         match self {
             Self::Version => "check Podman version",
             Self::Info => "check rootless Podman mode and UID map",
@@ -1319,7 +1319,7 @@ pub(super) fn run_ssh_podman_probes(
 ///
 /// Tests across this crate stand in for a remote host, so they need the real
 /// framing rather than a second, drifting description of it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
     let mut output = String::new();
     for (name, status, stdout, stderr) in probes {

@@ -10,7 +10,7 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionCreateIntent {
+pub struct SessionCreateIntent {
     pub session_id: String,
     pub operation_id: String,
     /// Whether the person launched interactively; the post-success step that
@@ -31,7 +31,7 @@ pub(crate) fn holds_create_intent(state: SessionState) -> bool {
 /// Whether a create intent outlived its creation: its session was archived, or
 /// finished or failed by something that did not settle the intent (an older
 /// daemon).
-pub(crate) fn create_intent_is_stale(session: &SessionRecord) -> bool {
+pub fn create_intent_is_stale(session: &SessionRecord) -> bool {
     session.archived || !holds_create_intent(session.state)
 }
 
@@ -39,13 +39,13 @@ pub(crate) fn create_intent_is_stale(session: &SessionRecord) -> bool {
 /// intent row says whether it is unfinished, the record says how it ended.
 /// The row is read first. It is removed in the transaction that writes the
 /// final state, so a missing row means the record already shows the end.
-pub(crate) enum CreateEnd {
+pub enum CreateEnd {
     Unfinished,
     Finished,
     Failed(String),
 }
 
-pub(crate) fn session_create_end(session_id: &str) -> Result<CreateEnd> {
+pub fn session_create_end(session_id: &str) -> Result<CreateEnd> {
     let connection = open_reader(&database_path())?;
     let unfinished: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_create_intents WHERE session_id = ?1)",
@@ -119,7 +119,7 @@ pub(super) fn settle_create_intent_for_state(
     Ok(())
 }
 
-pub(crate) fn load_session_create_intents() -> Result<Vec<SessionCreateIntent>> {
+pub fn load_session_create_intents() -> Result<Vec<SessionCreateIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT session_id, operation_id, remember_launch_choices
@@ -138,7 +138,7 @@ pub(crate) fn load_session_create_intents() -> Result<Vec<SessionCreateIntent>> 
 }
 
 /// Drop an intent whose session already finished or failed elsewhere.
-pub(crate) fn discard_session_create_intent(session_id: &str, operation_id: &str) -> Result<()> {
+pub fn discard_session_create_intent(session_id: &str, operation_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("discard_session_create_intent", move |connection| {
@@ -161,7 +161,7 @@ pub(super) fn restore_create_intent_for_retry(
 }
 
 /// The only classification of a failed create that Resume may launch again.
-pub(crate) fn failed_first_launch(
+pub fn failed_first_launch(
     session: &SessionRecord,
     is_subagent: bool,
     movement: Option<&mj_core::state::MoveOperation>,
@@ -193,14 +193,14 @@ fn failed_launch_record_with(connection: &Connection, id: &str) -> Result<Option
     Ok(failed_first_launch(&record, is_subagent, movement.as_ref()).then_some(record))
 }
 
-pub(crate) fn read_failed_launch_record(id: &str) -> Result<Option<SessionRecord>> {
+pub fn read_failed_launch_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
     failed_launch_record_with(&snapshot, id)
 }
 
 /// Accept the retry and publish a recoverable create in the same transaction.
-pub(crate) fn begin_failed_launch_retry(expected: SessionRecord) -> Result<Option<String>> {
+pub fn begin_failed_launch_retry(expected: SessionRecord) -> Result<Option<String>> {
     submit_database_write("begin failed launch retry", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(mut record) = failed_launch_record_with(&tx, &expected.id)? else {

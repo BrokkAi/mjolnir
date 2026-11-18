@@ -2300,7 +2300,7 @@ proxy)
     {LATCH_RELAY_FRESH_NATIVE}=fresh-native
     {LATCH_RELAY_ANSWER_PROMPTS}=1
     export {LATCH_RELAY_ROOT} {LATCH_RELAY_FRESH_NATIVE} {LATCH_RELAY_ANSWER_PROMPTS}
-    {binary} --exact controller::checkpoint::tests::latch_relay_child_serves_stdio --nocapture | grep --line-buffered '^{{'
+    {binary} --exact {child} --nocapture | grep --line-buffered '^{{'
     ;;
 restore-checkpoint)
     cp "$4" {restore_spec}
@@ -2313,6 +2313,7 @@ exit 0
 "#,
         root = quote(&worker_root),
         binary = quote(&std::env::current_exe().unwrap()),
+        child = mj_core::test_hooks::latch_relay::CHILD_TEST,
         seed = quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
         restore_spec = quote(&restore_spec),
         digest = verified.canonical_session.event_frontier_digest,
@@ -2641,205 +2642,6 @@ fn only_the_archived_unused_session_may_be_replaced_on_resume() {
         "fresh",
         Some("another")
     ));
-}
-
-// Hard-won: 94d7 resume: failed Resume deleted the container its live sub-agents used.
-#[test]
-fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
-    const CHILD: &str = "MJ_RESUME_PRESENT_ENVIRONMENT_TEST";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new("controller::resume::tests::failed_resume_keeps_present_and_unknown_environments_without_an_archive")
-            .env(CHILD, "1").isolated_store(directory.path())
-            .env("MJ_WORKER_BINARY", directory.path().join("unavailable-worker"))
-            .run();
-        return;
-    }
-    struct Engine {
-        exists_status: i32,
-        commands: Mutex<Vec<String>>,
-    }
-    impl CommandExecutor for Engine {
-        fn pause_deadline(&self) -> mj_core::targets::DeadlinePause {
-            mj_core::targets::DeadlinePause::none()
-        }
-
-        fn cancellation_requested_without_deadline(&self) -> bool {
-            self.cancellation_requested()
-        }
-
-        fn execute_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute(command)
-        }
-
-        fn execute_with_stdin_without_deadline(
-            &self,
-            command: &mj_core::targets::CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> anyhow::Result<mj_core::targets::CommandOutput> {
-            self.execute_with_stdin(command, input)
-        }
-
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.lock().unwrap().push(command.purpose.clone());
-            let (status, stdout) = match command.purpose.as_str() {
-                "check for Mjolnir session container" => (self.exists_status, Vec::new()),
-                "inspect Mjolnir session container" => (0, serde_json::to_vec(&serde_json::json!([{
-                    "Config": {"Labels": {"dev.mj.managed": "true", "dev.mj.session": "0123456789abcdef0123456789abcdef"}},
-                    "State": {"Status": "running"}
-                }])).unwrap()),
-                "probe Mjolnir worker daemon liveness" => (0, b"dead\n".to_vec()),
-                "probe retained environment directory" => (0, b"present\n".to_vec()),
-                "probe Mjolnir worker root" => (0, b"recoverable\n".to_vec()),
-                _ => anyhow::bail!("injected harness preparation failure: {}", command.purpose),
-            };
-            Ok(CommandOutput {
-                status,
-                stdout,
-                stderr: Vec::new(),
-            })
-        }
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let id = "0123456789abcdef0123456789abcdef";
-    let mut parent = checkpoint_test_session(id);
-    parent.state = SessionState::Error;
-    parent.checkpoint = None;
-    parent.target = Some(Box::new(TargetLocator::LocalPodman {
-        container_id: crate::targets::resource_name(id).unwrap(),
-        borrowed_from: None,
-        workspace_storage: Default::default(),
-    }));
-    crate::database::save_session(&parent).unwrap();
-    let original = crate::database::session_environment(id).unwrap().unwrap();
-    let mut controller = Controller {
-        config: resume_compatibility_config(),
-        state: State {
-            sessions: [(id.into(), parent.clone())].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    let engine = Engine {
-        exists_status: 0,
-        commands: Mutex::default(),
-    };
-    controller
-        .rollback_failed_resume(
-            id,
-            &parent,
-            Some(&original),
-            false,
-            anyhow::anyhow!("failure before creating a destination"),
-            &engine,
-        )
-        .unwrap();
-    assert!(engine.commands.lock().unwrap().is_empty());
-    assert_eq!(
-        crate::database::session_environment(id)
-            .unwrap()
-            .unwrap()
-            .placement
-            .target,
-        original.placement.target
-    );
-    // Rollback settles its attempt as stopped; probe each condition from Error.
-    controller.state.sessions.insert(id.into(), parent.clone());
-    crate::database::save_session(&parent).unwrap();
-    for status in [0, 125, 1] {
-        let engine = Engine {
-            exists_status: status,
-            commands: Mutex::default(),
-        };
-        let error = runtime
-            .block_on(crate::controller::test_support::worker_test_scope_async(
-                id,
-                controller.resume_session_controlled(
-                    id,
-                    "codex",
-                    "podman",
-                    SessionResumeOptions {
-                        additional_mounts: None,
-                        resource_allocation: None,
-                        discard_queue: false,
-                    },
-                    &engine,
-                ),
-            ))
-            .unwrap_err();
-        let error = format!("{error:#}");
-        if status == 125 {
-            assert!(error.contains("Retry Resume"), "{error}");
-        }
-        if status == 1 {
-            assert!(error.contains("no checkpoint"), "{error}");
-        }
-        if status == 0 {
-            assert!(!error.contains("no checkpoint"), "{error}");
-        }
-        if status == 1 {
-            assert!(controller.state.sessions[id].target.is_none());
-            assert_eq!(controller.state.sessions[id].state, SessionState::Lost);
-            let view = crate::server::ViewerSnapshot::from_config_state(
-                &controller.config,
-                &controller.state,
-                1,
-            );
-            assert!(!view.sessions[0].capabilities.resume);
-            assert!(view.sessions[0].capabilities.destroy);
-        } else {
-            assert_eq!(controller.state.sessions[id].target, parent.target);
-        }
-        let environment = crate::database::session_environment(id).unwrap().unwrap();
-        assert_eq!(environment.id, original.id);
-        assert_eq!(environment.phase, original.phase);
-        assert_eq!(environment.placement.target, original.placement.target);
-        let commands = engine.commands.lock().unwrap();
-        assert!(
-            commands
-                .iter()
-                .all(|purpose| !purpose.contains("remove") && !purpose.contains("stop")),
-            "{commands:?}"
-        );
-    }
-    // A new placement stops being disposable when its boot owner is admitted,
-    // including a lost launch acknowledgement before Running was published.
-    parent.state = SessionState::Provisioning;
-    controller.state.sessions.insert(id.into(), parent.clone());
-    crate::database::save_session(&parent).unwrap();
-    let owner =
-        crate::controller::test_support::worker_test_permit(id, "resume rollback boot regression")
-            .unwrap()
-            .unwrap();
-    owner.scope_blocking(|| {
-        let intent = crate::database::WorkerRestartIntent {
-            operation_id: owner.operation_id().into(),
-            target: *parent.target.clone().unwrap(),
-            desired_build: String::new(),
-        };
-        crate::database::begin_worker_restart(id, &intent).unwrap();
-        let engine = Engine {
-            exists_status: 0,
-            commands: Mutex::default(),
-        };
-        controller
-            .rollback_failed_resume(
-                id,
-                &parent,
-                None,
-                false,
-                anyhow::anyhow!("lost startup acknowledgement"),
-                &engine,
-            )
-            .unwrap();
-        assert!(engine.commands.lock().unwrap().is_empty());
-        assert_eq!(controller.state.sessions[id].state, SessionState::Error);
-        assert_eq!(controller.state.sessions[id].target, parent.target);
-        crate::database::finish_worker_restart(id, &intent.operation_id).unwrap();
-    });
 }
 
 // Hard-won: c77d71fc3 review: an intact stopped Apple container was never started by Resume.

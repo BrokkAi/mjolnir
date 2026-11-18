@@ -208,7 +208,7 @@ impl BuildStateRelease {
     /// target: an SSH workspace, or a container that mounted the shared build
     /// cache. `None` for a target another session owns, one that never had
     /// build state Mjolnir can name, and a container that ran without the cache.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(in crate::controller) fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,
@@ -589,7 +589,7 @@ pub(crate) fn recent_release_failures() -> Vec<ReleaseFailure> {
         .collect()
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn enabled() -> bool {
     true
 }
@@ -598,18 +598,18 @@ fn enabled() -> bool {
 // executor, and a release would then run this machine's own mbx against the
 // developer's live build cache. Releases stay off in unit tests unless a test
 // turns them on for its thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn enabled() -> bool {
     ENABLED.with(std::cell::Cell::get)
 }
 
 /// Turn releases on for the current test thread until the guard drops.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::controller) fn enable_for_test() -> impl Drop {
     struct Guard;
     impl Drop for Guard {

@@ -157,7 +157,7 @@ upgrade regressions. Keep terminal upgrade handoff formats backward compatible.
 
 ## Control plane and data plane
 
-The daemon (`mj daemon-run`, mj-controller) is the control plane. It owns the
+The daemon (`mj daemon-run`, mj-daemon over mj-controller) is the control plane. It owns the
 database, session records, lifecycle operations (provision, checkpoint, close,
 destroy, recovery), the HTTP API, review orchestration, and client attachments.
 It holds no agent state that cannot be rebuilt from the database and from

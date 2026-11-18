@@ -461,10 +461,10 @@ pub(crate) struct DashboardContext {
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
     runtime_subagent_parents: watch::Sender<BTreeSet<String>>,
-    runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
+    runtime_health: Feed<watch::Receiver<mj_daemon::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
-    runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::review_host::RuntimeReviewView>>>,
+    runtime_reviews: Feed<watch::Receiver<Vec<mj_daemon::review_host::RuntimeReviewView>>>,
     /// Background events the daemon reported. Only ones newer than
     /// `reported_notice_id` reach the notice bar, so a surface that attaches
     /// late does not replay a backlog.
@@ -479,7 +479,7 @@ pub(crate) struct DashboardContext {
     ui_request_actions: Vec<DashboardAction>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
-    runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
+    runtime_review_views: BTreeMap<String, mj_daemon::review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<Config>>,
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
     remote_lifecycle_operations: BTreeMap<String, drains::RemoteLifecycleObservation>,
@@ -1940,7 +1940,7 @@ impl DashboardContext {
         dashboard.set_recent_launch(runtime_state_rx.borrow().recent_launch.clone());
         dashboard.set_container_capacities(runtime_state_rx.borrow().container_capacities.clone());
         let runtime_reviews_rx = remote_worker.reviews;
-        let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
+        let runtime_review_views: BTreeMap<String, mj_daemon::review_host::RuntimeReviewView> =
             runtime_reviews_rx
                 .borrow()
                 .iter()

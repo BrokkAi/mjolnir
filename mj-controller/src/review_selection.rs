@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// profile on it has no subscription report). A profile whose billing neither
 /// decides counts as a subscription here; see [`unclassified_in_draft`] for
 /// callers that must not guess.
-pub(crate) fn usage_priced_profiles(
+pub fn usage_priced_profiles(
     candidates: &crate::profile_scheduler::SubagentCandidates,
 ) -> BTreeSet<String> {
     use mj_client::quota::QuotaBilling;
@@ -63,7 +63,7 @@ pub(crate) fn unclassified_in_draft(
         .collect()
 }
 
-pub(crate) async fn upgrade_reviewers<F, Fut>(
+pub async fn upgrade_reviewers<F, Fut>(
     legacy: &LegacyReview,
     available: &[(String, ProfileConfig)],
     usage_priced: &BTreeSet<String>,
@@ -136,7 +136,7 @@ where
 
 /// Compute the ordered legacy Auto preset using the same model and effort
 /// discovery for the daemon upgrade and the startup review fallback.
-pub(crate) async fn autoconfigure_with_efforts<F, Fut>(
+pub async fn autoconfigure_with_efforts<F, Fut>(
     available: &[(String, ProfileConfig)],
     usage_priced: &BTreeSet<String>,
     probe: F,
@@ -249,7 +249,7 @@ where
 /// refused the reviewer action, a lease taken meanwhile cancelled it, or the
 /// worker turned reviewer work away during a checkpoint or replacement (the
 /// recovery copy a finished turn starts, or an upgrade to the current build).
-pub(crate) fn preempted_by_lifecycle(reason: &str) -> bool {
+pub fn preempted_by_lifecycle(reason: &str) -> bool {
     reason.contains("session is reserved for a lifecycle operation")
         || reason.contains("cancelled for session lifecycle change")
         || reason.contains("worker is reserved for checkpoint or replacement")

@@ -17,7 +17,7 @@ use mj_core::remote_git::{Shorthand, parse_github_remote};
 mod availability;
 pub use availability::{AvailabilityReport, check_availability, profile_presence};
 mod machines;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use machines::machine_probe_fixture;
 pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,

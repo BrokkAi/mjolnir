@@ -1562,7 +1562,7 @@ pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
 
 /// Recovery checks storage under target ownership before touching a process.
 /// This bounded read also detects a broken store even without a pending write.
-pub(crate) fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
+pub fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
     load_session_with(&snapshot, id)

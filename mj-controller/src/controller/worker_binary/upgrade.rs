@@ -24,7 +24,7 @@ pub(in crate::controller) fn replace_installed_worker_binary(
 /// its sidecars. Promotion happens only while an idle reservation is held.
 /// A successfully transferred private binary has no live process using it.
 /// Deferred admission and failed swaps discard it without touching live files.
-pub(crate) struct PreparedWorkerBinary<'a, E: CommandExecutor> {
+pub struct PreparedWorkerBinary<'a, E: CommandExecutor> {
     name: String,
     cleanup: CommandSpec,
     executor: &'a E,
@@ -142,7 +142,7 @@ done"#;
 }
 
 impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
-    pub(crate) fn install(&self, owner: &crate::worker_lifecycle::WorkerPermit) -> Result<()> {
+    pub fn install(&self, owner: &crate::worker_lifecycle::WorkerPermit) -> Result<()> {
         install_staged_worker_binary(
             owner,
             &self.name,
@@ -158,7 +158,7 @@ impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
 /// A container whose image carries this build gets a fresh link to it: the
 /// image's worker and a host copy never share bytes, so the digest gate below
 /// would otherwise copy a host worker over a current one.
-pub(crate) fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
+pub fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
     executor: &'a E,
     refresh: &DeferredWorkerBinaryRefresh,
 ) -> Result<Option<PreparedWorkerBinary<'a, E>>> {
@@ -864,7 +864,7 @@ pub(super) fn worker_binary_refresh_plan(
 /// The digest gate is what stops a redeploy loop: once the right binary is
 /// installed, its digest matches the source and nothing is copied again, even
 /// though recovery may still restart the worker.
-pub(crate) fn refresh_target_worker_binary_if_stale(
+pub fn refresh_target_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     refresh: &DeferredWorkerBinaryRefresh,
 ) -> Result<()> {
