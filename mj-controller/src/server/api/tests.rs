@@ -167,7 +167,7 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     for path in [
         "/api/v1/usage/report",
-        "/api/v1/usage/report?profile=account%2Bapi&period=monthly&include_suspended=true",
+        "/api/v1/usage/report?profile=account%2Bapi&hour_start_ms=7200000&include_suspended=true",
     ] {
         let response = app
             .clone()
@@ -193,7 +193,7 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
             mj_core::usage::SessionUsageQuery::default(),
             mj_core::usage::SessionUsageQuery {
                 profile: Some("account+api".into()),
-                period: mj_core::usage::UsagePeriod::Monthly,
+                hour_start_ms: Some(7_200_000),
                 include_suspended: true
             }
         ]

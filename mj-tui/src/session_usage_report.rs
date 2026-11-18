@@ -1,4 +1,5 @@
 //! Profiles' cancellable, read-only API cost comparison.
+use crate::resume::DisplayZone;
 use crate::{
     DashboardAction, DashboardState, Mode,
     widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells},
@@ -11,7 +12,7 @@ use mj_chat::{
     theme,
 };
 use mj_core::usage::{
-    CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsageAgentRole, UsagePeriod,
+    CostUsdTicks, HOUR_MS, HourlyUsage, SessionUsageQuery, SessionUsageReport, UsageAgentRole,
 };
 use ratatui::{
     Frame,
@@ -24,8 +25,9 @@ use std::cell::{Cell, RefCell};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageControl {
     Profile,
-    Period,
     Suspended,
+    /// The hourly bar graph; its columns are the selectable hours.
+    Hours,
     Rows,
     Refresh,
     Close,
@@ -46,6 +48,11 @@ pub(crate) struct SessionUsageDialog {
     pub(crate) query: SessionUsageQuery,
     pub(crate) report: Option<Result<SessionUsageReport, String>>,
     pub(crate) profiles: Vec<String>,
+    /// The latest bars, kept while a new read is in flight so the graph the
+    /// user clicked stays on screen.
+    hours: Vec<HourlyUsage>,
+    /// How many of the oldest `hours` the last frame had no room to draw.
+    hidden_hours: Cell<usize>,
     selected_key: RefCell<Option<UsageRow>>,
     row_keys: RefCell<Vec<UsageRow>>,
     selected_row: Cell<usize>,
@@ -66,6 +73,8 @@ impl DashboardState {
             },
             report: None,
             profiles: self.config.profiles.keys().cloned().collect(),
+            hours: Vec::new(),
+            hidden_hours: Cell::new(0),
             selected_key: RefCell::new(None),
             row_keys: RefCell::new(Vec::new()),
             selected_row: Cell::new(0),
@@ -95,6 +104,7 @@ impl DashboardState {
         }
         if let Mode::SessionUsageReport(dialog) = &mut self.mode {
             if let Ok(report) = &result {
+                dialog.hours = report.hours.clone();
                 dialog.profiles = dialog
                     .profiles
                     .iter()
@@ -131,9 +141,6 @@ impl DashboardState {
                     .map_or(0, |i| i + 1);
                 dialog.combo.open(UsageControl::Profile, index);
             }
-            Some(Interaction::Activate(UsageControl::Period)) => dialog
-                .combo
-                .open(UsageControl::Period, dialog.query.period as usize),
             Some(Interaction::ComboBoxCommit(UsageControl::Profile, index)) => {
                 dialog.query.profile = index
                     .checked_sub(1)
@@ -141,11 +148,20 @@ impl DashboardState {
                     .cloned();
                 reload = true;
             }
-            Some(Interaction::ComboBoxCommit(UsageControl::Period, index)) => {
-                if let Some(period) = UsagePeriod::ALL.get(index) {
-                    dialog.query.period = *period;
+            // Choosing the hour that is already shown goes back to all hours.
+            Some(Interaction::Select(UsageControl::Hours, index)) => {
+                if let Some(bar) = dialog.hours.get(dialog.hidden_hours.get() + index) {
+                    let hour = Some(bar.start_ms);
+                    dialog.query.hour_start_ms = if dialog.query.hour_start_ms == hour {
+                        None
+                    } else {
+                        hour
+                    };
                     reload = true;
                 }
+            }
+            Some(Interaction::Activate(UsageControl::Hours)) => {
+                reload = dialog.query.hour_start_ms.take().is_some();
             }
             Some(Interaction::Toggle(UsageControl::Suspended)) => {
                 dialog.query.include_suspended = !dialog.query.include_suspended;
@@ -203,7 +219,7 @@ pub(crate) fn render(
         true,
     );
     frame.render_widget(theme::modal().title(title), popup);
-    if inner.height < 9 {
+    if inner.height < 14 {
         form.end_frame(UsageControl::Close);
         return;
     }
@@ -213,36 +229,19 @@ pub(crate) fn render(
         .as_ref()
         .and_then(|p| dialog.profiles.iter().position(|v| v == p))
         .map_or(0, |i| i + 1);
-    // Declare in reading order; the expanded dropdowns paint last.
-    for (control, len, selected) in [
-        (
-            UsageControl::Profile,
-            dialog.profiles.len() + 1,
-            selected_profile,
-        ),
-        (
-            UsageControl::Period,
-            UsagePeriod::ALL.len(),
-            dialog.query.period as usize,
-        ),
-    ] {
-        form.declare(
-            control,
-            ControlKind::ComboBox {
-                len,
-                selected: dialog.combo.selection(control, selected),
-                expanded: dialog.combo.is_open(control),
-            },
-        );
-    }
-    let profile_width = inner.width.saturating_sub(22);
+    form.declare(
+        UsageControl::Profile,
+        ControlKind::ComboBox {
+            len: dialog.profiles.len() + 1,
+            selected: dialog
+                .combo
+                .selection(UsageControl::Profile, selected_profile),
+            expanded: dialog.combo.is_open(UsageControl::Profile),
+        },
+    );
     frame.render_widget(
         Paragraph::new("Profile"),
         Rect::new(inner.x, inner.y, 8.min(inner.width), 1),
-    );
-    frame.render_widget(
-        Paragraph::new("Period"),
-        Rect::new(inner.x + profile_width, inner.y, 7, 1),
     );
     Checkbox::render(
         frame,
@@ -253,13 +252,37 @@ pub(crate) fn render(
         &mut form,
         UsageControl::Suspended,
     );
-    let window = match dialog.query.period {
-        UsagePeriod::Hourly => "last hour",
-        UsagePeriod::Daily => "last 24 hours",
-        UsagePeriod::Weekly => "last 7 days",
-        UsagePeriod::Monthly => "last 30 days",
-    };
-    let rows_area = Rect::new(inner.x, inner.y + 6, inner.width, inner.height - 9);
+    let window = dialog.query.hour_start_ms.map_or_else(
+        || "last 24 hours".to_owned(),
+        |ms| {
+            let zone = |ms| {
+                chrono::DateTime::from_timestamp_millis(ms)
+                    .unwrap_or_default()
+                    .with_timezone(&DisplayZone::now().timezone())
+            };
+            format!(
+                "{}–{}",
+                zone(ms).format("%a %b %-d %H:00"),
+                zone(ms + HOUR_MS).format("%H:00")
+            )
+        },
+    );
+    let bar_rows = if inner.height >= 24 { 5 } else { 2 };
+    let chart_y = inner.y + 5;
+    render_hour_chart(
+        frame,
+        Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
+        dialog,
+        bar_rows,
+        &mut form,
+    );
+    let rows_y = chart_y + bar_rows + 2;
+    let rows_area = Rect::new(
+        inner.x,
+        rows_y,
+        inner.width,
+        inner.bottom().saturating_sub(rows_y + 3),
+    );
     match &dialog.report {
         None => frame.render_widget(
             Paragraph::new("Loading usage…").style(theme::muted()),
@@ -402,11 +425,18 @@ pub(crate) fn render(
             }
         }
     }
-    frame.render_widget(
-        Paragraph::new("Sub-agents included · profile filters turns · + partial · base rates")
-            .style(theme::muted()),
-        Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
-    );
+    for (row, hint) in [
+        "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
+        "Sub-agents included · profile filters turns · + partial · base rates",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        frame.render_widget(
+            Paragraph::new(hint).style(theme::muted()),
+            Rect::new(inner.x, inner.bottom() - 3 + row as u16, inner.width, 1),
+        );
+    }
     Dialog::render_actions(
         frame,
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
@@ -423,7 +453,12 @@ pub(crate) fn render(
     ComboBox::render(
         frame,
         area,
-        Rect::new(inner.x + 8, inner.y, profile_width.saturating_sub(10), 1),
+        Rect::new(
+            inner.x + 8,
+            inner.y,
+            inner.width.saturating_sub(8).min(40),
+            1,
+        ),
         dialog.query.profile.as_deref().unwrap_or("All"),
         &profile_options,
         dialog
@@ -437,28 +472,139 @@ pub(crate) fn render(
         &mut form,
         UsageControl::Profile,
     );
-    let periods = UsagePeriod::ALL.map(|p| Line::raw(p.label()));
-    ComboBox::render(
-        frame,
-        area,
-        Rect::new(
-            inner.x + profile_width + 7,
-            inner.y,
-            15.min(inner.width.saturating_sub(profile_width + 7)),
-            1,
-        ),
-        dialog.query.period.label(),
-        &periods,
-        dialog
-            .combo
-            .selection(UsageControl::Period, dialog.query.period as usize),
-        dialog.combo.is_open(UsageControl::Period),
-        true,
-        "Period",
-        PopupSide::Below,
-        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
-        &mut form,
-        UsageControl::Period,
-    );
     form.end_frame(UsageControl::Close);
+}
+
+/// The graph's top value: the next 1, 2, or 5 times a power of ten above the
+/// tallest bar, in dollars, so the axis labels read cleanly.
+fn axis_top_dollars(max_ticks: u64) -> f64 {
+    let dollars = max_ticks as f64 / 10_000_000_000.0;
+    if dollars <= 0.0 {
+        return 1.0;
+    }
+    let magnitude = 10f64.powf(dollars.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|step| step * magnitude)
+        .find(|top| *top >= dollars * 0.999_999)
+        .unwrap_or(10.0 * magnitude)
+}
+
+fn axis_label(dollars: f64) -> String {
+    let text = format!("{dollars:.3}");
+    format!("${}", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// One bar per hour in the report, tallest at the axis top. Each is a column
+/// of the `Hours` control, so a click or arrow selects that hour.
+fn render_hour_chart(
+    frame: &mut Frame,
+    area: Rect,
+    dialog: &SessionUsageDialog,
+    bar_rows: u16,
+    form: &mut Dialog<UsageControl>,
+) {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max_ticks = dialog
+        .hours
+        .iter()
+        .map(|hour| hour.known_cost_usd_ticks)
+        .max()
+        .unwrap_or(0);
+    let top = axis_top_dollars(max_ticks);
+    let labels = [axis_label(top), axis_label(top / 2.0), "$0".to_owned()];
+    let gutter = labels.iter().map(String::len).max().unwrap_or(0) as u16 + 1;
+    let available = area.width.saturating_sub(gutter);
+    // Draw the newest hours that fit, each with a one-cell gap.
+    let pitch = (available / dialog.hours.len().max(1) as u16).max(2);
+    let shown = dialog.hours.len().min(usize::from(available / pitch));
+    let hidden = dialog.hours.len() - shown;
+    dialog.hidden_hours.set(hidden);
+    let hours = &dialog.hours[hidden..];
+    let selected = hours
+        .iter()
+        .position(|hour| Some(hour.start_ms) == dialog.query.hour_start_ms);
+    let cursor = selected.unwrap_or(hours.len().saturating_sub(1));
+    let focused = form.is_focused(UsageControl::Hours);
+    let eighths = |hour: &HourlyUsage| {
+        if hour.known_cost_usd_ticks == 0 {
+            return 0;
+        }
+        let full = f64::from(bar_rows) * 8.0;
+        let scaled = hour.known_cost_usd_ticks as f64 / 10_000_000_000.0 / top * full;
+        (scaled.round() as u16).clamp(1, bar_rows * 8)
+    };
+    let bar_width = usize::from(pitch - 1);
+    let mut lines = Vec::new();
+    for row in 0..bar_rows {
+        let axis = match row {
+            0 => 0,
+            r if r == bar_rows - 1 => 2,
+            r if r == bar_rows / 2 => 1,
+            _ => usize::MAX,
+        };
+        let mut spans = vec![Span::styled(
+            format!(
+                "{:>width$} ",
+                labels.get(axis).map_or("", String::as_str),
+                width = usize::from(gutter) - 1
+            ),
+            theme::muted(),
+        )];
+        let level_below = (bar_rows - 1 - row) * 8;
+        for (index, hour) in hours.iter().enumerate() {
+            let level = eighths(hour).saturating_sub(level_below).min(8);
+            let glyph = match (level, hour.has_unknown_cost) {
+                (0, _) => ' ',
+                (_, true) => '░',
+                (level, false) => BLOCKS[usize::from(level) - 1],
+            };
+            let style = if selected == Some(index) {
+                theme::active_control()
+            } else {
+                theme::actionable()
+            };
+            spans.push(Span::styled(glyph.to_string().repeat(bar_width), style));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+    // A two-digit hour needs two cells; with one-cell bars, label every other bar.
+    let stride = if bar_width >= 2 { 1 } else { 2 };
+    let label_width = usize::from(pitch) * stride;
+    let mut label_row = vec![Span::raw(" ".repeat(usize::from(gutter)))];
+    for index in (0..hours.len()).step_by(stride) {
+        let local = chrono::DateTime::from_timestamp_millis(hours[index].start_ms)
+            .unwrap_or_default()
+            .with_timezone(&DisplayZone::now().timezone());
+        let covers =
+            |bar: Option<usize>| bar.is_some_and(|bar| (index..index + stride).contains(&bar));
+        let mut style = if covers(selected) {
+            theme::active_control()
+        } else {
+            theme::muted()
+        };
+        if focused && covers(Some(cursor)) {
+            style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+        }
+        label_row.push(Span::styled(
+            format!("{:<label_width$}", local.format("%H")),
+            style,
+        ));
+    }
+    lines.push(Line::from(label_row));
+    frame.render_widget(Paragraph::new(lines), area);
+    let columns = (0..shown)
+        .map(|index| {
+            let start = area.x + gutter + index as u16 * pitch;
+            (start, start + pitch)
+        })
+        .collect::<Vec<_>>();
+    form.register_columns(
+        UsageControl::Hours,
+        Rect::new(area.x + gutter, area.y, shown as u16 * pitch, area.height),
+        cursor,
+        &columns,
+        shown > 0,
+    );
 }

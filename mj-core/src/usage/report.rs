@@ -2,36 +2,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsagePeriod {
-    #[default]
-    Hourly,
-    Daily,
-    Weekly,
-    Monthly,
+pub const HOUR_MS: i64 = 3_600_000;
+/// The graph shows this many whole clock hours, ending with the current one.
+pub const USAGE_GRAPH_HOURS: i64 = 24;
+
+/// Start of the clock hour (UTC) that contains `ms`.
+pub const fn hour_start_ms(ms: i64) -> i64 {
+    ms.div_euclid(HOUR_MS) * HOUR_MS
 }
 
-impl UsagePeriod {
-    pub const ALL: [Self; 4] = [Self::Hourly, Self::Daily, Self::Weekly, Self::Monthly];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Hourly => "Hourly",
-            Self::Daily => "Daily",
-            Self::Weekly => "Weekly",
-            Self::Monthly => "Monthly",
-        }
-    }
-
-    pub const fn duration_ms(self) -> i64 {
-        match self {
-            Self::Hourly => 3_600_000,
-            Self::Daily => 86_400_000,
-            Self::Weekly => 7 * 86_400_000,
-            Self::Monthly => 30 * 86_400_000,
-        }
-    }
+/// Start of the oldest hour the graph shows when `now_ms` is the current time.
+pub const fn graph_start_ms(now_ms: i64) -> i64 {
+    hour_start_ms(now_ms) - (USAGE_GRAPH_HOURS - 1) * HOUR_MS
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,10 +22,23 @@ pub struct SessionUsageQuery {
     /// Counts only turns recorded on this profile, anywhere in a parent's
     /// sub-agent tree; None counts every turn. Rows remain whole parents.
     pub profile: Option<String>,
+    /// Start of one clock hour (see `hour_start_ms`) whose turns the rows
+    /// cover. None covers every hour the graph shows.
     #[serde(default)]
-    pub period: UsagePeriod,
+    pub hour_start_ms: Option<i64>,
     #[serde(default)]
     pub include_suspended: bool,
+}
+
+/// One bar of the usage graph: the turns that completed in one clock hour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HourlyUsage {
+    pub start_ms: i64,
+    /// Sum of the costs that are known.
+    pub known_cost_usd_ticks: u64,
+    /// Some turn in the hour used a model that cannot be priced, so the
+    /// known sum is a lower bound.
+    pub has_unknown_cost: bool,
 }
 
 /// Recorded tokens that cannot be priced: the model has no known rate, or
@@ -157,8 +152,14 @@ pub struct AgentUsageEstimate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
+    /// The span `sessions` and `agent_usage` cover: the selected hour, or
+    /// every hour the graph shows.
     pub since_ms: i64,
     pub until_ms: i64,
+    /// One bar per hour the graph shows, oldest first, for the same profile
+    /// and suspended filters but regardless of the selected hour.
+    #[serde(default)]
+    pub hours: Vec<HourlyUsage>,
     /// Includes retained parent and turn profile names even if no longer
     /// configured.
     pub profiles: Vec<String>,
@@ -176,6 +177,7 @@ impl Default for SessionUsageReport {
         Self {
             since_ms: 0,
             until_ms: 0,
+            hours: Vec::new(),
             profiles: Vec::new(),
             sessions: Vec::new(),
             agent_usage: Vec::new(),
