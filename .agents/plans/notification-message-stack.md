@@ -118,6 +118,9 @@ To see it working, in an isolated instance: run a session whose turn ends with a
   - Kept: each card item resolves its own destination (stack entries belong to the card's session, only the live form to its holder), and TUI desktop/bell alerts track the highest question ordinal already alerted per session.
   Rationale: the hold never removed a question, only delayed it ("hold, then always show"). The logs since 2026-11-09 show 718 held questions, 218 re-held after a release (the flicker gaps), and released holds delayed by a median 3.4 min, p90 16 min, max 5.9 h. Keeping that delay flicker-free cost about nine review findings in daemon-side state. Cost accepted: until the recalibrated classifier ships, a false `?` on a "your call later" wait shows at turn end instead of when the children finish.
   Date/Author: 2026-11-18, user on the Advisor's recommendation.
+- Decision (user, 2026-11-18: "Alerts follow push"): TUI desktop and bell alerts come from the daemon's notify-once decision, the one Web Push already makes per card item (identity, mute, sub-agent exclusion, holder, text). The daemon publishes each newly visible item as an alert event with a monotone sequence, its destination session, title and text; the TUI rings for events after the sequence it attached at and keeps no alert-episode state of its own. It still skips the ring when that destination's conversation is on screen. Daemon protocol 107, so client and daemon always agree and no legacy alert path remains.
+  Rationale: three review rounds in a row found alert bugs in the TUI's own episode tracking (holder mute, reused request ids after a child restart, alerts marked sent before their text loaded). One owner for "notify once" removes that class.
+  Date/Author: 2026-11-18, user.
 
 ## Outcomes & Retrospective
 
