@@ -296,8 +296,9 @@ def probe_runtime(d, child, carrier):
         try:
             if session(child).get("lifecycle") in ("suspended", "closed", "failed", "destroyed"):
                 return  # ended: collect() records it as unobserved; starting reviewers keep being probed
-        except Exception:  # noqa: BLE001 - a destroyed reviewer has no session to read
-            return
+        except Exception as e:  # noqa: BLE001 - destroyed, or a transient API failure: log, keep trying
+            with (d / "runtime-errors.jsonl").open("a") as f:
+                f.write(json.dumps({"child": child, "lifecycle_error": repr(e), "time_ns": time.time_ns()}) + "\n")
         stop.wait(5)
 
 

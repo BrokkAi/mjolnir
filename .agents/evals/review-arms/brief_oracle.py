@@ -707,11 +707,14 @@ def noleak_check_collect(n):
                 raise SystemExit(f"{r['id']}: carrying item is not a complete line of the checked brief")
         decisions[r["id"]] = {"decision": r["decision"], "item": r.get("item"), "why": r.get("why"),
                               "brief_sha256": e["brief_sha256"]}
-    if out_path.exists() and json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
-        raise SystemExit(f"{out_path} holds different decisions")
-    # The results file is written first and is the leak builder's record of completion; the
-    # texts follow from it, and a rerun after an interruption writes only the missing ones.
-    save(out_path, {"round": n, "decisions": decisions})
+    if out_path.exists():
+        if json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
+            raise SystemExit(f"{out_path} holds different decisions")
+    else:
+        # The results file is written first and is the leak builder's record of completion; the
+        # texts follow from it, and a rerun after an interruption writes only the missing ones
+        # without rewriting the frozen record.
+        save(out_path, {"round": n, "decisions": decisions})
     for bug, d in decisions.items():
         if d["decision"] == "carries":
             path = W / "texts" / bug / f"round-{n}.md"

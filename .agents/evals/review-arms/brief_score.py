@@ -179,8 +179,11 @@ def build(arms, per_batch):
             spans = []
             for b in {r["bug"] for r in rows if r["arm"] == arm}:
                 run = ROOT / "runs" / b / arm
-                polls = [json.loads(line)["time_ns"] for line in
-                         (run / "review-status.jsonl").read_text().splitlines() if line.strip()]
+                # The last poll that still showed the review: a later poll (after a resumed driver)
+                # would stretch the window past the review's end.
+                polls = [p["time_ns"] for p in (json.loads(line) for line in
+                         (run / "review-status.jsonl").read_text().splitlines() if line.strip())
+                         if (p.get("status") or {}).get("review")]
                 spans.append((json.loads((run / "review-start-intent.json").read_text())["time_ns"], max(polls)))
             window[arm] = {"first_review_start_ns": min(s for s, _ in spans), "last_status_poll_ns": max(e for _, e in spans)}
         IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved,
