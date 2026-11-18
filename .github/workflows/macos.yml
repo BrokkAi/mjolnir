@@ -16,7 +16,10 @@ jobs:
   macos:
     name: macOS (aarch64-apple-darwin)
     runs-on: macos-latest
-    timeout-minutes: 60
+    # A warm-cache run takes about 56 minutes (43742796104); a cold one builds
+    # clippy and every test binary first and has exceeded 60 minutes
+    # (44184969125), which would otherwise fail the tag CI before a release.
+    timeout-minutes: 90
     env:
       CARGO_BUILD_TARGET: aarch64-apple-darwin
     steps:
