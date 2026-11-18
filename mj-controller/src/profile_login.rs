@@ -85,10 +85,10 @@ pub fn status(
                     .login_store(mj_core::config::HarnessHost::current(), &profile.home),
                 mj_core::config::HarnessLoginStore::MacKeychain
             ) {
-                return match crate::setup::read_claude_keychain_login(executor) {
-                    Ok(crate::setup::KeychainLogin::Present(_)) => LoginStatus::SignedIn,
-                    Ok(crate::setup::KeychainLogin::Missing) => LoginStatus::SignedOut,
-                    Ok(crate::setup::KeychainLogin::Unreadable { status }) => {
+                return match crate::harness_auth::read_claude_keychain_login(executor) {
+                    Ok(crate::harness_auth::KeychainLogin::Present(_)) => LoginStatus::SignedIn,
+                    Ok(crate::harness_auth::KeychainLogin::Missing) => LoginStatus::SignedOut,
+                    Ok(crate::harness_auth::KeychainLogin::Unreadable { status }) => {
                         LoginStatus::Unknown(format!(
                             "the macOS Keychain could not be read (security exited with status {status})"
                         ))
@@ -99,7 +99,7 @@ pub fn status(
                 };
             }
             let authenticated =
-                crate::setup::harness_is_authenticated_with_executor(profile, executor);
+                crate::harness_auth::harness_is_authenticated_with_executor(profile, executor);
             if !authenticated {
                 return LoginStatus::SignedOut;
             }

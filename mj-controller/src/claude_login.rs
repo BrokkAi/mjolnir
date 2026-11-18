@@ -1,7 +1,7 @@
 //! Writing the host's Claude login on macOS (#1491).
 //!
 //! The Keychain item `Claude Code-credentials` is the only host login for
-//! Claude there ([`crate::setup::read_claude_keychain_login`] reads it). The
+//! Claude there ([`crate::harness_auth::read_claude_keychain_login`] reads it). The
 //! daemon is the one refresher, but a pre-upgrade container or remote session
 //! (or an old worker during a rollout) can still hold a full copy with the
 //! refresh token. When that session refreshes, Anthropic rotates the shared
@@ -19,7 +19,7 @@ use mj_core::credentials::{
     validate_credential_payload,
 };
 
-use crate::setup::{KeychainLogin, claude_keychain_account, read_claude_keychain_login};
+use crate::harness_auth::{KeychainLogin, claude_keychain_account, read_claude_keychain_login};
 use crate::targets::{CommandExecutor, CommandSpec};
 
 /// The longest command line `security -i` accepts.

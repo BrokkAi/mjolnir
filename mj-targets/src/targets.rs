@@ -90,6 +90,54 @@ pub fn target_join(root: &str, relative: &Path) -> String {
     path
 }
 
+/// Every container image the daemon downloads in the background, once per
+/// (host, image, platform).
+///
+/// Every container target is covered, including Apple's `container` engine.
+/// A `never` policy is the one opt-out. The rest differ only in when they
+/// download: `always` and `newer` pull on every refresh, while the others
+/// pull only when the host has no copy of the image.
+///
+/// Several targets often share one image on one host, and that needs one
+/// download. When two such targets disagree about when to pull, the merged
+/// entry takes the more eager of the two.
+pub fn image_refresh_plan(config: &mj_core::config::Config) -> Vec<mj_core::targets::ImageRefresh> {
+    let mut plan: Vec<mj_core::targets::ImageRefresh> = Vec::new();
+    for (target_id, target) in &config.targets {
+        let Some((host, container)) = target.image_host() else {
+            continue;
+        };
+        let mut images = vec![container.image.as_str()];
+        if let Some(platform) = container.platform.as_deref() {
+            for bundle_id in config.bundles.keys() {
+                if let Some(image) = config.session_image(Some(bundle_id), target_id, platform) {
+                    images.push(image);
+                }
+            }
+        }
+        for image in images {
+            let Some(refresh) = mj_core::targets::image_refresh(
+                host.clone(),
+                image,
+                container.platform.as_deref(),
+                container.pull_policy,
+            ) else {
+                continue;
+            };
+            if let Some(existing) = plan.iter_mut().find(|entry| {
+                entry.host == refresh.host
+                    && entry.image == refresh.image
+                    && entry.platform == refresh.platform
+            }) {
+                existing.when = existing.when.max(refresh.when);
+            } else {
+                plan.push(refresh);
+            }
+        }
+    }
+    plan
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 /// The command an SSH remote line runs, without the macOS system PATH prefix

@@ -284,7 +284,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::test_isolation::{IsolatedTest, test_name};
 
     /// Moving to OpenCode 2 keeps every login the person had and revives none
     /// they removed. In the person's own home, the database's logins come with

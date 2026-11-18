@@ -86,9 +86,9 @@ use crate::targets::{
     self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
 };
 
+pub use crate::targets::image_refresh_plan;
 pub use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
-pub use backend::image_refresh_plan;
 pub use backend::validate_resource_allocation;
 pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};

@@ -27,6 +27,7 @@ pub mod compaction;
 pub mod controller;
 pub mod doctor;
 pub mod handoff;
+mod harness_auth;
 pub mod harness_login;
 pub mod image;
 pub mod import;

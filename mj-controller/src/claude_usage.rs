@@ -717,19 +717,21 @@ impl LoginSource {
             Self::Keychain { security, .. } => {
                 let security = Arc::clone(security);
                 let login = tokio::task::spawn_blocking(move || {
-                    crate::setup::read_claude_keychain_login(&*security)
+                    crate::harness_auth::read_claude_keychain_login(&*security)
                 })
                 .await
                 .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
                 .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
                 match login {
-                    crate::setup::KeychainLogin::Missing => Err(ClaudeUsageError::NotSignedIn),
-                    crate::setup::KeychainLogin::Unreadable { status } => {
+                    crate::harness_auth::KeychainLogin::Missing => {
+                        Err(ClaudeUsageError::NotSignedIn)
+                    }
+                    crate::harness_auth::KeychainLogin::Unreadable { status } => {
                         Err(ClaudeUsageError::Refresh(format!(
                             "the macOS Keychain could not be read (security exited with status {status}); unlock it and the renewal will be retried"
                         )))
                     }
-                    crate::setup::KeychainLogin::Present(bytes) => {
+                    crate::harness_auth::KeychainLogin::Present(bytes) => {
                         serde_json::from_slice(&bytes).map_err(|_| ClaudeUsageError::NotSignedIn)
                     }
                 }
@@ -762,9 +764,10 @@ impl LoginSource {
             command.env.remove("CLAUDE_CONFIG_DIR");
             command.env_remove.push("CLAUDE_CONFIG_DIR".into());
             command.env_remove.retain(|name| name != "USER");
-            command
-                .env
-                .insert("USER".into(), crate::setup::claude_keychain_account());
+            command.env.insert(
+                "USER".into(),
+                crate::harness_auth::claude_keychain_account(),
+            );
         }
     }
 }
@@ -2277,7 +2280,7 @@ Last 7d · 5966 requests · 78 sessions
             assert!(command.env_remove.contains(&"CLAUDE_CONFIG_DIR".to_owned()));
             assert_eq!(
                 command.env.get("USER"),
-                Some(&crate::setup::claude_keychain_account()),
+                Some(&crate::harness_auth::claude_keychain_account()),
                 "the renewal writes the account the daemon reads"
             );
             assert!(self.lock_home.join(".oauth_refresh.lock").is_dir());

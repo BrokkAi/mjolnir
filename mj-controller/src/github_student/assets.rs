@@ -131,7 +131,7 @@ pub(super) async fn download(
         _ = cancellation.cancelled() => anyhow::bail!("student preparation cancelled"),
         response = client.get(url).send() => response?,
     };
-    let retry_after = crate::quota::retry_after_header(response.headers());
+    let retry_after = mj_core::retry_after::retry_after_header(response.headers());
     let response = response
         .error_for_status()
         .map_err(|e| PreparationFailure::error(StudentFailureKind::Download, e, retry_after))?;

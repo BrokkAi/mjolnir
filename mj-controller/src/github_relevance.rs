@@ -301,12 +301,10 @@ mod tests {
         const CHILD: &str = "MJ_GITHUB_RELEVANCE_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "github_relevance_exact_boundaries_and_failure_episodes",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "github_relevance_exact_boundaries_and_failure_episodes",
+            ))
             .env(CHILD, "1")
             .isolated_store(root.path())
             .run();

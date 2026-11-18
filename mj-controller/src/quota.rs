@@ -285,21 +285,7 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
-/// A `Retry-After` value: a number of seconds, or an HTTP date. A date that
-/// has passed, or anything else, says nothing.
-pub(crate) fn parse_retry_after(value: &str, now: DateTime<chrono::Utc>) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    let date = DateTime::parse_from_rfc2822(value).ok()?;
-    (date.with_timezone(&chrono::Utc) - now).to_std().ok()
-}
-
-pub(crate) fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after(value, chrono::Utc::now())
-}
+pub(crate) use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute
 /// and six hours so a bad header can neither spin the poller nor park a
@@ -666,7 +652,7 @@ pub async fn refresh_claude_grant(
                     // as the other host lookups. The login exchange itself
                     // runs under no deadline.
                     security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
-                        crate::setup::KEYCHAIN_READ_TIMEOUT,
+                        crate::harness_auth::KEYCHAIN_READ_TIMEOUT,
                     )),
                 },
                 None,

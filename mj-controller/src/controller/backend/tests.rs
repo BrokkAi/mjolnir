@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::targets::image_refresh_plan;
+
 use crate::controller::Controller;
 use mj_core::config::{
     Config, ContainerTemplate as ConfigContainer, ProjectBundle, ProjectRepository, SshConnection,

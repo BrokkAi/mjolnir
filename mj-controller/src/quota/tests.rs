@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mj_core::retry_after::parse_retry_after;
 use std::sync::{Arc, Mutex};
 
 fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
@@ -574,12 +575,10 @@ for line in sys.stdin:
             .to_string_lossy()
             .into_owned(),
     );
-    let child = crate::controller::test_support::IsolatedTest::new(
-        crate::controller::test_support::test_name(
-            module_path!(),
-            "codex_quota_processes_share_refresh_ownership_and_recheck_expiry",
-        ),
-    )
+    let child = crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+        module_path!(),
+        "codex_quota_processes_share_refresh_ownership_and_recheck_expiry",
+    ))
     .env(CHILD_HOME, directory.path())
     .env(CHILD_ENV, serde_json::to_string(&environment).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
@@ -1043,9 +1042,10 @@ fn a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once() {
     const CHILD: &str = "MJ_QUOTA_LOG_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(module_path!(), TEST),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            TEST,
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
@@ -1665,12 +1665,10 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     const CHILD: &str = "MJ_QUOTA_RESET_CACHE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(
-                module_path!(),
-                "only_the_process_with_the_database_writer_keeps_quota_reset_times",
-            ),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "only_the_process_with_the_database_writer_keeps_quota_reset_times",
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();

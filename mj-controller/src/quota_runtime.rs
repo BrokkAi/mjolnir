@@ -876,7 +876,7 @@ mod tests {
             let (_bin, path) = path_with(&["podman", "docker"]);
             let mut runtime = QuotaRuntimeConfig::of(&config);
             runtime.in_daemon_container = false;
-            let mut plan = crate::controller::image_refresh_plan(&config);
+            let mut plan = crate::targets::image_refresh_plan(&config);
             add_quota_image(&mut plan, &runtime, Some(&path));
             let mut downloads = plan
                 .into_iter()
