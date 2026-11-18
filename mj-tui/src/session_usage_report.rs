@@ -226,6 +226,8 @@ pub(crate) fn render(
         form.end_frame(UsageControl::Close);
         return;
     }
+    // A short terminal drops the blank lines between the controls.
+    let compact = inner.height < 14;
     let selected_profile = dialog
         .query
         .profile
@@ -248,7 +250,12 @@ pub(crate) fn render(
     );
     Checkbox::render(
         frame,
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        Rect::new(
+            inner.x,
+            inner.y + if compact { 1 } else { 2 },
+            inner.width,
+            1,
+        ),
         "Include suspended sessions",
         dialog.query.include_suspended,
         true,
@@ -271,26 +278,29 @@ pub(crate) fn render(
         },
     );
     // A short terminal keeps the rows and drops the graph.
-    let graph = inner.height >= 14;
-    let rows_y = if graph {
-        let bar_rows = if inner.height >= 24 { 5 } else { 2 };
-        let chart_y = inner.y + 5;
-        render_hour_chart(
-            frame,
-            Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
-            dialog,
-            bar_rows,
-            &mut form,
-        );
-        chart_y + bar_rows + 2
+    let bar_rows = if inner.height >= 24 {
+        5
+    } else if compact {
+        1
     } else {
-        inner.y + 6
+        2
     };
+    let chart_y = inner.y + if compact { 3 } else { 5 };
+    render_hour_chart(
+        frame,
+        Rect::new(inner.x, chart_y, inner.width, bar_rows + 1),
+        dialog,
+        bar_rows,
+        &mut form,
+    );
+    let rows_y = chart_y + bar_rows + if compact { 1 } else { 2 };
     let rows_area = Rect::new(
         inner.x,
         rows_y,
         inner.width,
-        inner.bottom().saturating_sub(rows_y + 3),
+        inner
+            .bottom()
+            .saturating_sub(rows_y + if compact { 2 } else { 3 }),
     );
     match &dialog.report {
         None => frame.render_widget(
@@ -310,7 +320,12 @@ pub(crate) fn render(
                     "Total {} · {window} · estimated API USD",
                     dollars(report.cost_usd_ticks, partial),
                 )),
-                Rect::new(inner.x, inner.y + 4, inner.width, 1),
+                Rect::new(
+                    inner.x,
+                    inner.y + if compact { 2 } else { 4 },
+                    inner.width,
+                    1,
+                ),
             );
             let mut lines = Vec::new();
             let mut row_map = Vec::new();
@@ -438,7 +453,7 @@ pub(crate) fn render(
         "Click a bar or ←/→ for an hour, Enter for all 24 · ░ unpriced models",
         "Sub-agents included · profile filters turns · + partial · base rates",
     ];
-    for (row, hint) in hints[usize::from(!graph)..].iter().rev().enumerate() {
+    for (row, hint) in hints[usize::from(compact)..].iter().rev().enumerate() {
         frame.render_widget(
             Paragraph::new(*hint).style(theme::muted()),
             Rect::new(inner.x, inner.bottom() - 2 - row as u16, inner.width, 1),

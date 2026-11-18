@@ -879,14 +879,14 @@ Ent
 
    ╭ × Usage by session ──────────────────────────────────────────╮
    │Profile codex ▾                                               │
-   │                                                              │
    │☒ Include suspended sessions                                  │
-   │                                                              │
    │Total ? · last 24 hours · estimated API USD                   │
-   │                                                              │
+   │$50     ▁ ▁ ▁     ▂ ▅ ▄ ▃ ▁ ▁ ░     ▁ ▂ ▄ ░ ▆ ▃ ▂ ▁           │
+   │    16  18  20  22  00  02  04  06  08  10  12  14            │
    │Primary agents  $1.000                                        │
    │  gpt-6.1-terra  $1.000                                       │
    │                                                              │
+   │Subagents  $3.105                                             │
    │Sub-agents included · profile filters turns · + partial · base│
    │  Refresh     Close                                           │
    ╰──────────────────────────────────────────────────────────────╯

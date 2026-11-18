@@ -8,7 +8,8 @@ pub const USAGE_GRAPH_HOURS: i64 = 24;
 
 /// Start of the clock hour (UTC) that contains `ms`.
 pub const fn hour_start_ms(ms: i64) -> i64 {
-    ms.div_euclid(HOUR_MS) * HOUR_MS
+    // An API caller can send any i64; the extremes saturate.
+    ms.div_euclid(HOUR_MS).saturating_mul(HOUR_MS)
 }
 
 /// Start of the oldest hour the graph shows when `now_ms` is the current time.

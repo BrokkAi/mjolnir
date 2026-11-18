@@ -62,7 +62,7 @@ fn load_with(
     let (since_ms, until_ms) = match query.hour_start_ms {
         Some(hour) => {
             let hour = hour_start_ms(hour);
-            (hour, now_ms.min(hour + HOUR_MS - 1))
+            (hour, now_ms.min(hour.saturating_add(HOUR_MS - 1)))
         }
         None => (graph_start, now_ms),
     };
