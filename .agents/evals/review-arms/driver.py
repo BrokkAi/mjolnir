@@ -206,17 +206,27 @@ IMAGE_PIN = None
 IMAGE_PIN_LOCK = threading.Lock()
 
 
-def check_image_pin(place):
+def image_pin_mismatch(place):
+    """None when the carrier's image is the run's pinned image (pinning it if this is the first)."""
     if IMAGE_PIN is None:
-        return
+        return None
     with IMAGE_PIN_LOCK:
         if IMAGE_PIN.exists():
             pinned = json.loads(IMAGE_PIN.read_text())["image"]
-            if place["image"] != pinned:
-                raise RuntimeError(f"carrier image {place['image']} differs from the run's pinned image {pinned}; "
-                                   "review not started")
-        else:
-            save(IMAGE_PIN, {"image": place["image"], "time_ns": time.time_ns()})
+            return None if place["image"] == pinned else pinned
+        save(IMAGE_PIN, {"image": place["image"], "time_ns": time.time_ns()})
+        return None
+
+
+def set_aside_carrier(d, sid, place, pinned):
+    """A carrier on another image never reviews: suspend it and move its launch records aside, so a
+    later run starts a fresh carrier once the pinned image is current again."""
+    tag = f"rejected-{time.time_ns()}"
+    save(d / f"{tag}-image.json", {"session_id": sid, "image": place["image"], "pinned": pinned})
+    save(d / f"{tag}-suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
+        if (d / name).exists():
+            (d / name).rename(d / f"{tag}-{name}")
 
 
 def record_runtimes(d, children):
@@ -224,7 +234,13 @@ def record_runtimes(d, children):
     for child in children:
         path = d / "reviewers" / child[:12] / "runtime.json"
         if not path.exists():
-            runtime = reviewer_runtime(child, carrier)
+            try:
+                runtime = reviewer_runtime(child, carrier)
+            except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
+                # Sampling is evidence, not the review: record the failure and retry next poll.
+                with (d / "runtime-errors.jsonl").open("a") as f:
+                    f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
+                continue
             if runtime:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 save(path, runtime)
@@ -442,6 +458,10 @@ def run_job(job, gate):
             s = wait_idle(sid)
     assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
     place = container(sid)
+    pinned = image_pin_mismatch(place)
+    if pinned:
+        set_aside_carrier(d, sid, place, pinned)
+        return f"held: carrier image {place['image']} differs from the pinned {pinned}; carrier set aside"
     if recorded:
         if place != json.loads((d / "placement.json").read_text()):
             return "needs-recovery"
@@ -454,7 +474,6 @@ def run_job(job, gate):
         save(d / "placement.json", place)
         before = inventory(place, "pin", bug["base_commit"])
         save(d / "pre-inventory.json", before)
-    check_image_pin(place)
     assert list(before["session_start"].values()) == [bug["base_commit"]], before["session_start"]
     assert not before["remotes"] and not before["alternates"] and not before["status"], before
     assert before["base_tree"] != before["head_tree"]
