@@ -408,8 +408,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
         except Exception as e:  # report every failure with its batch
             failed += 1
             b, j = futures[f]
-            print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e)}),
-                  flush=True)
+            import traceback
+            print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e),
+                              "traceback": "".join(traceback.format_exception(e))[-2000:]}), flush=True)
 both = [(b, j) for b in batches for j in ("A", "B")]
 if a.kind == "judge" and not failed:
     import fcntl
