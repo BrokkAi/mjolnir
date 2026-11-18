@@ -14,7 +14,7 @@ pub(super) fn spawn_phone_server(
     state.set_phone_status(WebViewerStatus::Starting);
     let workspaces = state.workspaces();
     tokio::spawn(async move {
-        let push = crate::web_push::run(state.clone());
+        let push = crate::daemon::push_delivery::run(state.clone());
         let server = crate::server_runtime::run_server(
             (&config).into(),
             cancellation.clone(),

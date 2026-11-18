@@ -3445,7 +3445,7 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
     let sessions = remote.control.clone();
     let row = pending[0].clone();
     let delivery = tokio::spawn(async move {
-        crate::mailbox_outbox::deliver_mailbox_event(
+        crate::daemon::mailbox_delivery::deliver_mailbox_event(
             state,
             &sessions,
             &row.target_session_id,
@@ -4557,7 +4557,7 @@ async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
     let exports = ParkingExports::new(SessionState::Running, None);
     let exports_trait: Arc<dyn ExportRuntime> = exports.clone();
     let pending = crate::database::pending_mailbox_events(10).unwrap();
-    crate::mailbox_outbox::deliver_session_events(
+    crate::daemon::mailbox_delivery::deliver_session_events(
         exports_trait,
         remote.control.clone(),
         tokio_util::sync::CancellationToken::new(),
@@ -5487,7 +5487,7 @@ async fn a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay
     let state: Arc<dyn ExportRuntime> = exports.clone();
     let sessions = remote.control.clone();
     let delivery = tokio::spawn(async move {
-        crate::mailbox_outbox::deliver_mailbox_event(
+        crate::daemon::mailbox_delivery::deliver_mailbox_event(
             state,
             &sessions,
             &row.target_session_id,
@@ -6823,7 +6823,7 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
             .unwrap();
         if protocol < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL {
             assert!(matches!(
-                crate::mailbox_outbox::deliver_mailbox_event(
+                crate::daemon::mailbox_delivery::deliver_mailbox_event(
                     exports.clone(),
                     &remote.control,
                     "parent-1",
@@ -6845,7 +6845,7 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
         let exports = exports.clone();
         let event = event.clone();
         let delivery = tokio::spawn(async move {
-            crate::mailbox_outbox::deliver_mailbox_event(
+            crate::daemon::mailbox_delivery::deliver_mailbox_event(
                 exports, &control, "parent-1", event, false,
             )
             .await
