@@ -214,11 +214,13 @@ pub(crate) struct QuotaPool {
     pub label: String,
     pub members: Vec<PoolMember>,
     pub remaining: u8,
+    pub missing: usize,
 }
 
 pub(crate) struct PoolMember {
     pub id: String,
     pub weight: f64,
+    pub limit: Option<i64>,
     pub remaining: u8,
     pub reset: Option<i64>,
     pub banked: Option<u64>,
@@ -272,7 +274,13 @@ pub(crate) fn provider_pools(
             None
         };
         if let Some(label) = label {
-            group.text.push((id.into(), label));
+            group.text.push((
+                id.into(),
+                match &quota.extra {
+                    Some(extra) if !quota.is_usage_priced() => format!("{label} · {extra}"),
+                    _ => label,
+                },
+            ));
             continue;
         }
         let reports = if profile.kind == HarnessKind::Antigravity {
@@ -316,27 +324,41 @@ pub(crate) fn provider_pools(
                         },
                         members: Vec::new(),
                         remaining: 0,
+                        missing: 0,
                     });
                     group.pools.len() - 1
                 });
             group.pools[index].members.push(PoolMember {
                 id: id.into(),
                 weight: quota.monthly_price_usd.map(f64::from).unwrap_or(0.0),
+                limit: window.limit.filter(|limit| *limit > 0),
                 remaining,
                 reset: window.resets_at_epoch_seconds,
                 banked: quota.banked_resets,
-                five_hour: report.five_hour_window().cloned(),
+                five_hour: report
+                    .five_hour_window()
+                    .filter(|five| *five != window)
+                    .cloned(),
                 // Claude omits the short window until first use; other adapters
                 // do not define an absent window as idle.
                 five_hour_idle: profile.kind == HarnessKind::Claude,
                 fable: quota
                     .fable_weekly_window()
                     .and_then(quota_remaining_percent),
-                note: quota.rate_limit_label(now),
+                note: match (quota.rate_limit_label(now), &quota.extra) {
+                    (Some(rate), Some(extra)) => Some(format!("{rate} · {extra}")),
+                    (rate, extra) => rate.or_else(|| extra.clone()),
+                },
             });
         }
         if !added {
-            group.text.push((id.into(), "unavailable".into()));
+            group.text.push((
+                id.into(),
+                match &quota.extra {
+                    Some(extra) => format!("unavailable · {extra}"),
+                    None => "unavailable".into(),
+                },
+            ));
         }
     }
     for group in grouped.values_mut() {
@@ -361,7 +383,41 @@ pub(crate) fn provider_pools(
                     .cmp(&b.reset.unwrap_or(i64::MAX))
                     .then_with(|| a.id.cmp(&b.id))
             });
-            if pool.members.iter().any(|member| member.weight <= 0.0) {
+            pool.missing = config
+                .enabled_profiles()
+                .filter(|(id, profile)| {
+                    providers
+                        .provider(id, profile)
+                        .is_some_and(|provider| *provider == group.provider)
+                        && !quotas.get(*id).is_some_and(ProfileQuota::is_usage_priced)
+                        && !pool.members.iter().any(|member| member.id == *id)
+                        && !quotas.get(*id).is_some_and(|quota| {
+                            if quota.error.is_some() {
+                                return false;
+                            }
+                            let report = match pool.key.scope.as_deref() {
+                                Some("gemini") => {
+                                    quota.for_antigravity_pool(AntigravityQuotaPool::Gemini)
+                                }
+                                Some("claude,gpt") => {
+                                    quota.for_antigravity_pool(AntigravityQuotaPool::Claude)
+                                }
+                                _ => quota.clone(),
+                            };
+                            report
+                                .summary_window()
+                                .and_then(quota_remaining_percent)
+                                .is_some()
+                        })
+                })
+                .count();
+            // The provider, scope and period identify the allowance's unit.
+            // Prefer its absolute capacity over a subscription's dollar price.
+            if pool.members.iter().all(|member| member.limit.is_some()) {
+                for member in &mut pool.members {
+                    member.weight = member.limit.unwrap() as f64;
+                }
+            } else if pool.members.iter().any(|member| member.weight <= 0.0) {
                 for member in &mut pool.members {
                     member.weight = 1.0;
                 }

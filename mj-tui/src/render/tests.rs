@@ -1374,7 +1374,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         cycles: 1,
     });
     let row = profiles_row(&mut dashboard);
-    assert!(row.contains("Anthropic 63%, OpenAI 10%"), "{row:?}");
+    assert!(row.contains("Anthropic 63%, OpenAI 10%*"), "{row:?}");
 
     // Refreshing preserves the last pool reading and marks the affected pool.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
@@ -1387,7 +1387,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     });
     let row = profiles_row(&mut dashboard);
     assert!(row.contains("Anthropic 63%"), "{row:?}");
-    assert!(row.contains("OpenAI 10% (refreshing)"), "{row:?}");
+    assert!(row.contains("OpenAI 10%* (refreshing)"), "{row:?}");
 
     // The snapshot replaces what the dashboard held; it does not add to it.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
@@ -1396,7 +1396,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     });
     let row = profiles_row(&mut dashboard);
     assert!(!row.contains("63%"), "{row:?}");
-    assert!(row.contains("OpenAI 12%"), "{row:?}");
+    assert!(row.contains("OpenAI 12%*"), "{row:?}");
 }
 
 #[test]

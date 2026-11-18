@@ -40,6 +40,9 @@ Provider is not the harness. A Codex profile can be configured to talk to DeepSe
 
 ## Decision Log
 
+- Decision (2026-11-18 review fixes): lane notes always name the pooled allowance and independently append short-window readings and provider extras. Wrap notes below lanes when they cannot fit, retaining row identity on every continuation for selection, scrolling and clicks. Bound the name column so a long profile ID cannot consume other readings.
+- Decision (2026-11-18 review fixes): count subscription profiles without usable readings within the provider/model scope as missing; annotate totals with `*` and report the count. Usage-priced reports are excluded. Use positive absolute limits when every member has one, then complete monthly prices, then equal weights. Provider/scope/period define the metered unit (the report format has no separate unit field).
+
 - Decision: resolve file-based provider identity asynchronously in the TUI; unresolved identities say resolving and completed failures are reported. Pooling remains pure.
   Rationale: preserve the repository's event/render loop I/O rule without changing persisted or wire formats.
   Date/Author: 2026-11-18 / implementation agent.

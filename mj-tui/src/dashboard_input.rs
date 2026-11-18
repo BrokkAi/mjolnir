@@ -393,8 +393,12 @@ impl DashboardState {
                 .borrow()
                 .iter()
                 .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
-                .map(|(index, _)| *index);
-            if let Some(index) = hit {
+                .map(|(row, _)| row.clone());
+            if let Some(row) = hit {
+                let Some(index) = self.quota_rows().iter().position(|current| *current == row)
+                else {
+                    return DashboardAction::None;
+                };
                 self.focus = Focus::Quota;
                 self.set_selection_for(Focus::Quota, index);
                 if matches!(

@@ -1084,7 +1084,7 @@ pub struct DashboardState {
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.
     pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
-    pub(crate) quota_pool_areas: RefCell<Vec<(usize, Rect)>>,
+    pub(crate) quota_pool_areas: RefCell<Vec<(crate::render::quota_pools::QuotaRow, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,

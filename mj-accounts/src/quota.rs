@@ -13,7 +13,6 @@ use tracing::Instrument;
 use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
-use mj_core::codex_provider::BuiltInCodexProvider;
 use mj_core::config::{
     AuthScheme, HarnessKind, HarnessProfile, QuotaRuntimeChoice, harness_authentication_marker,
 };
@@ -123,63 +122,7 @@ impl QuotaRuntimeConfig {
     }
 }
 
-/// Where a Codex profile's quota comes from, decided once from its provider
-/// configuration. Only Codex's own OpenAI login has ChatGPT rate-limit
-/// windows; every other provider must never be probed through that login,
-/// or it reports the ChatGPT account's quota as its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CodexQuotaSource {
-    /// No `model_provider`, or the built-in `openai` provider.
-    ChatGptLogin,
-    /// A custom provider whose API key and host Mjolnir can read; its quota
-    /// comes from the provider's own endpoint when it publishes one.
-    Provider(ProviderCredential),
-    /// Any other provider: a local or Bedrock built-in, or a custom provider
-    /// whose key Mjolnir cannot read. It has no allowance to report.
-    UsagePriced { provider: String },
-    /// The profile's Codex configuration could not be read.
-    Unreadable(String),
-}
-
-impl CodexQuotaSource {
-    /// The source for one configured profile. `mj doctor` reads the same
-    /// answer to say where each profile's quota comes from.
-    pub fn of_profile(profile: &HarnessProfile) -> Self {
-        let provider = match profile.codex_provider() {
-            Ok(None) => return Self::ChatGptLogin,
-            Ok(Some(provider)) => provider,
-            Err(error) => return Self::Unreadable(format!("{error:#}")),
-        };
-        if provider.built_in() == Some(BuiltInCodexProvider::OpenAi) {
-            return Self::ChatGptLogin;
-        }
-        match (
-            provider.custom(),
-            profile.codex_provider_api_key(),
-            provider.host(),
-        ) {
-            (Some(_), Some(api_key), Some(host)) => Self::Provider(ProviderCredential {
-                id: provider.id().to_owned(),
-                host,
-                api_key,
-            }),
-            _ => Self::UsagePriced {
-                provider: provider.id().to_owned(),
-            },
-        }
-    }
-}
-
-/// Where a profile's quota lives when the profile authenticates with an API
-/// key against a provider named in its harness configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderCredential {
-    /// Provider id from the harness configuration, for error messages.
-    pub id: String,
-    /// Host of the provider's base URL, for example `api.z.ai`.
-    pub host: String,
-    pub api_key: String,
-}
+pub use mj_core::config::{CodexQuotaSource, ProviderCredential};
 
 impl QuotaRefreshRequest {
     pub fn cache_identity(&self) -> String {
