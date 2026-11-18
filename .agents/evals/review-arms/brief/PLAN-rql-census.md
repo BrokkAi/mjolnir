@@ -15,28 +15,29 @@ A positive result shows that the information helps when it's delivered this way.
 
 **Repositories.**
 - Development: mjolnir and bifrost-dev, with their frozen corpora.
-- Test: 8 Rust repos to start, up to about 12 under the stopping rule, from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
-- Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/corpus-yield-summary.md`: upper bound × bug precision × admission rate). Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output.
-- Rank and measure at least 16 repos: one cold Bifrost index and one incremental re-index each, at a representative revision. Take the 8 with the most expected admitted bugs per indexing hour; the rest form the ordered reserve for the stopping rule. Budget for about 12 repos. Reaching ±10 needs about 12 repos if the between-repo SD is 10 points, and about 16 if it is 15. More bugs per repo can't substitute for more repos, and the list may run out, which reads Inconclusive.
+- Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs, from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
+- Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/scan.py`, then `yield_rank.py`, which turns the capped samples into per-repo yields: upper bound × bug precision 0.85 × admission rate 31/67; results in `yield.json` and `corpus-yield-summary.md`). Incompletely traced fixes never count as strong. Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output.
+- Rank and measure at least 16 repos: one cold Bifrost index and one incremental re-index each, at a representative revision. Take the 12 that qualify with the most expected admitted bugs per indexing hour. Reaching ±10 needs about 12 repos if the between-repo SD is 10 points, and about 16 if it is 15. More bugs per repo can't substitute for more repos. If fewer than 12 qualify, use all that do; a wider interval then reads as the bands below say.
 - A repo counts only if it has at least 8 admitted relation diffs, decided before any reviewer runs on it.
 
 **Bugs.**
+- Candidates come from each selected repo's full git history: fix commits that change non-test code and add or change a test. The brokkbench SFT lists only seeded the screen, and they are a model-screened subset capped at 1,000 commits per repo.
 - The corpus SPEC rules (`corpus/SPEC.md`) apply, adapted: the regression test in the fix commit replaces the Hard-won marker, and the cutoff rule becomes the window below. Attribution, findable-from-the-diff, real behavior, not pre-flagged, ordinary commits, size and spread all apply unchanged.
 - Each candidate is admitted by a blind Sol/high tracer with a second-family check of the attribution, as in `PLAN-bifrost-bugs.md`.
 - Target about 25 admitted bugs per repo.
 
 **Window.**
 - Test bugs have both the introducing change and the fix on or after 2025-01-01.
-- If a selected repo falls short of the target, extend that repo to 2024-01-01 and record it.
-- Contamination: a bug a model memorized is caught in every arm, so it shrinks the paired difference rather than inflating it. It is measured by the no-brief catch rate on bugs fixed before and after the cutoffs (Sol 2026-04-30, Terra 2026-06-01, Opus June 2026). The after-cutoff subset is reported separately.
+- If a selected repo falls short of the target, extend that repo's test window to 2024-01-01 and record it. This happens before its development sample is drawn.
+- Contamination: a memorized bug tends to be caught in every arm, which shrinks the paired difference. An RQL row can also cue recall of a bug the reviewer missed without a brief, which inflates it, so the direction isn't guaranteed. Sensitivity checks are the after-cutoff subset (cutoffs: Sol 2026-04-30, Terra 2026-06-01, Opus June 2026) and the no-brief catch rate by fix date. The latter is descriptive only, because difficulty and repo mix confound it.
 
 **Development and test split.**
-- The RQL step menu is chosen only from development data: mjolnir, bifrost-dev and up to 10 pre-2025 bugs per test repo (census only).
-- Pre-2025 bugs are labelled for relation kind and expressibility only. That needs no indexing of old commits. They feed the menu counts and nothing else.
+- The RQL step menu is chosen only from development data: mjolnir, bifrost-dev and up to 10 bugs per test repo fixed before that repo's test-window start (before 2025, or before 2024 for an extended repo; census only). Development and test bugs therefore never overlap in time, and no introducing or fix commit appears in both sets.
+- Development bugs are labelled for relation kind and expressibility only. That needs no indexing of old commits. They feed the menu counts and nothing else.
 - Grammar, prompts and simulator tuning use mjolnir and bifrost-dev only.
 - No 2025+ test bug informs the menu, the grammar or the prompts.
-- **Menu rule, written before the pre-2025 census:** the added steps are the top k = 3 missing step kinds, ranked by the repo-averaged share of relation bugs they decide.
-- **Leak check:** report whether the menu changes when one test repo's pre-2025 bugs are left out, and when all of them are left out. An unchanged menu means nothing leaked.
+- **Menu rule, written before the development census:** the added steps are the top k = 3 missing step kinds, ranked by the repo-averaged share of relation bugs they decide.
+- **Leak check:** report whether the menu changes when one test repo's development bugs are left out, and when all of them are left out. An unchanged menu means nothing leaked.
 - **Exclusion:** a test bug in the same family as a development bug from that repo is excluded. Same family means the same issue, or introduced by the development bug's fix.
 
 ## Stage 1: census (no reviewers)
@@ -84,13 +85,15 @@ It reports:
 - **N:** no brief.
 - **G:** grep writer. It gets the same step list in prose, so the contrast is the answers, not the checklist.
 - **R:** mocked-RQL writer, which keeps grep and the list.
-- **H:** compute-matched. A grep writer that may ask a helper the same number of free-form questions R asked on that diff. The helper has the same model and inputs as the answer engine.
+- **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine, and a token budget equal to the engine tokens spent answering R's queries on that diff. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
 - **D (conditional):** R with answers degraded at random to the owner's realistic recall.
+
+**Leak audit.** Each brief's exact text, bound to its hash, gets the blind `judge/SPEC.md` check (one Opus/high) as if it were a review output. Briefs are not rewritten: a blind writer that states the defect from accurate rows is the product working. The readout reports, per arm, the share of briefs that state the defect, and a secondary R − G that excludes diffs where any arm's brief states it. That separates writer-found defects from facts the reviewer used.
 
 **Writer gates.** One blind Opus judge decides per brief whether it contains the decisive fact (any minimal set). Every diff where R's and G's containment differ is hand-checked. A gate is read only if R actually queried the engine (Terra never called the tool in the Oz run). Prompt fixes are allowed in the pilot and frozen before test.
 - **Pilot (futility bar):** if R's containment doesn't exceed G's by at least 10 points, stop before pilot reviewers and report. The menu was chosen on these bugs, so a pass here is weak evidence and a fail is strong.
 - **Test (binding):** run every test writer first. If the upper bound of R − G containment (the same repo-level t interval) is below +10, skip the test reviewers and report "stopped for futility". On mjolnir, a brief with the decisive fact was worth about +40 to +50 catch points, so a +10 catch effect needs about +20 containment.
-- **Arm N always runs,** whatever the gates say: the census ranking among baseline misses, the contamination measure and G − N all need it.
+- **Arms N and G always run their reviewers,** whatever the gates say: the census ranking among baseline misses, the contamination measure and G − N all need them. The gates skip only R, H and D reviewers.
 
 **Reviewers and judging.**
 - Terra/high reviewers. Each brief arm gets 2 briefs per diff with 2 reviewers per brief. N gets 4 reviewers per diff.
@@ -107,7 +110,7 @@ It reports:
 
 These set the test-phase sample. Pilot effects are development data and are never pooled into the reading.
 
-**Test:** the 8 starting test repos, and any added by the stopping rule, with arms N, G, R and H (and D if triggered).
+**Test:** the test repos, with arms N, G, R and H (and D if triggered).
 
 ## Reading
 
@@ -122,7 +125,7 @@ Decision bands (minimum effect set by Jonathan, 2026-11-18):
 - **Don't build for review:** upper bound below +10. This takes precedence.
 - **Build the features:** estimate at least +10 and lower bound above 0.
 - **Partial:** lower bound above 0, estimate below +10, and upper bound at least +10.
-- **Inconclusive:** anything else, including the repo list running out.
+- **Inconclusive:** anything else, including too few qualifying repos.
 
 Also reported:
 - **H against R:** if H comes within 5 points of R, the useful product today is a writer with model helpers, and Bifrost's case rests on cost, latency and completeness.
@@ -130,7 +133,7 @@ Also reported:
 - **The census rankings.**
 - **Cost.**
 
-**Stopping rule** (by interval width, never significance): if the primary half-width exceeds 10 points after the 8 repos, add the next 2 ranked repos at a time until it doesn't, or the ranked list or the budget below runs out. The rule's script prints only the half-width, so nobody sees the estimate while repos are still being added.
+**Fixed sample.** The repo set is fixed before any test reviewer outcome exists, with no sequential looks, so the t interval keeps its nominal coverage. A data-dependent rule that adds repos while the interval is wide would not. If the interval comes out wider than ±10, the bands decide, often Inconclusive. Adding repos afterwards is a new registered study.
 
 **Contamination.** Most 2025+ bugs predate Sol's cutoff, so the after-cutoff subset will be small. The usable measure is the no-brief catch rate by fix date.
 
@@ -143,7 +146,7 @@ Also reported:
   - about 560 Terra reviewer sessions;
   - about 210 Sol writer sessions;
   - the simulator and the gold set.
-- **Test:** about 5 times the pilot for 8 repos, and about 7 times for 12.
+- **Test:** about 7 times the pilot for 12 repos.
 - **Indexing:** Bifrost and rust-analyzer compute for each bug's introducing commit, reusing incremental indexes within a repo. Runs on local clones copied from `/nfs/morannon` (never written).
 - **Quota:** Sol and Terra on codex, Opus on claude7. Keep every profile above 25% of its week, checked before each launch, and don't use codex4.
 

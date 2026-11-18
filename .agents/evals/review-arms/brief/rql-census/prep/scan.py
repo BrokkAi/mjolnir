@@ -20,8 +20,8 @@ CLONES = pathlib.Path("/nfs/morannon/nvme/repo-clones")
 OUT = pathlib.Path(__file__).resolve().parent
 CANDS = pathlib.Path(sys.argv[1])
 JOBS = 24
-CAP_PER_WINDOW = 10      # per repo, for windows from 2025-01 on
-PRE2025_GLOBAL = 300     # global random sample, rate only
+CAP_PER_WINDOW = 10      # per repo, for windows from 2024-01 on
+PRE2024_GLOBAL = 300     # global random sample, rate only
 SEED = 20261118
 
 lock = threading.Lock()
@@ -35,8 +35,10 @@ def git(repo, *args, stdin=None, timeout=300):
 
 def window(ts):
     d = dt.datetime.fromtimestamp(ts, dt.timezone.utc)
-    if d.year < 2025:
-        return "pre2025"
+    if d.year < 2024:
+        return "pre2024"
+    if d.year == 2024:
+        return "2024"
     if d.year == 2025:
         return "2025H1" if d.month <= 6 else "2025H2"
     if d.year == 2026 and d.month <= 6:
@@ -58,19 +60,22 @@ def emit(path, rec):
 
 def stage_dates(by_repo):
     out = OUT / "dates.jsonl"
-    done = set()
+    have = set()
     if out.exists():
-        done = {json.loads(l)["repo"] for l in open(out)}
+        for l in open(out):
+            r = json.loads(l)
+            if not r.get("error"):
+                have.update((r["repo"], h) for h in (r.get("dates") or {}))
 
     def one(repo):
-        if repo in done:
+        if all((repo, c["hash"]) in have for c in by_repo[repo]):
             return
         if not (CLONES / repo).is_dir():
             emit(out, {"repo": repo, "error": "no clone"})
             return
         try:
             rc, head, _ = git(repo, "log", "-1", "--format=%ct", "HEAD", timeout=120)
-            hashes = "\n".join(c["hash"] for c in by_repo[repo]) + "\n"
+            hashes = "\n".join(c["hash"] for c in by_repo[repo] if (repo, c["hash"]) not in have) + "\n"
             rc2, so, se = git(repo, "log", "--no-walk=unsorted", "--format=%H %ct", "--stdin", stdin=hashes)
             dates = dict(l.split() for l in so.splitlines() if l.strip())
             emit(out, {"repo": repo, "clone_ct": int(head.strip() or 0),
@@ -117,13 +122,14 @@ def blame_one(c):
         files, ranges, funcs = parse_diff(diff)
         rec["fix_files"], rec["fix_funcs"] = len(files), len(funcs)
         rec["multi_site_proxy"] = len(files) >= 2 or len(funcs) >= 2
-        counts, ctimes = collections.Counter(), {}
+        counts, ctimes, failed = collections.Counter(), {}, []
         for path, rs in ranges.items():
             args = ["blame", "--porcelain", "-w"]
             for s, n in rs:
                 args += ["-L", f"{s},+{n}"]
             rc, so, se = git(repo, *args, f"{h}^", "--", path, timeout=600)
             if rc:
+                failed.append({"path": path, "stderr": se.strip()[-200:]})
                 continue
             sha = None
             for line in so.splitlines():
@@ -135,6 +141,8 @@ def blame_one(c):
                     ctimes[sha] = int(line.split()[1])
         total = sum(counts.values())
         rec["blamed_lines"] = total
+        rec["blame_failed"] = failed
+        rec["trace_complete"] = not failed
         if not total:
             rec["traceable"] = False
             return rec
@@ -144,7 +152,7 @@ def blame_one(c):
         size = sum(int(x) for x in re.findall(r"(\d+) (?:insertion|deletion)", lines[-1])) if len(lines) > 1 else 0
         rec.update(traceable=True, top_share=n / total, intro_sha=top, intro_ct=ctimes.get(top),
                    intro_window=window(ctimes[top]) if top in ctimes else None, intro_size=size,
-                   strong=(n / total >= 0.3 and size <= 4000))
+                   strong=(not failed and n / total >= 0.3 and size <= 4000))
         rec["intro_same_window"] = rec["intro_window"] == rec["window"]
         return rec
     except Exception as e:
@@ -176,13 +184,13 @@ def main():
             cells[(c["repo"], c["window"])].append(c)
     pre = []
     for (repo, w), cs in sorted(cells.items()):
-        if w == "pre2025":
+        if w == "pre2024":
             pre.extend(cs)
         else:
             rng.shuffle(cs)
             sample.extend(cs[:CAP_PER_WINDOW])
     rng.shuffle(pre)
-    sample.extend(pre[:PRE2025_GLOBAL])
+    sample.extend(pre[:PRE2024_GLOBAL])
 
     out = OUT / "blame.jsonl"
     done = {(json.loads(l)["repo"], json.loads(l)["hash"]) for l in open(out)} if out.exists() else set()
