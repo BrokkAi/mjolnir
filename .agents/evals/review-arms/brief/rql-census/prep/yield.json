@@ -1182,15 +1182,15 @@
    }
   },
   "ext_2024": {
-   "upper_bound_total": 2172.6,
-   "realistic_total": 854.4,
+   "upper_bound_total": 2173.6,
+   "realistic_total": 854.8,
    "repos_realistic_ge": {
     "5": 30,
     "10": 12,
     "15": 8,
     "25": 4
    },
-   "realistic_total_one_per_group": 839.1,
+   "realistic_total_one_per_group": 839.5,
    "per_repo_realistic": {
     "web-infra-dev__rspack": 44.9,
     "sinelaw__fresh": 41.1,
@@ -1251,6 +1251,7 @@
     "SeaQL__sea-orm": 3.1,
     "TraceMachina__nativelink": 3.1,
     "mitsuhiko__insta": 3.1,
+    "project-oak__oak": 3.1,
     "facebook__pyrefly": 3.0,
     "rust-lang__rust-clippy": 3.0,
     "Hmbown__DeepSeek-TUI": 2.9,
@@ -1264,7 +1265,6 @@
     "Project-Navi__ordvec": 2.8,
     "diesel-rs__diesel": 2.8,
     "microsoft__litebox": 2.8,
-    "project-oak__oak": 2.8,
     "redbadger__crux": 2.8,
     "stacks-network__stacks-core": 2.8,
     "tokio-rs__tokio": 2.8,
@@ -1765,6 +1765,7 @@
     "SeaQL__sea-orm": 3.1,
     "TraceMachina__nativelink": 3.1,
     "mitsuhiko__insta": 3.1,
+    "project-oak__oak": 3.1,
     "facebook__pyrefly": 3.0,
     "rust-lang__rust-clippy": 3.0,
     "Hmbown__DeepSeek-TUI": 2.9,
@@ -1778,7 +1779,6 @@
     "Project-Navi__ordvec": 2.8,
     "diesel-rs__diesel": 2.8,
     "microsoft__litebox": 2.8,
-    "project-oak__oak": 2.8,
     "redbadger__crux": 2.8,
     "stacks-network__stacks-core": 2.8,
     "tokio-rs__tokio": 2.8,

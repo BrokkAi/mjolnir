@@ -172,8 +172,10 @@ def changed_sites(repo, h):
             if not m:
                 continue
             start, count = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
-            anchor = start if count > 0 else max(start, 1)
-            funcs.add((path, enclosing_fn(old_lines, anchor)))
+            # Every old line a hunk replaces belongs to some function: a hunk spanning two
+            # adjacent functions touches both. A pure insertion is anchored at its old position.
+            for line_no in (range(start, start + count) if count > 0 else [max(start, 1)]):
+                funcs.add((path, enclosing_fn(old_lines, line_no)))
             if count > 0:
                 ranges[path].append((start, count))
     return set(paths), ranges, funcs

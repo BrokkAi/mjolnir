@@ -1,14 +1,14 @@
-# Local Rust corpus yield screen (2026-11-18, dbcece95; v9 after sixteen review rounds)
+# Local Rust corpus yield screen (2026-11-18, dbcece95; v12 after twenty-four review rounds)
 
 Candidates: brokkbench sft-tools-commits/rust (993 repos), records with test_files>=1, non_test_files>=1 and a bug word in the oneline: 9,647. Clones /nfs/morannon/nvme/repo-clones, read only.
 Method: `scan.py` dates every candidate and blames the fix's deleted non-test .rs lines at fix^ on a capped sample (10 per repo per window from 2024; 300 pre-2024 globally). A fix with any failed blame is an incomplete trace and never strong. `yield_rank.py` turns the samples into per-repo yields, counting distinct introducing changes once per repo across the window and also giving yields capped at the tracing stop of 25: upper bound x bug precision 0.85 x admission 31/67.
-Strong = top blamed commit >=30% of blamed lines, not a merge, and <=4,000 changed lines excluding goldens, fixtures and lock files (corpus SPEC rules 6 and 7). Clones sharing a candidate commit or a root commit (forks, renames, subtrees) are one repo; every member stays ranked, and selection takes at most one per group; the repo counts below count each group once. Diffs, blame and sizes ignore diff drivers and textconv; a renamed file counts only its edited lines. Multi-site proxy = fix touches >=2 non-test files or >=2 enclosing functions, found from the old file's `fn` signatures (crude, over-counts relation bugs). Paths come from `git diff --name-status -z -M`; renamed files keep their old path for blame.
+Strong = top blamed commit >=30% of blamed lines, not a merge, and <=4,000 changed lines excluding goldens, fixtures and lock files (corpus SPEC rules 6 and 7). Clones sharing a candidate commit or a root commit (forks, renames, subtrees) are one repo; every member stays ranked, and selection takes at most one per group; the repo counts below count each group once. Diffs, blame and sizes ignore diff drivers and textconv; a renamed file counts only its edited lines. Multi-site proxy = fix touches >=2 non-test files or >=2 enclosing functions, found from the old file's `fn` signatures for every replaced line (crude, over-counts relation bugs). Paths come from `git diff --name-status -z -M`; renamed files keep their old path for blame.
 Run: undated 0, undatable 0, blame errors 0, incomplete traces 0, shared-history groups 15; the ranker refuses to rank while any planned draw lacks a record.
 
 | Window (intro and fix on or after) | Upper bound | Realistic, one per group | Repos >=5 | >=10 | >=15 | >=25 |
 |---|---:|---:|---:|---:|---:|---:|
 | wide_2025 | 1631 | 629 | 23 | 8 | 6 | 3 |
-| ext_2024 | 2173 | 839 | 30 | 12 | 8 | 4 |
+| ext_2024 | 2174 | 840 | 30 | 12 | 8 | 4 |
 | mid_2026 | 860 | 331 | 10 | 4 | 2 | 2 |
 | strict_2026_07 | 15 | 6 | 0 | 0 | 0 | 0 |
 
