@@ -46,14 +46,14 @@ Two labellers from different families (Sol/high primary, Opus/high replication) 
 - **Decisive facts,** as minimal sufficient sets: several sets when more than one fact decides the bug.
 - **Relation kind and RQL expression:** a documented step, a missing step (with its semantics), or not expressible.
 - **Anchoring:** whether the canonical query anchors on a symbol the diff touches, and the hops from it.
-- **Row count:** how many rows the canonical query returns at the introducing commit, counted mechanically.
+- **Row count:** how many rows the canonical query returns at the introducing commit. For documented steps it comes from running Bifrost. For a missing step it comes from the answer engine, once the menu is chosen, and so exists only for menu steps. Missing steps outside the menu are reported without row counts.
 - **Bifrost today:** whether today's Bifrost returns the decisive row (run it), and whether it's complete.
 - **Primary membership:** a bug is a relation diff when the primary labeller (Sol) records a decisive fact relating two or more code sites. That includes relation bugs the menu can't express; the expressible subset is secondary. This is fixed before any reviewer runs, and labeller agreement is reported.
 - **Baseline catch:** whether no-brief Terra reviewers catch it, from stage 2's no-brief arm.
 
 It reports:
 - features ranked by bugs decided among baseline misses;
-- for each fixed recipe ("run step S on every touched symbol"), the share of bugs whose decisive row it emits, against total rows emitted. That evaluates a pushed-facts brief without reviewers;
+- for each fixed recipe ("run step S on every touched symbol") over a documented or menu step, the share of bugs whose decisive row it emits, against total rows emitted. That evaluates a pushed-facts brief without reviewers;
 - agreement between the two labellers per category;
 - a bias statement: bugs fixed soon after they were introduced lean toward visible regressions.
 
@@ -129,13 +129,14 @@ Decision bands on R − G, which decide whether complete RQL is worth building f
 - **Inconclusive:** anything else, including too few qualifying repos.
 
 Which features to build, when R − G reads Build or Partial (same repo-level t interval):
-- **Added steps:** build them if the lower bound of R − R0 is above 0.
+- **Added steps:** if the lower bound of R − R0 is above 0, the added steps as a bundle are worth building. The study doesn't attribute that lift to individual steps. Build order comes from descriptive evidence: each step's share of the rows in briefs whose reviewers caught the bug, and the census rankings. As each step is built, it's measured on its own (milestone 5 adds and measures templates one at a time), and a step that adds nothing is dropped.
 - **Today's steps:** if the lower bound of R0 − G is above 0, complete answers to today's steps carry lift, and their completeness and latency are worth engine work. This can hold alongside the added steps.
 - **Unresolved:** a contrast whose interval includes 0 is reported as unresolved. It is never read as showing that part contributed nothing.
 
 Also reported:
 - **H against R** (paired R − H, same repo-level t interval):
-  - **Upper bound below +5** (this takes precedence): a writer with model helpers matches RQL to within 5 points. The useful product today is that writer, and Bifrost's case rests on cost, latency and completeness. If the lower bound is also above 0, the readout reports a real but small RQL edge under 5 points, which counts as practically equivalent.
+  - **Upper bound below −5:** the helper writer beats RQL. The useful product today is that writer, and RQL's rows don't earn their cost for review.
+  - **Interval within −5 to +5:** a writer with model helpers matches RQL to within 5 points. The useful product today is that writer, and Bifrost's case rests on cost, latency and completeness. If the lower bound is also above 0, the readout reports a real but small RQL edge, which counts as practically equivalent.
   - **Lower bound above 0 and upper bound at least +5:** RQL's structured rows add value over equal helper compute.
   - **Otherwise:** unresolved.
 - **G − N:** the effect of the checklist-assisted grep writer over no brief. G gets the new step list in prose, which the shipped writer's prompt (`WRITER.md`) doesn't have, so this isn't a measure of the shipped writer itself.

@@ -1,38 +1,38 @@
 {
  "undated_candidates": 0,
  "undatable": {},
- "shared_history_groups": {
-  "rust-bakery__nom": [
+ "shared_history_groups": [
+  [
    "Geal__nom",
    "rust-bakery__nom"
   ],
-  "Hmbown__CodeWhale": [
+  [
    "Hmbown__CodeWhale",
    "Hmbown__DeepSeek-TUI"
   ],
-  "farion1231__cc-switch": [
+  [
    "SaladDay__cc-switch-cli",
    "farion1231__cc-switch"
   ],
-  "clap-rs__clap": [
+  [
    "TeXitoi__structopt",
    "clap-rs__clap",
    "ordian__toml_edit",
    "rust-cli__config-rs"
   ],
-  "apache__arrow-rs": [
+  [
    "apache__arrow-rs",
    "apache__datafusion"
   ],
-  "apache__opendal": [
+  [
    "apache__incubator-opendal",
    "apache__opendal"
   ],
-  "rome__tools": [
+  [
    "biomejs__biome",
    "rome__tools"
   ],
-  "rust-lang__rust-analyzer": [
+  [
    "crablang__crab",
    "rust-lang__miri",
    "rust-lang__rust",
@@ -40,43 +40,43 @@
    "rust-lang__rust-clippy",
    "rust-lang__rustfmt"
   ],
-  "datafuselabs__databend": [
+  [
    "databendlabs__databend",
    "datafuselabs__databend"
   ],
-  "dathere__qsv": [
+  [
    "dathere__qsv",
    "medialab__xan"
   ],
-  "libra__libra": [
+  [
    "diem__diem",
    "libra__libra"
   ],
-  "ogham__exa": [
+  [
    "eza-community__eza",
    "ogham__exa"
   ],
-  "gfx-rs__wgpu": [
+  [
    "gfx-rs__naga",
    "gfx-rs__wgpu"
   ],
-  "kreuzberg-dev__kreuzberg": [
+  [
    "kreuzberg-dev__kreuzberg",
    "xberg-io__xberg"
   ],
-  "readysettech__readyset": [
+  [
    "mit-pdos__noria",
    "readysettech__readyset"
   ]
- },
+ ],
  "blame_errors": 0,
  "incomplete_traces": 0,
  "bug_precision": 0.85,
  "admission": 0.4626865671641791,
  "windows": {
   "wide_2025": {
-   "upper_bound_total": 1647.0,
-   "realistic_total": 647.7,
+   "upper_bound_total": 1690.7,
+   "realistic_total": 651.9,
    "repos_realistic_ge": {
     "5": 25,
     "10": 8,
@@ -113,9 +113,9 @@
     "prefix-dev__pixi": 5.0,
     "salsa-rs__salsa": 4.7,
     "vortex-data__vortex": 4.7,
+    "farion1231__cc-switch": 4.6,
     "aaif-goose__goose": 4.6,
     "dekobon__big-code-analysis": 4.6,
-    "farion1231__cc-switch": 4.6,
     "hahwul__dalfox": 4.4,
     "pgdogdev__pgdog": 4.3,
     "tursodatabase__turso": 4.2,
@@ -128,6 +128,7 @@
     "verus-lang__verus": 3.5,
     "lance-format__lance": 3.4,
     "GreptimeTeam__greptimedb": 3.3,
+    "ordian__toml_edit": 3.3,
     "nearai__ironclaw": 3.3,
     "wasmerio__wasmer": 3.2,
     "HelixDB__helix-db": 3.1,
@@ -224,6 +225,7 @@
     "apache__arrow-rs": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
+    "biomejs__biome": 0.8,
     "brave__adblock-rust": 0.8,
     "cberner__redb": 0.8,
     "cloudflare__workers-rs": 0.8,
@@ -421,7 +423,6 @@
     "build-trust__ockam": 0.0,
     "bytecodealliance__javy": 0.0,
     "ccusage__ccusage": 0.0,
-    "clap-rs__clap": 0.0,
     "cloudflare__quiche": 0.0,
     "commit3296__adler": 0.0,
     "confidential-containers__td-shim": 0.0,
@@ -530,8 +531,8 @@
    }
   },
   "ext_2024": {
-   "upper_bound_total": 2198.0,
-   "realistic_total": 864.4,
+   "upper_bound_total": 2250.1,
+   "realistic_total": 868.2,
    "repos_realistic_ge": {
     "5": 33,
     "10": 14,
@@ -576,13 +577,14 @@
     "vortex-data__vortex": 4.7,
     "wasmCloud__wasmCloud": 4.7,
     "GreptimeTeam__greptimedb": 4.6,
+    "farion1231__cc-switch": 4.6,
     "aaif-goose__goose": 4.6,
     "dekobon__big-code-analysis": 4.6,
-    "farion1231__cc-switch": 4.6,
     "hahwul__dalfox": 4.4,
     "paradigmxyz__reth": 4.3,
     "pgdogdev__pgdog": 4.3,
     "agent-of-empires__agent-of-empires": 4.1,
+    "ordian__toml_edit": 4.1,
     "openai__codex": 4.1,
     "wasmerio__wasmer": 4.0,
     "t8y2__dbx": 3.9,
@@ -692,7 +694,6 @@
     "FyroxEngine__Fyrox": 1.2,
     "apache__arrow-rs": 1.2,
     "cberner__redb": 1.2,
-    "clap-rs__clap": 1.2,
     "deuxfleurs-org__garage": 1.2,
     "dora-rs__dora": 1.2,
     "fish-shell__fish-shell": 1.2,
@@ -730,6 +731,7 @@
     "altsem__gitu": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
+    "biomejs__biome": 0.8,
     "biomejs__gritql": 0.8,
     "brave__adblock-rust": 0.8,
     "bytecodealliance__javy": 0.8,
@@ -1040,8 +1042,8 @@
    }
   },
   "mid_2026": {
-   "upper_bound_total": 858.2,
-   "realistic_total": 337.5,
+   "upper_bound_total": 882.6,
+   "realistic_total": 338.8,
    "repos_realistic_ge": {
     "5": 10,
     "10": 4,
@@ -1070,6 +1072,7 @@
     "nearai__ironclaw": 3.3,
     "pola-rs__polars": 3.3,
     "Project-Navi__ordvec": 3.1,
+    "SaladDay__cc-switch-cli": 2.9,
     "nushell__nushell": 2.9,
     "wealthfolio__wealthfolio": 2.9,
     "clouatre-labs__aptu-coder": 2.8,
@@ -1078,7 +1081,6 @@
     "moltis-org__moltis": 2.6,
     "web-infra-dev__rspack": 2.6,
     "dbt-labs__dbt-core": 2.5,
-    "farion1231__cc-switch": 2.4,
     "paradigmxyz__reth": 2.4,
     "registrystack__registry-stack": 2.4,
     "vortex-data__vortex": 2.2,
@@ -1181,11 +1183,13 @@
     "SeaQL__sea-orm": 0.4,
     "TheDan64__inkwell": 0.4,
     "anulum__sc-neurocore": 0.4,
+    "apache__datafusion": 0.4,
     "apache__opendal": 0.4,
     "ariel-os__ariel-os": 0.4,
     "astral-sh__ruff": 0.4,
     "astral-sh__uv": 0.4,
     "bgreenwell__doxx": 0.4,
+    "biomejs__biome": 0.4,
     "cachix__devenv": 0.4,
     "cberner__redb": 0.4,
     "ccc-spdm-tools__spdm-rs": 0.4,
@@ -1275,7 +1279,6 @@
     "anulum__scpn-mif-core": 0.0,
     "anulum__scpn-phase-orchestrator": 0.0,
     "anulum__scpn-quantum-control": 0.0,
-    "apache__arrow-rs": 0.0,
     "apache__iggy": 0.0,
     "apache__thrift": 0.0,
     "arxanas__git-branchless": 0.0,
@@ -1289,7 +1292,7 @@
     "bytecodealliance__javy": 0.0,
     "carthage-software__mago": 0.0,
     "ccusage__ccusage": 0.0,
-    "clap-rs__clap": 0.0,
+    "ordian__toml_edit": 0.0,
     "cloudflare__quiche": 0.0,
     "cloudflare__workers-rs": 0.0,
     "commit3296__adler": 0.0,
@@ -1416,8 +1419,8 @@
    }
   },
   "strict_2026_07": {
-   "upper_bound_total": 12.8,
-   "realistic_total": 5.0,
+   "upper_bound_total": 14.8,
+   "realistic_total": 5.8,
    "repos_realistic_ge": {
     "5": 0,
     "10": 0,
@@ -1428,6 +1431,7 @@
     "1jehuang__jcode": 0.7,
     "BigPizzaV3__CodexPlusPlus": 0.4,
     "Hmbown__CodeWhale": 0.4,
+    "SaladDay__cc-switch-cli": 0.4,
     "assura-lang__assura": 0.4,
     "gosub-io__gosub-engine": 0.4,
     "ironcalc__IronCalc": 0.4,
@@ -1435,6 +1439,7 @@
     "openebs__mayastor": 0.4,
     "patchloom__patchloom": 0.4,
     "rtk-ai__rtk": 0.4,
+    "rust-lang__rust-clippy": 0.4,
     "sinelaw__fresh": 0.4,
     "xingkongliang__skills-manager": 0.4,
     "0xPlaygrounds__rig": 0.0,
@@ -1461,7 +1466,6 @@
     "delta-io__delta-rs": 0.0,
     "facebook__pyrefly": 0.0,
     "facebook__relay": 0.0,
-    "farion1231__cc-switch": 0.0,
     "foundry-rs__foundry": 0.0,
     "freenet__freenet-core": 0.0,
     "gitbutlerapp__gitbutler": 0.0,
@@ -1486,7 +1490,6 @@
     "registrystack__registry-stack": 0.0,
     "rivet-dev__agentos": 0.0,
     "rust-lang__cargo": 0.0,
-    "rust-lang__rust-analyzer": 0.0,
     "rustfs__rustfs": 0.0,
     "salsa-rs__salsa": 0.0,
     "sbom-tool__sbom-tools": 0.0,

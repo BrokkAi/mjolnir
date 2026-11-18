@@ -89,7 +89,8 @@ def main():
         sample[(r["repo"], r["window"])].append(r)
 
     # Clones that share history (forks, renames, subtrees) are one repository: group repos whose
-    # candidate fix commits or root commits overlap, and keep the member with the most candidates.
+    # candidate fix commits or root commits overlap; each window keeps the member with the most
+    # eligible yield.
     by_hash = collections.defaultdict(set)
     for c in cands:
         by_hash[c["hash"]].add(c["repo"])
@@ -121,8 +122,8 @@ def main():
     groups = collections.defaultdict(list)
     for repo in size:
         groups[find(repo)].append(repo)
-    keep = {max(members, key=lambda r: (size[r], r)) for members in groups.values()}
-    shared = {max(m, key=lambda r: (size[r], r)): sorted(m) for m in groups.values() if len(m) > 1}
+    group_of = {repo: tuple(sorted(members)) for members in groups.values() for repo in members}
+    shared = [sorted(m) for m in groups.values() if len(m) > 1]
 
     out = {"undated_candidates": undated, "undatable": undatable, "shared_history_groups": shared, "blame_errors": errors,
            "incomplete_traces": sum(1 for rs in sample.values() for r in rs if r.get("trace_complete") is False),
@@ -130,14 +131,21 @@ def main():
     for label, (start, wins) in WINDOWS.items():
         per = collections.Counter()
         for (repo, w), count in n.items():
-            if repo not in keep or w not in wins or not sample.get((repo, w)):
+            if w not in wins or not sample.get((repo, w)):
                 continue
             s = sample[(repo, w)]
             good = sum(1 for r in s if not r.get("error") and r.get("strong") and r.get("multi_site_proxy")
                        and r.get("trace_complete") is True
                        and r.get("intro_ct") and r["intro_ct"] >= start.timestamp())
             per[repo] += count * good / len(s)
-        realistic = {r: v * BUG_PRECISION * ADMISSION for r, v in per.items()}
+        # One repository per shared-history group: keep the member with the most eligible yield
+        # in this window (an old predecessor mustn't displace its active successor).
+        best = {}
+        for repo, v in per.items():
+            g = group_of.get(repo, (repo,))
+            if g not in best or (v, repo) > (per[best[g]], best[g]):
+                best[g] = repo
+        realistic = {r: per[r] * BUG_PRECISION * ADMISSION for r in best.values()}
         out["windows"][label] = {
             "upper_bound_total": round(sum(per.values()), 1),
             "realistic_total": round(sum(realistic.values()), 1),
