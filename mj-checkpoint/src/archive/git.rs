@@ -60,6 +60,29 @@ impl GitCommandRunner for SystemGit {
     }
 }
 
+/// Stable identity for internal commits and reflogs; never written to user config.
+pub(crate) fn synthetic_git_identity() -> Vec<(OsString, OsString)> {
+    [
+        ("GIT_AUTHOR_NAME", "Mjolnir"),
+        ("GIT_AUTHOR_EMAIL", "mjolnir@localhost"),
+        ("GIT_COMMITTER_NAME", "Mjolnir"),
+        ("GIT_COMMITTER_EMAIL", "mjolnir@localhost"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.into(), value.into()))
+    .collect()
+}
+/// Commit objects use a fixed date for stable IDs; reflogs must use current
+/// time because Git does not list epoch-zero stash reflog entries.
+pub(crate) fn synthetic_git_commit_identity() -> Vec<(OsString, OsString)> {
+    let mut identity = synthetic_git_identity();
+    identity.extend([
+        ("GIT_AUTHOR_DATE".into(), "@0 +0000".into()),
+        ("GIT_COMMITTER_DATE".into(), "@0 +0000".into()),
+    ]);
+    identity
+}
+
 /// How much committed history a snapshot has to carry. Committed work that is
 /// already reachable from an origin ref is durable at its source, so it is
 /// never bundled.
@@ -608,23 +631,34 @@ pub fn migrate_review_ref(
 
 /// The worktree's own Git directory and the repository's common one, which
 /// are the same directory in the main worktree.
-fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(PathBuf, PathBuf)> {
-    let output = git_text(
+/// Resolve Git's path output without requiring --path-format (Git 2.31).
+pub(crate) fn absolute_git_path(repository: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let path = mj_core::path_input::from_git_bytes(bytes)?;
+    Ok(std::path::absolute(repository.join(path))?)
+}
+pub(crate) fn git_directories(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let git_dir = git_bytes(
         runner,
         repository,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--absolute-git-dir",
-            "--git-common-dir",
-        ],
-    )
-    .context("locate the Git directories")?;
-    let mut lines = output.lines();
-    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
-        bail!("git rev-parse named no common directory: {output}");
-    };
-    Ok((PathBuf::from(git_dir), PathBuf::from(common_dir)))
+        ["rev-parse", "--absolute-git-dir"],
+        &[],
+        "locate Git directory",
+    )?;
+    let common = git_bytes(
+        runner,
+        repository,
+        ["rev-parse", "--git-common-dir"],
+        &[],
+        "locate common Git directory",
+    )?;
+    Ok((
+        absolute_git_path(repository, &git_dir)?,
+        absolute_git_path(repository, &common)?,
+    ))
 }
 
 fn same_directory(left: &Path, right: &Path) -> Result<bool> {
@@ -3132,6 +3166,32 @@ fn git_bytes_owned(
     )?;
     ensure!(output.status == 0, "{}", git_failure(action, &output));
     Ok(output.stdout)
+}
+
+/// Index flags that can hide tracked edits from Git's stash machinery.
+pub fn hidden_tracked_paths(
+    runner: &dyn GitCommandRunner,
+    checkout: &Path,
+) -> Result<Vec<PathBuf>> {
+    let listed = git_bytes(
+        runner,
+        checkout,
+        ["ls-files", "-v", "-z"],
+        &[],
+        "inspect hidden tracked files",
+    )?;
+    listed
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| entry[0] == b'S' || entry[0].is_ascii_lowercase())
+        .map(|entry| {
+            ensure!(
+                entry.get(1) == Some(&b' '),
+                "malformed Git index flag entry"
+            );
+            mj_core::path_input::from_git_bytes(&entry[2..])
+        })
+        .collect()
 }
 
 pub(crate) fn git_text<const N: usize>(
