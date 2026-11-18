@@ -34,6 +34,28 @@ pub(super) enum HostSlopcopLogin {
     SignedIn(mj_core::slopcop::SlopcopLogin),
 }
 
+/// What credential sync asks the daemon. The daemon owns its session records
+/// and configuration, so sync reads these facts from it when it acts and
+/// keeps no copy. Tests run sync without a daemon.
+pub trait CredentialSyncRuntime: Send + Sync {
+    /// The published list of sessions to keep supplied.
+    fn credential_targets(&self) -> Arc<watch::Sender<Vec<CredentialSyncTarget>>>;
+    fn credential_session_ids(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>;
+    fn credential_session_ended(&self, session_id: &str) -> bool;
+    fn credential_profile_source_is_current(&self, target: &CredentialSyncTarget) -> bool;
+    fn credential_target_is_current(&self, target: &CredentialSyncTarget) -> Result<bool>;
+    /// The sessions a sync of `profile_id` leaves out, each with the reason.
+    fn credential_sync_skips(
+        &self,
+        profile_id: &str,
+        fanout: bool,
+        caused_by: Option<&str>,
+        present: &dyn Fn(&str) -> bool,
+    ) -> Vec<(String, &'static str)>;
+}
+
 /// A test reader: the host's login is never known, so no session copy changes.
 #[cfg(test)]
 pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::SlopcopLogin>> {
@@ -62,7 +84,7 @@ struct HoldState {
     phase: std::sync::Mutex<HoldPhase>,
     /// The admission's cancellation flag; `None` without a gate.
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<Arc<dyn CredentialSyncRuntime>>,
 }
 
 enum HoldPhase {
@@ -84,7 +106,7 @@ impl JobHold {
         admission: Option<crate::recovery_gate::RecoveryAttempt>,
         turn: Option<SessionTurn>,
         installing: Option<SessionTurn>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
     ) -> Self {
         Self(Arc::new(HoldState {
             cancellation: admission.as_ref().map(|admission| admission.cancellation()),
@@ -274,7 +296,7 @@ impl SessionSteps {
 pub(super) struct SessionAccess<'a> {
     pub(super) relays: &'a SessionRelays,
     pub(super) gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
+    pub(super) runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
     pub(super) steps: &'a SessionSteps,
 }
 
@@ -320,7 +342,7 @@ impl CredentialSyncCoordinator {
     pub fn spawn_guarded(
         manager: SessionManagerControl,
         gate: Arc<crate::recovery_gate::RecoveryGate>,
-        runtime: Arc<crate::daemon::RuntimeState>,
+        runtime: Arc<dyn CredentialSyncRuntime>,
         rejected: DeliveryRegistry,
     ) -> Self {
         Self::spawn_with_registry(
@@ -337,7 +359,7 @@ impl CredentialSyncCoordinator {
     pub(super) fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
     ) -> Self {
@@ -354,14 +376,14 @@ impl CredentialSyncCoordinator {
     pub(super) fn spawn_with_registry(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<Arc<dyn CredentialSyncRuntime>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
         rejected: DeliveryRegistry,
     ) -> Self {
         let targets_tx = runtime
             .as_ref()
-            .map(|runtime| runtime.credential_targets.clone())
+            .map(|runtime| runtime.credential_targets())
             .unwrap_or_else(|| Arc::new(watch::channel(Vec::new()).0));
         let mut targets_rx = targets_tx.subscribe();
         let handle_targets = targets_tx.clone();
@@ -871,7 +893,7 @@ impl OwnedSyncLog {
 }
 
 fn log_missing_targets(
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     profile_id: &str,
     targets: &[CredentialSyncTarget],
     log: SyncLog<'_>,
@@ -882,7 +904,7 @@ fn log_missing_targets(
             profile_id,
             log.fanout && !log.targeted,
             log.cause.map(|cause| cause.session_id.as_str()),
-            present,
+            &present,
         );
         for (session_id, reason) in skipped {
             log.record(profile_id, &session_id, reason);
@@ -1323,7 +1345,7 @@ impl ScopeExpectation {
 struct PassContext<'a> {
     relays: &'a SessionRelays,
     gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&'a Arc<dyn CredentialSyncRuntime>>,
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     login: &'a PassLogin,
@@ -1366,7 +1388,7 @@ thread_local! {
 /// Whether the session is still the one this target describes. A lifecycle
 /// may have completed since the dashboard published its target list.
 async fn target_is_current(
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
 ) -> Result<bool> {
     #[cfg(test)]
@@ -1384,7 +1406,7 @@ async fn target_is_current(
             config: mj_core::config::Config::load()?,
             state: crate::database::load_state()?,
         };
-        Ok::<_, anyhow::Error>(crate::pollers::credential_sync_target_is_current(
+        Ok::<_, anyhow::Error>(super::credential_sync_target_is_current(
             controller, &candidate,
         ))
     })
@@ -1398,7 +1420,7 @@ async fn target_is_current(
 /// whatever outlives this future.
 async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
     turn: SessionTurn,
     installing: Option<SessionTurn>,
@@ -1434,7 +1456,7 @@ async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T
 #[cfg(test)]
 pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
     target: &CredentialSyncTarget,
     turn: SessionTurn,
     installing: Option<SessionTurn>,
@@ -1882,7 +1904,7 @@ async fn aws_job(
 pub(super) struct RenewalEnv {
     pub(super) relays: SessionRelays,
     pub(super) gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    pub(super) runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    pub(super) runtime: Option<Arc<dyn CredentialSyncRuntime>>,
     pub(super) steps: SessionSteps,
     /// Orders one session's renewals, so a replaced task's cycle finishes
     /// before its successor's begins.
@@ -2548,7 +2570,7 @@ impl ProfileLogin {
 
     async fn refresh(
         &self,
-        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
     ) -> bool {
         let _decision = self.decide.lock().await;
@@ -2602,7 +2624,7 @@ impl ProfileLogin {
 
     fn begin_delivery(
         &self,
-        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        runtime: Option<&Arc<dyn CredentialSyncRuntime>>,
         target: &CredentialSyncTarget,
     ) {
         if runtime.is_some_and(|runtime| runtime.credential_session_ended(&target.session_id)) {

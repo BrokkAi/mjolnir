@@ -46,9 +46,13 @@ pub struct MachineProbe {
 pub enum MachineProbeOutcome {
     /// The machine answered: each runtime it could run, usable or not.
     Answered(Vec<RuntimeProbe>),
-    /// The machine did not answer over SSH, so nothing is known about what
-    /// it runs.
-    Unreachable { detail: String, remediation: String },
+    /// The SSH check failed, so nothing is known about what it runs.
+    Unreachable {
+        detail: String,
+        remediation: String,
+        /// True only when the host answered nothing at all.
+        answered_nothing: bool,
+    },
 }
 
 impl MachineProbe {
@@ -321,15 +325,39 @@ fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> Record
 fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> MachineProbeOutcome {
     let target = SshTarget::from(ssh);
     let recorded = record_machine(&target, executor);
+    // The batch's deadline expiring says only that the check did not finish:
+    // SSH may still have been connecting (a configured `ConnectTimeout` beats
+    // the probe's) or a runtime command may have hung. Replayed as the
+    // `ssh true` result it would read as a host that answered nothing.
+    if let Some(timed_out) = recorded
+        .failure
+        .borrow()
+        .as_ref()
+        .and_then(|error| error.downcast_ref::<mj_core::targets::CommandTimedOut>())
+    {
+        let destination = &target.destination;
+        return MachineProbeOutcome::Unreachable {
+            detail: format!(
+                "Checking what {destination} can run did not finish within {} seconds.",
+                timed_out.timeout.as_secs()
+            ),
+            remediation: format!(
+                "Run `ssh {destination} true`. If it hangs or fails, fix the connection; if it succeeds, a runtime command on {destination} is hanging."
+            ),
+            answered_nothing: false,
+        };
+    }
     let executor = &recorded;
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        answered_nothing,
     } = ssh_connectivity(&target, executor)
     {
         return MachineProbeOutcome::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         };
     }
     let destination = &target.destination;

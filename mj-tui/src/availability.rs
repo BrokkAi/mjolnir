@@ -58,10 +58,39 @@ impl Default for Availability {
 /// An entry the pickers leave out, and the line that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Missing {
-    /// Named under the list.
+    /// A runtime that is there but cannot run sessions, named with its
+    /// reason and fix everywhere: it needs the user's action.
     Named(String),
+    /// Its SSH check failed. The list names the machine once, however many
+    /// runtimes it hides; only a host that answered nothing is routine.
+    Unreachable {
+        machine: String,
+        detail: String,
+        remediation: String,
+        answered_nothing: bool,
+    },
     /// A standard runtime whose engine was never installed here.
     Silent,
+}
+
+impl Missing {
+    fn ssh_failure(machine: Option<&str>, answered_nothing: bool) -> String {
+        match (machine, answered_nothing) {
+            (Some(machine), true) => format!("{machine} did not answer"),
+            (Some(machine), false) => format!("SSH to {machine} failed"),
+            (None, true) => "it did not answer".into(),
+            (None, false) => "its SSH check failed".into(),
+        }
+    }
+}
+
+/// One line under the target list. A `routine` line (a machine that did not
+/// answer) is muted; the others are warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingTargetLine {
+    pub(crate) text: String,
+    pub(crate) full: String,
+    pub(crate) routine: bool,
 }
 
 impl DashboardState {
@@ -207,15 +236,60 @@ impl DashboardState {
             .collect()
     }
 
-    /// The line under a target list for each enabled runtime it leaves out,
-    /// then for each machine that runs nothing yet.
-    pub(crate) fn missing_target_lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
-            .config
-            .targets
-            .keys()
-            .filter_map(|id| Some(format!("{id}: {}", self.target_missing_line(id)?)))
-            .collect();
+    /// The lines under a target list: one for each enabled runtime it leaves
+    /// out, except that a machine that did not answer is named once with every
+    /// runtime it hides; then one for each machine that runs nothing yet.
+    pub(crate) fn missing_target_lines(&self) -> Vec<MissingTargetLine> {
+        let mut lines = Vec::new();
+        let mut unreachable_machines: Vec<(Missing, Vec<&str>)> = Vec::new();
+        for id in self.config.targets.keys() {
+            if self.config.enabled_target(id).is_none() {
+                continue;
+            }
+            match self.target_missing(id) {
+                Some(Missing::Named(reason)) => lines.push(MissingTargetLine {
+                    text: format!("{id}: {reason}"),
+                    full: format!("{id}: {reason}"),
+                    routine: false,
+                }),
+                Some(missing @ Missing::Unreachable { .. }) => {
+                    match unreachable_machines
+                        .iter_mut()
+                        .find(|(found, _)| *found == missing)
+                    {
+                        Some((_, ids)) => ids.push(id),
+                        None => unreachable_machines.push((missing, vec![id])),
+                    }
+                }
+                Some(Missing::Silent) | None => {}
+            }
+        }
+        lines.extend(unreachable_machines.into_iter().map(|(missing, ids)| {
+            let Missing::Unreachable {
+                machine,
+                detail,
+                remediation,
+                answered_nothing,
+            } = missing
+            else {
+                unreachable!("only SSH failures are grouped");
+            };
+            let brief = format!(
+                "{}; not listing {}.",
+                Missing::ssh_failure(Some(&machine), answered_nothing),
+                ids.join(", ")
+            );
+            let full = sentence(&format!("{brief} {}", detail.trim()), &remediation);
+            MissingTargetLine {
+                text: if answered_nothing {
+                    brief
+                } else {
+                    full.clone()
+                },
+                full,
+                routine: answered_nothing,
+            }
+        }));
         lines.extend(self.machines_without_runtime_lines());
         lines
     }
@@ -279,10 +353,13 @@ impl DashboardState {
                     MachineFinding::Unreachable {
                         detail,
                         remediation,
-                    } => Some(Missing::Named(sentence(
-                        &format!("{machine_id} did not answer. {}", detail.trim()),
-                        remediation,
-                    ))),
+                        answered_nothing,
+                    } => Some(Missing::Unreachable {
+                        machine: machine_id.to_owned(),
+                        detail: detail.clone(),
+                        remediation: remediation.clone(),
+                        answered_nothing: *answered_nothing,
+                    }),
                     MachineFinding::Answered { runtimes, rejected } => {
                         if runtimes
                             .iter()
@@ -308,6 +385,19 @@ impl DashboardState {
         self.config.enabled_target(id)?;
         match self.target_missing(id)? {
             Missing::Named(reason) => Some(reason),
+            Missing::Unreachable {
+                machine,
+                detail,
+                remediation,
+                answered_nothing,
+            } => Some(sentence(
+                &format!(
+                    "{}. {}",
+                    Missing::ssh_failure(Some(&machine), answered_nothing),
+                    detail.trim()
+                ),
+                &remediation,
+            )),
             Missing::Silent => None,
         }
     }
@@ -434,7 +524,7 @@ impl DashboardState {
     }
 
     /// The machines no runtime runs on, for the line under the target list.
-    pub(crate) fn machines_without_runtime_lines(&self) -> Vec<String> {
+    pub(crate) fn machines_without_runtime_lines(&self) -> Vec<MissingTargetLine> {
         let ids: BTreeSet<&str> = self
             .config
             .machines_without_runtimes()
@@ -442,8 +532,27 @@ impl DashboardState {
             .collect();
         ids.into_iter()
             .filter_map(|id| {
-                self.machine_runtime_reason(id)
-                    .map(|reason| format!("Machine {id} has no runtime: {reason}"))
+                let machine = self.config.machines.get(id)?;
+                let probe = self
+                    .availability
+                    .machines
+                    .get(id)
+                    .filter(|probe| probe.machine == *machine)?;
+                Some(match &probe.finding {
+                    MachineFinding::Unreachable {
+                        answered_nothing: true,
+                        ..
+                    } => MissingTargetLine {
+                        text: format!("{id} did not answer."),
+                        full: format!("{id}: {}", finding_reason(&probe.finding)),
+                        routine: true,
+                    },
+                    finding => MissingTargetLine {
+                        text: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
+                        full: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
+                        routine: false,
+                    },
+                })
             })
             .collect()
     }
@@ -480,8 +589,13 @@ pub(crate) fn finding_reason(finding: &MachineFinding) -> String {
         MachineFinding::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         } => sentence(
-            &format!("it did not answer. {}", detail.trim()),
+            &format!(
+                "{}. {}",
+                Missing::ssh_failure(None, *answered_nothing),
+                detail.trim()
+            ),
             remediation,
         ),
         MachineFinding::Answered { runtimes, rejected } if runtimes.is_empty() => {

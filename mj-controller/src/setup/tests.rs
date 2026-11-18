@@ -527,6 +527,26 @@ fn golden_setup_origin_discovery() {
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "setup-origin-discovery", &out);
 }
 
+// Hard-won: 3294e8360: a Warning runtime check hid a working runtime from the pickers
+#[test]
+fn podman_without_delegated_cpu_cgroup_is_a_warning_but_still_usable() {
+    let mut info: serde_json::Value = serde_json::from_slice(&podman_info(true).stdout).unwrap();
+    info["host"]["cgroupVersion"] = "v2".into();
+    info["host"]["cgroupControllers"] = serde_json::json!(["memory", "pids"]);
+    let executor = RuntimeProbeExecutor::new([
+        ok(b"podman version 5.4.2\n"),
+        ok(info.to_string().as_bytes()),
+        ok(b"29.0.1 linux\n"),
+    ]);
+    let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
+    let podman = runtimes
+        .iter()
+        .find(|runtime| runtime.kind == RuntimeKind::Podman)
+        .unwrap();
+    assert_eq!(podman.status, CheckStatus::Warning);
+    assert!(podman.usable());
+}
+
 #[test]
 fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     let executor = RuntimeProbeExecutor::new([

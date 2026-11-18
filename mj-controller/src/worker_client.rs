@@ -126,6 +126,8 @@ mod transport;
 use transport::*;
 mod credential_sync;
 pub use credential_sync::*;
+mod credential_targets;
+pub use credential_targets::*;
 
 /// Controller-side connection to the durable ACP relay protocol.
 ///

@@ -143,7 +143,7 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(inactivity),
             inactivity_changed: tokio::sync::Notify::new(),
-            mbx_install_wake: crate::controller::mbx::service::InstallWake::default(),
+            mbx_install_wake: crate::daemon::mbx_service::InstallWake::default(),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
             profile_catalog,
             recovery_observer,
@@ -881,7 +881,7 @@ impl RuntimeState {
         self.revisions.subscribe()
     }
 
-    pub(crate) fn mbx_install_wake(&self) -> &crate::controller::mbx::service::InstallWake {
+    pub(crate) fn mbx_install_wake(&self) -> &crate::daemon::mbx_service::InstallWake {
         &self.mbx_install_wake
     }
 

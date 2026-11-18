@@ -424,7 +424,7 @@ impl RuntimeState {
         if capacity.refuses(&allocation, hard_memory) {
             return Err(capacity_refusal(capacity, &allocation));
         }
-        let warning = capacity.overcommit(&allocation).warning(&capacity);
+        let warning = capacity.overcommit_warning(&allocation);
         if let Some(warning) = &warning {
             tracing::warn!(target_id, session_id, "{warning}");
             if let Some(session_id) = session_id {
@@ -915,9 +915,7 @@ mod tests {
         let state = crate::daemon::tests::test_runtime_state_loading_the_store();
         // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
         state.profile_catalog.get_or_init(|| {
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            )
+            crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
         });
         let target_ids = vec!["podman".into(), "apple".into()];
         let target = crate::targets::DeploymentCapacityTarget {
@@ -1149,7 +1147,7 @@ mod tests {
             .await
             .unwrap();
         let warning = admitted.warning.as_deref().unwrap();
-        assert!(warning.contains("more CPUs"));
+        assert!(!warning.contains("CPU"));
         assert!(warning.contains("more RAM"));
         assert_eq!(
             state.notices.lock().unwrap().back().unwrap().notice.text,
@@ -1214,9 +1212,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let warning = admitted.warning.as_deref().unwrap();
-        assert!(warning.contains("more CPUs"));
-        assert!(!warning.contains("more RAM"));
+        assert_eq!(admitted.warning, None, "CPU overcommit does not warn");
         drop(admitted);
 
         // Missing owner sizing refuses Apple only; the cgroup warning describes
@@ -1351,14 +1347,6 @@ mod tests {
 
         assert_eq!(capacity.committed.cpus, 8);
         assert_eq!(capacity.remaining.cpus, 2);
-        assert!(
-            capacity
-                .overcommit(&mj_core::state::SessionResourceAllocation::Container {
-                    cpus: 8,
-                    memory_bytes: 16 << 30,
-                })
-                .cpus
-        );
 
         let mut stopped = source.clone();
         stopped.state = mj_core::state::SessionState::Stopped;

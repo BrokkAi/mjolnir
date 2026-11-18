@@ -1436,52 +1436,10 @@ pub struct ViewerSessionCapabilities {
     pub interrupt_all: bool,
 }
 
-/// The small set of states a phone reasons about, alongside the precise state.
-///
-/// A phone groups and filters by this; it shows the precise `state` string as
-/// the word it prints. Collapsing here rather than in the browser keeps one
-/// definition of "live" in the controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ViewerLifecycleCategory {
-    Live,
-    Starting,
-    Suspending,
-    Suspended,
-    Failed,
-}
-
 /// The published state of a session that has been provisioned and whose
 /// start is still connecting its worker. Its record says disconnected, which
 /// reads as a fault while it is only launching (F-12).
 pub const LAUNCHING_STATE: &str = "launching";
-
-impl ViewerLifecycleCategory {
-    pub const fn of(state: SessionState) -> Self {
-        match state {
-            SessionState::Provisioning => Self::Starting,
-            // A parked sub-agent stays on the dashboard with its parent.
-            SessionState::Running
-            | SessionState::Disconnected
-            | SessionState::Checkpointing
-            | SessionState::Parked => Self::Live,
-            SessionState::Closing | SessionState::Destroying | SessionState::StartupCleanup => {
-                Self::Suspending
-            }
-            SessionState::Stopped => Self::Suspended,
-            SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
-                Self::Failed
-            }
-        }
-    }
-
-    /// Whether this session belongs on the dashboard. Stopped and failed
-    /// sessions belong to the resume flow instead, which is where a person can
-    /// do something about them.
-    pub const fn is_dashboard_visible(self) -> bool {
-        matches!(self, Self::Live | Self::Starting | Self::Suspending)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

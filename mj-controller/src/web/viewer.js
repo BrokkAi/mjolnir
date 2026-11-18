@@ -3033,18 +3033,12 @@ function containerAllocationFromDraft(draft, target, savedAllocation = undefined
       : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
   }
   const remaining = capacity?.remaining ?? target?.container_host_limits;
-  const overcommitsCpu = Boolean(remaining && cpusBig > BigInt(remaining.cpus));
   const overcommitsMemory = Boolean(remaining && BigInt(memoryBytes) > BigInt(remaining.memory_bytes));
   let warning = '';
-  if ((overcommitsCpu || overcommitsMemory) && capacity && !error) {
-    if (!capacity.complete) {
-      warning = 'A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start.';
-    } else {
-      const parts = [];
-      if (overcommitsCpu) parts.push(`more CPUs than the ${capacity.remaining.cpus} left, so busy sessions may run slower`);
-      if (overcommitsMemory) parts.push(`more RAM than the ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left, so the host may stop processes if sessions use all their RAM`);
-      warning = `This session asks for ${parts.join(', and ')}. It will still start.`;
-    }
+  if (overcommitsMemory && capacity && !error) {
+    warning = capacity.complete
+      ? `Asks for more RAM than the ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left on this host; it will still start.`
+      : 'A live container on this host has no recorded size, so the RAM left is unknown; it will still start.';
   }
   return {
     allocation,

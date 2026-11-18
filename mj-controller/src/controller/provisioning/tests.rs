@@ -714,7 +714,7 @@ fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
             .unwrap()
             .contains("fixture launch failed")
     );
-    assert!(!crate::pollers::session_target_is_pollable(child));
+    assert!(!crate::session_manager::session_target_is_pollable(child));
     assert!(
         recovered
             .ensure_subagent_slot_available(PROVISIONED_SESSION, None)

@@ -68,5 +68,27 @@ pub use nitro::{
 mod process_limit;
 pub use process_limit::*;
 
+/// Resolve the primary repository's directory on a target. Session indexing
+/// uses the same rule as API file exports so both surfaces name the agent's
+/// actual working directory.
+pub(crate) fn agent_working_directory_at(workspace_root: &str, destination: &Path) -> String {
+    target_join(workspace_root, destination)
+}
+
+/// Join a relative path onto a target-side root.
+///
+/// Target paths are POSIX text whatever this daemon runs on, so the components
+/// are spelled with `/` here rather than by the host's separator.
+pub(crate) fn target_join(root: &str, relative: &Path) -> String {
+    let mut path = root.trim_end_matches('/').to_owned();
+    for component in relative.components() {
+        if let std::path::Component::Normal(part) = component {
+            path.push('/');
+            path.push_str(&part.to_string_lossy());
+        }
+    }
+    path
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

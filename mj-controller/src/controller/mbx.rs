@@ -14,7 +14,6 @@
 mod configuration;
 pub(crate) mod install;
 pub(crate) mod release;
-pub(crate) mod service;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

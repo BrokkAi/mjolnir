@@ -79,7 +79,7 @@ fn band(score: f64) -> u8 {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the verified pinned model/runtime cache; missing assets fail explicitly"]
 async fn python_parity_and_sixteen_concurrent_calls_share_one_loaded_session() {
-    crate::server::install_rustls_crypto_provider();
+    crate::signing_key::install_rustls_crypto_provider();
     let student = Student::new(
         cache(),
         false,
@@ -190,7 +190,7 @@ async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
         response::Response,
         routing::get,
     };
-    crate::server::install_rustls_crypto_provider();
+    crate::signing_key::install_rustls_crypto_provider();
     #[derive(Clone)]
     struct Source {
         root: PathBuf,
@@ -433,7 +433,7 @@ async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "downloads optional CoreML graphs; runs real static graph inference"]
 async fn coreml_external_initializers_padding_and_python_parity() {
-    crate::server::install_rustls_crypto_provider();
+    crate::signing_key::install_rustls_crypto_provider();
     let root = cache();
     let client = reqwest::Client::new();
     let cancel = CancellationToken::new();
@@ -487,7 +487,7 @@ async fn coreml_external_initializers_padding_and_python_parity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a host GPU; deliberately fails if its real EP cannot run"]
 async fn actual_gpu_python_parity_and_warm_latency() {
-    crate::server::install_rustls_crypto_provider();
+    crate::signing_key::install_rustls_crypto_provider();
     let root = cache();
     let client = reqwest::Client::new();
     let cancel = CancellationToken::new();

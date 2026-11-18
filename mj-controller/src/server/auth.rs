@@ -46,13 +46,6 @@ pub(super) fn derive_login_token(key: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
-pub(super) fn generate_cookie_key() -> AnyResult<[u8; COOKIE_KEY_BYTES]> {
-    let mut key = [0_u8; COOKIE_KEY_BYTES];
-    getrandom::fill(&mut key)
-        .map_err(|error| anyhow::anyhow!("generate Mjolnir cookie key: {error}"))?;
-    Ok(key)
-}
-
 /// A random name for one viewer, minted at unlock.
 ///
 /// The cookie used to sign only an expiry, which meant two phones unlocking in

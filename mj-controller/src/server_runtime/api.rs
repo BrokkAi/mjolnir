@@ -27,7 +27,10 @@ use crate::server::api::{
     BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
     TranscriptPage, TurnSpan, TurnState, TurnSummary,
 };
-use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandOutput};
+use crate::targets::{
+    self, CancellableProcessExecutor, CommandExecutor, CommandOutput, agent_working_directory_at,
+    target_join,
+};
 use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
@@ -3404,13 +3407,6 @@ fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, Expor
     ))
 }
 
-/// Resolve the primary repository's directory on a target. Session indexing
-/// uses the same rule as API file exports so both surfaces name the agent's
-/// actual working directory.
-pub(crate) fn agent_working_directory_at(workspace_root: &str, destination: &Path) -> String {
-    target_join(workspace_root, destination)
-}
-
 fn primary_repository(
     layout: &SessionExportLayout,
 ) -> Result<&mj_checkpoint::checkpoint::CheckpointRepositorySpec, ExportError> {
@@ -3537,21 +3533,6 @@ fn fetch_arguments(
         arguments.push("--list".to_owned());
     }
     Ok(arguments)
-}
-
-/// Join a relative path onto a target-side root.
-///
-/// Target paths are POSIX text whatever this daemon runs on, so the components
-/// are spelled with `/` here rather than by the host's separator.
-fn target_join(root: &str, relative: &Path) -> String {
-    let mut path = root.trim_end_matches('/').to_owned();
-    for component in relative.components() {
-        if let Component::Normal(part) = component {
-            path.push('/');
-            path.push_str(&part.to_string_lossy());
-        }
-    }
-    path
 }
 
 async fn write_workspace_file(

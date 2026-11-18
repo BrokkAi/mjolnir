@@ -57,6 +57,7 @@ impl std::fmt::Display for StartRefusal {
 /// Reads the current per-session review configuration without blocking the host.
 pub type ReviewConfigSource = Arc<dyn Fn(&str) -> ReviewConfig + Send + Sync>;
 mod environment;
+mod selection;
 pub(crate) use environment::SharedReviewerRuntime;
 pub use environment::*;
 mod host;
@@ -64,10 +65,10 @@ pub use host::*;
 mod events;
 use events::*;
 mod begin;
-mod delivery;
 mod dispatch;
 mod notices;
-pub(crate) use delivery::partial_review_events;
+#[cfg(test)]
+pub(crate) use crate::database::partial_review_events;
 mod override_push;
 mod persist;
 mod resolve;

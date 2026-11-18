@@ -290,7 +290,7 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<auto_afk::Inactivity>,
     inactivity_changed: tokio::sync::Notify,
-    mbx_install_wake: crate::controller::mbx::service::InstallWake,
+    mbx_install_wake: crate::daemon::mbx_service::InstallWake,
     projects: Arc<crate::project_catalog::Catalog>,
     profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,
@@ -554,49 +554,7 @@ fn durable_session_state(controller: &Controller, session_id: &str) -> Option<Se
         .map(|session| session.state)
 }
 
-/// One piece of work that waits for a starting session's harness.
-///
-/// Both kinds are ordered against each other on purpose: a restored session's
-/// hand-off is the hidden context its first prompt reads, so it has to be
-/// installed before any queued prompt is submitted.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) enum StartupStep {
-    InstallHandoff(Box<mj_core::archive::CanonicalSessionSnapshot>),
-    PreparedHandoff {
-        text: String,
-    },
-    Prompt {
-        text: String,
-        /// None only for text rows persisted before structured startup prompts.
-        #[serde(default)]
-        prompt: Option<Vec<ContentBlock>>,
-        #[serde(default)]
-        encoded_draft: Option<String>,
-        #[serde(default)]
-        move_operation_id: Option<String>,
-        inherited_draft: Option<String>,
-    },
-    Configure {
-        key: String,
-        value: String,
-        optional: bool,
-    },
-    ApiPrompt {
-        text: String,
-    },
-    /// A peer message accepted while this session was still starting.
-    /// Delivered after earlier startup steps: through the mailbox when the
-    /// worker can take one, otherwise as the next turn. `waited_on_group` is
-    /// the startup group this message queued behind, when one was still
-    /// pending. The request id is the command id's `SessionMessageTurn` suffix.
-    SessionMessage {
-        sender_id: String,
-        sender_title: String,
-        text: String,
-        created_at_ms: u64,
-        waited_on_group: Option<String>,
-    },
-}
+pub(crate) use crate::database::StartupStep;
 
 /// One supervised drain per session. Pending payloads stay in SQLite.
 struct StartupQueue {
@@ -920,6 +878,9 @@ mod close;
 mod close_workspace;
 pub(crate) mod create;
 mod lifecycle;
+pub(crate) mod mailbox_delivery;
+pub(crate) mod mbx_service;
+pub(crate) mod push_delivery;
 mod resume;
 mod snapshot;
 pub(crate) mod startup_followup;

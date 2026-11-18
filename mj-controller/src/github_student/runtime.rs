@@ -394,7 +394,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "downloads the official pinned native archives for all supported platforms"]
     async fn native_archives_publish_only_verified_libraries_and_notices() {
-        crate::server::install_rustls_crypto_provider();
+        crate::signing_key::install_rustls_crypto_provider();
         let root = tempfile::Builder::new()
             .prefix("github-student-native-integration-")
             .tempdir()

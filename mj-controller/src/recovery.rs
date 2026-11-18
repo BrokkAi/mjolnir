@@ -9,6 +9,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::task::JoinSet;
 
+pub(crate) use crate::backoff::backoff_delay;
 use crate::controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
 use crate::database::record_recovery_failure_if_current;
 #[cfg(test)]
@@ -314,16 +315,6 @@ fn deferred_retry_delay(consecutive_deferrals: u32) -> Duration {
         MAX_DEFERRED_RETRY_INTERVAL,
         consecutive_deferrals,
     )
-}
-
-/// The retry shape every background session policy uses: `base` after the
-/// first failure, doubling per consecutive failure, never past `cap`.
-///
-/// Capped rather than unbounded because a target that is broken rather than
-/// blipping must keep being probed, just rarely enough to cost nothing.
-pub(crate) fn backoff_delay(base: Duration, cap: Duration, consecutive_failures: u32) -> Duration {
-    let doublings = consecutive_failures.saturating_sub(1).min(u32::BITS - 1);
-    base.checked_mul(1 << doublings).unwrap_or(cap).min(cap)
 }
 
 /// Whether `now` is at least `window` past `since`. A timestamp in the future -

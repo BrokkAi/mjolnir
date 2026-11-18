@@ -608,7 +608,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             .build()
             .unwrap()
             .block_on(controller.prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 selection,
@@ -665,29 +665,30 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         config,
         state: incompatible_state.clone(),
     };
-    let error = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            mj_core::state::MoveSelection {
-                oracle: None,
-                oracle_choice: None,
-                subagents: None,
-                workspace: Default::default(),
-                clear_resource_allocation: false,
-                session_id: session_id.into(),
-                profile_id: Some("codex".into()),
-                target_template_id: Some("podman".into()),
-                additional_mounts: None,
-                resource_allocation: None,
-            },
-            &RefusingExecutor("move preflight"),
-        ))
-        .unwrap_err();
+    let error =
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                mj_core::state::MoveSelection {
+                    oracle: None,
+                    oracle_choice: None,
+                    subagents: None,
+                    workspace: Default::default(),
+                    clear_resource_allocation: false,
+                    session_id: session_id.into(),
+                    profile_id: Some("codex".into()),
+                    target_template_id: Some("podman".into()),
+                    additional_mounts: None,
+                    resource_allocation: None,
+                },
+                &RefusingExecutor("move preflight"),
+            ))
+            .unwrap_err();
     assert!(format!("{error:#}").contains("resume it on a bare target there"));
     assert_eq!(controller.state.sessions[session_id], incompatible);
     assert!(
@@ -773,7 +774,7 @@ fn only_an_explicit_oracle_request_without_a_model_is_turned_off_with_a_notice()
             .build()
             .unwrap()
             .block_on(controller.prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 selection,
@@ -1207,15 +1208,16 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         .enable_all()
         .build()
         .unwrap();
-    let first = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection.clone(),
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let first =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection.clone(),
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(first.active);
     assert_eq!(
         first
@@ -1229,15 +1231,16 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     materialized.execution = MaterializedExecutionState::Idle;
     materialized.queued_prompts = vec![queued_prompt("queued-2")];
     crate::database::save_materialized_session(&materialized).unwrap();
-    let second = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let second =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(!second.active);
     assert_eq!(
         second
@@ -2220,15 +2223,16 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
         .build()
         .unwrap();
 
-    let first = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection.clone(),
-            &executor,
-        ))
-        .unwrap();
+    let first =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection.clone(),
+                &executor,
+            ))
+            .unwrap();
 
     let preview = first.conversion.as_deref().expect("a conversion preview");
     assert_eq!(
@@ -2251,15 +2255,16 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     // A live agent keeps editing, so the dirty counts must not be able to
     // invalidate a confirmation the person is still reading.
     fs::write(repository.path().join("agent-edit.txt"), "written\n").unwrap();
-    let second = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &executor,
-        ))
-        .unwrap();
+    let second =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &executor,
+            ))
+            .unwrap();
 
     assert_eq!(
         second.conversion.as_deref().unwrap().untracked_files,
@@ -2297,15 +2302,16 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     // than two instructions that contradict each other.
     let mut cleared = from_scratch.clone();
     cleared.clear_resource_allocation = true;
-    let cleared = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            cleared,
-            &executor,
-        ))
-        .unwrap();
+    let cleared =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                cleared,
+                &executor,
+            ))
+            .unwrap();
     assert_eq!(
         cleared.selection.resource_allocation,
         container_size(12, 24)
@@ -2319,15 +2325,16 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     // replaces it.
     let mut explicit = from_scratch;
     explicit.resource_allocation = container_size(6, 16);
-    let explicit = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            explicit,
-            &executor,
-        ))
-        .unwrap();
+    let explicit =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                explicit,
+                &executor,
+            ))
+            .unwrap();
     assert_eq!(
         explicit.selection.resource_allocation,
         container_size(6, 16)
@@ -2871,18 +2878,19 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
         resource_allocation: None,
     };
     let executor = RsyncWithoutPartialDir(GitWithPodmanPreflightExecutor { remote });
-    let preparation = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection.clone(),
-            &executor,
-        ))
-        .unwrap();
+    let preparation =
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection.clone(),
+                &executor,
+            ))
+            .unwrap();
 
     let assessment = preparation.workspace.expect("a workspace transfer");
     for side in ["controller", "source", "Destination"] {
@@ -3517,7 +3525,7 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 &crate::controller::test_support::session_admission(
                     request.preparation.selection.session_id.as_str(),
                 ),
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 request,
@@ -3738,15 +3746,16 @@ fn bare_move_preparation_preserves_an_explicit_resource_reset() {
         .enable_all()
         .build()
         .unwrap();
-    let prepared = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &RefusingExecutor("profile-only Move needs no provisioning commands"),
-        ))
-        .unwrap();
+    let prepared =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &RefusingExecutor("profile-only Move needs no provisioning commands"),
+            ))
+            .unwrap();
     assert!(prepared.in_place);
     assert!(prepared.selection.clear_resource_allocation);
     let mut source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
@@ -3799,7 +3808,7 @@ fn profile_move_after_explicit_resume_starts_fresh_without_transferring_files() 
         selection.profile_id = Some(profile.into());
         let prepared = runtime
             .block_on(fixture.controller.prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 selection,
@@ -3911,7 +3920,7 @@ fn in_place_move_that_failed_at_the_seal_leaves_the_next_same_target_move_in_pla
     for _ in 0..2 {
         let prepared = runtime
             .block_on(fixture.controller.prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 selection.clone(),
@@ -3967,15 +3976,16 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .enable_all()
         .build()
         .unwrap();
-    let empty = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            empty_selection.clone(),
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let empty =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                empty_selection.clone(),
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(empty.in_place);
     assert!(!empty.stops_subagents);
 
@@ -4017,15 +4027,16 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    let error = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection.clone(),
-            &ProcessExecutor,
-        ))
-        .unwrap_err();
+    let error =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection.clone(),
+                &ProcessExecutor,
+            ))
+            .unwrap_err();
     let message = format!("{error:#}");
     assert!(message.contains("finish the migration"), "{message}");
     assert!(message.contains("live-child"), "{message}");
@@ -4038,15 +4049,16 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .state
         .sessions
         .insert(child.id.clone(), child);
-    let prepared = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let prepared =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(prepared.in_place);
     assert!(
         prepared.stops_subagents,
@@ -4060,15 +4072,16 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .get_mut("live-child")
         .unwrap()
         .kind = mj_core::subagent::SubagentKind::Oracle;
-    let oracle = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            empty_selection.clone(),
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let oracle =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                empty_selection.clone(),
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(oracle.stops_subagents, "parked oracles are stopped too");
     fixture
         .controller
@@ -4077,15 +4090,16 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .get_mut("live-child")
         .unwrap()
         .state = SessionState::Stopped;
-    let stopped = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            empty_selection,
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let stopped =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                empty_selection,
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(!stopped.stops_subagents);
     let late_child = fixture
         .controller
@@ -5702,15 +5716,16 @@ fn preparing_a_move_to_another_local_bare_target_keeps_the_environment() {
         .enable_all()
         .build()
         .unwrap();
-    let prepared = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let prepared =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &ProcessExecutor,
+            ))
+            .unwrap();
     assert!(
         prepared.in_place,
         "a local bare to local bare Move is in place"
@@ -5920,7 +5935,7 @@ fn in_place_move_failure_retains_environment_for_retry() {
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let preparation = controller
             .prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 operation.selection.clone(),
@@ -6313,7 +6328,7 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
             let preparation = fixture
                 .controller
                 .prepare_move_session_controlled(
-                    &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    &crate::profile_catalog::ProfileCatalog::new(
                         tokio_util::sync::CancellationToken::new(),
                     ),
                     requested,
@@ -6426,7 +6441,7 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
             .unwrap();
         let refusal = runtime
             .block_on(fixture.controller.prepare_move_session_controlled(
-                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                &crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 operation.selection.clone(),
@@ -6482,15 +6497,16 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
         .enable_all()
         .build()
         .unwrap();
-    let preparation = runtime
-        .block_on(fixture.controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            operation.selection.clone(),
-            &ProcessExecutor,
-        ))
-        .unwrap();
+    let preparation =
+        runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                operation.selection.clone(),
+                &ProcessExecutor,
+            ))
+            .unwrap();
     fs::remove_file(&operation.handoff.as_ref().unwrap().archive_path).unwrap();
     let result = runtime.block_on(async {
         let channels = crate::session_manager::spawn_session_manager().unwrap();
@@ -7415,15 +7431,16 @@ fn retired_ec2_move_is_rejected_before_source_interruption() {
         .build()
         .unwrap();
     let before = controller.state.sessions[id].clone();
-    let error = runtime
-        .block_on(controller.prepare_move_session_controlled(
-            &crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            ),
-            selection,
-            &executor,
-        ))
-        .unwrap_err();
+    let error =
+        runtime
+            .block_on(controller.prepare_move_session_controlled(
+                &crate::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+                selection,
+                &executor,
+            ))
+            .unwrap_err();
     assert!(
         format!("{error:#}").contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
         "{error:#}"

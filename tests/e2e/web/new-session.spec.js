@@ -787,8 +787,8 @@ test('container overcommit warns and remains launchable except for Apple RAM', a
     complete: true,
   };
   const cases = [
-    { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'This session asks for more CPUs than the 4 left, so busy sessions may run slower, and more RAM than the 16 GiB left' },
-    { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true, warning: 'more CPUs than the 4 left, so busy sessions may run slower' },
+    { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'Asks for more RAM than the 16 GiB left on this host; it will still start.' },
+    { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true },
     { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'host has 16 GiB left' },
   ];
   for (const scenario of cases) {
@@ -813,6 +813,7 @@ test('container overcommit warns and remains launchable except for Apple RAM', a
         expect(state.actions).toHaveLength(0);
         continue;
       }
+      if (!scenario.warning) await expect(page.locator('#new-resource-warning')).toHaveText('');
       await expect(page.locator('#new-resource-error')).toHaveText('');
       await expect(page.locator('#new-next')).toBeEnabled();
       const output = [];

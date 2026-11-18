@@ -2067,7 +2067,7 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     let record = &controller.state.sessions[session_id];
     assert_eq!(record.state, SessionState::Error);
     assert!(record.target.is_some());
-    assert!(!crate::pollers::session_target_is_pollable(record));
+    assert!(!crate::session_manager::session_target_is_pollable(record));
 
     persist_controller_fixture(&controller);
     let outcome = crate::controller::test_support::worker_test_scope(session_id, || {

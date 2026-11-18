@@ -17,7 +17,6 @@ use anyhow::{Context, Result, bail};
 use mj_core::clock::epoch_seconds;
 use mj_core::credentials::{
     CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, CredentialSyncSignal,
-    CredentialSyncTarget,
 };
 use mj_core::state::{
     ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionState, State,
@@ -46,7 +45,7 @@ pub(crate) use provider_auth::ProviderAuthCache;
 #[cfg(test)]
 mod runtime_feed_tests;
 
-pub const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+pub use crate::quota::QUOTA_REFRESH_INTERVAL;
 /// When a quota reading stops counting as current. A reading only goes stale
 /// once a scheduled refresh should already have replaced it, so this is
 /// derived from the refresh interval rather than chosen next to it: a shorter

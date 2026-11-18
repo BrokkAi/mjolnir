@@ -2881,16 +2881,16 @@ fn stored_handback(
         .request_key
         .clone();
     // Use the actual submission path, not the driver's logical command key.
-    let command_id = crate::daemon::startup_followup::api_followup_steps(
+    let command_id = crate::database::api_followup_steps(
         &request_key,
-        crate::server::api::StartFollowup {
+        crate::database::StartFollowup {
             prompt: Some("review the changes".into()),
             ..Default::default()
         },
     )
     .into_iter()
     .find_map(|(id, step)| {
-        matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }).then_some(id)
+        matches!(step, crate::database::StartupStep::ApiPrompt { .. }).then_some(id)
     })
     .expect("the submitted prompt step");
     Some(mj_core::subagent::SubagentHandback {

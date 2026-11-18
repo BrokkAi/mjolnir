@@ -2,12 +2,15 @@
 
 pub(crate) mod backend;
 mod cache_host;
+pub(crate) use cache_host::CacheHost;
 pub(crate) mod checkpoint;
 mod container_upgrade;
 pub(crate) mod environment;
 pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
+mod interrupted;
+pub use interrupted::interrupted_lifecycle_cause;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;

@@ -868,6 +868,7 @@ pub(crate) fn availability_answer(
             machine: machine.clone(),
             finding: if unreachable.contains(&id.as_str()) {
                 crate::MachineFinding::Unreachable {
+                    answered_nothing: true,
                     detail: format!("`ssh {id} true` failed: Connection timed out"),
                     remediation: format!("Check that {id} is up."),
                 }

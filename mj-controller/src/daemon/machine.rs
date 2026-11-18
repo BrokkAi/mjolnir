@@ -301,9 +301,11 @@ fn machine_runtime_probe(
         MachineProbeOutcome::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         } => mj_client::availability::MachineFinding::Unreachable {
             detail: detail.clone(),
             remediation: remediation.clone(),
+            answered_nothing: *answered_nothing,
         },
     };
     mj_client::availability::MachineRuntimeProbe {

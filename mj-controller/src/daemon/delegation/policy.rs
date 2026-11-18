@@ -1,8 +1,8 @@
 //! Backend inputs are maintained independently of any control surface.
 use super::*;
 use crate::pollers::*;
+use crate::profile_catalog::ProfileCatalog;
 use crate::quota::{ProfileQuota, QuotaReportMap, QuotaReportPublication};
-use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
 use mj_core::credentials::{
     CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, RejectedLogins,

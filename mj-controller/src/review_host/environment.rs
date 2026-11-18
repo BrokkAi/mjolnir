@@ -196,7 +196,7 @@ pub struct ControllerEnvironment {
 
 /// The daemon installs its profile catalog after the review host starts.
 pub(crate) type SharedProfileCatalog =
-    Arc<std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>>;
+    Arc<std::sync::OnceLock<Arc<crate::profile_catalog::ProfileCatalog>>>;
 
 pub(crate) type SharedReviewerRuntime =
     Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;
@@ -433,7 +433,7 @@ impl ReviewEnvironment for ControllerEnvironment {
     > {
         Box::pin(async move {
             let backend = self.profile_backend().await?;
-            crate::review_selection::resolve(handle, Some(config), backend)
+            super::selection::resolve(handle, Some(config), backend)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -449,7 +449,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         Box::pin(async move {
             let backend: Arc<dyn crate::server::api::SubagentBackend> =
                 self.profile_backend().await?;
-            crate::review_selection::resolve_choice(&backend, choice)
+            super::selection::resolve_choice(&backend, choice)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

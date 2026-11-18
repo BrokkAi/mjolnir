@@ -663,11 +663,11 @@ pub(super) async fn run_daemon_runtime(
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
-    let mut cache_task = tokio::spawn(crate::controller::mbx::service::run(
+    let mut cache_task = tokio::spawn(crate::daemon::mbx_service::run(
         state.clone(),
         cancellation.clone(),
     ));
-    let mut mailbox_task = tokio::spawn(crate::mailbox_outbox::run(
+    let mut mailbox_task = tokio::spawn(crate::daemon::mailbox_delivery::run(
         state.clone(),
         manager_control.clone(),
         cancellation.clone(),

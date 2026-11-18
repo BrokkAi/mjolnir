@@ -1525,10 +1525,8 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
     let reports = Arc::new(Mutex::new(crate::quota::QuotaReportMap::new()));
     let (publications, quota_feed) =
         tokio::sync::watch::channel(crate::quota::QuotaReportMap::new());
-    let catalog = crate::server_runtime::profile_catalog::ProfileCatalog::with_probe(
-        crate::server_runtime::profile_catalog::counting_probe(Arc::new(
-            std::sync::atomic::AtomicUsize::new(0),
-        )),
+    let catalog = crate::profile_catalog::ProfileCatalog::with_probe(
+        crate::profile_catalog::counting_probe(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
     );
     catalog.sync(&config);
     let (refresh, mut refreshes) = mpsc::unbounded_channel();
@@ -1616,10 +1614,10 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
 #[tokio::test]
 async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
     use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::profile_catalog::{ProfileCatalog, counting_probe};
     use crate::quota::{
         ProfileQuota, QuotaRefreshRequest, QuotaReportMap, QuotaReportPublication, QuotaWindow,
     };
-    use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe};
     use futures::FutureExt;
     use mj_core::config::{HarnessKind, HarnessProfile};
 

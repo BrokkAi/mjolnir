@@ -553,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn draft_hydration_publishes_shared_capabilities_without_adopting_the_draft() {
-        use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
+        use crate::profile_catalog::{ProfileCatalog, counting_probe, test_config};
         use mj_core::config::HarnessKind;
         use mj_core::profile_capabilities::CapabilityState;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -678,10 +678,10 @@ mod tests {
             return;
         }
         let state = super::super::tests::test_runtime_state();
-        let catalog = crate::server_runtime::profile_catalog::ProfileCatalog::with_probe(
-            crate::server_runtime::profile_catalog::counting_probe(Arc::new(
-                std::sync::atomic::AtomicUsize::new(0),
-            )),
+        let catalog = crate::profile_catalog::ProfileCatalog::with_probe(
+            crate::profile_catalog::counting_probe(Arc::new(std::sync::atomic::AtomicUsize::new(
+                0,
+            ))),
         );
         assert!(state.profile_catalog.set(catalog).is_ok());
         state.owner().edit_sessions(|sessions| {

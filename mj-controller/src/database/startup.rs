@@ -41,8 +41,8 @@ impl StartupGroupStatus {
                 .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted")),
             last_done: (last.phase == "done").then(|| {
                 (
-                    serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)
-                        .map(|step| matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }))
+                    serde_json::from_str::<StartupStep>(&last.step_json)
+                        .map(|step| matches!(step, StartupStep::ApiPrompt { .. }))
                         .map_err(|error| error.to_string()),
                     last.accepted_ordinal,
                 )
@@ -653,6 +653,104 @@ pub fn next_startup_delivery(session_id: &str) -> Result<Option<StartupDelivery>
         [session_id],
         |row| Ok(StartupDelivery { session_id: row.get(0)?, command_id: row.get(1)?, step_json: row.get(2)?, phase: row.get(3)?, group_id: row.get(4)?, accepted_ordinal: row.get(5)?, error: row.get(6)? }),
     ).optional().map_err(Into::into)
+}
+
+/// One piece of work that waits for a starting session's harness.
+///
+/// Both kinds are ordered against each other on purpose: a restored session's
+/// hand-off is the hidden context its first prompt reads, so it has to be
+/// installed before any queued prompt is submitted.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum StartupStep {
+    InstallHandoff(Box<mj_core::archive::CanonicalSessionSnapshot>),
+    PreparedHandoff {
+        text: String,
+    },
+    Prompt {
+        text: String,
+        /// None only for text rows persisted before structured startup prompts.
+        #[serde(default)]
+        prompt: Option<Vec<agent_client_protocol::v1::schema::ContentBlock>>,
+        #[serde(default)]
+        encoded_draft: Option<String>,
+        #[serde(default)]
+        move_operation_id: Option<String>,
+        inherited_draft: Option<String>,
+    },
+    Configure {
+        key: String,
+        value: String,
+        optional: bool,
+    },
+    ApiPrompt {
+        text: String,
+    },
+    /// A peer message accepted while this session was still starting.
+    /// Delivered after earlier startup steps: through the mailbox when the
+    /// worker can take one, otherwise as the next turn. `waited_on_group` is
+    /// the startup group this message queued behind, when one was still
+    /// pending. The request id is the command id's `SessionMessageTurn` suffix.
+    SessionMessage {
+        sender_id: String,
+        sender_title: String,
+        text: String,
+        created_at_ms: u64,
+        waited_on_group: Option<String>,
+    },
+}
+
+/// Configuration and a first prompt to apply once a newly created session's
+/// harness is ready. Served in M2.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartFollowup {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub prompt: Option<String>,
+    pub fast_mode: bool,
+}
+
+/// One startup step's durable command id. The worker relay accepts only ASCII
+/// alphanumerics, `-` and `_` in a command id, so the step key is joined with
+/// `-`, never `:`: a rejected id leaves `mj new --model` and every spawned
+/// child waiting forever for a step the worker will never admit.
+pub(crate) fn startup_step_id(group_id: &str, key: &str) -> String {
+    format!("{group_id}-{key}")
+}
+
+pub(crate) fn api_followup_steps(
+    group_id: &str,
+    followup: StartFollowup,
+) -> Vec<(String, StartupStep)> {
+    let mut steps = Vec::new();
+    for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
+        if let Some(value) = value {
+            steps.push((
+                startup_step_id(group_id, key),
+                StartupStep::Configure {
+                    key: key.to_owned(),
+                    value,
+                    optional: false,
+                },
+            ));
+        }
+    }
+    if followup.fast_mode {
+        steps.push((
+            startup_step_id(group_id, "fast-mode"),
+            StartupStep::Configure {
+                key: "fast-mode".to_owned(),
+                value: "on".to_owned(),
+                optional: true,
+            },
+        ));
+    }
+    if let Some(text) = followup.prompt {
+        steps.push((
+            startup_step_id(group_id, "prompt"),
+            StartupStep::ApiPrompt { text },
+        ));
+    }
+    steps
 }
 
 #[cfg(test)]

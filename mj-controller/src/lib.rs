@@ -4,6 +4,7 @@
 mod antigravity_usage;
 mod aws_assume_role;
 mod aws_credentials;
+mod backoff;
 mod claude_login;
 mod claude_usage;
 mod codex_usage;
@@ -24,6 +25,7 @@ pub mod image;
 pub mod import;
 pub mod observe;
 pub mod opencode_logins;
+pub(crate) mod profile_catalog;
 pub mod profile_health;
 pub mod profile_login;
 pub(crate) mod profile_scheduler;
@@ -38,6 +40,7 @@ pub mod server;
 pub mod session_manager;
 pub mod sessionwiki;
 pub mod setup;
+pub(crate) mod signing_key;
 mod streamed_child;
 pub mod tailscale;
 pub mod utility_llm;
@@ -64,6 +67,7 @@ pub mod image_pull_gate;
 pub mod recovery_gate;
 
 pub mod github_item_verdict;
+mod github_rate_limit;
 pub(crate) mod github_relevance;
 mod github_watch;
 mod jev_transport;
@@ -72,6 +76,8 @@ mod mailbox_outbox;
 mod test_log;
 mod upgrade;
 pub(crate) mod web_push;
+
+pub mod wait_policy;
 
 pub mod github_student;
 

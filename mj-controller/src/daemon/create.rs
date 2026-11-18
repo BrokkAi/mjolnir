@@ -989,9 +989,7 @@ mod delegation_replay_tests {
         let workspace = crate::database::create_workspace("launch choices").unwrap();
         let runtime = crate::daemon::tests::test_runtime_state_loading_the_store();
         runtime.profile_catalog.get_or_init(|| {
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            )
+            crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
         });
         let path = GoPreferences::path();
         let mut stale_candidate = None;
@@ -1174,9 +1172,7 @@ mod delegation_replay_tests {
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         runtime.profile_catalog.get_or_init(|| {
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            )
+            crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
         });
         let request = mj_client::daemon::CreateSessionRequest {
             oracle: None,
@@ -1262,7 +1258,7 @@ mod delegation_replay_tests {
             crate::database::save_subagent_session(&child, &relation).unwrap();
             let runtime = crate::daemon::tests::test_runtime_state();
             runtime.profile_catalog.get_or_init(|| {
-                crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                crate::profile_catalog::ProfileCatalog::new(
                     tokio_util::sync::CancellationToken::new(),
                 )
             });
