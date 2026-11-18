@@ -104,10 +104,26 @@ for sub in ("out", "sessions", "prompts"):
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir
     (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
 WORKSPACE_RECORD = ROOT / "default-instance/verify/workspace.json"
-if not WORKSPACE_RECORD.exists():  # creates the workspace, or selects one with this name
-    WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
-    WORKSPACE_RECORD.write_bytes(r.stdout)
+
+
+def ensure_workspace():
+    """Creates or selects the verifier workspace once, under the same lock as the checkout, and
+    publishes its record atomically so a concurrent driver never reads a partial file."""
+    import fcntl
+    REPO.parent.mkdir(parents=True, exist_ok=True)
+    with open(REPO.parent / ".repo-setup.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if WORKSPACE_RECORD.exists():
+            return
+        WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([str(MJX), "workspaces", "create", "Review arms verify", "--json"],
+                           capture_output=True, check=True)
+        tmp = WORKSPACE_RECORD.with_name(f"workspace.{os.getpid()}.tmp")
+        tmp.write_bytes(r.stdout)
+        os.replace(tmp, WORKSPACE_RECORD)
+
+
+ensure_workspace()
 WORKSPACE = json.loads(WORKSPACE_RECORD.read_text())["workspace"]["id"]
 
 
@@ -314,7 +330,10 @@ def run(batch_path, judge=None):
         out = {"output": str(batch_path / a.output), "session_id": sid}
     # Bind the output to the session that produced it, so a consumer can check the model and
     # profile of the exact verdicts it reads rather than a session record that a rerun replaces.
-    out = {**out, "producer": {"session_id": sid, "profile": rec.get("profile"), "config": rec.get("config")}}
+    # The profile recorded is the one the session was on when its turn completed: quota recovery can
+    # move a session to another profile after launch.
+    out = {**out, "producer": {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
+                               "launch_profile": rec.get("profile"), "config": rec.get("config")}}
     save(out_path, out)
     mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
     return tag, "done"

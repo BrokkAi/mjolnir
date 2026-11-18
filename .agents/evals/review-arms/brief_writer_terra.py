@@ -723,8 +723,9 @@ def main():
     p.add_argument("step", choices=["leak-build", "leak-collect", "rewrite-build", "rewrite-collect",
                                     "contains-build", "usage", "readout"])
     p.add_argument("--writer", choices=sorted(STUDIES), default="terra")
-    p.add_argument("--round", type=int, choices=[0, 1, 2, 3], default=0,
-                   help="leak round; 2 and 3 exist only for --kind oracle-noleak, which starts at 1")
+    p.add_argument("--round", type=int, choices=[0, 1, 2, 3, 4], default=0,
+                   help="leak round; 2 to 4 exist only for --kind oracle-noleak, which starts at 1 "
+                        "(strict mode runs to 4)")
     p.add_argument("--name", help="readout judging round, or path prefix for leak/rewrite")
     p.add_argument("--kind", choices=("blind", *ORACLE_KINDS, *(s["kind"] for s in STUDIES.values())),
                    help="leak/rewrite brief kind (default: the selected writer's kind)")
@@ -738,7 +739,7 @@ def main():
     if a.kind in ORACLE_KINDS and (a.brief_root is None or a.bugs_from is None):
         p.error(f"--kind {a.kind} requires --brief-root and --bugs-from")
     if (a.kind == "oracle-noleak") != (a.round >= 2) and not (a.kind == "oracle-noleak" and a.round == 1):
-        p.error("rounds 2-3 apply only to --kind oracle-noleak, whose rounds are 1-3")
+        p.error("rounds 2-4 apply only to --kind oracle-noleak, whose rounds start at 1")
     if a.kind == "oracle-noleak" and a.step not in ("leak-build", "leak-collect"):
         p.error("--kind oracle-noleak has no rewrite step; edits run through brief_oracle.py noleak steps")
     if a.step in leak_steps and a.name is not None and (
