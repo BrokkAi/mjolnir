@@ -190,23 +190,23 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 # pins" in AGENTS.md). Muse installs below from its runtime.json file.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.15.0 \
-        @agentclientprotocol/claude-agent-acp@0.107.3 \
-        @anthropic-ai/claude-code@2.1.325 \
-        @brokkai/dsh-acp@0.6.0 \
-        @brokkai/muse-acp@0.21.0 \
-        @moonshot-ai/kimi-code@2.6.1 \
-        @openai/codex@0.168.0 \
+        @agentclientprotocol/claude-agent-acp@0.108.0 \
+        @anthropic-ai/claude-code@2.1.326 \
+        @brokkai/dsh-acp@0.7.0 \
+        @brokkai/muse-acp@0.24.0 \
+        @moonshot-ai/kimi-code@2.6.3 \
+        @openai/codex@0.170.0 \
         @opencode/cli@2.2.7 \
-        @xai-official/grok@1.0.77 \
+        @xai-official/grok@1.0.89 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
     && claude --version \
-    && [ "$(dsh-acp --version)" = "dsh-acp 0.6.0" ] \
-    && kimi --version | grep -qF 2.6.1 \
-    && grok --version | grep -qF 1.0.77 \
+    && [ "$(dsh-acp --version)" = "dsh-acp 0.7.0" ] \
+    && kimi --version | grep -qF 2.6.3 \
+    && grok --version | grep -qF 1.0.89 \
     && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.7 \
-    && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.21.0" ]
+    && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.24.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
 # separately pinned global CLI so containers and managed bare workers use

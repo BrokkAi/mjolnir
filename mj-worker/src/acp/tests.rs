@@ -494,7 +494,7 @@ fn opencode_mcp_calls_always_reach_the_person() {
     }
 }
 
-/// agy 1.5.8 titles an MCP call `mcp_<server>_<tool>` and names no server in
+/// agy 1.5.11 titles an MCP call `mcp_<server>_<tool>` and names no server in
 /// the request, so a title cannot tell an owned tool from a lookalike. Its own
 /// `mcp(<server>/*)` grant can: the worker stages one per registered owned
 /// server in agy's project file and answers none of agy's requests itself.

@@ -2653,13 +2653,22 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/muse-integration-inspect");
         std::fs::create_dir_all(&parent).unwrap();
         let temp = tempfile::tempdir_in(parent).unwrap();
+        // The adapter runs through npx, so resolution also locates the managed
+        // Node cache, which needs a cache base of its own.
+        let environment = BTreeMap::from([
+            ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                temp.path().join("cache").to_string_lossy().into_owned(),
+            ),
+        ]);
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
                 resolve_at(
                     temp.path(),
                     HarnessKind::Muse,
                     ExecutionPolicy::ConfiguredApprovals,
-                    &BTreeMap::new(),
+                    &environment,
                 )
                 .unwrap()
             });
@@ -2668,7 +2677,7 @@ mod tests {
                     temp.path(),
                     HarnessKind::Muse,
                     ExecutionPolicy::ConfiguredApprovals,
-                    &BTreeMap::new(),
+                    &environment,
                 )
                 .unwrap()
             });

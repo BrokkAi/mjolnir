@@ -2714,7 +2714,7 @@ fn gh_permission_security_boundary() {
         (json!({"command":["gh-evil","issue"]}), false),
         (json!({"command":"gh"}), true),
         (json!({"command":"gh issue view 123"}), true),
-        // DSH v0.6.0 run_command forwards executable and args unchanged.
+        // DSH v0.7.0 run_command forwards executable and args unchanged.
         (
             json!({"command":"gh", "args":["issue", "view", "123"]}),
             true,
