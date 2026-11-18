@@ -88,38 +88,53 @@ def stage_dates(by_repo):
         list(ex.map(one, sorted(by_repo)))
 
 
-def parse_diff(text):
-    files, ranges, funcs = set(), collections.defaultdict(list), set()
-    cur = None
-    for line in text.splitlines():
-        if line.startswith("diff --git "):
-            cur = None
-        elif line.startswith("--- "):
-            p = line[4:]
-            cur = p[2:] if p.startswith("a/") else None
-        elif line.startswith("@@") and cur and not is_test_path(cur):
-            m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@ ?(.*)", line)
+FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+                   r"(?:extern\s+(?:\"[^\"]*\"\s+)?)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def enclosing_fn(lines, line_no):
+    """Nearest preceding `fn` signature at or above 1-based line_no in the old file (None at top level)."""
+    for i in range(min(line_no, len(lines)) - 1, -1, -1):
+        m = FN_RE.match(lines[i])
+        if m:
+            return m.group(1), i + 1
+    return None
+
+
+def changed_sites(repo, h):
+    """Per non-test .rs file: deleted old-side ranges and enclosing functions of every hunk.
+
+    Paths come from `--name-only -z` (never parsed from patch headers, which Git quotes), each
+    file's hunks from a literal-pathspec diff, and enclosing functions from the old file text,
+    so the result doesn't depend on the repo's diff drivers or attributes."""
+    rc, so, se = git(repo, "diff", "--name-only", "-z", f"{h}^", h, "--", "*.rs")
+    if rc:
+        raise RuntimeError("diff names: " + se.strip()[-200:])
+    paths = [p for p in so.split("\0") if p and not is_test_path(p)]
+    ranges, funcs = collections.defaultdict(list), set()
+    for path in paths:
+        rc, diff, se = git(repo, "diff", "-U0", "--no-color", f"{h}^", h, "--", f":(literal){path}")
+        if rc:
+            raise RuntimeError("diff file: " + se.strip()[-200:])
+        rc, old, _ = git(repo, "show", f"{h}^:{path}")
+        old_lines = old.splitlines() if rc == 0 else []
+        for line in diff.splitlines():
+            m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)
             if not m:
                 continue
             start, count = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
-            files.add(cur)
-            ctx = m.group(3).strip()
-            fn = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", ctx)
-            funcs.add((cur, fn.group(1) if fn else ctx[:60]))
+            anchor = start if count > 0 else max(start, 1)
+            funcs.add((path, enclosing_fn(old_lines, anchor)))
             if count > 0:
-                ranges[cur].append((start, count))
-    return files, ranges, funcs
+                ranges[path].append((start, count))
+    return set(paths), ranges, funcs
 
 
 def blame_one(c):
     repo, h = c["repo"], c["hash"]
     rec = {k: c[k] for k in ("repo", "hash", "oneline", "window", "fix_ct", "p2p", "outcome", "validated_image")}
     try:
-        rc, diff, se = git(repo, "diff", "-U0", "--no-color", f"{h}^", h, "--", "*.rs")
-        if rc:
-            rec["error"] = "diff: " + se.strip()[-200:]
-            return rec
-        files, ranges, funcs = parse_diff(diff)
+        files, ranges, funcs = changed_sites(repo, h)
         rec["fix_files"], rec["fix_funcs"] = len(files), len(funcs)
         rec["multi_site_proxy"] = len(files) >= 2 or len(funcs) >= 2
         counts, ctimes, failed = collections.Counter(), {}, []

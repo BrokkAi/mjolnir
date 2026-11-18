@@ -60,6 +60,13 @@ def main():
         n[(c["repo"], window(t))] += 1
     # Only the current plan's sampled commits count; failed draws stay in the denominator.
     current = set(json.load(open(scan / "plan.json"))["sample_ids"])
+    present = set()
+    for l in open(scan / "blame.jsonl"):
+        r = json.loads(l)
+        present.add(f"{r['repo']} {r['hash']}")
+    missing = current - present
+    if missing:
+        sys.exit(f"{len(missing)} planned draws have no trace record; finish the scan before ranking")
     sample = collections.defaultdict(list)
     errors = 0
     for l in open(scan / "blame.jsonl"):
