@@ -3,7 +3,6 @@ use super::*;
 use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a direct (no actor) reconciliation of one session borrows.
