@@ -272,22 +272,6 @@ impl CommandExecutor for RecordedMachine {
 
 /// Run every runtime check against the host in one SSH call, then judge the
 /// answers with the checks a launch uses.
-/// The batch runs with `ssh_validation_command`'s short `ConnectTimeout` and
-/// `ServerAlive` keepalive, so SSH itself reports a host that answers nothing
-/// well before the command deadline. The deadline expiring therefore means a
-/// check stalled on a host that answered; replayed as the `ssh true` result
-/// it would read as "did not answer", so it is no longer a `CommandTimedOut`.
-fn batch_deadline_is_not_silence(error: anyhow::Error, target: &SshTarget) -> anyhow::Error {
-    match error.downcast::<mj_core::targets::CommandTimedOut>() {
-        Ok(timed_out) => anyhow::anyhow!(
-            "the runtime check on {} did not finish within {} seconds, though SSH reported no connection timeout",
-            target.destination,
-            timed_out.timeout.as_secs()
-        ),
-        Err(error) => error,
-    }
-}
-
 fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> RecordedMachine {
     let commands = machine_probe_commands();
     let batch = ssh_validation_command(
@@ -303,7 +287,7 @@ fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> Record
     match executor.execute(&batch) {
         Err(error) => RecordedMachine {
             answers: BTreeMap::new(),
-            failure: RefCell::new(Some(batch_deadline_is_not_silence(error, target))),
+            failure: RefCell::new(Some(error)),
         },
         // The script always exits 0, so any other status is SSH's own: the
         // connectivity check classifies it from what SSH printed.
@@ -341,6 +325,28 @@ fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> Record
 fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> MachineProbeOutcome {
     let target = SshTarget::from(ssh);
     let recorded = record_machine(&target, executor);
+    // The batch runs under `ssh_validation_command`'s short `ConnectTimeout`
+    // and `ServerAlive` keepalive, so SSH itself reports a host that answers
+    // nothing. The batch's deadline expiring means a check stalled on a host
+    // that answered, which the `ssh true` replay below would misread.
+    if let Some(timed_out) = recorded
+        .failure
+        .borrow()
+        .as_ref()
+        .and_then(|error| error.downcast_ref::<mj_core::targets::CommandTimedOut>())
+    {
+        let destination = &target.destination;
+        return MachineProbeOutcome::Unreachable {
+            detail: format!(
+                "{destination} answered over SSH, but checking what it can run did not finish within {} seconds.",
+                timed_out.timeout.as_secs()
+            ),
+            remediation: format!(
+                "Run `ssh {destination} podman info` and `ssh {destination} docker version` to find the command that hangs, fix or restart that engine, then check again."
+            ),
+            answered_nothing: false,
+        };
+    }
     let executor = &recorded;
     if let SshConnectivity::Failed {
         detail,
