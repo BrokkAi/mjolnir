@@ -328,7 +328,13 @@ fn a_machine_whose_ssh_fails_is_unreachable_with_the_ssh_error() {
             false,
         ),
         (Some("Connection timed out"), "Connection timed out", true),
-        (None, "did not answer within 15 seconds", true),
+        (
+            Some("ssh: connect to host nas port 22: Operation timed out"),
+            "Operation timed out",
+            true,
+        ),
+        // Hard-won: bd97f0dc1: a stalled check on a reachable host read as "did not answer"
+        (None, "did not finish within 15 seconds", false),
     ] {
         let probe = probe_machine("nas", &ssh_machine("nas"), &Refused(stderr)).unwrap();
         let MachineProbeOutcome::Unreachable {

@@ -1949,8 +1949,10 @@ fn classify_ssh_stderr(stderr: &str) -> SshFailure {
         "Authentication failed",
     ];
     const CLIENT_MISSING: [&str; 2] = ["ssh: command not found", "No such file or directory"];
-    const UNREACHABLE: [&str; 3] = [
+    // macOS's OpenSSH reports a dropped connect as "Operation timed out".
+    const UNREACHABLE: [&str; 4] = [
         "Connection timed out",
+        "Operation timed out",
         "No route to host",
         "Network is unreachable",
     ];
