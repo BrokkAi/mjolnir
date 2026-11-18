@@ -23,7 +23,7 @@ pub fn harness_is_authenticated_with_executor(
 /// [`HarnessProfile::authentication_marker`] already names the right file for
 /// either case. A harness without a login or a configuration file, such as
 /// DSH, is proven by its key alone.
-pub(crate) fn harness_is_authenticated_with(
+pub fn harness_is_authenticated_with(
     profile: &HarnessProfile,
     is_default_home: bool,
     executor: &impl CommandExecutor,
@@ -78,10 +78,7 @@ pub(crate) fn harness_is_authenticated_with(
 /// Ask Claude Code about a scoped profile. Setting `CLAUDE_CONFIG_DIR` for the
 /// default home changes Claude's profile selection, so the default home is
 /// never asked.
-pub(crate) fn claude_cli_reports_authenticated(
-    home: &Path,
-    executor: &impl CommandExecutor,
-) -> bool {
+pub fn claude_cli_reports_authenticated(home: &Path, executor: &impl CommandExecutor) -> bool {
     let mut command = CommandSpec::new("claude", ["auth", "status", "--json"])
         .purpose("check Claude Code authentication");
     command.env.insert(
@@ -103,7 +100,7 @@ pub(crate) fn claude_cli_reports_authenticated(
 /// Whether the Keychain holds a Claude login. `security` is already
 /// authorized for the item, so this does not raise a Keychain prompt; the
 /// shared executor still bounds a wedged lookup.
-pub(crate) fn claude_keychain_reports_authenticated(executor: &impl CommandExecutor) -> bool {
+pub fn claude_keychain_reports_authenticated(executor: &impl CommandExecutor) -> bool {
     claude_keychain_credentials(executor)
         .ok()
         .flatten()
@@ -202,7 +199,7 @@ pub fn claude_keychain_credentials(
     })
 }
 
-pub(crate) fn claude_credentials_contain_login(credentials: &[u8]) -> bool {
+pub fn claude_credentials_contain_login(credentials: &[u8]) -> bool {
     let Ok(document) = serde_json::from_slice::<serde_json::Value>(credentials) else {
         return false;
     };

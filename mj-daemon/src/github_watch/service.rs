@@ -81,7 +81,7 @@ trait GithubClassifier: Send + Sync {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a>;
 }
 
-impl GithubClassifier for mj_controller::github_relevance::Classifier {
+impl GithubClassifier for mj_github_relevance::github_relevance::Classifier {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
         Box::pin(self.classify(evidence))
     }
@@ -91,11 +91,13 @@ impl GithubClassifier for mj_controller::github_relevance::Classifier {
 /// replacement daemon can resume from the same repo cursors and event keys.
 pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Result<()> {
     let notice_state = Arc::downgrade(&state);
-    let notices = Arc::new(mj_controller::github_relevance::Notices::new(move |text| {
-        if let Some(state) = notice_state.upgrade() {
-            state.push_public_notice("", text);
-        }
-    }));
+    let notices = Arc::new(mj_github_relevance::github_relevance::Notices::new(
+        move |text| {
+            if let Some(state) = notice_state.upgrade() {
+                state.push_public_notice("", text);
+            }
+        },
+    ));
     let mut student = None;
     let result = run_poll_loop(state, stop, &mut student, notices).await;
     let shutdown = match student {
@@ -111,8 +113,8 @@ pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Re
 async fn run_poll_loop(
     state: Arc<RuntimeState>,
     stop: CancellationToken,
-    student: &mut Option<Arc<mj_controller::github_student::Student>>,
-    notices: Arc<mj_controller::github_relevance::Notices>,
+    student: &mut Option<Arc<mj_github_relevance::github_student::Student>>,
+    notices: Arc<mj_github_relevance::github_relevance::Notices>,
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
@@ -144,7 +146,7 @@ async fn run_poll_loop(
         if config.local_inference {
             let local = student.get_or_insert_with(|| {
                 let notices = notices.clone();
-                Arc::new(mj_controller::github_student::Student::new(
+                Arc::new(mj_github_relevance::github_student::Student::new(
                     mj_core::config::data_dir(),
                     config.use_gpu,
                     Arc::new(move |notice| notices.student_notice(notice)),
@@ -153,9 +155,9 @@ async fn run_poll_loop(
             local.set_use_gpu(config.use_gpu);
         }
         let classifier: Arc<dyn GithubClassifier> =
-            Arc::new(mj_controller::github_relevance::Classifier::new(
+            Arc::new(mj_github_relevance::github_relevance::Classifier::new(
                 student.as_ref().map(|student| {
-                    student.clone() as Arc<dyn mj_controller::github_relevance::StudentOwner>
+                    student.clone() as Arc<dyn mj_github_relevance::github_relevance::StudentOwner>
                 }),
                 notices.clone(),
             ));

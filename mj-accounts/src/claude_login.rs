@@ -31,7 +31,7 @@ const SECURITY_INTERACTIVE_LINE_LIMIT: usize = 4032;
 /// updates its item instead of adding a second one. Reads the item back,
 /// because an interactive `security` does not report a failed command in its
 /// exit status.
-pub(crate) fn write_claude_keychain_login(
+pub fn write_claude_keychain_login(
     executor: &(impl CommandExecutor + ?Sized),
     login: &[u8],
 ) -> Result<()> {
@@ -86,7 +86,7 @@ pub(crate) fn write_claude_keychain_login(
 /// Keychain under them, and writes under them, so Claude Code's own refresh and
 /// this install cannot interleave. A Keychain that cannot be read or written
 /// fails; it never falls back to a file.
-pub(crate) async fn install_keychain_login_if_newer(
+pub async fn install_keychain_login_if_newer(
     lock_marker: &Path,
     security: Arc<dyn CommandExecutor + Send + Sync>,
     bytes: &[u8],
@@ -124,15 +124,15 @@ pub(crate) async fn install_keychain_login_if_newer(
 
 /// A hand-written macOS Keychain for tests: `security` as Claude Code's item
 /// answers it and as `security -i` writes it.
-#[cfg(test)]
-pub(crate) mod fake {
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake {
     use std::sync::Mutex;
 
     use super::*;
     use crate::targets::CommandOutput;
 
     #[derive(Default)]
-    pub(crate) struct FakeKeychain {
+    pub struct FakeKeychain {
         state: Mutex<State>,
     }
 
@@ -150,35 +150,35 @@ pub(crate) mod fake {
     }
 
     impl FakeKeychain {
-        pub(crate) fn holding(login: &[u8]) -> Self {
+        pub fn holding(login: &[u8]) -> Self {
             let keychain = Self::default();
             keychain.state.lock().unwrap().login = Some(login.to_vec());
             keychain
         }
 
-        pub(crate) fn locked(self) -> Self {
+        pub fn locked(self) -> Self {
             self.state.lock().unwrap().locked = true;
             self
         }
 
         /// Fail any write made without Claude Code's refresh lock in `dir`.
         #[cfg(unix)]
-        pub(crate) fn requiring_lock_in(self, dir: &std::path::Path) -> Self {
+        pub fn requiring_lock_in(self, dir: &std::path::Path) -> Self {
             self.state.lock().unwrap().lock_dir = Some(dir.canonicalize().unwrap());
             self
         }
 
         #[cfg(unix)]
-        pub(crate) fn refuse_writes(&self) {
+        pub fn refuse_writes(&self) {
             self.state.lock().unwrap().refuse_writes = true;
         }
 
         #[cfg(unix)]
-        pub(crate) fn login(&self) -> Option<Vec<u8>> {
+        pub fn login(&self) -> Option<Vec<u8>> {
             self.state.lock().unwrap().login.clone()
         }
 
-        pub(crate) fn calls(&self) -> Vec<(Vec<String>, Option<Vec<u8>>)> {
+        pub fn calls(&self) -> Vec<(Vec<String>, Option<Vec<u8>>)> {
             self.state.lock().unwrap().calls.clone()
         }
     }

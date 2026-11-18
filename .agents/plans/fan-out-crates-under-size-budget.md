@@ -20,6 +20,8 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [x] (2026-11-18) Milestone 2c, first half: the targets layer is `mj-targets` (`brokk-mj-targets`), 18,115 lines; `mj-controller` is 230,766. The same 1,845 tests run, 175 of them in `mj-targets`.
 - [x] (2026-11-18) Milestone 2c, second half: the store layer is `mj-store` (`brokk-mj-store`), 45,605 lines and under the budget; `mj-controller` is 185,161. The same 1,845 tests run: 175 in `mj-targets`, 302 in `mj-store`, 1,368 in `mj-controller`. `scripts/check-controller-layers.py` is deleted, since the compiler enforces both boundaries now.
 - [x] (2026-11-18) A commit no longer recompiles the workspace: after an empty commit `cargo build` compiles three small units in 12 s where it compiled everything in 83 s (`.agents/plans/build-identity-off-the-compile-path.md`).
+- [x] (2026-11-18) Milestone 4, first two groups: `mj-accounts` (`brokk-mj-accounts`, 17,074 lines: logins, the login terminal, quota and usage readers) and `mj-github-relevance` (`brokk-mj-github-relevance`: the GitHub classifier with its ONNX Runtime and tokenizer dependencies, which only the daemon uses). `mj-controller` is 164,848 lines. Its 1,368 tests are now 158 + 10 + 1,200.
+- [ ] Milestone 4, remaining groups in `mj-controller`: session runtime (`worker_client`, `session_manager`), import (`import`, `sessionwiki`, `compaction`, `handoff`, `utility_llm`, `project_catalog`), worker staging (`controller/worker_binary`, `controller/mbx`). They form a cycle with `controller`, `setup` and `doctor`; list each group's references upward before cutting.
 - [ ] Milestone 2: the review host and the pollers leave `mj-daemon`.
 - [ ] Milestone 3: `mj-daemon`'s `daemon` and `server_runtime` modules are separated and the crate is under the budget.
 - [ ] Milestone 4: `mj-controller` fans out above the store (accounts, import, worker staging, session runtime); starts when the storage layer is its own crate.
@@ -48,6 +50,11 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 
 - Observation: a test that hands a file's path to a child process breaks silently when the file moves crates. Five `worker_client` tests write a stand-in `aws` script that prints `tests/fixtures/aws-sts-assume-role-access-denied.txt` by its path under `CARGO_MANIFEST_DIR`; the compiler found every `include_str!` of the moved fixtures, but not that. The fixtures are now constants in `mj_targets::aws_assume_role::test_fixtures` and the tests write the text to a scratch file. After a move, search for the fixture's file name, not only for compile errors.
   Evidence: `the AWS CLI exited with status 254` in those five tests after the move.
+
+- Observation: a group chosen by subject can hide a module that belongs elsewhere. `github_student` was first placed with the quota readers because it names `quota::retry_after_header`; it is in fact an on-device inference model that pulls in ONNX Runtime bindings and a tokenizer, and nothing in `mj-controller` uses it. As its own crate it needs only `mj-core` and `mj-transcript`, and `mj-controller` no longer depends on those libraries. Check a candidate's third-party dependencies, not only its `crate::` references, before grouping it.
+  Evidence: `grep -rlE "\bort::|tokenizers::"` over the group named only `github_student/`.
+- Observation: after a move, the crate that gave up the code keeps the dependencies only that code used, and nothing local reports it; the `cargo machete` job in CI does. Eleven such dependencies failed that job for eight pushes before it was noticed.
+  Evidence: the "Unused dependencies" job on commits `ed3554170` through `f2f99b9f0`.
 
 ## Decision Log
 - Decision: in a file that moves to a new crate, every `pub(crate)` becomes `pub`.

@@ -120,7 +120,7 @@ fn grok_programs(home: &Path) -> Vec<PathBuf> {
 /// This follows the spawn in [`GrokUsageSession`]: it moves to the next
 /// candidate only when a program is missing. A `grok` that is on `path` but
 /// cannot run fails the launch, so it decides the answer.
-pub(crate) fn host_has_grok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
+pub fn host_has_grok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
     for program in grok_programs(home) {
         if program.is_absolute() {
             if program.exists() {

@@ -54,7 +54,7 @@ pub struct CodexUsageWindow {
 
 /// Where a Codex quota check starts its app-server.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CodexLauncher {
+pub enum CodexLauncher {
     /// The Mjolnir-managed installation under this cache root, or the
     /// process's default cache root.
     Managed(Option<PathBuf>),
@@ -402,7 +402,7 @@ async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceabl
 
 /// Refresh a persistent app-server client, recreating it after transport or
 /// protocol failures. Calls are awaited serially by the session worker.
-pub(crate) async fn refresh_with_cache_root(
+pub async fn refresh_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
@@ -444,7 +444,7 @@ pub struct LoginRefreshFailure {
 /// expiry at the same instant both try to spend the same token, one wins, and
 /// the loser's turn dies. Rotating early on the host, so the sync can push the
 /// new file, keeps container copies away from that instant.
-pub(crate) async fn refresh_login_with_cache_root(
+pub async fn refresh_login_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
@@ -491,7 +491,7 @@ fn process_managed_cache_root() -> Result<PathBuf, QueryError> {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
+pub fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
     let install = managed_harness_install_dir(cache_root, HarnessKind::Codex);
     let launcher = install.join(CODEX_CLI_ENTRYPOINT);
     let launcher_directory = launcher.parent().expect("launcher parent");
@@ -618,7 +618,7 @@ fn managed_codex_launcher(install: &Path) -> Result<PathBuf, QueryError> {
 /// profile's environment, so `node` must also be on `path`, the PATH that
 /// environment gives it. A host whose only Node is Mjolnir's managed copy
 /// therefore uses a container under `auto`.
-pub(crate) fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
+pub fn host_has_codex(cache_root: Option<&Path>, path: Option<&std::ffi::OsStr>) -> bool {
     #[cfg(unix)]
     {
         if mj_core::program_path::find_executable_on_path("node", path).is_none() {

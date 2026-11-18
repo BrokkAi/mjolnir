@@ -24,7 +24,7 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
 
 /// Quota-row copy when the stored Claude OAuth access token is past `expiresAt`.
-pub(crate) const LOGIN_EXPIRED: &str = "login expired";
+pub const LOGIN_EXPIRED: &str = "login expired";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageReport {
@@ -168,7 +168,7 @@ impl ClaudeLauncher {
     /// Mjolnir installs it (Unix), and where it does not (Windows) when the
     /// person's own `claude.cmd` is on the profile's `PATH`. Quota runtime
     /// `auto` falls back to a container exactly when this is false.
-    pub(crate) fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
+    pub fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
         match self {
             #[cfg(any(test, feature = "test-support"))]
             Self::Program(_) => true,
@@ -558,14 +558,14 @@ async fn refresh_and_retry(
 pub const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// When a login expiring at `expires_at_ms` is due for renewal.
-pub(crate) fn grant_due_at(expires_at_ms: i64) -> i64 {
+pub fn grant_due_at(expires_at_ms: i64) -> i64 {
     let lead_ms = i64::try_from(GRANT_REFRESH_LEAD.as_millis()).unwrap_or(i64::MAX);
     expires_at_ms.saturating_sub(lead_ms)
 }
 
 /// What [`refresh_grant_if_due`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GrantRefresh {
+pub enum GrantRefresh {
     /// Nothing to refresh: no login here, or it carries no refresh token.
     NotRefreshable,
     /// Enough lifetime remains. The login becomes due at this epoch time.
@@ -581,7 +581,7 @@ pub(crate) enum GrantRefresh {
     },
 }
 
-pub(crate) struct GrantRefreshTrigger<'a> {
+pub struct GrantRefreshTrigger<'a> {
     pub now_ms: i64,
     /// Identity of the access token used by the authentication-failed turn.
     pub rejected_logins: &'a std::collections::BTreeSet<String>,
@@ -593,7 +593,7 @@ pub(crate) struct GrantRefreshTrigger<'a> {
 /// is the grant's only refresher: copies handed to harnesses carry no refresh
 /// token. The decision does not consult the usage API's rate-limit hold, which
 /// covers usage requests only.
-pub(crate) async fn refresh_grant_if_due(
+pub async fn refresh_grant_if_due(
     source: LoginSource,
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
@@ -679,7 +679,7 @@ pub(crate) async fn refresh_grant_if_due(
 /// Where the login a renewal works on is kept, and how Claude Code is told to
 /// find it. Built from [`mj_core::config::HarnessKind::login_store`].
 #[derive(Clone)]
-pub(crate) enum LoginSource {
+pub enum LoginSource {
     /// `<home>/.credentials.json`, with `CLAUDE_CONFIG_DIR` pointing at `home`.
     File { home: PathBuf },
     /// The macOS Keychain item every profile shares. `claude auth login` must

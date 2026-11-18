@@ -16,19 +16,14 @@ doctest = false
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks"]
 # Exposes the shared test fixtures to the tests of mj-daemon.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support"]
+test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support"]
 
 [lints]
 workspace = true
 
 [dependencies]
-portable-pty = "0.9"
-half = "2"
-libloading = "0.9"
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-23", "directml", "coreml", "cuda", "half"] }
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 sysinfo.workspace = true
 mj-core.workspace = true
 mj-transcript = { workspace = true, features = ["github-history"] }
@@ -36,12 +31,12 @@ mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
+mj-accounts.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
-chrono-tz = "0.10"
 dirs.workspace = true
 flate2.workspace = true
 futures = "0.3"
@@ -51,7 +46,6 @@ rayon.workspace = true
 reedline = { version = "0.51", default-features = false }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
 ring.workspace = true
-rustls.workspace = true
 rusqlite.workspace = true
 ruzstd.workspace = true
 sessionwiki.workspace = true
@@ -74,6 +68,7 @@ anvil-client.workspace = true
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-targets = { workspace = true, features = ["test-support"] }
 mj-store = { workspace = true, features = ["test-support"] }
+mj-accounts = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
 http-body-util = "0.1"

@@ -30,11 +30,11 @@ use mj_core::targets::{
 };
 
 /// Marks a container as a quota check, so a later daemon can find leftovers.
-pub(crate) const QUOTA_LABEL: &str = "dev.mj.quota";
+pub const QUOTA_LABEL: &str = "dev.mj.quota";
 /// Names the process that started a quota check: its process id and birth
 /// identity, as [`owner_token`] writes them. The sweep removes a container
 /// only when that process is gone.
-pub(crate) const OWNER_LABEL: &str = "dev.mj.quota-owner";
+pub const OWNER_LABEL: &str = "dev.mj.quota-owner";
 /// Bounds the engine's own bookkeeping commands: image lookup and removal.
 const ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// The container's home and working directory. A tmpfs, so a check runs the
@@ -42,13 +42,13 @@ const ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTAINER_SCRATCH: &str = "/tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Engine {
+pub enum Engine {
     Podman,
     Docker,
 }
 
 impl Engine {
-    pub(crate) fn program(self) -> &'static str {
+    pub fn program(self) -> &'static str {
         match self {
             Self::Podman => "podman",
             Self::Docker => "docker",
@@ -65,20 +65,20 @@ impl Engine {
 
 /// The decision for one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QuotaRuntime {
+pub enum QuotaRuntime {
     Host,
     Container(ContainerRuntime),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContainerRuntime {
-    pub(crate) engine: Engine,
+pub struct ContainerRuntime {
+    pub engine: Engine,
     /// The engine executable found on `PATH` when the check was decided.
-    pub(crate) program: std::path::PathBuf,
-    pub(crate) image: String,
+    pub program: std::path::PathBuf,
+    pub image: String,
     /// The pull policy of the runtime whose image this is. The release image
     /// a named engine falls back to belongs to no runtime, so it is `Auto`.
-    pub(crate) pull_policy: ImagePullPolicy,
+    pub pull_policy: ImagePullPolicy,
 }
 
 impl QuotaRuntime {
@@ -167,15 +167,15 @@ impl QuotaRuntime {
 }
 
 /// One harness program to run in the image.
-pub(crate) struct ContainerLaunch {
+pub struct ContainerLaunch {
     /// The engine program; the caller runs it with `args` and `env`.
-    pub(crate) program: std::path::PathBuf,
-    pub(crate) args: Vec<String>,
+    pub program: std::path::PathBuf,
+    pub args: Vec<String>,
     /// The values behind every `--env NAME` in `args`. They reach the engine
     /// through its own environment, never its argument list, which every
     /// local user can read.
-    pub(crate) env: BTreeMap<String, String>,
-    pub(crate) container: QuotaContainer,
+    pub env: BTreeMap<String, String>,
+    pub container: QuotaContainer,
 }
 
 impl ContainerRuntime {
@@ -183,7 +183,7 @@ impl ContainerRuntime {
     /// `None` when the runtime's pull policy forbids one. This is the decision
     /// the runtime's own image refresh makes, so a quota check never fetches
     /// an image its runtime says not to.
-    pub(crate) fn image_refresh(&self) -> Option<mj_core::targets::ImageRefresh> {
+    pub fn image_refresh(&self) -> Option<mj_core::targets::ImageRefresh> {
         mj_core::targets::image_refresh(
             self.engine.image_host(),
             &self.image,
@@ -195,7 +195,7 @@ impl ContainerRuntime {
     /// Fail unless the engine already holds the image. A check never pulls:
     /// the daemon's image refresher does, and a multi-gigabyte download would
     /// outlast any quota request.
-    pub(crate) fn ensure_image(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn ensure_image(&self, executor: &impl CommandExecutor) -> Result<()> {
         let command = CommandSpec::new(
             mj_core::target_path::text(&self.program),
             [
@@ -229,7 +229,7 @@ impl ContainerRuntime {
     }
 
     /// [`Self::ensure_image`] off the async runtime, bounded.
-    pub(crate) async fn ensure_image_async(&self) -> Result<()> {
+    pub async fn ensure_image_async(&self) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || {
             runtime.ensure_image(&BoundedProcessExecutor::new(ENGINE_COMMAND_TIMEOUT))
@@ -242,7 +242,7 @@ impl ContainerRuntime {
     /// `home` mounted read-write at its own path and `env` passed by name.
     /// `PATH` and `HOME` stay the image's own: a host value names host
     /// directories.
-    pub(crate) fn launch(
+    pub fn launch(
         &self,
         home: &Path,
         program: &str,
@@ -324,7 +324,7 @@ impl ContainerRuntime {
 }
 
 /// A quota check's container, removed when this is dropped or removed.
-pub(crate) struct QuotaContainer {
+pub struct QuotaContainer {
     engine: Engine,
     program: std::path::PathBuf,
     name: String,
@@ -561,12 +561,12 @@ fn sweep_quota_containers_with(
 /// to mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerCheck {
-    pub(crate) runtime: ContainerRuntime,
-    pub(crate) home: std::path::PathBuf,
+    pub runtime: ContainerRuntime,
+    pub home: std::path::PathBuf,
 }
 
 impl ContainerCheck {
-    pub(crate) fn launch(
+    pub fn launch(
         &self,
         program: &str,
         args: &[&str],

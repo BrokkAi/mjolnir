@@ -131,6 +131,16 @@ it or introduce a dependency between sibling branches.
   event records, the single writer, and the gates that order recovery and
   worker lifecycle against it. It builds on the targets crate.
   `mj_controller` re-exports its modules under their old names.
+- `brokk-mj-accounts` (`mj-accounts/`, library `mj_accounts`) covers harness
+  profiles' accounts: whether a profile is logged in, the login terminal, and
+  each provider's quota and usage reader with the scheduling and health built
+  on them. It builds on the targets and store crates. `mj_controller`
+  re-exports its modules under their old names.
+- `brokk-mj-github-relevance` (`mj-github-relevance/`, library
+  `mj_github_relevance`) is the on-device classifier that decides which GitHub
+  events matter to a session, with the download of its weights and runtime.
+  It needs only the foundation, and only the daemon uses it, so its inference
+  dependencies stay out of every other crate's build.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client

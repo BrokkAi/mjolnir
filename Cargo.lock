@@ -614,6 +614,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-accounts"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "brokk-anvil-client",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "getrandom 0.3.4",
+ "libc",
+ "portable-pty",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "brokk-mj-build-id"
 version = "2.71.0"
 dependencies = [
@@ -710,6 +742,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "brokk-anvil-client",
+ "brokk-mj-accounts",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
@@ -719,23 +752,17 @@ dependencies = [
  "brokk-mj-worker-runtime",
  "brokk-sessionwiki",
  "chrono",
- "chrono-tz",
  "dirs 6.0.0",
  "flate2",
  "futures",
  "getrandom 0.3.4",
- "half",
  "http-body-util",
  "libc",
- "libloading 0.9.0",
- "ort",
- "portable-pty",
  "rayon",
  "reedline",
  "reqwest",
  "ring",
  "rusqlite",
- "rustls",
  "ruzstd",
  "semver",
  "serde",
@@ -744,7 +771,6 @@ dependencies = [
  "sysinfo",
  "tar",
  "tempfile",
- "tokenizers",
  "tokio",
  "tokio-util",
  "toml",
@@ -809,6 +835,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-github-relevance",
  "brokk-mj-review",
  "brokk-mj-server",
  "brokk-mj-transcript",
@@ -836,6 +863,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-github-relevance"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-mj-core",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "flate2",
+ "futures",
+ "half",
+ "libloading 0.9.0",
+ "ort",
+ "reqwest",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokenizers",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "brokk-mj-review"
 version = "2.71.0"
 dependencies = [
@@ -856,6 +914,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-github-relevance",
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",

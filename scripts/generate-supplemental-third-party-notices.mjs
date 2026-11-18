@@ -309,7 +309,7 @@ async function main() {
     ),
     {
       component: "Downloaded GitHub relevance inference runtime",
-      source: "mj-controller/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
+      source: "mj-github-relevance/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
       scope: "downloaded, verified and atomically cached at first preparation; not bundled in release archives",
       text: [
         "ONNX Runtime 1.23.0 is MIT licensed. Its LICENSE and ThirdPartyNotices.txt accompany the verified native library in the Mjolnir data-directory cache.",

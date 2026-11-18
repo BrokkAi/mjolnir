@@ -5542,8 +5542,8 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
 
 #[tokio::test]
 async fn github_relevance_daemon_notices_snapshot_golden() {
-    use mj_controller::github_relevance::Notices;
-    use mj_controller::github_student::{
+    use mj_github_relevance::github_relevance::Notices;
+    use mj_github_relevance::github_student::{
         StudentDevice, StudentDeviceFallbackReason, StudentFailureKind, StudentNotice,
     };
     let notices = Arc::new(std::sync::Mutex::new(Vec::new()));

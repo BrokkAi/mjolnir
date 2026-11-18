@@ -26,10 +26,10 @@ const DEFAULT_OAUTH_STORAGE_NAME: &str = "kimi-code";
 /// and the environment. Keeping this in one place makes quota probes and
 /// inference refresh the same OAuth token at the same host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct KimiRuntimeAuth {
-    pub(crate) base_url: String,
-    pub(crate) oauth_host: String,
-    pub(crate) credentials_path: PathBuf,
+pub struct KimiRuntimeAuth {
+    pub base_url: String,
+    pub oauth_host: String,
+    pub credentials_path: PathBuf,
 }
 
 impl KimiRuntimeAuth {
@@ -128,14 +128,14 @@ fn nonempty(value: Option<&String>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) struct KimiAuth {
+pub struct KimiAuth {
     runtime: KimiRuntimeAuth,
     api_key: Option<String>,
     http: reqwest::Client,
 }
 
 impl KimiAuth {
-    pub(crate) fn new(home: &Path, mut environment: BTreeMap<String, String>) -> Result<Self> {
+    pub fn new(home: &Path, mut environment: BTreeMap<String, String>) -> Result<Self> {
         HarnessKind::Kimi.configure_profile_home_environment(
             home,
             HarnessHost::current(),

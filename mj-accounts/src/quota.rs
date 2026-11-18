@@ -144,7 +144,7 @@ pub enum CodexQuotaSource {
 impl CodexQuotaSource {
     /// The source for one configured profile. `mj doctor` reads the same
     /// answer to say where each profile's quota comes from.
-    pub(crate) fn of_profile(profile: &HarnessProfile) -> Self {
+    pub fn of_profile(profile: &HarnessProfile) -> Self {
         let provider = match profile.codex_provider() {
             Ok(None) => return Self::ChatGptLogin,
             Ok(Some(provider)) => provider,
@@ -273,7 +273,7 @@ pub const DEFAULT_RATE_LIMIT_HOLD: Duration = Duration::from_secs(15 * 60);
 /// A provider answered 429 (too many requests). Carried as the error of a
 /// failed probe so the refresh can turn it into a hold.
 #[derive(Debug)]
-pub(crate) struct RateLimited {
+pub struct RateLimited {
     pub retry_after: Option<Duration>,
 }
 
@@ -285,12 +285,12 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
-pub(crate) use mj_core::retry_after::retry_after_header;
+pub use mj_core::retry_after::retry_after_header;
 
 /// The hold for a 429: what the provider asked for, kept between one minute
 /// and six hours so a bad header can neither spin the poller nor park a
 /// profile for days.
-pub(crate) fn rate_limit_hold(retry_after: Option<Duration>) -> Duration {
+pub fn rate_limit_hold(retry_after: Option<Duration>) -> Duration {
     retry_after
         .unwrap_or(DEFAULT_RATE_LIMIT_HOLD)
         .clamp(Duration::from_secs(60), Duration::from_secs(6 * 3600))
@@ -1417,7 +1417,7 @@ async fn fetch_bearer(
 /// lock the Kimi Code CLI also takes, and the pair is re-read once the lock is
 /// held, so a refresh another process just finished is used instead of
 /// spending its new refresh token again.
-pub(crate) async fn ensure_fresh_kimi_token(
+pub async fn ensure_fresh_kimi_token(
     client: &reqwest::Client,
     runtime: &crate::kimi_auth::KimiRuntimeAuth,
     force: bool,
@@ -1709,7 +1709,7 @@ fn kimi_reset_epoch_seconds(value: &Value) -> Option<i64> {
 /// Format a Unix reset timestamp as wall-clock time in the machine's local
 /// time zone. Accepts seconds or milliseconds and rejects non-finite or
 /// out-of-range values.
-pub(crate) fn format_reset_local(epoch: f64) -> Option<String> {
+pub fn format_reset_local(epoch: f64) -> Option<String> {
     if !epoch.is_finite() {
         return None;
     }
@@ -1722,18 +1722,18 @@ pub(crate) fn format_reset_local(epoch: f64) -> Option<String> {
     Some(format_reset_label(local.fixed_offset()))
 }
 
-pub(crate) fn format_reset_local_seconds(epoch: i64) -> Option<String> {
+pub fn format_reset_local_seconds(epoch: i64) -> Option<String> {
     format_reset_local(epoch as f64)
 }
 
 /// Normalize a provider's textual reset value to the compact 24-hour form
 /// used by the dashboard. A time-only value is the next occurrence of that
 /// wall-clock time; Claude Code uses this shape for its five-hour window.
-pub(crate) fn normalize_reset_text(value: &str) -> Option<String> {
+pub fn normalize_reset_text(value: &str) -> Option<String> {
     normalize_reset_at(value, Local::now().fixed_offset()).map(format_reset_label)
 }
 
-pub(crate) fn normalize_reset_epoch_seconds(value: &str) -> Option<i64> {
+pub fn normalize_reset_epoch_seconds(value: &str) -> Option<i64> {
     normalize_reset_at(value, Local::now().fixed_offset()).map(|reset| reset.timestamp())
 }
 

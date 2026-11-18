@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
-pub(crate) async fn post_bounded_json(
+pub async fn post_bounded_json(
     endpoint: &str,
     key: Option<&str>,
     request_body: Vec<u8>,

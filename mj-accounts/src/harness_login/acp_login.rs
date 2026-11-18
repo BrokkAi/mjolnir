@@ -31,7 +31,7 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     DeviceAuth,
     SignedIn {
         method: String,
@@ -45,7 +45,7 @@ pub(crate) enum Outcome {
 
 /// A pinned harness CLI and the environment prepared for it. A managed
 /// harness keeps the installation lease alive while the child command runs.
-pub(crate) struct PinnedCli {
+pub struct PinnedCli {
     pub command: PathBuf,
     pub environment: BTreeMap<String, String>,
     _located: Located,
@@ -56,10 +56,7 @@ fn uses_ambient_cli(profile: &HarnessProfile) -> bool {
 }
 
 /// Sign in `profile` through the pinned harness's ACP methods.
-pub(crate) async fn login(
-    profile: &HarnessProfile,
-    requested_method: Option<&str>,
-) -> Result<Outcome> {
+pub async fn login(profile: &HarnessProfile, requested_method: Option<&str>) -> Result<Outcome> {
     let scheme = profile.auth_scheme();
     if !scheme.syncs_login() {
         return Ok(Outcome::NoLogin(describe_auth(&scheme)));
@@ -122,7 +119,7 @@ fn source_label() -> &'static str {
 /// Locate the same harness a local session uses and return its CLI with the
 /// environment that makes its shebangs and child tools use the matching Node
 /// version.
-pub(crate) async fn pinned_cli(profile: &HarnessProfile) -> Result<PinnedCli> {
+pub async fn pinned_cli(profile: &HarnessProfile) -> Result<PinnedCli> {
     anyhow::ensure!(
         !uses_ambient_cli(profile),
         "this profile uses your own {} installation; Mjolnir signs in through that harness's installed CLI",
@@ -516,7 +513,7 @@ fn looks_interactive(id: &str) -> bool {
 }
 
 /// Whether this login has a desktop session for a browser callback or opener.
-pub(crate) fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
+pub fn has_desktop_session(environment: &BTreeMap<String, String>) -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
         || ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| {
             environment
@@ -546,7 +543,7 @@ fn api_key_present(environment: &BTreeMap<String, String>) -> bool {
 /// outlives the future. A terminal login command and the CLI fallback expect
 /// Ctrl+C to terminate this process, so restore the default before handing
 /// over to them.
-pub(crate) fn restore_default_sigint() {
+pub fn restore_default_sigint() {
     #[cfg(unix)]
     // SAFETY: setting SIGINT back to its default disposition is process-wide
     // and does not touch any memory owned by another thread.

@@ -40,10 +40,7 @@ impl CandidateQuota {
 impl CandidateQuota {
     /// The candidate's billing: its report decides, then what the harness
     /// implies (see [`mj_client::quota::harness_billing`]).
-    pub(crate) fn billing(
-        &self,
-        harness: mj_core::config::HarnessKind,
-    ) -> mj_client::quota::QuotaBilling {
+    pub fn billing(&self, harness: mj_core::config::HarnessKind) -> mj_client::quota::QuotaBilling {
         use mj_client::quota::QuotaBilling;
         match self {
             Self::UsagePriced => QuotaBilling::Usage,

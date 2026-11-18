@@ -54,6 +54,7 @@ url.workspace = true
 anvil-client.workspace = true
 mj-controller.workspace = true
 mj-server.workspace = true
+mj-github-relevance.workspace = true
 
 [dev-dependencies]
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }

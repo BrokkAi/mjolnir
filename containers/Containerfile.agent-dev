@@ -38,6 +38,8 @@ COPY mj-worker-bin/ mj-worker-bin/
 COPY mj-client/ mj-client/
 COPY mj-targets/ mj-targets/
 COPY mj-store/ mj-store/
+COPY mj-accounts/ mj-accounts/
+COPY mj-github-relevance/ mj-github-relevance/
 COPY mj-controller/ mj-controller/
 COPY mj-server/ mj-server/
 COPY mj-daemon/ mj-daemon/

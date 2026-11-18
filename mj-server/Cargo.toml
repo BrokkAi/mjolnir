@@ -56,6 +56,7 @@ url.workspace = true
 [dev-dependencies]
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-controller = { workspace = true, features = ["test-support"] }
+mj-github-relevance.workspace = true
 mj-review.workspace = true
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }

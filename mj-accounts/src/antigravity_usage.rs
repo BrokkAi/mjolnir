@@ -8,10 +8,7 @@ use mj_client::quota::{AntigravityQuotaPool, QuotaWindow};
 use mj_core::config::{HarnessKind, harness_authentication_marker};
 use serde_json::Value;
 
-pub(crate) async fn query(
-    home: &Path,
-    environment: &HashMap<String, String>,
-) -> Result<Vec<QuotaWindow>> {
+pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<Vec<QuotaWindow>> {
     // Resolve the runtime from the daemon's environment before HOME is replaced
     // for the disposable login. Profile overrides retain their usual precedence.
     let mut inherited = std::env::vars_os()

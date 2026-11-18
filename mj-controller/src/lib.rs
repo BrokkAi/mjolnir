@@ -8,39 +8,35 @@
     allow(dead_code, unused_imports)
 )]
 
-mod antigravity_usage;
 pub(crate) use mj_targets::aws_assume_role;
 pub(crate) use mj_targets::aws_credentials;
 pub mod backoff;
-mod claude_login;
-pub mod claude_usage;
-mod codex_usage;
-mod grok_usage;
-mod kimi_auth;
+pub(crate) use mj_accounts::claude_login;
+pub use mj_accounts::claude_usage;
+pub(crate) use mj_accounts::kimi_auth;
 pub mod launch_timing;
-pub mod login_terminal;
-mod muse_usage;
-pub mod quota_runtime;
-mod zai_usage;
+pub use mj_accounts::login_terminal;
+pub use mj_accounts::quota_runtime;
+pub(crate) use mj_accounts::zai_usage;
 
 pub mod compaction;
 pub mod controller;
 pub mod doctor;
 pub mod handoff;
-mod harness_auth;
-pub mod harness_login;
+pub(crate) use mj_accounts::harness_auth;
+pub use mj_accounts::harness_login;
 pub mod image;
 pub mod import;
-pub mod opencode_logins;
+pub use mj_accounts::opencode_logins;
 pub mod profile_catalog;
-pub mod profile_health;
-pub mod profile_login;
-pub mod profile_scheduler;
+pub use mj_accounts::profile_health;
+pub use mj_accounts::profile_login;
+pub use mj_accounts::profile_scheduler;
 pub mod project_catalog;
 pub mod project_picker;
-pub mod quota;
+pub use mj_accounts::quota;
 pub mod readline;
-pub mod review_selection;
+pub use mj_accounts::review_selection;
 pub mod session_manager;
 pub mod sessionwiki;
 pub mod setup;
@@ -65,10 +61,7 @@ pub mod checkpoint_transfer;
 pub use mj_store::recovery_gate;
 pub use mj_targets::image_pull_gate;
 
-pub mod github_item_verdict;
 pub mod github_rate_limit;
-pub mod github_relevance;
-mod jev_transport;
 pub use mj_store::mailbox_outbox;
 pub use mj_store::upgrade;
 pub use mj_store::web_push;
@@ -78,8 +71,6 @@ pub use mj_targets::test_isolation;
 pub use mj_targets::test_log;
 
 pub mod wait_policy;
-
-pub mod github_student;
 
 pub mod session_images;
 

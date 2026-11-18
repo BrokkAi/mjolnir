@@ -19,7 +19,7 @@ const NOTIFY: f64 = 0.2830;
 const REJECT: f64 = 0.0716;
 const GLIDE_NOTIFY: f64 = 0.1123;
 
-pub(crate) type ScoreFuture<'a> =
+pub type ScoreFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<f64, StudentError>> + Send + 'a>>;
 type GlideFuture<'a> = Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>>;
 
@@ -60,7 +60,7 @@ impl StudentOwner for Student {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
-pub(crate) enum Route {
+pub enum Route {
     StudentNotify,
     StudentReject,
     GlideBand,

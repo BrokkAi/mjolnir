@@ -28,7 +28,7 @@ pub fn usage_priced_profiles(
 /// The profiles in `unclassified` (billing not yet known) that offer a model
 /// in a family the legacy upgrade would draft from `available`. Empty when a
 /// pinned profile decides the reviewers without Autoconfigure.
-pub(crate) fn unclassified_in_draft(
+pub fn unclassified_in_draft(
     legacy: &LegacyReview,
     available: &[(String, ProfileConfig)],
     usage_priced: &BTreeSet<String>,
