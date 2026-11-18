@@ -1135,7 +1135,9 @@ Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
 Registration: `brief/PLAN-bifrost-oracle-noleak.md` and its amendments.
 Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
 
-- **Facts carry.** With the decisive fact stated so that both Opus and Sol
+- **Facts carry** for the whole neutral brief against no brief; the arm
+  doesn't isolate the decisive fact from the brief's other relations.
+  With the decisive fact stated so that both Opus and Sol
   leak judges read every brief as `missed` (all 17 retained after one
   wording round), Terra/high caught 45.1% against 7.8% for a fresh
   no-brief arm run in the same window on the same image. ON − AF is
