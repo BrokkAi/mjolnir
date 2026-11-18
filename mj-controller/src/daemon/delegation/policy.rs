@@ -648,7 +648,7 @@ impl Policy {
                 let mut rejected = self.rejected.lock().expect("rejected logins poisoned");
                 rejected.conclude(&result, profile.as_ref());
                 auth_cause.map(|cause| {
-                    rejected.failure_verdict(&result.profile_id, cause, current.as_ref())
+                    rejected.failure_verdict(&result.profile_id, cause, current.as_ref(), None)
                 })
             };
             let notice = self.notices.leveled_notice(
@@ -873,7 +873,7 @@ mod tests {
             );
             let mut registry = rejected.lock().unwrap();
             assert_eq!(
-                registry.failure_verdict("helper", &cause, Some(&current)),
+                registry.failure_verdict("helper", &cause, Some(&current), None),
                 LoginFailureVerdict::Deciding
             );
             let first = queued.try_recv().unwrap();
@@ -905,7 +905,7 @@ mod tests {
                 &profile,
             );
             assert_eq!(
-                registry.failure_verdict("helper", &cause, Some(&current)),
+                registry.failure_verdict("helper", &cause, Some(&current), None),
                 LoginFailureVerdict::Refused
             );
             drop(registry);

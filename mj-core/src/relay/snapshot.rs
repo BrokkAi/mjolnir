@@ -754,12 +754,17 @@ pub struct RelayOperationalState {
     pub capacity_retry: Option<CapacityRetry>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
-    /// Worker-published (process-local): the access-token hash of the failed
-    /// turn this worker will resubmit once a login with a different token is
-    /// installed. Present exactly while the worker's own retry rule allows
-    /// that; absent from older workers, which never resubmit.
+    /// Retired at protocol 70: workers no longer set it, and no reader asks
+    /// it. It stays so that an older daemon still decodes the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication_retry_waiting: Option<String>,
+    /// Worker-published: the access-token hash of the failed turn this
+    /// worker still owes a retry for. Present while the durable intent holds
+    /// (the turn failed authentication, nothing newer was accepted or
+    /// started, nobody withdrew or paused the work), even while a checkpoint
+    /// or other transient state delays the submit. Absent from older workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_retry_intent: Option<String>,
     /// Identity observed in the session's credential store. Claude reports
     /// its access-token hash; other harnesses report the credential file hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1953,6 +1958,7 @@ impl RelaySnapshot {
             }) || self.retry_assessment.is_some(),
             authentication_retry_waiting: None,
             held_login_fingerprint: None,
+            authentication_retry_intent: None,
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

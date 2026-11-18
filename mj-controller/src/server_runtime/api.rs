@@ -87,6 +87,24 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    /// The one verdict on a failed turn's login, read together with the
+    /// worker's published retry state so the two cannot come from different
+    /// moments. The default has no published worker views, which is unknown,
+    /// never a hold; the daemon's runtime state overrides it.
+    fn login_failure_verdict(
+        &self,
+        rejected: &Mutex<mj_core::credentials::RejectedLogins>,
+        profile_id: &str,
+        cause: &mj_core::credentials::CredentialSyncCause,
+        current: Option<&mj_core::credentials::LoginFingerprint>,
+        _actor_connected: bool,
+    ) -> Result<mj_core::credentials::LoginFailureVerdict> {
+        Ok(rejected
+            .lock()
+            .map_err(|_| anyhow!("refused logins lock poisoned"))?
+            .failure_verdict(profile_id, cause, current, None))
+    }
+
     /// The load-balancing preference order from `[quota] prefer`.
     fn quota_preferences(&self) -> Vec<String> {
         Vec::new()
@@ -274,6 +292,24 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn login_failure_verdict(
+        &self,
+        rejected: &Mutex<mj_core::credentials::RejectedLogins>,
+        profile_id: &str,
+        cause: &mj_core::credentials::CredentialSyncCause,
+        current: Option<&mj_core::credentials::LoginFingerprint>,
+        actor_connected: bool,
+    ) -> Result<mj_core::credentials::LoginFailureVerdict> {
+        RuntimeState::login_failure_verdict(
+            self,
+            rejected,
+            profile_id,
+            cause,
+            current,
+            actor_connected,
+        )
+    }
+
     fn workspace_admission(
         &self,
         session_id: String,
@@ -1724,7 +1760,8 @@ impl ApiBackend {
                 .filter(|view| view.connected)
                 .and_then(|view| view.snapshot.as_ref());
             // A projection commit can precede the actor publication for that
-            // completion. Resolve both the turn and its retry from one view.
+            // completion. Resolve the turn from one view; the retry and the
+            // delivery are read together by `login_failure_verdict`.
             let active = record
                 .as_ref()
                 .is_some_and(|record| record_may_be_running(record.state));
@@ -1751,9 +1788,7 @@ impl ApiBackend {
                     id,
                     progress,
                     record.as_ref().map(|record| record.last_profile.as_str()),
-                    connected.and_then(|snapshot| {
-                        snapshot.operational.authentication_retry_waiting.as_deref()
-                    }),
+                    connected.is_some(),
                 )
                 .await?;
             progress.state = if active
@@ -1773,7 +1808,7 @@ impl ApiBackend {
         id: &str,
         progress: &ChildProgress,
         profile: Option<&str>,
-        authentication_retry_waiting: Option<&str>,
+        actor_connected: bool,
     ) -> Result<ChildState> {
         use mj_core::credentials::CredentialSyncCause;
         if let Some(error) = &progress.wake_error {
@@ -1789,9 +1824,7 @@ impl ApiBackend {
                     .lock()
                     .map_err(|_| anyhow!("refused logins lock poisoned"))?
                     .wake_verdict(&staged_login, current.as_ref());
-                return Ok(ChildState::from_login_verdict(
-                    profile_id, verdict, false, detail,
-                ));
+                return Ok(ChildState::from_login_verdict(profile_id, verdict, detail));
             }
             return Ok(ChildState::RetryableFailure {
                 reason: detail.to_owned(),
@@ -1816,19 +1849,14 @@ impl ApiBackend {
             .await?;
             let profile = selection.map_or_else(|| profile.to_owned(), |(profile, _)| profile);
             let current = self.current_child_profile_login(&profile).await?;
-            let verdict = self
-                .rejected_logins
-                .lock()
-                .map_err(|_| anyhow!("refused logins lock poisoned"))?
-                .failure_verdict(&profile, &cause, current.as_ref());
-            let worker_waits = authentication_retry_waiting.is_some()
-                && authentication_retry_waiting == cause.login_fingerprint.as_deref();
-            return Ok(ChildState::from_login_verdict(
-                profile,
-                verdict,
-                worker_waits,
-                &reason,
-            ));
+            let verdict = self.exports.login_failure_verdict(
+                &self.rejected_logins,
+                &profile,
+                &cause,
+                current.as_ref(),
+                actor_connected,
+            )?;
+            return Ok(ChildState::from_login_verdict(profile, verdict, &reason));
         }
         let diagnostic = turn.diagnostic.as_ref().filter(|diagnostic| {
             state == "failed" && crate::profile_health::ProfileFault::of(diagnostic).is_some()
@@ -2937,14 +2965,13 @@ impl ChildState {
     fn from_login_verdict(
         profile_id: String,
         verdict: mj_core::credentials::LoginFailureVerdict,
-        worker_waits: bool,
         detail: &str,
     ) -> Self {
         use mj_core::credentials::LoginFailureVerdict::*;
         let reason = match verdict {
             Deciding => return Self::Deciding,
             Refused => return Self::Refused { profile_id },
-            Renewed if worker_waits => return Self::RetryOwed,
+            RetryOwed => return Self::RetryOwed,
             Renewed => "the login was renewed after this authentication failure".to_owned(),
             Unrefused { reason } => {
                 format!("a refusal of the current login was not established ({reason})")

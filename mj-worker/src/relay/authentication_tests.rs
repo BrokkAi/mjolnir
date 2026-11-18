@@ -60,16 +60,17 @@ fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
         let authorization = relay.snapshot.continuation.user_command_id.clone();
         auth_failure(&mut relay, original, "old-access-hash");
         let (ordinal, _) = relay
-            .authentication_retry_identity()
+            .authentication_retry_intent()
             .expect("auth failure is recoverable");
-        // The worker publishes that it is waiting for a different login.
+        // The worker publishes the retry it owes; the retired field stays empty.
         assert_eq!(
             relay
                 .operational_state()
-                .authentication_retry_waiting
+                .authentication_retry_intent
                 .as_deref(),
             Some("old-access-hash")
         );
+        assert_eq!(relay.operational_state().authentication_retry_waiting, None);
         assert!(
             !relay
                 .submit_authentication_retry(ordinal, "old-access-hash")
@@ -99,7 +100,7 @@ fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
             mj_core::continuation::prompt_blocks()
         );
         auth_failure(&mut relay, &retry.command_id, "new-access-hash");
-        let (second, _) = relay.authentication_retry_identity().unwrap();
+        let (second, _) = relay.authentication_retry_intent().unwrap();
         assert!(
             !relay
                 .submit_authentication_retry(second, "new-access-hash")
@@ -118,6 +119,9 @@ fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
     }
 }
 
+// Hard-won: #1581: a checkpoint barrier dropped the published retry, so the
+// daemon reported a child whose retry was about to be submitted. The barrier
+// only gates the submit; a question or a paused goal withdraws the intent.
 #[test]
 fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
     for intervention in [
@@ -127,6 +131,7 @@ fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
         "checkpoint",
         "harness turn",
         "question",
+        "paused goal",
     ] {
         let root = tempfile::tempdir().unwrap();
         let mut relay = open(root.path());
@@ -167,6 +172,15 @@ fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
                     })
                     .unwrap();
             }
+            "paused goal" => {
+                relay.snapshot.goal.snapshot = Some(mj_core::goal::GoalSnapshot {
+                    objective: "finish".into(),
+                    status: "paused".into(),
+                    created_at: None,
+                    control_method: None,
+                    details: Default::default(),
+                });
+            }
             "question" => {
                 relay
                     .record_observation(RelayObservation::ElicitationRequested {
@@ -184,15 +198,33 @@ fn authentication_recovery_yields_to_new_input_cancellation_and_checkpoints() {
                 .unwrap(),
             "{intervention}"
         );
-        // The worker stops publishing it the moment the retry is no longer its to make.
+        // The worker stops publishing it the moment the retry is no longer its
+        // to make. A checkpoint barrier only delays the submit.
         assert_eq!(
-            relay.operational_state().authentication_retry_waiting,
-            None,
+            relay
+                .operational_state()
+                .authentication_retry_intent
+                .as_deref(),
+            (intervention == "checkpoint").then_some("old-access-hash"),
             "{intervention}"
         );
         if intervention == "checkpoint" {
             relay.claim_pending_commands(true).unwrap();
             relay.record_checkpoint_ready("checkpoint-request").unwrap();
+            // The barrier is held and the new login arrives during it: the
+            // intent is still published, and nothing is submitted.
+            assert_eq!(
+                relay
+                    .operational_state()
+                    .authentication_retry_intent
+                    .as_deref(),
+                Some("old-access-hash")
+            );
+            assert!(
+                !relay
+                    .submit_authentication_retry(ordinal, "new-access-hash")
+                    .unwrap()
+            );
             submit_relay(
                 &mut relay,
                 "release-checkpoint",
@@ -216,7 +248,7 @@ fn a_revision_24_snapshot_with_the_quota_flag_keeps_the_auth_retry_blocked() {
     submit_relay(&mut relay, "user-request", prompt("finish this task"));
     relay.claim_pending_commands(true).unwrap();
     auth_failure(&mut relay, "user-request", "old-access-hash");
-    assert!(relay.authentication_retry_identity().is_some());
+    assert!(relay.authentication_retry_intent().is_some());
     let frontier = relay.snapshot.latest_ordinal;
     // What an older worker wrote after the user cancelled: the flag alone.
     let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
@@ -238,5 +270,5 @@ fn a_revision_24_snapshot_with_the_quota_flag_keeps_the_auth_retry_blocked() {
         upgraded.snapshot.continuation.withdrawn_ordinal,
         Some(frontier)
     );
-    assert!(upgraded.authentication_retry_identity().is_none());
+    assert!(upgraded.authentication_retry_intent().is_none());
 }

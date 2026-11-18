@@ -1113,7 +1113,22 @@ pub enum LoginFailureVerdict {
     Deciding,
     Refused,
     Renewed,
-    Unrefused { reason: String },
+    /// The login was renewed and the worker still owes the retry, and the new
+    /// login is arriving or already held: its next prompt ends this failure.
+    RetryOwed,
+    Unrefused {
+        reason: String,
+    },
+}
+
+/// What a connected worker's published view says about a failed turn's retry.
+/// Taken from one published view, never assembled from separate reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerLoginRetry {
+    /// The rejected login the worker still owes a retry for, if any.
+    pub intent: Option<String>,
+    /// The login the worker reports holding.
+    pub held: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1404,11 +1419,17 @@ impl RejectedLogins {
         }
     }
 
+    /// The one verdict on a failed turn. `worker` is the connected worker's
+    /// published view, or `None` when there is none (unknown, never a hold).
+    /// The caller must read it and this registry under the lock that publishes
+    /// views before it concludes deliveries, so a delivery conclusion is never
+    /// paired with an older view.
     pub fn failure_verdict(
         &self,
         profile_id: &str,
         cause: &CredentialSyncCause,
         current: Option<&LoginFingerprint>,
+        worker: Option<&WorkerLoginRetry>,
     ) -> LoginFailureVerdict {
         use LoginFailureVerdict::*;
         let Some(failure) = self
@@ -1421,21 +1442,50 @@ impl RejectedLogins {
                 reason: "credential reconciliation has no result for this turn".into(),
             };
         };
-        if self.delivery_state(profile_id, &cause.session_id) == Some(LoginDeliveryState::Pending) {
+        let delivery = self.delivery_state(profile_id, &cause.session_id);
+        if delivery == Some(LoginDeliveryState::Pending) {
             return Deciding;
         }
         let Some(conclusion) = &failure.conclusion else {
             return Deciding;
         };
+        let renewed = |delivery: Option<LoginDeliveryState>| {
+            let Some(failed) = failure.fingerprint.as_deref() else {
+                return Renewed;
+            };
+            let Some(worker) = worker.filter(|worker| worker.intent.as_deref() == Some(failed))
+            else {
+                return Renewed;
+            };
+            // The delivery is no longer pending. Either the worker holds a
+            // login other than the rejected one and will submit, or the
+            // delivery ended without delivering and nothing else ends this.
+            match worker.held.as_deref() {
+                Some(held) if held != failed => RetryOwed,
+                _ => Unrefused {
+                    reason: match delivery {
+                        Some(LoginDeliveryState::Concluded { reason }) => {
+                            format!("the renewed login was not delivered to the worker: {reason}")
+                        }
+                        _ => "no delivery of the renewed login to the worker is recorded".into(),
+                    },
+                },
+            }
+        };
         if let (Some(failed), Some(LoginFingerprint::AccessToken(current))) =
             (&failure.fingerprint, current)
             && failed != current
         {
-            return Renewed;
+            return renewed(delivery);
         }
         match conclusion {
-            LoginConclusion::Refused(refused) => self.wake_verdict(refused, current),
-            LoginConclusion::Delivered { renewed: true } | LoginConclusion::Renewed => Renewed,
+            LoginConclusion::Refused(refused) => match self.wake_verdict(refused, current) {
+                Renewed => renewed(delivery),
+                verdict => verdict,
+            },
+            LoginConclusion::Delivered { renewed: true } | LoginConclusion::Renewed => {
+                renewed(delivery)
+            }
             LoginConclusion::Delivered { renewed: false } => Unrefused {
                 reason: "credential reconciliation refreshed this session's login".into(),
             },

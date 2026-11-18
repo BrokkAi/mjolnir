@@ -564,6 +564,48 @@ impl RuntimeState {
             .collect()
     }
 
+    /// The one verdict on a failed turn's login. The worker's published view
+    /// and the refusal registry are read together under the owner lock, the
+    /// same lock `publish_session` holds while it publishes a view and then
+    /// concludes the delivery that view proves. A conclusion is therefore never
+    /// paired with an older view, and callers cannot supply either half.
+    pub(crate) fn login_failure_verdict(
+        &self,
+        rejected: &std::sync::Mutex<mj_core::credentials::RejectedLogins>,
+        profile_id: &str,
+        cause: &mj_core::credentials::CredentialSyncCause,
+        current: Option<&mj_core::credentials::LoginFingerprint>,
+        actor_connected: bool,
+    ) -> Result<mj_core::credentials::LoginFailureVerdict> {
+        use mj_core::credentials::{LoginFailureVerdict, WorkerLoginRetry};
+        let owner = self.owner();
+        let published = owner
+            .sessions
+            .get(&cause.session_id)
+            .filter(|view| view.connected);
+        // A view published before the failed turn completed cannot say
+        // whether the worker owes its retry; the publication that does is on
+        // its way. No view at all is unknown, which is not a hold.
+        // The same holds when the session's actor is connected but its first
+        // publication has not reached the owner yet; the publication follows
+        // the actor's view without any worker action.
+        if published.is_some_and(|view| view.projection_ordinal < cause.ordinal)
+            || (actor_connected && published.is_none())
+        {
+            return Ok(LoginFailureVerdict::Deciding);
+        }
+        let worker = published
+            .and_then(|view| view.operational.as_ref())
+            .map(|operational| WorkerLoginRetry {
+                intent: operational.authentication_retry_intent.clone(),
+                held: operational.held_login_fingerprint.clone(),
+            });
+        Ok(rejected
+            .lock()
+            .map_err(|_| anyhow::anyhow!("refused logins lock poisoned"))?
+            .failure_verdict(profile_id, cause, current, worker.as_ref()))
+    }
+
     pub(crate) fn held_login_fingerprint(&self, session_id: &str) -> Option<String> {
         self.owner()
             .sessions

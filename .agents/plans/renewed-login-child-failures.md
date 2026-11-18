@@ -23,7 +23,7 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
 - [x] (2026-11-17) Milestone 2 delivery. Concurrent per-session delivery and worker read-back publication implemented. Targeted controller and worker tests passed, as did clippy and formatting.
 - [x] (2026-11-17) Isolated Claude acceptance passed. Both workers received the replacement login and both transfers appeared at INFO. The workers were destroyed and the `t1581` daemon stopped.
 - [x] (2026-11-17) Validated the combined Milestone 1 and 2 path. Seven focused tests passed, including the test where the auth decision is settled and delivery remains pending until the worker reports the held login. Core and controller clippy passed.
-- [ ] Milestone 3: the hold. Worker publishes retry intent separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present.
+- [x] (2026-11-17) Milestone 3: the hold. Worker publishes retry intent (`authentication_retry_intent`, relay protocol 70) separately from its submit gate; the daemon holds a child only while the retry is owed and the login is coming or already present. Worker, controller API and incident tests pass.
 - [ ] Integrated review, merge, push; close #1581.
 
 
@@ -105,6 +105,14 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Rationale: two turns can fail on the same token, and later warning events can follow a failed turn. Neither can use that turn's pending decision or conclusion.
   Date/Author: 2026-11-17, Milestone 1 implementation.
 
+
+- Decision: intent versus gate, term by term. Intent (withdraws): non-Claude harness, assessment questions, budget-limited or paused goal, close barrier, no auth-failed completion with a fingerprint, continuation withdrawn at or after the failed prompt's acceptance, a newer accepted prompt, a later harness turn. Gate (delays only): `can_submit` (execution, running prompt or harness turn, tools, queued commands, user shells, checkpoint barrier, checkpoint-only, ACP not ready, goal resume or decision pending), `driver_present`, pending checkpoint barrier. Submit requires both.
+  Rationale: gate terms clear by themselves; intent terms wait on a person or end the session.
+  Date/Author: 2026-11-17, Milestone 3 implementation.
+
+- Decision: the daemon reads the worker's published view and the refusal registry together inside `RuntimeState::login_failure_verdict`, under the owner lock that `publish_session` holds while publishing a view and then concluding the delivery. `failure_verdict` takes the worker view as a parameter, and `ApiBackend` reaches it only through `ExportRuntime`, so a caller cannot pair a conclusion with an older view. A published view older than the failed turn, or an actor connected with no publication yet, is `Deciding`; no view is unknown (never a hold).
+  Rationale: one snapshot, one owner; mixing cannot be expressed.
+  Date/Author: 2026-11-17, Milestone 3 implementation.
 
 ## Outcomes & Retrospective
 
@@ -212,3 +220,7 @@ Diagnosis reports (planning clone): `.mj/agents/83a843526c1f475b63ad2f3d6e7c028b
 No new crates or libraries. New public surface: in `mj_core::credentials`, the per-failure verdict API on the refusal owner (Milestone 1) and delivery-state queries (Milestone 2); in `mj_core::relay::snapshot` operational state, a held-login fingerprint field (Milestone 2) and an authentication-retry-intent field (Milestone 3), both `Option`, both defaulting to `None` so older peers decode them. The daemon API `list_agents` / wait output keeps its JSON shape; only which children carry `failure.kind == "login_invalid"` changes.
 
 Milestone 2 update, 2026-11-17. Recorded the delivery ownership, event sources and worker read-back behavior so the classification and hold milestones can consume one result. Updated Cargo package names to match this checkout.
+
+Milestone 3 update, 2026-11-17. `authentication_retry_waiting` is retired (always `None`, no reader); `authentication_retry_intent` carries the rejected fingerprint at relay protocol 70.
+
+Whole-plan retrospective: a parent is told `login_invalid` only when the refusal owner says the current login was refused; renewed logins are delivered per session; a worker that owes a retry holds its child through checkpoint barriers while the login is coming or present, and a stuck delivery is reported as a retryable failure with its reason. Full-suite runs were not made; only targeted tests. Builds took about eight minutes each.
