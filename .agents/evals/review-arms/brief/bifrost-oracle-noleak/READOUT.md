@@ -4,6 +4,8 @@ Registration: `brief/PLAN-bifrost-oracle-noleak.md`, with its edit-scope clarifi
 
 ## Reading: Facts carry
 
+**Quota exception.** The registration keeps every profile above its 25% floor. 11 of the 102 ON/AF reviewers were drawn to codex4 below that floor, spread across 11 diffs. The supervisor accepted this before launch, because mj review's quota-weighted draw cannot exclude a profile without a shared-config change. Holding strictly to the floor would leave 6 complete ON/AF pairs, below the 8-diff minimum, so under the registration applied strictly the outcome is Inconclusive. The Facts carry reading below is the observed result on all 17 diffs, under that accepted exception.
+
 Terra/high reviewers, 3 per arm per diff, on all 17 bifrost-dev relation diffs; every diff was retained. Catch rate is the mean over diffs of the share of a diff's sessions that caught its defect. Intervals are paired 95% bootstraps over diffs. The classification uses unrounded bounds.
 
 | Arm | Catch rate | Partial rate |
@@ -49,7 +51,7 @@ What this shows and what it doesn't: when the decisive fact is stated neutrally,
 
   The registered reading covers the briefs that actually ran, and it reads Facts carry. Removing every documented concern, including the narrow leak passes the registered rule accepts, leaves 2 diffs, too few to classify, so the positive result depends materially on briefs that passed the leak rule narrowly or that dropped a stated relation.
 - **Order of the diagnostics.** The diagnostic amendment held reviewers until the supervisor had seen both diagnostics. After diagnostic 1, the supervisor lifted the hold for diagnostic 2 and directed that the reviewers and diagnostic 2 start together when `codex` reset. The first ON review therefore started at 05:28:31Z, eleven seconds before the Sol verdicts were written at 05:28:42Z. Diagnostic 2 is a retrospective check, not a gate.
-- **Diagnostic 2:** two Sol/high judges, round L's leak-judge model, say `missed` on all 17 published ON briefs. The secondary reading that excludes Sol-flagged diffs is therefore empty.
+- **Diagnostic 2:** two Sol/high judges, round L's leak-judge model, say `missed` on all 17 published ON briefs. Excluding Sol-flagged diffs therefore removes none: all 17 remain, and the reading is unchanged at +37.3.
 
 ## Per diff (catches of 3; partials in parentheses)
 

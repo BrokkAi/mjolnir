@@ -1135,6 +1135,9 @@ Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
 Registration: `brief/PLAN-bifrost-oracle-noleak.md` and its amendments.
 Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
 
+- Quota exception: 11 reviewers ran on codex4 below the 25% floor, an
+  exception the supervisor accepted. Holding strictly to the floor leaves 6
+  ON/AF pairs, too few to classify.
 - **Facts carry** for the whole neutral brief against no brief; the arm
   doesn't isolate the decisive fact from the brief's other relations.
   With the decisive fact stated so that both Opus and Sol
