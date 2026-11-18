@@ -10,10 +10,10 @@ Round L's oracle lift sat entirely on briefs that leaked the defect. This arm as
 
 - [x] Plan registered, and the scope clarification recorded before any edit.
 - [x] Harness generalized (b439150b6): `brief_oracle.py noleak-*` steps, `brief_writer_terra.py --kind oracle-noleak --round 1..3`, driver arm ON, brief_score reading `bifrost-oracle-noleak`. Existing offline tests pass.
-- [ ] Rounds 1–3: editor, blind fact check, paired leak check, on claude7 Opus/high.
-- [ ] Publish the retained briefs and the ON jobs file. Exclusions list each diff's last check.
-- [ ] Run ON reviewers (3 Terra/high per retained diff) once a Codex profile is above 25%; no paid credits.
-- [ ] Round M: ON with stored A and OT, two Opus/high judges, hand check, score, readout, review, push.
+- [x] Round 1 (2026-11-18): 17 edits, all fact-checked and all passing both Opus leak judges; rounds 2–3 not needed. Diagnostics: Opus flags 15/17 OT briefs, Sol passes 17/17 ON briefs.
+- [x] Published all 17; ON/AF jobs interleaved (34).
+- [x] ON/AF reviewers ran 05:25–06:02Z on one pinned image; 102 handbacks; 11 reviewers drawn to codex4.
+- [x] Round M: 204 outputs, judges agreed on all, 67 hand-checked; Facts carry (ON − AF +37.3, +17.6 to +58.8).
 
 ## Decision Log
 
@@ -54,4 +54,4 @@ Each build step refuses to overwrite an existing round directory, and each colle
 
 ## Outcomes & Retrospective
 
-Pending.
+Facts carry: ON 45.1%, AF 7.8%, A 17.6%, OT 45.1%. Round L's lift survives removing the leak. The same-window control matters, because the fresh no-brief cohort caught 9.8 points less than the stored one. Readout: `.agents/evals/review-arms/brief/bifrost-oracle-noleak/READOUT.md`.

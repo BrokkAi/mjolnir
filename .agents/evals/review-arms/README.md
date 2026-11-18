@@ -1129,3 +1129,23 @@ Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
   OT − A of +25.5 (+9.8 to +43.1), still Facts carry. The recorded new spend
   is $10.56 or more at API-equivalent rates; carrier cost coverage is
   incomplete, so the full cost is unknown.
+
+## Bifrost-dev non-leaking oracle arm (ON)
+
+Registration: `brief/PLAN-bifrost-oracle-noleak.md` and its amendments.
+Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
+
+- **Facts carry.** With the decisive fact stated so that both Opus and Sol
+  leak judges read every brief as `missed` (all 17 retained after one
+  wording round), Terra/high caught 45.1% against 7.8% for a fresh
+  no-brief arm run in the same window on the same image. ON − AF is
+  +37.3 points (+17.6 to +58.8).
+- ON equals round L's leaking OT (45.1% each; ON − OT 0.0, −11.8 to
+  +11.8), so round L's lift did not depend on the leak. ON − OT spans two
+  windows and images.
+- The fresh no-brief arm caught less than the stored one (AF − A −9.8,
+  −19.6 to −2.0), a cohort/image effect that the same-window control
+  removes from the primary reading.
+- Unchanged with the hand-check assessor's labels (ON − AF +41.2). Recorded
+  new spend is $18.81 or more at API-equivalent rates. It shows reviewers
+  use a supplied neutral fact, not that Bifrost queries can find it.

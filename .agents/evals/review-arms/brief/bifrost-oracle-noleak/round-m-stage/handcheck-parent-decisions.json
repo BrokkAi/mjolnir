@@ -1,0 +1,47 @@
+{
+  "recorded_at": "2026-11-18T06:15:52.563713+00:00",
+  "sealed_before_arm_join": true,
+  "assessor": "Opus/high claude7, one task session",
+  "parent": "Opus (290e45f2), all 67 rows; retained-fill rows read in full",
+  "proposal_sha256": "dd5b898d88f96d5e55c1cad639df76d6d87a00c3a87349a6e83ca05d7727a3bc",
+  "decisions_sha256": "42d4535124cc296f7ae281b6bef1961225e585a110c482af64c2ac059d1fbd62",
+  "parent_overrides_of_assessor": {
+    "0b81aa10a69555b1": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "trigger is an incomplete read or store error framed as recovering ('even after the read has recovered'): transient, so the lower label"
+    },
+    "100a8f7c384f849c": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "explicit 'transient store or source-read failure'; text identical to stored 07f60e503e05d025 (partial)"
+    },
+    "368c508049920477": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "explicit 'transient store error'"
+    },
+    "393e6acbcc409278": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "concrete trigger is a read that 'records a store failure'; text identical to stored 7d69459eea839714 (partial)"
+    },
+    "3a29d48b9dca2c6e": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "trigger is only a store error during the index build"
+    },
+    "7bff892641365e70": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "explicit 'transient store or source-read failure'"
+    },
+    "8a4eeb223ec3fd61": {
+      "assessor": "caught",
+      "parent": "partial",
+      "why": "failed file-state read named as 'the original transient failure'; identical to round L f0a966840b299213 (partial)"
+    }
+  },
+  "override_standard": "Same stored-round precedent as round L: a retained-fill finding that confines the cached failed Java index build to a transient or store failure, not StructureUnavailable or equivalent stable incompleteness, is partial; identical texts keep their prior labels.",
+  "sensitivity": "score also computed with the assessor's labels unchanged"
+}
