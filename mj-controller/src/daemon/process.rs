@@ -667,7 +667,7 @@ pub(super) async fn run_daemon_runtime(
         state.clone(),
         cancellation.clone(),
     ));
-    let mut mailbox_task = tokio::spawn(crate::mailbox_outbox::run(
+    let mut mailbox_task = tokio::spawn(crate::daemon::mailbox_delivery::run(
         state.clone(),
         manager_control.clone(),
         cancellation.clone(),

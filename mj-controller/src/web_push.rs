@@ -1,5 +1,4 @@
 //! Daemon-owned encrypted Web Push delivery. Durable intents precede HTTPS.
-use crate::{daemon::RuntimeState, database as db};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use mj_client::runtime_feed::RuntimeProjection;
@@ -10,15 +9,15 @@ use ring::{
     signature::{self, KeyPair},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::OnceLock};
 
 static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
 pub(crate) fn wake() {
-    WAKE.get_or_init(Default::default).notify_one();
+    wake_signal().notify_one();
+}
+/// The signal `wake` raises, for the delivery loop to wait on.
+pub(crate) fn wake_signal() -> &'static tokio::sync::Notify {
+    WAKE.get_or_init(Default::default)
 }
 pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
@@ -111,7 +110,7 @@ impl Vapid {
     pub(crate) fn public(&self) -> String {
         B64.encode(self.0.public_key().as_ref())
     }
-    fn authorization(&self, endpoint: &str) -> Result<String> {
+    pub(crate) fn authorization(&self, endpoint: &str) -> Result<String> {
         let origin = url::Url::parse(endpoint)?.origin().ascii_serialization();
         // RFC 8292 permits at most 24 hours; use that documented validity.
         let claims = serde_json::json!({"aud":origin,"exp":chrono::Utc::now().timestamp()+24*60*60,"sub":"https://github.com/BrokkAi/mjolnir"});
@@ -148,7 +147,7 @@ fn expand(salt: &[u8], input: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>>
         .map_err(|_| anyhow::anyhow!("HKDF fill"))?;
     Ok(out)
 }
-fn encrypt(subscription: &Subscription, payload: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn encrypt(subscription: &Subscription, payload: &[u8]) -> Result<Vec<u8>> {
     let rng = SystemRandom::new();
     let private = agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &rng)
         .map_err(|_| anyhow::anyhow!("push ECDH key"))?;
@@ -316,125 +315,6 @@ impl PushEntry<'_> {
             observed_revision: runtime.revision,
         }
     }
-}
-
-pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
-    // Let the startup owner settle before the first map can consume cutover.
-    crate::upgrade::wait_for_startup_recovery().await;
-    let vapid = Arc::new(blocking(Vapid::load).await?);
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let mut revisions = state.revisions();
-    let mut sends = tokio::task::JoinSet::new();
-    blocking(db::push_recover).await?;
-    loop {
-        let runtime = state.runtime_publication()?;
-        let (due, next) = blocking(move || db::push_reconcile(runtime)).await?;
-        for delivery in due {
-            let client = client.clone();
-            let vapid = vapid.clone();
-            sends.spawn(async move { deliver(&client, &vapid, delivery).await });
-        }
-        // Serialize each device/tag so an older request cannot replace a newer
-        // card. Other sessions and devices continue independently.
-        let deadline = next.and_then(|at| {
-            let delay = Duration::from_secs(
-                at.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64,
-            );
-            // A service's Retry-After can exceed this clock's range.
-            // In that case, the service waits for a state change.
-            tokio::time::Instant::now().checked_add(delay)
-        });
-        tokio::select! {
-            changed=revisions.changed()=>{changed.context("push runtime feed closed")?;},
-            _=WAKE.get_or_init(Default::default).notified()=>{},
-            completed=sends.join_next(),if !sends.is_empty()=>{let result=completed.context("push task disappeared")??;result?;},
-            _=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline).await,None=>std::future::pending().await}}=>{},
-        }
-    }
-}
-async fn deliver(
-    client: &reqwest::Client,
-    vapid: &Vapid,
-    delivery: db::PushDelivery,
-) -> Result<()> {
-    let endpoint = delivery.subscription.endpoint.clone();
-    let identity = delivery.identity.clone();
-    let body = encrypt(&delivery.subscription, delivery.payload.as_bytes())?;
-    // At-least-once: a crash after remote acceptance but before this receipt can
-    // repeat a send. Stable session tags replace the card; they cannot prevent
-    // a second alert after dismissal. Never discard unknown outcomes.
-    let response = client
-        .post(&endpoint)
-        .header("Authorization", vapid.authorization(&endpoint)?)
-        .header("Content-Encoding", "aes128gcm")
-        .header("Content-Type", "application/octet-stream")
-        // RFC 8030 requires TTL. Retain notifications for one day when a phone is offline.
-        .header("TTL", "86400")
-        .body(body)
-        .send()
-        .await;
-    let mut service_status = None;
-    let mut retry_after = None;
-    let error;
-    match response {
-        Ok(response) => {
-            let status = response.status();
-            service_status = Some(status.as_u16());
-            let accepted = status.is_success();
-            error = (!accepted).then(|| format!("push service returned {status}"));
-            if status.as_u16() == 429 || status.is_server_error() {
-                retry_after = response
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|value| {
-                        value
-                            .parse::<i64>()
-                            .ok()
-                            .map(|seconds| {
-                                chrono::Utc::now()
-                                    .timestamp()
-                                    .saturating_add(seconds.max(0))
-                            })
-                            .or_else(|| {
-                                chrono::DateTime::parse_from_rfc2822(value)
-                                    .ok()
-                                    .map(|date| date.timestamp())
-                            })
-                    });
-            } else if !accepted {
-                // Permanent rejection: keep the error visible until re-enrollment.
-                retry_after = Some(i64::MAX);
-            }
-        }
-        Err(failure) => {
-            // Subscription URLs are capabilities: retain diagnostics without them.
-            error = Some(format!(
-                "push transport failed; outcome unknown: {}",
-                failure.without_url()
-            ));
-        }
-    }
-    if let Some(error) = &error {
-        tracing::warn!(%error,"Web Push delivery deferred");
-    }
-    // Exponential backoff has no guessed retry cap. The persisted due time
-    // prevents hot retry loops when the service omits Retry-After.
-    let seconds = 1_i64.checked_shl(delivery.failures).unwrap_or(i64::MAX);
-    let at = retry_after.unwrap_or_else(|| chrono::Utc::now().timestamp().saturating_add(seconds));
-    blocking(move || {
-        db::push_result(
-            delivery.subscription,
-            delivery.enrollment,
-            identity,
-            service_status,
-            at,
-            error,
-        )
-    })
-    .await
 }
 
 #[cfg(test)]
