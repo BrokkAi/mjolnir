@@ -76,8 +76,8 @@ def main():
         errors += bool(r.get("error"))
         sample[(r["repo"], r["window"])].append(r)
 
-    # Clones that share history (forks, renames) are one repository: group repos whose candidate
-    # fix commits overlap, and keep the member with the most candidates.
+    # Clones that share history (forks, renames, subtrees) are one repository: group repos whose
+    # candidate fix commits or root commits overlap, and keep the member with the most candidates.
     by_hash = collections.defaultdict(set)
     for c in cands:
         by_hash[c["hash"]].add(c["repo"])
@@ -89,6 +89,12 @@ def main():
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
+    for l in open(scan / "roots.jsonl"):
+        x = json.loads(l)
+        if x.get("error"):
+            sys.exit(f"root commits unavailable for {x['repo']}: {x['error']}")
+        for root in x["roots"]:
+            by_hash["root:" + root].add(x["repo"])
     for repos in by_hash.values():
         repos = sorted(repos)
         for other in repos[1:]:

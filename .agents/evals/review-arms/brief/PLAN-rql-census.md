@@ -15,7 +15,7 @@ A positive result shows that the information helps when it's delivered this way.
 
 **Repositories.**
 - Development: mjolnir and bifrost-dev, with their frozen corpora.
-- Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs. Clones that share history (any common commit, such as forks or renamed repos) count as one repo; the screen groups them and keeps the member with the most candidates. Repos come from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
+- Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs. Clones that share history (a common commit or root, such as forks, renamed repos or subtrees) count as one repo; the screen groups them by shared candidate commits and root commits, and keeps the member with the most candidates. Repos come from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
 - Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/scan.py`, then `yield_rank.py`, which turns the capped samples into per-repo yields: upper bound × bug precision 0.85 × admission rate 31/67; results in `yield.json` and `corpus-yield-summary.md`). The screen applies the corpus size rule (goldens, fixtures and lock files don't count) and rejects merge commits as introductions. Incompletely traced fixes never count as strong, and the ranker refuses to rank while any planned draw lacks a trace record. File paths come from Git's NUL-separated name list, not patch headers. Functions are counted from the old file's `fn` signatures, so the screen doesn't depend on a repo's diff drivers. Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output. The screen only orders repos: its multi-site proxy over-counts (for example, inline `#[cfg(test)]` hunks in production files), so a repo enters the test set only after tracing admits at least 8 relation diffs, going down the ranked list. Inputs are reproducible: `stage_a.py` derives `stage_a_candidates.jsonl.gz` from the SFT lists, then `scan.py` and `yield_rank.py` run on it.
 - Rank and measure at least 16 repos: one cold Bifrost index and one incremental re-index each, at a representative revision. Take the 12 that qualify with the most expected admitted bugs per indexing hour. Reaching ±10 needs about 12 repos if the between-repo SD is 10 points, and about 16 if it is 15. More bugs per repo can't substitute for more repos. If fewer than 12 qualify, use all that do; a wider interval then reads as the bands below say.
 - A repo counts only if it has at least 8 admitted relation diffs, decided before any reviewer runs on it.
@@ -72,7 +72,7 @@ It reports:
 - **Scope:** a touched symbol is one whose definition the diff changes, or one referenced in a changed line. Symbols defined outside the workspace are excluded by rule; nothing is cut by fan-out.
 - **Freezing the definition:** before freezing it, report on development data the share of bugs whose decisive row the table contains.
 
-**Fidelity gate** (per added step, on at least 40 gold queries drawn from the potential table, settled before any reviewer outcome is unblinded). The sample is stratified. It includes every development query whose scope holds a census decisive row for that step, then random others up to 40. A step needs at least 10 decisive queries in its sample, or the decisive-row recall gap is undefined and the step fails the gate:
+**Fidelity gate** (per step the engine serves, documented and added alike, since R0 and R both serve simulated rows for documented steps; on at least 40 gold queries drawn from the potential table, settled before any reviewer outcome is unblinded). The sample is stratified. It includes every development query whose scope holds a census decisive row for that step, then random others up to 40. An added step needs at least 10 decisive queries in its sample, or the decisive-row recall gap is undefined and the step fails the gate. A documented step with fewer than 10 must still meet the precision, recall and stability bars; its gap is reported as not estimable. Documented steps also use real Bifrost as one more mechanical candidate source:
 - **Gold set:** built by pooling the engine's rows, a second-family model asked to enumerate, and the mechanical superset, with every candidate adjudicated. For sampled queries whose scope includes a census decisive fact, those decisive rows are added to the gold set even when every enumerator missed them. They are never shown to the engine, so a step that misses the relations it exists to supply can't pass.
 - **Accuracy:** row precision at least 95% and recall at least 90%, with lower 95% bounds (bootstrap over queries) of 90% and 80%.
 - **Stability:** re-asking a sample without the cache returns the same rows at Jaccard 0.9 or better.
@@ -120,7 +120,7 @@ These set the test-phase sample. Pilot effects are development data and are neve
   - a cluster bootstrap;
   - a mixed logistic model with a repo intercept, a repo arm slope and a diff intercept;
   - the after-cutoff subset.
-- **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo.
+- **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo selected the same way. The repos were chosen for bug yield per indexing hour, with indexing hazards excluded, so neither the interval nor the prediction interval covers Rust projects the screen excludes.
 
 Decision bands on R − G, which decide whether complete RQL is worth building for review (minimum effect set by Jonathan, 2026-11-18):
 - **Don't build for review:** upper bound below +10. This takes precedence.
@@ -130,7 +130,8 @@ Decision bands on R − G, which decide whether complete RQL is worth building f
 
 Which features to build, when R − G reads Build or Partial (same repo-level t interval):
 - **Added steps:** build them if the lower bound of R − R0 is above 0.
-- **Otherwise:** the lift comes from complete answers to today's steps (R0 − G). The engine work then targets those steps' completeness and latency, not new steps.
+- **Today's steps:** if the lower bound of R0 − G is above 0, complete answers to today's steps carry lift, and their completeness and latency are worth engine work. This can hold alongside the added steps.
+- **Unresolved:** a contrast whose interval includes 0 is reported as unresolved. It is never read as showing that part contributed nothing.
 
 Also reported:
 - **H against R** (paired R − H, same repo-level t interval):

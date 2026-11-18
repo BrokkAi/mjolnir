@@ -15,19 +15,37 @@
   ],
   "clap-rs__clap": [
    "TeXitoi__structopt",
-   "clap-rs__clap"
+   "clap-rs__clap",
+   "ordian__toml_edit",
+   "rust-cli__config-rs"
+  ],
+  "apache__arrow-rs": [
+   "apache__arrow-rs",
+   "apache__datafusion"
   ],
   "apache__opendal": [
    "apache__incubator-opendal",
    "apache__opendal"
   ],
+  "rome__tools": [
+   "biomejs__biome",
+   "rome__tools"
+  ],
   "rust-lang__rust-analyzer": [
    "crablang__crab",
-   "rust-lang__rust-analyzer"
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
   ],
   "datafuselabs__databend": [
    "databendlabs__databend",
    "datafuselabs__databend"
+  ],
+  "dathere__qsv": [
+   "dathere__qsv",
+   "medialab__xan"
   ],
   "libra__libra": [
    "diem__diem",
@@ -44,6 +62,10 @@
   "kreuzberg-dev__kreuzberg": [
    "kreuzberg-dev__kreuzberg",
    "xberg-io__xberg"
+  ],
+  "readysettech__readyset": [
+   "mit-pdos__noria",
+   "readysettech__readyset"
   ]
  },
  "blame_errors": 0,
@@ -52,8 +74,8 @@
  "admission": 0.4626865671641791,
  "windows": {
   "wide_2025": {
-   "upper_bound_total": 1648.7,
-   "realistic_total": 648.4,
+   "upper_bound_total": 1630.0,
+   "realistic_total": 641.1,
    "repos_realistic_ge": {
     "5": 25,
     "10": 8,
@@ -106,7 +128,6 @@
     "lance-format__lance": 3.4,
     "GreptimeTeam__greptimedb": 3.3,
     "nearai__ironclaw": 3.3,
-    "ordian__toml_edit": 3.3,
     "wasmerio__wasmer": 3.2,
     "HelixDB__helix-db": 3.1,
     "Project-Navi__ordvec": 3.1,
@@ -145,7 +166,6 @@
     "pydantic__monty": 1.9,
     "s0undt3ch__ToolR": 1.9,
     "cocoindex-io__cocoindex": 1.8,
-    "rust-lang__rust-clippy": 1.7,
     "withcoral__coral": 1.7,
     "Ataraxy-Labs__sem": 1.6,
     "assura-lang__assura": 1.6,
@@ -203,7 +223,6 @@
     "apache__arrow-rs": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
-    "biomejs__biome": 0.8,
     "brave__adblock-rust": 0.8,
     "cberner__redb": 0.8,
     "cloudflare__workers-rs": 0.8,
@@ -231,7 +250,6 @@
     "rivet-dev__agentos": 0.8,
     "rizsotto__Bear": 0.8,
     "rust-bitcoin__rust-bitcoin": 0.8,
-    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "scanopy__scanopy": 0.8,
     "sebastienrousseau__hsh": 0.8,
@@ -275,7 +293,6 @@
     "Y2Z__monolith": 0.4,
     "altsem__gitu": 0.4,
     "anulum__sc-neurocore": 0.4,
-    "apache__datafusion": 0.4,
     "ariel-os__ariel-os": 0.4,
     "astral-sh__uv": 0.4,
     "benfred__py-spy": 0.4,
@@ -310,7 +327,6 @@
     "lucasgelfond__zerobrew": 0.4,
     "maciejhirsz__logos": 0.4,
     "maplibre__martin": 0.4,
-    "medialab__xan": 0.4,
     "microsoft__windows-rs": 0.4,
     "mikeyobrien__ralph-orchestrator": 0.4,
     "mimblewimble__grin": 0.4,
@@ -470,12 +486,9 @@
     "rhaiscript__rhai": 0.0,
     "ron-rs__ron": 0.0,
     "run-llama__liteparse": 0.0,
-    "rust-cli__config-rs": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
-    "rust-lang__miri": 0.0,
     "rust-lang__regex": 0.0,
-    "rust-lang__rustfmt": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
     "safetensors__safetensors": 0.0,
@@ -516,8 +529,8 @@
    }
   },
   "ext_2024": {
-   "upper_bound_total": 2195.4,
-   "realistic_total": 863.4,
+   "upper_bound_total": 2168.3,
+   "realistic_total": 852.8,
    "repos_realistic_ge": {
     "5": 33,
     "10": 14,
@@ -570,7 +583,6 @@
     "pgdogdev__pgdog": 4.3,
     "agent-of-empires__agent-of-empires": 4.1,
     "openai__codex": 4.1,
-    "ordian__toml_edit": 4.1,
     "wasmerio__wasmer": 4.0,
     "t8y2__dbx": 3.9,
     "wild-linker__wild": 3.9,
@@ -581,7 +593,6 @@
     "tokio-rs__tokio": 3.5,
     "verus-lang__verus": 3.5,
     "lance-format__lance": 3.4,
-    "rust-lang__rust-clippy": 3.4,
     "meilisearch__meilisearch": 3.3,
     "nearai__ironclaw": 3.3,
     "DioxusLabs__dioxus": 3.2,
@@ -717,7 +728,6 @@
     "altsem__gitu": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
-    "biomejs__biome": 0.8,
     "biomejs__gritql": 0.8,
     "brave__adblock-rust": 0.8,
     "bytecodealliance__javy": 0.8,
@@ -748,7 +758,6 @@
     "risingwavelabs__risingwave": 0.8,
     "rivet-dev__agentos": 0.8,
     "rust-bitcoin__rust-bitcoin": 0.8,
-    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "scanopy__scanopy": 0.8,
     "seanmonstar__reqwest": 0.8,
@@ -792,7 +801,6 @@
     "agersant__polaris": 0.4,
     "anulum__sc-neurocore": 0.4,
     "apache__datafusion-sqlparser-rs": 0.4,
-    "apache__datafusion": 0.4,
     "ariel-os__ariel-os": 0.4,
     "benfred__py-spy": 0.4,
     "bgreenwell__doxx": 0.4,
@@ -824,7 +832,6 @@
     "linebender__resvg": 0.4,
     "lucasgelfond__zerobrew": 0.4,
     "maplibre__martin": 0.4,
-    "medialab__xan": 0.4,
     "mikaelmello__inquire": 0.4,
     "mikeyobrien__ralph-orchestrator": 0.4,
     "mimblewimble__grin": 0.4,
@@ -849,9 +856,7 @@
     "rkyv__rkyv": 0.4,
     "rusqlite__rusqlite": 0.4,
     "rust-bakery__nom": 0.4,
-    "rust-cli__config-rs": 0.4,
     "rust-lang__mdBook": 0.4,
-    "rust-lang__rustfmt": 0.4,
     "rust-lang__rustup": 0.4,
     "rustls__rustls": 0.4,
     "rustviz__rustviz": 0.4,
@@ -992,7 +997,6 @@
     "run-llama__liteparse": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
-    "rust-lang__miri": 0.0,
     "rust-lang__regex": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
@@ -1035,8 +1039,8 @@
    }
   },
   "mid_2026": {
-   "upper_bound_total": 851.8,
-   "realistic_total": 335.0,
+   "upper_bound_total": 846.8,
+   "realistic_total": 333.0,
    "repos_realistic_ge": {
     "5": 10,
     "10": 4,
@@ -1147,7 +1151,6 @@
     "rivet-dev__agentos": 0.8,
     "rizsotto__Bear": 0.8,
     "rolldown__rolldown": 0.8,
-    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "sebastienrousseau__hsh": 0.8,
     "servo__servo": 0.8,
@@ -1177,13 +1180,11 @@
     "SeaQL__sea-orm": 0.4,
     "TheDan64__inkwell": 0.4,
     "anulum__sc-neurocore": 0.4,
-    "apache__datafusion": 0.4,
     "apache__opendal": 0.4,
     "ariel-os__ariel-os": 0.4,
     "astral-sh__ruff": 0.4,
     "astral-sh__uv": 0.4,
     "bgreenwell__doxx": 0.4,
-    "biomejs__biome": 0.4,
     "cachix__devenv": 0.4,
     "cberner__redb": 0.4,
     "ccc-spdm-tools__spdm-rs": 0.4,
@@ -1218,7 +1219,6 @@
     "probe-rs__probe-rs": 0.4,
     "redbadger__crux": 0.4,
     "rusqlite__rusqlite": 0.4,
-    "rust-lang__rust-clippy": 0.4,
     "rustls__rustls": 0.4,
     "rustviz__rustviz": 0.4,
     "sbom-tool__sbom-tools": 0.4,
@@ -1333,7 +1333,6 @@
     "loro-dev__loro": 0.0,
     "maciejhirsz__logos": 0.0,
     "makepad__makepad": 0.0,
-    "medialab__xan": 0.0,
     "meilisearch__meilisearch": 0.0,
     "microsoft__windows-rs": 0.0,
     "mitsuhiko__insta": 0.0,
@@ -1351,7 +1350,6 @@
     "numaproj__numaflow": 0.0,
     "open-telemetry__opentelemetry-rust": 0.0,
     "open-telemetry__weaver": 0.0,
-    "ordian__toml_edit": 0.0,
     "oss-review-toolkit__ort": 0.0,
     "ouch-org__ouch": 0.0,
     "oven-sh__bun": 0.0,
@@ -1374,8 +1372,6 @@
     "rust-bitcoin__rust-bitcoin": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
-    "rust-lang__miri": 0.0,
-    "rust-lang__rustfmt": 0.0,
     "rust-lang__rustup": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
@@ -1419,8 +1415,8 @@
    }
   },
   "strict_2026_07": {
-   "upper_bound_total": 13.8,
-   "realistic_total": 5.4,
+   "upper_bound_total": 12.8,
+   "realistic_total": 5.0,
    "repos_realistic_ge": {
     "5": 0,
     "10": 0,
@@ -1438,7 +1434,6 @@
     "openebs__mayastor": 0.4,
     "patchloom__patchloom": 0.4,
     "rtk-ai__rtk": 0.4,
-    "rust-lang__rust-clippy": 0.4,
     "sinelaw__fresh": 0.4,
     "xingkongliang__skills-manager": 0.4,
     "0xPlaygrounds__rig": 0.0,

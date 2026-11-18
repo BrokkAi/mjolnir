@@ -58,6 +58,22 @@ def emit(path, rec):
         f.write(json.dumps(rec) + "\n")
 
 
+def stage_roots(repos):
+    """Root commits of every clone. Clones sharing a root share history: forks and renames share
+    their roots, and a subtree merge imports the subtree's roots into the host repo."""
+    out = OUT / "roots.jsonl"
+    have = {json.loads(l)["repo"] for l in open(out)} if out.exists() else set()
+
+    def one(repo):
+        if repo in have:
+            return
+        rc, so, se = git(repo, "rev-list", "--max-parents=0", "--all", timeout=600)
+        emit(out, {"repo": repo, "roots": sorted(set(so.split())), "error": se.strip()[-300:] if rc else None})
+
+    with cf.ThreadPoolExecutor(JOBS) as ex:
+        list(ex.map(one, sorted(repos)))
+
+
 def stage_dates(by_repo):
     out = OUT / "dates.jsonl"
     have = set()
@@ -107,7 +123,7 @@ def changed_sites(repo, h):
     Paths come from `--name-status -z -M` (never parsed from patch headers, which Git quotes;
     renames keep their old path for blame), each file's hunks from a literal-pathspec diff, and enclosing functions from the old file text,
     so the result doesn't depend on the repo's diff drivers or attributes."""
-    rc, so, se = git(repo, "diff", "--name-status", "-z", "-M", f"{h}^", h, "--", "*.rs")
+    rc, so, se = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "-M", f"{h}^", h, "--", "*.rs")
     if rc:
         raise RuntimeError("diff names: " + se.strip()[-200:])
     fields, entries = so.split("\0"), []
@@ -125,14 +141,15 @@ def changed_sites(repo, h):
     ranges, funcs = collections.defaultdict(list), set()
     for status, old_path, new_path in entries:
         specs = [f":(literal){old_path}"] + ([f":(literal){new_path}"] if new_path != old_path else [])
-        rc, diff, se = git(repo, "diff", "-U0", "--no-color", "-M", f"{h}^", h, "--", *specs)
+        rc, diff, se = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--text", "-U0", "--no-color", "-M",
+                           f"{h}^", h, "--", *specs)
         if rc:
             raise RuntimeError("diff file: " + se.strip()[-200:])
         path = old_path
         if status.startswith("A"):
             rc, old = 1, ""
         else:
-            rc, old, _ = git(repo, "show", f"{h}^:{old_path}")
+            rc, old, _ = git(repo, "show", "--no-textconv", f"{h}^:{old_path}")
         old_lines = old.splitlines() if rc == 0 else []
         for line in diff.splitlines():
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)
@@ -160,12 +177,13 @@ def intro_size(repo, sha):
         return 0, False, "rev-list: " + se.strip()[-200:]
     if len(parents.split()) > 2:
         return 0, True, None
-    rc, so, se = git(repo, "show", "--numstat", "--format=", "--no-renames", sha, timeout=300)
+    rc, so, se = git(repo, "show", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--format=",
+                     "--no-renames", sha, timeout=300)
     if rc:
         return 0, False, "numstat: " + se.strip()[-200:]
     size = 0
-    for line in so.splitlines():
-        parts = line.split("\t")
+    for record in so.split("\0"):
+        parts = record.strip("\n").split("\t", 2)
         if len(parts) != 3 or SIZE_EXCLUDED.search(parts[2]):
             continue
         size += sum(int(x) for x in parts[:2] if x.isdigit())
@@ -181,7 +199,7 @@ def blame_one(c):
         rec["multi_site_proxy"] = len(files) >= 2 or len(funcs) >= 2
         counts, ctimes, failed = collections.Counter(), {}, []
         for path, rs in ranges.items():
-            args = ["blame", "--porcelain", "-w"]
+            args = ["blame", "--no-textconv", "--porcelain", "-w"]
             for s, n in rs:
                 args += ["-L", f"{s},+{n}"]
             rc, so, se = git(repo, *args, f"{h}^", "--", path, timeout=600)
@@ -224,6 +242,7 @@ def main():
     by_repo = collections.defaultdict(list)
     for c in cands:
         by_repo[c["repo"]].append(c)
+    stage_roots(by_repo)
     stage_dates(by_repo)
 
     dates, clone_ct = {}, {}
