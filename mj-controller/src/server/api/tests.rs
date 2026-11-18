@@ -5078,6 +5078,7 @@ fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
 fn a_launch_failure_for_another_session_is_not_this_session_s() {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot.sessions[0].lifecycle = ViewerLifecycleCategory::Failed;
     let session_id = snapshot.sessions[0].id.clone();
     snapshot.launch_failures = vec![super::super::ViewerLaunchFailure {
         id: format!("{}-4", std::process::id()),
@@ -5661,16 +5662,24 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
 // Hard-won: 94d7 resume: an intact failed environment needs no checkpoint to repair.
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
-    for repair in [false, true] {
+    for source in ["checkpoint", "retained environment", "failed launch"] {
         let (app, mut actions, snapshot_tx, _) =
             api_app(backend_holding_the_session_workspace(), |snapshot| {
                 make_stopped(snapshot);
-                if repair {
+                if source == "retained environment" {
                     let session = &mut snapshot.sessions[0];
                     session.state = "error".into();
                     session.lifecycle = ViewerLifecycleCategory::Failed;
                     session.has_checkpoint = false;
                     session.retained_target = true;
+                } else if source == "failed launch" {
+                    let (config, mut state) = sample_config_state();
+                    let record = state.sessions.get_mut("session-1").unwrap();
+                    record.state = mj_core::state::SessionState::Error;
+                    record.native_session_id = None;
+                    record.last_error = Some("worker bootstrap failed".into());
+                    *snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+                    assert!(snapshot.sessions[0].failed_launch_retry);
                 }
             });
         let mut response = tokio::spawn(
@@ -5701,7 +5710,11 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
             session.operation = Some(Box::new(ViewerOperation {
                 id: "resume-op".into(),
                 session_id: session.id.clone(),
-                kind: ViewerOperationKind::Resume,
+                kind: if source == "failed launch" {
+                    ViewerOperationKind::Create
+                } else {
+                    ViewerOperationKind::Resume
+                },
                 started_at_epoch_seconds: 1,
                 stages: Vec::new(),
                 notice: None,
@@ -5807,36 +5820,61 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 // Hard-won: 78245c3a: resume without a checkpoint was accepted and then failed silently.
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(backend_holding_the_session_workspace(), |snapshot| {
-            make_stopped(snapshot);
-            // A launch that failed before its first checkpoint.
-            let session = &mut snapshot.sessions[0];
-            session.has_checkpoint = false;
-            session.retained_target = false;
-            session.state = "error".into();
-            session.lifecycle = ViewerLifecycleCategory::Failed;
-            session.has_error = true;
-            session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
-        });
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/resume"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    )
-    .await
-    .expect("the resume was admitted instead of refused")
-    .unwrap();
+    for prior_use in ["native session", "archived", "sub-agent"] {
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(backend_holding_the_session_workspace(), |snapshot| {
+                let (config, mut state) = sample_config_state();
+                let record = state.sessions.get_mut("session-1").unwrap();
+                record.state = mj_core::state::SessionState::Error;
+                record.last_error = Some("worker bootstrap failed: operation cancelled".into());
+                if prior_use != "native session" {
+                    record.native_session_id = None;
+                }
+                record.archived = prior_use == "archived";
+                if prior_use == "sub-agent" {
+                    let mut parent = record.clone();
+                    parent.id = "parent".into();
+                    state.sessions.insert(parent.id.clone(), parent);
+                    state.subagents.insert(
+                        "session-1".into(),
+                        mj_core::subagent::SubagentMetadata {
+                            kind: mj_core::subagent::SubagentKind::default(),
+                            child_session_id: "session-1".into(),
+                            parent_session_id: "parent".into(),
+                            task_name: "child".into(),
+                            profile_id: "codex-1".into(),
+                            model: None,
+                            effort: None,
+                            working_directory: "/tmp/project".into(),
+                            request_key: "launch-child".into(),
+                            created_at: "now".into(),
+                            noticed_turn: None,
+                            reported_finish: None,
+                            handback_tool: false,
+                        },
+                    );
+                }
+                *snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+            });
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the resume was admitted instead of refused")
+        .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await;
-    let error = body["error"].as_str().unwrap().to_owned();
-    assert!(error.contains("session has no checkpoint"), "{error}");
-    assert!(error.contains("mj destroy --session session-1"), "{error}");
-    assert!(actions.try_recv().is_err(), "no resume reaches the daemon");
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{prior_use}");
+        let body = json_body(response).await;
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("session has no checkpoint"), "{error}");
+        assert!(error.contains("mj destroy --session session-1"), "{error}");
+        assert!(actions.try_recv().is_err(), "no resume reaches the daemon");
+    }
 }
 
 /// Launch finding R6-1: the published session says whether its record holds

@@ -34,6 +34,9 @@ pub(crate) struct CapacityTableRow {
     memory: Line<'static>,
     /// The one-line Disks button, which opens filesystem details in a popup.
     disks: Line<'static>,
+    /// Why the row's reading cannot be trusted, when it cannot. It is drawn
+    /// on a second line of the row rather than in a column of its own, so a
+    /// notice never changes how wide the table has to be.
     staleness: Option<String>,
 }
 
@@ -41,6 +44,14 @@ impl CapacityTableRow {
     /// Width of the Disks button. Zero when the row has no storage reading.
     fn disks_button_width(&self) -> u16 {
         u16::try_from(self.disks.width()).unwrap_or(u16::MAX)
+    }
+
+    /// The lines this target wants: its readings, plus one for the notice
+    /// when the reading cannot be trusted. The pane's content height bounds
+    /// it, so a short pane keeps the readings and waits for room for the
+    /// notice.
+    fn height(&self) -> usize {
+        1 + usize::from(self.staleness.is_some())
     }
 }
 
@@ -212,20 +223,28 @@ pub(crate) fn capacity_disks_menu_lines(
         .collect()
 }
 
-/// The Targets table always has one line per row; filesystem details are
-/// rendered in a dropdown above the table.
+/// The lines the Targets table draws: one line per target, plus one line
+/// under each target whose reading cannot be trusted and says why.
 pub(crate) fn capacity_table_lines(dashboard: &DashboardState) -> usize {
-    dashboard.capacity_details.len()
+    let now_epoch_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    capacity_table_rows(dashboard, now_epoch_seconds)
+        .iter()
+        .map(CapacityTableRow::height)
+        .sum()
 }
 
 /// The Disks column has no heading: its cell already says `Disks ▾`, or
 /// names the filesystem it is about.
 const CAPACITY_HEADERS: [&str; 5] = ["Host / fleet", "Targets", "CPU", "RAM", ""];
 
-/// Column widths of the Targets table. A sixth, untitled column says why a
-/// reading is stale, and exists only while some row's reading is.
+/// Column widths of the Targets table, one per heading. A notice line is
+/// deliberately absent from this list: it spans the columns under Targets
+/// instead, so a stale reading cannot make the pane ask for more width.
 pub(crate) fn capacity_column_widths(rows: &[CapacityTableRow]) -> Vec<u16> {
-    let mut widths = vec![
+    vec![
         quota_column_width(
             CAPACITY_HEADERS[0],
             rows.iter().map(|row| Line::raw(row.host.as_str()).width()),
@@ -251,24 +270,15 @@ pub(crate) fn capacity_column_widths(rows: &[CapacityTableRow]) -> Vec<u16> {
             rows.iter().map(|row| row.disks.width()),
             u16::MAX,
         ),
-    ];
-    if rows.iter().any(|row| row.staleness.is_some()) {
-        widths.push(quota_column_width(
-            "",
-            rows.iter()
-                .filter_map(|row| row.staleness.as_deref())
-                .map(|staleness| Line::raw(staleness).width()),
-            u16::MAX,
-        ));
-    }
-    widths
+    ]
 }
 
 /// Columns are separated by this many cells.
 const CAPACITY_COLUMN_SPACING: u16 = 2;
 
 /// Width needed to draw the complete Targets table, including its table
-/// spacing, border, and always-present selection marker.
+/// spacing, border, and always-present selection marker. A notice line needs
+/// no width of its own: it shares the row's second line.
 pub(crate) fn capacity_table_width(dashboard: &DashboardState) -> u16 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -328,34 +338,45 @@ pub(crate) fn render_capacity(
             dashboard.pane_maximize_enabled(SupportPane::Targets),
         ))
     });
-    let row_heights = vec![1; rows.len()];
+    // A row never asks for more lines than the pane has room for. The table
+    // scrolls a selected row into view by dropping whole rows from the top of
+    // the page, and a row taller than the content area makes it drop the
+    // selected row itself, so a notice that does not fit waits for room
+    // instead of costing the readings their line.
+    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
+    let row_heights = rows
+        .iter()
+        .map(|row| row.height().min(viewport.max(1)))
+        .collect::<Vec<_>>();
     let disks_buttons = rows
         .iter()
         .map(CapacityTableRow::disks_button_width)
         .collect::<Vec<_>>();
-    let mut header = CAPACITY_HEADERS.to_vec();
-    if column_widths.len() > header.len() {
-        header.push("");
-    }
-    let stale_column = column_widths.len() > CAPACITY_HEADERS.len();
+    let notices = rows
+        .iter()
+        .zip(&row_heights)
+        .map(|(row, height)| {
+            (*height > 1)
+                .then(|| row.staleness.clone())
+                .flatten()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
     let table = Table::new(
-        rows.into_iter().map(|row| {
-            let mut cells = vec![
+        rows.into_iter().zip(&row_heights).map(|(row, height)| {
+            Row::new(vec![
                 Cell::from(row.host).style(Style::default().add_modifier(Modifier::BOLD)),
                 Cell::from(row.targets).style(theme::muted()),
                 Cell::from(row.cpu),
                 Cell::from(row.memory),
                 Cell::from(row.disks),
-            ];
-            if stale_column {
-                cells.push(Cell::from(row.staleness.unwrap_or_default()).style(theme::muted()));
-            }
-            Row::new(cells).height(1)
+            ])
+            .height(u16::try_from(*height).unwrap_or(u16::MAX))
         }),
         column_widths.iter().copied().map(Constraint::Length),
     )
     .column_spacing(CAPACITY_COLUMN_SPACING)
-    .header(Row::new(header).style(theme::muted().patch(theme::raised())))
+    .header(Row::new(CAPACITY_HEADERS.to_vec()).style(theme::muted().patch(theme::raised())))
     .row_highlight_style(if focused {
         theme::selection(true)
     } else {
@@ -368,7 +389,6 @@ pub(crate) fn render_capacity(
     })
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
-    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.targets_scroll.get(),
         &row_heights,
@@ -382,14 +402,17 @@ pub(crate) fn render_capacity(
         (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),
     );
     frame.render_stateful_widget(table, area, &mut state);
+    // The notice lines are drawn after the table, which laid out the rows
+    // they belong to.
+    let columns = capacity_columns(area, &column_widths);
     register_disks_buttons(
         dashboard,
-        area,
-        &column_widths,
-        row_heights.len(),
+        &columns,
         &disks_buttons,
+        &row_heights,
         state.offset(),
     );
+    render_capacity_notices(frame, &columns, &notices, &row_heights, state.offset());
     if dashboard.capacity_details.is_empty() {
         let message = if dashboard.config.targets.is_empty() {
             "Add a target in Settings."
@@ -412,36 +435,105 @@ pub(crate) fn render_capacity(
     render_session_scrollbar(
         frame,
         area,
-        dashboard.capacity_details.len(),
-        state.offset(),
+        row_heights.iter().sum(),
+        row_heights.iter().take(state.offset()).sum(),
         usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
     );
 }
 
-/// Registers each visible row's Disks summary as the button that opens its
-/// filesystem dropdown. Use the table's layout constraints so the hit region
-/// follows the rendered text even when columns shrink to fit the pane.
-fn register_disks_buttons(
-    dashboard: &DashboardState,
-    area: Rect,
-    column_widths: &[u16],
-    row_count: usize,
-    buttons: &[u16],
-    offset: usize,
-) {
+/// The inner area of the Targets table and the columns inside it, laid out
+/// the way the table lays them out, so hit regions and notice lines follow
+/// the rendered text even when columns shrink to fit the pane.
+struct CapacityColumns {
+    inner: Rect,
+    columns: Vec<Rect>,
+}
+
+impl CapacityColumns {
+    /// The Targets column, under which every notice line starts.
+    fn targets(&self) -> Rect {
+        self.columns[1]
+    }
+
+    fn disks(&self) -> Rect {
+        self.columns[CAPACITY_HEADERS.len() - 1]
+    }
+}
+
+/// Width of the selection marker a table row reserves, always present. It is
+/// the width of `theme::glyphs().selected`, the glyph the table highlights a
+/// row with.
+const CAPACITY_SELECTION_WIDTH: u16 = 2;
+
+fn capacity_columns(area: Rect, column_widths: &[u16]) -> CapacityColumns {
     let inner = area.inner(Margin::new(1, 1));
-    let [_, columns_area] =
-        Layout::horizontal([Constraint::Length(2), Constraint::Fill(0)]).areas(inner);
+    let [_, columns_area] = Layout::horizontal([
+        Constraint::Length(CAPACITY_SELECTION_WIDTH),
+        Constraint::Fill(0),
+    ])
+    .areas(inner);
     let columns = Layout::horizontal(column_widths.iter().copied().map(Constraint::Length))
         .flex(Flex::Start)
         .spacing(CAPACITY_COLUMN_SPACING)
-        .split(columns_area);
-    let disks = columns[CAPACITY_HEADERS.len() - 1];
-    let mut y = area.y.saturating_add(2);
-    let mut areas = vec![None; row_count];
+        .split(columns_area)
+        .to_vec();
+    CapacityColumns { inner, columns }
+}
+
+/// Draws each row's notice across the columns under Targets, on the second
+/// line the row reserves for it. The line runs to the pane's inner edge and
+/// is cut with an ellipsis, so a long notice costs width the table already
+/// has instead of widening the pane.
+fn render_capacity_notices(
+    frame: &mut Frame,
+    columns: &CapacityColumns,
+    notices: &[String],
+    row_heights: &[usize],
+    offset: usize,
+) {
+    let targets = columns.targets();
+    let width = columns.inner.right().saturating_sub(targets.x);
+    if width == 0 {
+        return;
+    }
+    // The first row sits under the border and the heading row.
+    let mut y = columns.inner.y.saturating_add(1);
+    for (notice, height) in notices.iter().zip(row_heights).skip(offset) {
+        if y >= columns.inner.bottom() {
+            break;
+        }
+        let notice_y = y.saturating_add(1);
+        if !notice.is_empty() && notice_y < columns.inner.bottom() {
+            let text = truncate_to_cells(notice, usize::from(width), Truncate::SUMMARY);
+            frame.render_widget(
+                Paragraph::new(Line::styled(text, theme::muted())),
+                Rect::new(targets.x, notice_y, width, 1),
+            );
+        }
+        y = y.saturating_add(u16::try_from(*height).unwrap_or(u16::MAX));
+    }
+}
+
+/// Registers each visible row's Disks summary as the button that opens its
+/// filesystem dropdown.
+fn register_disks_buttons(
+    dashboard: &DashboardState,
+    columns: &CapacityColumns,
+    buttons: &[u16],
+    row_heights: &[usize],
+    offset: usize,
+) {
+    let disks = columns.disks();
+    let mut y = columns.inner.y.saturating_add(1);
+    let mut areas = vec![None; buttons.len()];
     let mut form = dashboard.surface_form.borrow_mut();
-    for (index, width) in buttons.iter().enumerate().skip(offset) {
-        if y >= inner.bottom() {
+    for ((index, width), height) in buttons
+        .iter()
+        .enumerate()
+        .zip(row_heights.iter())
+        .skip(offset)
+    {
+        if y >= columns.inner.bottom() {
             break;
         }
         let width = (*width).min(disks.width);
@@ -455,7 +547,7 @@ fn register_disks_buttons(
             );
             areas[index] = Some(button_area);
         }
-        y = y.saturating_add(1);
+        y = y.saturating_add(u16::try_from(*height).unwrap_or(u16::MAX));
     }
     *dashboard.capacity_disks_areas.borrow_mut() = areas;
 }

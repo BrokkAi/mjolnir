@@ -80,6 +80,47 @@
 │                                      ││Nothing needs you                                                             │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · : / ? palette
+=== stale reading notice under the Targets column (100x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                                                          │
+│Create new work or open a session.    ││                                                          │
+│                                      ││                                                          │
+│                                      ││                     ✦  M J O L N I R                     │
+│                                      ││                                                          │
+│                                      ││            Create a session to start building.           │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      ││                                                          │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                        │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find    │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets                CPU  RAM           │
+│                                      ││  local         podman, mac-container  37%  75%           │
+│                                      ││                stale: probe timed out after twenty secon…│
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
+│                                      ││Nothing needs you                                         │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === quota error with refresh age (120x28) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │

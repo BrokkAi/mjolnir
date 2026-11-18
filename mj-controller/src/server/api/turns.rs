@@ -302,7 +302,7 @@ fn prompt_refusal(session: &ViewerSession) -> String {
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    let mut refusal = if session.has_checkpoint {
+    let mut refusal = if session.has_checkpoint || session.failed_launch_retry {
         "this session failed, so it cannot take a prompt"
     } else {
         "this session failed before it saved a checkpoint, so it cannot take a prompt or be resumed"
