@@ -597,7 +597,7 @@ impl Policy {
             self.reconcile_publications(&self.batch.profiles.clone());
         }
     }
-    pub async fn tick(&mut self) {
+    pub fn tick(&mut self) {
         self.sync_grant_only_profiles();
         schedule_due_credential_syncs(
             &mut self.signals,
@@ -631,26 +631,11 @@ impl Policy {
                 .profiles
                 .get(&result.profile_id)
                 .cloned();
-            let auth_cause = result.trigger.as_ref().filter(|cause| {
-                cause.reason == mj_core::credentials::CredentialSyncReason::AuthenticationFailure
-            });
-            let current = match (auth_cause, profile.as_ref()) {
-                (Some(_), Some(profile)) => match current_profile_login(profile).await {
-                    Ok(current) => current,
-                    Err(error) => {
-                        tracing::warn!(profile_id = %result.profile_id, %error, "failed to read the current login after credential reconciliation");
-                        None
-                    }
-                },
-                _ => None,
-            };
-            let verdict = {
-                let mut rejected = self.rejected.lock().expect("rejected logins poisoned");
-                rejected.conclude(&result, profile.as_ref());
-                auth_cause.map(|cause| {
-                    rejected.failure_verdict(&result.profile_id, cause, current.as_ref(), None)
-                })
-            };
+            let verdict = self
+                .rejected
+                .lock()
+                .expect("rejected logins poisoned")
+                .conclude(&result, profile.as_ref());
             let notice = self.notices.leveled_notice(
                 &result,
                 profile.as_ref().map(|p| p.kind),

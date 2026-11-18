@@ -104,9 +104,6 @@ pub fn schedule_due_credential_syncs(
 pub(crate) async fn current_profile_login(
     profile: &mj_core::config::HarnessProfile,
 ) -> anyhow::Result<Option<LoginFingerprint>> {
-    if !profile.auth_scheme().uses_native_login_file() {
-        return Ok(None);
-    }
     let kind = profile.kind;
     let marker = match kind.login_store(mj_core::config::HarnessHost::current(), &profile.home) {
         mj_core::config::HarnessLoginStore::MacKeychain => {
@@ -116,7 +113,16 @@ pub(crate) async fn current_profile_login(
         }
         mj_core::config::HarnessLoginStore::File { marker } => marker,
     };
-    tokio::task::spawn_blocking(move || LoginFingerprint::read_file(kind, &marker)).await?
+    let profile = profile.clone();
+    tokio::task::spawn_blocking(move || {
+        // Codex's auth scheme comes from its config file.
+        if profile.auth_scheme().uses_native_login_file() {
+            LoginFingerprint::read_file(kind, &marker)
+        } else {
+            Ok(None)
+        }
+    })
+    .await?
 }
 
 /// Turns finished credential syncs into UI notices.
@@ -212,7 +218,7 @@ impl CredentialSyncNotices {
                 let profile = &result.profile_id;
                 let conclusion = match login_verdict {
                     Some(LoginFailureVerdict::Refused) => format!(
-                        "the provider refused the profile's current login. Run `mj login --profile {profile}`{advice}."
+                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`{advice}."
                     ),
                     Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
                         "the session held a stale login. The renewed login was pushed.".into()

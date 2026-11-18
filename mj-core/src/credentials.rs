@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
-use crate::config::{AuthScheme, HarnessKind, HarnessProfile};
+use crate::config::{AuthScheme, HarnessKind, HarnessProfile, harness_authentication_marker};
 use crate::diagnostic::TurnDiagnostic;
 use crate::relay::{RelayCommandOutcome, RelayEvent, RelayObservation};
 use crate::targets::CommandSpec;
@@ -1146,6 +1146,21 @@ enum LoginConclusion {
     Unrefused(String),
 }
 
+impl LoginConclusion {
+    fn verdict(&self) -> LoginFailureVerdict {
+        match self {
+            Self::Refused(_) => LoginFailureVerdict::Refused,
+            Self::Delivered { renewed: true } | Self::Renewed => LoginFailureVerdict::Renewed,
+            Self::Delivered { renewed: false } => LoginFailureVerdict::Unrefused {
+                reason: "credential reconciliation refreshed this session's login".into(),
+            },
+            Self::Unrefused(reason) => LoginFailureVerdict::Unrefused {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
 impl LoginFailure {
     fn matches(&self, profile_id: &str, cause: &CredentialSyncCause) -> bool {
         self.profile_id == profile_id && self.fingerprint == cause.login_fingerprint
@@ -1310,44 +1325,47 @@ impl RejectedLogins {
         self.deliveries.retain(|id, _| keep(id));
     }
 
-    /// Take in one finished sync of a configured profile. A removed profile
-    /// still ends the triggering decision.
+    /// Take in one finished sync of a configured profile.
     pub fn observe(&mut self, result: &CredentialSyncResult, profile: &HarnessProfile) {
         self.conclude(result, Some(profile));
     }
 
-    pub fn conclude(&mut self, result: &CredentialSyncResult, profile: Option<&HarnessProfile>) {
-        let Some(cause) = result
+    /// Record the reconciliation's own observation. A notice describes that
+    /// observation, while a later projection revalidates a refusal against
+    /// the login the profile holds then.
+    pub fn conclude(
+        &mut self,
+        result: &CredentialSyncResult,
+        profile: Option<&HarnessProfile>,
+    ) -> Option<LoginFailureVerdict> {
+        let cause = result
             .trigger
             .as_ref()
-            .filter(|cause| cause.reason == CredentialSyncReason::AuthenticationFailure)
-        else {
-            return;
-        };
+            .filter(|cause| cause.reason == CredentialSyncReason::AuthenticationFailure)?;
         let conclusion = Self::sync_conclusion(result, cause, profile);
         if let (Some(profile), LoginConclusion::Refused(identity)) = (profile, &conclusion) {
             let entry = (
                 profile.kind,
-                profile.authentication_marker(),
+                harness_authentication_marker(profile.kind, &profile.home),
                 identity.clone(),
             );
             if self.profiles.get(&result.profile_id) != Some(&entry) {
                 tracing::info!(
                     profile_id = %result.profile_id,
                     session_id = %cause.session_id,
-                    "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+                    "credential reconciliation found the profile's login refused"
                 );
                 self.profiles.insert(result.profile_id.clone(), entry);
             }
         }
-        if let Some(failure) = self
+        let failure = self
             .failures
             .get_mut(&cause.session_id)
             .and_then(|session| session.get_mut(&cause.ordinal))
-            && failure.matches(&result.profile_id, cause)
-        {
-            failure.conclusion = Some(conclusion);
-        }
+            .filter(|failure| failure.matches(&result.profile_id, cause))?;
+        let verdict = conclusion.verdict();
+        failure.conclusion = Some(conclusion);
+        Some(verdict)
     }
 
     fn sync_conclusion(
@@ -1362,9 +1380,11 @@ impl RejectedLogins {
         let Some(profile) = profile else {
             return unrefused("the profile is no longer configured");
         };
-        if !profile.auth_scheme().uses_native_login_file() {
-            return unrefused("this profile does not use a native login");
+        if profile.kind.keeps_logins_in_database() {
+            return unrefused("this profile stores its login in a database");
         }
+        // Only targets using a login file can return login evidence. Reading
+        // the profile again here would check a different login or config.
         let Some(reached) = result
             .outcomes
             .iter()
@@ -1478,20 +1498,13 @@ impl RejectedLogins {
         {
             return renewed(delivery);
         }
-        match conclusion {
-            LoginConclusion::Refused(refused) => match self.wake_verdict(refused, current) {
-                Renewed => renewed(delivery),
-                verdict => verdict,
-            },
-            LoginConclusion::Delivered { renewed: true } | LoginConclusion::Renewed => {
-                renewed(delivery)
-            }
-            LoginConclusion::Delivered { renewed: false } => Unrefused {
-                reason: "credential reconciliation refreshed this session's login".into(),
-            },
-            LoginConclusion::Unrefused(reason) => Unrefused {
-                reason: reason.clone(),
-            },
+        let verdict = match conclusion {
+            LoginConclusion::Refused(refused) => self.wake_verdict(refused, current),
+            conclusion => conclusion.verdict(),
+        };
+        match verdict {
+            Renewed => renewed(delivery),
+            verdict => verdict,
         }
     }
 
