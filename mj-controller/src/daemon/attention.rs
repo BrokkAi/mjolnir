@@ -146,12 +146,14 @@ pub(super) fn update(
             .and_then(|live| live.open_request.as_ref())
         {
             let work = request_hold(next, &id);
-            let held = held_questions.contains(&id)
-                && states.get(&id) != Some(&SessionAttention::NeedsInput);
-            let was_held = matches!(
-                previous.metadata.session_attention.get(&id),
-                Some(SessionAttention::Working | SessionAttention::Important)
-            ) && semantic_question(previous, &id).is_some()
+            let unshown = |runtime: &RuntimeProjection| {
+                runtime.records.get(&id).is_some_and(|record| {
+                    record.questions_shown_through < request.question.completed_ordinal
+                })
+            };
+            let held = held_questions.contains(&id) && unshown(next);
+            let was_held = unshown(previous)
+                && semantic_question(previous, &id).is_some()
                 && previous
                     .sessions
                     .get(&id)
@@ -162,7 +164,10 @@ pub(super) fn update(
                 && !request_hold(previous, &id).is_empty();
             if held && !was_held {
                 tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, ?work, "holding open request");
-            } else if states.get(&id) == Some(&SessionAttention::NeedsInput)
+            } else if (question_advances.contains_key(&id)
+                || states.get(&id) == Some(&SessionAttention::NeedsInput))
+                && work.is_empty()
+                && semantic_question(next, &id).is_some()
                 && was_held
                 && previous
                     .sessions
@@ -203,43 +208,42 @@ pub(super) async fn prune_read_notifications(
     state: std::sync::Arc<super::RuntimeState>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
+    maintain_notifications(
+        state,
+        cancellation,
+        crate::database::advance_questions_shown_through,
+    )
+    .await
+}
+
+pub(super) async fn maintain_notifications(
+    state: std::sync::Arc<super::RuntimeState>,
+    cancellation: tokio_util::sync::CancellationToken,
+    write: fn(&str, u64) -> anyhow::Result<u64>,
+) -> anyhow::Result<()> {
     use mj_core::snapshot_map::SnapshotMap;
     let mut revisions = state.revisions.subscribe();
     let mut previous_records = SnapshotMap::default();
     let mut previous_views = SnapshotMap::default();
     let mut attempted = BTreeMap::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut cursor_tasks = tokio::task::JoinSet::new();
+    let mut writing = BTreeSet::new();
     loop {
         revisions.borrow_and_update();
-        // Capture also queues advances from the sole question-raising decision.
+        // Pending decisions survive failures and deferred admission. Only a
+        // committed cursor or an explicit worker stack removal settles them.
         state.runtime_publication()?;
-        let advances = std::mem::take(
-            &mut state
-                .feed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .question_advances,
-        );
-        for (id, through) in advances {
-            let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
-            else {
-                continue;
-            };
-            let state = state.clone();
-            tasks.spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let _admission = admission;
-                    crate::database::advance_questions_shown_through(&id, through)
-                })
-                .await;
-                match result {
-                    Ok(Ok(_)) => {
-                        state.publish_revision();
-                    }
-                    Ok(Err(error)) => tracing::error!(%error, "could not persist shown question"),
-                    Err(error) => tracing::error!(%error, "shown question persistence task failed"),
-                }
-            });
+        let advances = state
+            .feed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .question_advances
+            .clone();
+        for id in advances.keys() {
+            if writing.insert(id.clone()) {
+                cursor_tasks.spawn(persist_shown_question(state.clone(), id.clone(), write));
+            }
         }
         let (records, views) = {
             let owner = state.owner();
@@ -293,15 +297,72 @@ pub(super) async fn prune_read_notifications(
             tokio::select! {
                 _ = cancellation.cancelled() => {
                     tasks.shutdown().await;
+                    cursor_tasks.shutdown().await;
                     return Ok(());
                 }
                 changed = revisions.changed() => {
                     changed?;
                     break;
                 }
+                Some(joined) = cursor_tasks.join_next(), if !cursor_tasks.is_empty() => {
+                    writing.remove(&joined?);
+                    if !crate::upgrade::gate().is_open() {
+                        tasks.shutdown().await;
+                        cursor_tasks.shutdown().await;
+                        return Ok(());
+                    }
+                    break;
+                }
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     joined?;
                 }
+            }
+        }
+    }
+}
+
+/// A session has one writer task; the shared pending map owns its latest advance.
+/// Admission belongs only to each write, never to drain waits or retry backoff.
+async fn persist_shown_question(
+    state: std::sync::Arc<super::RuntimeState>,
+    id: String,
+    write: fn(&str, u64) -> anyhow::Result<u64>,
+) -> String {
+    // Follow the supervised Observe delivery loop's 1s-to-60s backoff.
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        if !crate::upgrade::gate().wait_after_draining().await {
+            return id;
+        }
+        let through = state
+            .feed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .question_advances
+            .get(&id)
+            .copied();
+        let Some(through) = through else { return id };
+        let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
+        else {
+            continue;
+        };
+        let write_id = id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            write(&write_id, through)
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => {
+                // Only feed capture settles the pending map, together with
+                // the publication that observes the committed cursor.
+                state.publish_revision();
+                return id;
+            }
+            error => {
+                tracing::error!(session_id = %id, ?error, retry_after_ms = backoff.as_millis(), "could not persist shown question");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
             }
         }
     }
@@ -1359,6 +1420,29 @@ mod tests {
                 NotificationKind::NeedsInput
             );
         }
+        // A stays shown when the worker opens a newer B while its child works.
+        let previous = next.clone();
+        let mut newer = (*next.sessions["parent"].operational.clone().unwrap()).clone();
+        newer
+            .open_request
+            .as_mut()
+            .unwrap()
+            .question
+            .completed_ordinal = 20;
+        let stack = std::sync::Arc::make_mut(&mut newer.notification_stack);
+        stack.revision = 20;
+        stack.entries.push(NotificationStackEntry {
+            completed_at_ms: 200,
+            completed_ordinal: 20,
+            kind: NotificationKind::NeedsInput,
+            message: EntryMessage::Found("agent:held-b".into()),
+        });
+        next.sessions.get_mut("parent").unwrap().operational = Some(newer.into());
+        let advances = super::update(&previous, &mut next, None);
+        assert!(advances.is_empty());
+        let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
+        assert_eq!(card.entries.len(), 1);
+        assert_eq!(card.entries[0].completed_ordinal, 10);
         // A later agent-only turn and a missing child view cannot hide it either.
         let previous = next.clone();
         next.sessions.remove("child");

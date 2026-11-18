@@ -231,21 +231,117 @@ pub(super) async fn notification_message(
         return read_notification_message(session_id, move |id| {
             match (expected.message_id, expected.through) {
                 (Some(target), _) => read_notification_item(id, &target),
-                (_, Some(through)) => {
-                    let item = crate::database::load_materialized_agent_item_through(id, through)?;
-                    Ok(item.and_then(|item| {
-                        mj_core::transcript::materialized_agent_message_text(
-                            std::iter::once(&item),
-                            &item.stable_id,
-                        )
-                    }))
-                }
+                (_, Some(through)) => read_notification_completion(id, through),
                 _ => unreachable!("entry selector is present"),
             }
         })
         .await;
     }
-    // Copy what the snapshot holds, then release it before any database read.
+    // Resolve both routes from one immutable publication, then release the
+    // watch borrow before reading stored text.
+    enum Message {
+        Shown(mj_core::attention::NotificationStackEntry),
+        Fallback {
+            holder: String,
+            kind: NotificationKind,
+            pending_request: Option<String>,
+            review_activity: Option<String>,
+            question_message: Option<String>,
+            supports_open_request: bool,
+            through: Option<u64>,
+        },
+    }
+    let message = {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        let shown = session
+            .notification_card
+            .as_ref()
+            .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+            .cloned();
+        if let Some(entry) = shown {
+            use mj_core::attention::EntryMessage;
+            let question = match &entry.message {
+                EntryMessage::Found(id) => id.as_str(),
+                _ => "",
+            };
+            if expected.through.is_some()
+                || expected.holder.as_ref().is_some_and(|holder| {
+                    holder != &session_id
+                        || !expected.requests.is_empty()
+                        || expected.question != question
+                })
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the notification changed; its message will be read again",
+                )
+                .with_code(Some("notification_changed")));
+            }
+            Message::Shown(entry)
+        } else {
+            let holder = session
+                .form_holder
+                .as_deref()
+                .filter(|holder| snapshot.sessions.get(holder).is_some())
+                .unwrap_or(&session_id)
+                .to_owned();
+            let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
+            let requests = holder_session
+                .pending_elicitations
+                .iter()
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            // An `!` card's boundary is its ReadThrough ordinal, checked here and
+            // then used as the bound of the read, so no newer reply can answer.
+            let through = match (&session.notification_dismissal, expected.through) {
+                (
+                    Some(mj_core::attention::NotificationDismissal::ReadThrough(held)),
+                    Some(asked),
+                ) if *held == asked => Some(asked),
+                (Some(mj_core::attention::NotificationDismissal::ReadThrough(_)), _)
+                | (_, Some(_)) => {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "the notification changed; its message will be read again",
+                    )
+                    .with_code(Some("notification_changed")));
+                }
+                _ => None,
+            };
+            if expected.holder.as_ref().is_some_and(|expected_holder| {
+                &holder != expected_holder
+                    || requests != expected.requests
+                    || holder_session.question_message.as_deref().unwrap_or("") != expected.question
+            }) {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the notification changed; its message will be read again",
+                )
+                .with_code(Some("notification_changed")));
+            }
+            Message::Fallback {
+                holder,
+                kind: if session.attention == mj_core::attention::SessionAttention::NeedsInput {
+                    NotificationKind::NeedsInput
+                } else {
+                    NotificationKind::Important
+                },
+                pending_request: holder_session
+                    .pending_elicitations
+                    .last()
+                    .map(|request| request.message.clone()),
+                review_activity: holder_session
+                    .turn_review
+                    .as_ref()
+                    .map(|review| review.status.clone()),
+                question_message: holder_session.question_message.clone(),
+                supports_open_request: holder_session.supports_open_request,
+                through,
+            }
+        }
+    };
     let (
         holder,
         kind,
@@ -254,69 +350,33 @@ pub(super) async fn notification_message(
         question_message,
         supports_open_request,
         through,
-    ) = {
-        let snapshot = state.snapshot_rx.borrow();
-        let session = require_session_record(&snapshot, &session_id)?;
-        let holder = session
-            .form_holder
-            .as_deref()
-            .filter(|holder| snapshot.sessions.get(holder).is_some())
-            .unwrap_or(&session_id)
-            .to_owned();
-        let holder_session = snapshot.sessions.get(&holder).unwrap_or(session);
-        let requests = holder_session
-            .pending_elicitations
-            .iter()
-            .map(|request| request.id.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        // An `!` card's boundary is its ReadThrough ordinal, checked here and
-        // then used as the bound of the read, so no newer reply can answer.
-        let through = match (&session.notification_dismissal, expected.through) {
-            (Some(mj_core::attention::NotificationDismissal::ReadThrough(held)), Some(asked))
-                if *held == asked =>
-            {
-                Some(asked)
-            }
-            (Some(mj_core::attention::NotificationDismissal::ReadThrough(_)), _) | (_, Some(_)) => {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "the notification changed; its message will be read again",
-                )
-                .with_code(Some("notification_changed")));
-            }
-            _ => None,
-        };
-        if expected.holder.as_ref().is_some_and(|expected_holder| {
-            &holder != expected_holder
-                || requests != expected.requests
-                || holder_session.question_message.as_deref().unwrap_or("") != expected.question
-        }) {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "the notification changed; its message will be read again",
-            )
-            .with_code(Some("notification_changed")));
+    ) = match message {
+        Message::Shown(entry) => {
+            use mj_core::attention::EntryMessage;
+            return read_notification_message(session_id, move |id| match entry.message {
+                EntryMessage::Found(target) => read_notification_item(id, &target),
+                EntryMessage::Locating => Ok(None),
+                EntryMessage::None => read_notification_completion(id, entry.completed_ordinal),
+            })
+            .await;
         }
-        (
-            holder.clone(),
-            if session.attention == mj_core::attention::SessionAttention::NeedsInput {
-                NotificationKind::NeedsInput
-            } else {
-                NotificationKind::Important
-            },
-            holder_session
-                .pending_elicitations
-                .last()
-                .map(|request| request.message.clone()),
-            holder_session
-                .turn_review
-                .as_ref()
-                .map(|review| review.status.clone()),
-            holder_session.question_message.clone(),
-            holder_session.supports_open_request,
+        Message::Fallback {
+            holder,
+            kind,
+            pending_request,
+            review_activity,
+            question_message,
+            supports_open_request,
             through,
-        )
+        } => (
+            holder,
+            kind,
+            pending_request,
+            review_activity,
+            question_message,
+            supports_open_request,
+            through,
+        ),
     };
     read_notification_message(holder, move |reader| {
         let facts = NotificationMessageFacts {
@@ -344,6 +404,16 @@ pub(super) async fn notification_message(
         )
     })
     .await
+}
+
+fn read_notification_completion(session_id: &str, through: u64) -> anyhow::Result<Option<String>> {
+    let item = crate::database::load_materialized_agent_item_through(session_id, through)?;
+    Ok(item.and_then(|item| {
+        mj_core::transcript::materialized_agent_message_text(
+            std::iter::once(&item),
+            &item.stable_id,
+        )
+    }))
 }
 
 fn read_notification_item(session_id: &str, target: &str) -> anyhow::Result<Option<String>> {

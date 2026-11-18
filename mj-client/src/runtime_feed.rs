@@ -334,6 +334,24 @@ pub struct NotificationCard {
     pub form: Option<CardForm>,
 }
 
+impl NotificationCard {
+    /// The newest shown stack question; forms and legacy cards own other paths.
+    pub fn shown_question(&self) -> Option<&mj_core::attention::NotificationStackEntry> {
+        if self.form.is_some()
+            || !matches!(
+                self.dismissal,
+                Some(mj_core::attention::NotificationDismissal::Stack { .. })
+            )
+        {
+            return None;
+        }
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == mj_core::attention::NotificationKind::NeedsInput)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardForm {
     #[serde(default)]

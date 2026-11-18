@@ -197,13 +197,17 @@ impl RuntimeState {
     /// Terminal clients receive a scoped projection through
     /// [`Self::runtime_changes_for_subagent_parents`].
     pub(crate) fn runtime_publication(&self) -> Result<RuntimeProjection> {
+        self.runtime_publication_with_question_readiness()
+            .map(|(runtime, _)| runtime)
+    }
+
+    /// Cutover readiness and cards must describe the same serialized capture.
+    pub(crate) fn runtime_publication_with_question_readiness(
+        &self,
+    ) -> Result<(RuntimeProjection, bool)> {
         self.capture_runtime()?;
-        Ok(self
-            .feed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .full
-            .clone())
+        let history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok((history.full.clone(), history.question_advances.is_empty()))
     }
 
     fn capture_runtime(&self) -> Result<RuntimeCursor> {
@@ -343,6 +347,24 @@ impl RuntimeState {
             let pending = history.question_advances.entry(id).or_default();
             *pending = (*pending).max(through);
         }
+        // Decisions and their removal belong to this serialized capture. A
+        // background observer must never prune newer decisions using an older
+        // projection it retained after releasing this lock.
+        history.question_advances.retain(|id, through| {
+            full.records
+                .get(id)
+                .is_some_and(|record| record.questions_shown_through < *through)
+                && full
+                    .sessions
+                    .get(id)
+                    .and_then(|view| view.operational.as_deref())
+                    .is_none_or(|live| {
+                        live.notification_stack.entries.iter().any(|entry| {
+                            entry.kind == mj_core::attention::NotificationKind::NeedsInput
+                                && entry.completed_ordinal == *through
+                        })
+                    })
+        });
         // Preserve decorated rows as well as the attention tree across polls.
         let mut sessions = history.full.sessions.clone();
         for (id, view) in history.attention_source.sessions.changes(&source.sessions) {

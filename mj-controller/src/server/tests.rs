@@ -5676,6 +5676,7 @@ async fn notification_message_for_an_important_card_requires_its_read_through_bo
 }
 
 // Hard-won: 8dd7f6384: a turn without text used a preceding turn's reply.
+// Hard-won: 4c2c5b4f8: selector-free notification text exposed a newer held question.
 #[tokio::test]
 async fn notification_message_reads_only_entries_on_the_current_card() {
     use mj_client::runtime_feed::NotificationCard;
@@ -5838,4 +5839,63 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
         body["sessions"][0]["notification_card"]["entries"][0]["message"]["found"],
         "agent:1"
     );
+    // A is shown while the newer worker request B (agent:7) remains held.
+    // Even the selector-free compatibility route must read the card's newest ?.
+    for message in [
+        EntryMessage::Found("agent:4".into()),
+        EntryMessage::None,
+        EntryMessage::Locating,
+    ] {
+        let expected_text = if message == EntryMessage::Locating {
+            None
+        } else {
+            Some("bounded")
+        };
+        let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.attention = mj_core::attention::SessionAttention::NeedsInput;
+            session.question_message = Some("agent:7".into());
+            session.supports_open_request = true;
+            session.notification_card = Some(NotificationCard {
+                since_ms: 0,
+                badge: NotificationKind::NeedsInput,
+                entries: vec![
+                    NotificationStackEntry {
+                        completed_at_ms: 0,
+                        completed_ordinal: 2,
+                        kind: NotificationKind::NeedsInput,
+                        message: EntryMessage::Found("agent:1".into()),
+                    },
+                    NotificationStackEntry {
+                        completed_at_ms: 0,
+                        completed_ordinal: 5,
+                        kind: NotificationKind::NeedsInput,
+                        message: message.clone(),
+                    },
+                ],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 10 }),
+                holder: None,
+                form: None,
+            });
+        });
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions/session-1/notification-message")
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["text"], serde_json::json!(expected_text));
+        let response = app.oneshot(Request::get("/api/sessions/session-1/notification-message?holder=session-1&question=agent%3A7")
+            .header(COOKIE, &cookie).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }

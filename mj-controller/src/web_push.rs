@@ -329,8 +329,8 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     let mut sends = tokio::task::JoinSet::new();
     blocking(db::push_recover).await?;
     loop {
-        let runtime = state.runtime_publication()?;
-        let (due, next) = blocking(move || db::push_reconcile(runtime)).await?;
+        let (runtime, questions_settled) = state.runtime_publication_with_question_readiness()?;
+        let (due, next) = blocking(move || db::push_reconcile(runtime, questions_settled)).await?;
         for delivery in due {
             let client = client.clone();
             let vapid = vapid.clone();

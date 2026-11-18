@@ -234,6 +234,50 @@ impl DashboardState {
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
     pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
+        if level == AttentionLevel::Waiting
+            && let Some(entry) = self
+                .notification_cards
+                .as_ref()
+                .and_then(|cards| cards.get(session_id))
+                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
+        {
+            use mj_core::attention::EntryMessage;
+            let source = match &entry.message {
+                EntryMessage::Found(id) => Some(crate::NotificationReadSource::Item(id.clone())),
+                EntryMessage::None => Some(crate::NotificationReadSource::Through(
+                    entry.completed_ordinal,
+                )),
+                EntryMessage::Locating => None,
+            };
+            let text = match &entry.message {
+                EntryMessage::Found(id) => {
+                    self.session_details.get(session_id).and_then(|detail| {
+                        mj_core::transcript::materialized_agent_message_text(
+                            detail.projection.transcript.iter().map(AsRef::as_ref),
+                            id,
+                        )
+                    })
+                }
+                EntryMessage::None | EntryMessage::Locating => None,
+            };
+            return text
+                .or_else(|| {
+                    self.notifications
+                        .message_read
+                        .as_ref()
+                        .filter(|read| {
+                            read.request.session_id == session_id
+                                && source.as_ref() == Some(&read.request.source)
+                        })
+                        .and_then(|read| read.text.clone())
+                })
+                .unwrap_or_else(|| {
+                    mj_core::notification_message::notification_message_placeholder(
+                        mj_core::attention::NotificationKind::NeedsInput,
+                    )
+                    .to_owned()
+                });
+        }
         let holder = self.notification_content_session(session_id, level);
         let session_id = holder.as_str();
         let detail = self.session_details.get(session_id);
@@ -557,6 +601,7 @@ mod tests {
         dashboard
     }
 
+    // Hard-won: 4c2c5b4f8: desktop notifications displayed a newer held question.
     #[test]
     fn retained_question_notification_uses_original_message_after_later_reply() {
         let mut dashboard = dashboard();
@@ -587,6 +632,36 @@ mod tests {
         let detail = dashboard.session_details.get_mut("asks").unwrap();
         detail.supports_open_request = true;
         detail.question_message = Some("agent:original".into());
+        // A remains shown while B is the worker's newer, held open request.
+        detail.question_message = Some("agent:held".into());
+        detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
+            stable_id: "agent:held".into(), position: 2, latest_content_event_ordinal: None,
+            created_at_ms: 2, last_changed_at_ms: 2,
+            body: mj_core::state::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text","text":"Hidden newer question?"}})], streaming: false,
+            },
+        }));
+        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "asks".into(),
+            mj_client::runtime_feed::NotificationCard {
+                since_ms: 1,
+                badge: mj_core::attention::NotificationKind::NeedsInput,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 1,
+                    completed_ordinal: 1,
+                    kind: mj_core::attention::NotificationKind::NeedsInput,
+                    message: mj_core::attention::EntryMessage::Found("agent:original".into()),
+                }],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 2 }),
+                holder: None,
+                form: None,
+            },
+        )])));
+        assert_eq!(
+            dashboard.question_message("asks"),
+            Some("agent:original"),
+            "opening the conversation must jump to the shown question"
+        );
         assert!(dashboard.notification_events(0).is_empty());
         let notices = dashboard.notification_events(2000);
         assert_eq!(
