@@ -41,6 +41,11 @@ impl ActiveChat {
         }
     }
 
+    /// Accepted clipboard work remains with its logical form until delivered.
+    pub fn has_pending_elicitation_input(&self) -> bool {
+        self.state.elicitation.is_some() && self.state.composer_runtime.paste_in_flight
+    }
+
     pub fn has_elicitation(&self) -> bool {
         self.state.elicitation.is_some()
     }

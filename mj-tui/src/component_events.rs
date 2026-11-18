@@ -58,6 +58,11 @@ impl DashboardState {
         self.away_dialog().is_some() || !matches!(self.mode, Mode::Dashboard)
     }
 
+    /// An already pressed dashboard control owns its drag and release.
+    pub fn component_pointer_captured(&self) -> bool {
+        self.surface_form.borrow().captures_pointer() || self.workspace_scrollbar.is_dragging()
+    }
+
     /// Whether a form owns this pointer event, ahead of selectable body text.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
         if self.away_dialog().is_some() {

@@ -198,7 +198,7 @@ impl DashboardContext {
     }
 
     pub(super) fn wanted_chat_sessions(&self) -> BTreeSet<String> {
-        attachment::wanted_chat_sessions(&self.dashboard, &self.attachments)
+        attachment::wanted_chat_sessions(&self.dashboard, &self.attachments, &self.chats)
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays

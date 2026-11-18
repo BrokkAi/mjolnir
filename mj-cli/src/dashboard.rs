@@ -826,8 +826,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // leaves the frame current, so it needs no rebuild.
                 let mut previous_consumed = false;
                 loop {
-                    if previous_consumed
-                        && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open())
+                    if (previous_consumed
+                        && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open()))
+                        || context.dashboard.notification_input_needs_frame()
                     {
                         context.loop_stalls.phase(loop_stalls::Phase::Draw);
                         context.draw()?;
@@ -2399,6 +2400,7 @@ fn dispatch_event(
 ) -> (bool, bool) {
     if matches!(&event, Event::Mouse(_))
         && !context.dashboard.modal_open()
+        && !context.dashboard.component_pointer_captured()
         && let Some(session) = context
             .dashboard
             .conversation_form_pointer_session(&context.chats)

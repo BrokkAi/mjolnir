@@ -403,7 +403,9 @@ async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
         .unwrap();
     dashboard.close_pane(pane);
     let attachments = BTreeMap::from([("session-1".into(), attachment)]);
-    assert!(attachment::wanted_chat_sessions(&dashboard, &attachments).contains("session-1"));
+    assert!(
+        attachment::wanted_chat_sessions(&dashboard, &attachments, &chats).contains("session-1")
+    );
     let mut attachment = attachments.into_values().next().unwrap();
     // Restore the original assignment to continue the cancellation transitions.
     dashboard.set_pane_session(dashboard.focused_pane(), Some("session-1"));

@@ -2371,9 +2371,13 @@ async fn stale_clipboard_results_do_not_cross_capability_or_input_context_change
     })).unwrap());
     chat.state.earlier = Some(Default::default());
     chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+    // Hard-won: c9867384e: releasing a notification parked a read before it could update its form draft.
+    chat.state.composer_runtime.paste_in_flight = true;
+    assert!(chat.has_pending_elicitation_input());
     let pending = clipboard_result(&chat, ClipboardContent::Text("shared answer".into()));
     chat.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
     chat.state.apply_composer_update(pending);
+    assert!(!chat.has_pending_elicitation_input());
     chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
     let ChatAction::RespondElicitation { response, .. } =
         chat.state.handle_key(key(KeyCode::Enter))

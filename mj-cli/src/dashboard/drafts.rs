@@ -218,8 +218,11 @@ impl DashboardContext {
             // A visible form keeps its chat and clipboard result channel.
             // Parking and immediately re-adopting would replace the channel
             // underneath a read accepted by the retained form.
-            let form_retained =
-                self.dashboard.notification_form_session().as_deref() == Some(outgoing.as_str());
+            let form_retained = attachment::chat_retained_without_conversation(
+                &self.dashboard,
+                &self.chats,
+                &outgoing,
+            );
             if !form_retained {
                 self.park_chat_composer(&outgoing);
             }

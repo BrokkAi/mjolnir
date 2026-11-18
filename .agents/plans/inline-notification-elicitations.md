@@ -91,3 +91,10 @@ Fix all three findings. CardForm's shared namespace owner now distinguishes comp
 Extend the existing card input regression through a findings verdict, the interaction regression through a captured conversation entering Moving, and the layout-restore regression through record retirement/recreation and rejection of its old completion. Run the existing daemon native/review projection regression, attachment filters, dashboard golden replay, all-targets clippy and formatting before committing.
 
 Sixth follow-up validation passes: extended verdict/input/retirement regressions, 28 attachment tests, daemon native/review projection, unchanged dashboard golden, five-crate all-targets clippy, formatting and diff checks. Ready for mandatory review; no push.
+
+
+## Seventh review follow-up
+
+Fix all four findings. Inline focus uses the dashboard's shared pointer-press reset for pending chords and resize mode. Dashboard capture is checked before conversation or notification routing so drag/release returns to the pressed dashboard control. Accepted clipboard work retains its logical form chat and composer even when navigation releases the notification surface; after the result applies, normal retirement captures the updated form draft. This is the narrow accepted-input lifetime needed to preserve work, rather than a second clipboard path or a retention timeout. The notification presentation records which selection revision it rendered; the input loop refreshes a newly revealed form before handling another queued key or paste. Item changes invalidate the old form rectangle immediately.
+
+Extend the existing input regression through prefix+click+q, resize-mode reset, and a dashboard-button drag into the inline form. Extend card navigation through the renderer-readiness transition and the existing clipboard regression through pending-input ownership and completion. These focused tests, the 28-test attachment filter, unchanged golden replay, five-crate all-targets clippy, formatting and diff checks pass. No tests failed in this follow-up. Ready for required review; no push.

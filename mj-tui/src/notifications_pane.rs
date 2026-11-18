@@ -31,6 +31,7 @@ pub(crate) struct NotificationsPane {
     scroll_card: Option<CardIdentity>,
     selected_item: usize,
     selection_revision: u64,
+    rendered_revision: Option<u64>,
     text_generation: u64,
     text_rows: Option<mj_chat::selection::SelectableText>,
     form_text: Option<(String, u16)>,
@@ -53,6 +54,7 @@ impl Default for NotificationsPane {
             scroll_card: None,
             selected_item: 0,
             selection_revision: 0,
+            rendered_revision: None,
             text_generation: 0,
             text_rows: None,
             form_text: None,
@@ -563,6 +565,7 @@ impl DashboardState {
         pane.text_generation = pane.text_generation.wrapping_add(1);
         pane.text_rows = None;
         pane.form_text = None;
+        pane.form_area = None;
         pane.message_read = None;
         pane.selection_revision = pane.selection_revision.wrapping_add(1);
     }
@@ -654,6 +657,12 @@ impl DashboardState {
         }
     }
 
+    /// Input batching refreshes newly selected form content before any next event.
+    pub fn notification_input_needs_frame(&self) -> bool {
+        self.notification_form_session().is_some()
+            && self.notifications.rendered_revision != Some(self.notifications.selection_revision)
+    }
+
     pub fn notification_form_owns_keyboard(&self) -> bool {
         self.focus == Focus::Notifications
             && self.notifications.form_area.is_some()
@@ -684,7 +693,7 @@ impl DashboardState {
         chats: &std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
         mouse: crossterm::event::MouseEvent,
     ) -> Option<bool> {
-        if self.modal_open() {
+        if self.modal_open() || self.component_pointer_captured() {
             return None;
         }
         if self.conversation_form_pointer_session(chats).is_some() {
@@ -715,7 +724,10 @@ impl DashboardState {
         chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
         event: &crossterm::event::Event,
     ) -> Option<mj_chat::components::EventResult<mj_chat::chat::ChatEventOutcome>> {
-        if self.modal_open() {
+        if self.modal_open()
+            || (matches!(event, crossterm::event::Event::Mouse(_))
+                && self.component_pointer_captured())
+        {
             return None;
         }
         if matches!(event, crossterm::event::Event::Mouse(_))
@@ -764,6 +776,7 @@ impl DashboardState {
                             crossterm::event::MouseButton::Left,
                         )
                 {
+                    self.begin_pointer_press();
                     self.focus = Focus::Notifications;
                 }
                 inside
@@ -1222,6 +1235,7 @@ pub(crate) fn render(
     mut chat: Option<&mut mj_chat::chat::ActiveChat>,
 ) {
     dashboard.notifications.form_area = None;
+    dashboard.notifications.rendered_revision = Some(dashboard.notifications.selection_revision);
     let focused = dashboard.focus == Focus::Notifications;
     let minimized = dashboard.notifications.size == PaneSize::Minimized;
     let clearing = dashboard
@@ -2032,6 +2046,13 @@ pub(crate) mod tests {
                 .unwrap();
             let area = dashboard.notifications.form_area.unwrap();
             assert_eq!(area.height, 3, "one row inside the form border");
+            // Hard-won: c9867384e: inline focus left a prefix armed, so q detached instead of entering the answer.
+            dashboard.route_bound_key(&crossterm::event::KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+            ));
+            assert!(dashboard.prefix_pending());
+            dashboard.resize_mode = true;
             for kind in [
                 MouseEventKind::Down(MouseButton::Left),
                 MouseEventKind::Up(MouseButton::Left),
@@ -2049,8 +2070,14 @@ pub(crate) mod tests {
                         .consumed
                 );
             }
+            assert!(!dashboard.prefix_pending());
+            assert!(!dashboard.resize_mode);
+            assert_eq!(
+                dashboard.route_bound_key(&key(KeyCode::Char('q'))),
+                crate::KeyRoute::Forward
+            );
             for event in [
-                Event::Key(key(KeyCode::Char('x'))),
+                Event::Key(key(KeyCode::Char('q'))),
                 Event::Paste("compact".into()),
                 Event::Key(key(KeyCode::Enter)),
             ] {
@@ -2071,7 +2098,7 @@ pub(crate) mod tests {
                 ElicitationResponse::Accept {
                     content: [(
                         "path".into(),
-                        mj_core::elicitation::ElicitationValue::String("xcompact".into())
+                        mj_core::elicitation::ElicitationValue::String("qcompact".into())
                     )]
                     .into_iter()
                     .collect()
@@ -2194,6 +2221,42 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert!(chats["session-1"].has_elicitation());
+        // Hard-won: c9867384e: a dashboard button's release was stolen by the inline form.
+        let (x, y) = point(
+            &lines[usize::from(card.y)..usize::from(card.bottom())],
+            "Go to Session",
+        );
+        let dashboard_press = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: card.y + y,
+            modifiers: KeyModifiers::NONE,
+        };
+        dashboard.handle_mouse(dashboard_press);
+        assert!(dashboard.component_pointer_captured());
+        let release_in_form = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: area.x + 3,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Mouse(release_in_form))
+                .is_none()
+        );
+        dashboard.handle_mouse(release_in_form);
+        assert!(!dashboard.component_pointer_captured());
+        dashboard.handle_mouse(dashboard_press);
+        assert_eq!(
+            dashboard.handle_mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..dashboard_press
+            }),
+            DashboardAction::Open {
+                session_id: "session-1".into()
+            }
+        );
         // Hard-won: e1b4abc81: lifecycle-owned conversation capture blocked an unrelated notification form.
         let (x, y) = point(&lines, mj_chat::components::Checkbox::marker(false));
         chats
@@ -2384,6 +2447,15 @@ pub(crate) mod tests {
         let previous = point(&newest, "Previous");
         dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), previous));
         dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), previous));
+        // Hard-won: c9867384e: a same-batch paste used the old message frame after revealing a form.
+        let revision = dashboard.notifications.selection_revision;
+        dashboard.handle_key(alt(KeyCode::PageDown));
+        assert_ne!(revision, dashboard.notifications.selection_revision);
+        assert!(dashboard.notifications.form_area.is_none());
+        assert!(dashboard.notification_input_needs_frame());
+        drawn(&mut dashboard, 120, 44);
+        assert!(!dashboard.notification_input_needs_frame());
+        dashboard.handle_key(alt(KeyCode::PageUp));
         let item = dashboard.wanted_notification_message().unwrap();
         assert_eq!(item.session_id, "q1", "an entry belongs to its own session");
         assert_eq!(

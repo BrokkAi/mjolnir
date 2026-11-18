@@ -107,10 +107,24 @@ impl ChatRetirement {
     }
 }
 
+/// An inline form or its accepted input retains its one logical chat even
+/// after navigation removes the conversation surface.
+pub(super) fn chat_retained_without_conversation(
+    dashboard: &mj_tui::DashboardState,
+    chats: &BTreeMap<String, ActiveChat>,
+    session: &str,
+) -> bool {
+    dashboard.notification_form_session().as_deref() == Some(session)
+        || chats
+            .get(session)
+            .is_some_and(ActiveChat::has_pending_elicitation_input)
+}
+
 /// The sessions retained by live conversation or notification interests.
 pub(super) fn wanted_chat_sessions(
     dashboard: &mj_tui::DashboardState,
     attachments: &BTreeMap<String, SessionAttachment>,
+    chats: &BTreeMap<String, ActiveChat>,
 ) -> std::collections::BTreeSet<String> {
     let mut sessions = dashboard
         .pane_sessions()
@@ -125,6 +139,12 @@ pub(super) fn wanted_chat_sessions(
     if let Some(session) = dashboard.notification_form_session() {
         sessions.insert(session);
     }
+    sessions.extend(
+        chats
+            .iter()
+            .filter(|(_, chat)| chat.has_pending_elicitation_input())
+            .map(|(session, _)| session.clone()),
+    );
     sessions
 }
 
