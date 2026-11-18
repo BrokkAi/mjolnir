@@ -1465,30 +1465,22 @@ impl Controller {
             &target_id,
         )
         .map_err(anyhow::Error::msg)?;
-        // The environment decision and everything after it must read one
-        // answer for the destination size, so the request is resolved first:
-        // a clear request on a container destination means the default size,
-        // and the decision must compare that size, not the absence of one.
-        let resolved_by_default = resolve_move_destination_size(
+        // The environment decision and the destination size are one decision,
+        // so one function makes both and the sealed selection is what it
+        // decided from.
+        let (in_place, resolved_by_default) = resolve_move_size_for_environment(
             source,
             &mut selection,
             &self.state,
-            target,
-            previous.as_ref(),
-        );
-        let in_place = move_in_place_for_record(
-            source,
-            &selection,
             &self.config.targets,
+            target,
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
         )?;
         // The resolved selection is what every later reader decides from --
         // the sealed Move, capacity admission inside execution and the
         // destination record -- so it is never put back to the unresolved
-        // request. On a destination with a default that request would size
-        // the container differently from the answer this preparation just
-        // gave, and the two decisions would disagree (#1585).
+        // request.
         let sized_by_destination_default =
             move_size_is_destination_default(resolved_by_default, previous.as_ref());
         super::backend::validate_resource_allocation(
@@ -3293,11 +3285,52 @@ fn move_default_allocation(
     })
 }
 
-/// What a Move applies where its selection names no size: the inherited size,
-/// or the destination's default, decided once here so the environment
-/// decision, the sealed selection, capacity admission and the destination
-/// record cannot disagree (#1585). Returns whether the applied size is that
-/// default.
+/// Decide a Move's environment and, when it provisions, the size it will
+/// provision with.
+///
+/// One function makes both decisions so the sealed selection is always the
+/// selection the decision was made from: execution re-prepares that selection
+/// and capacity admission re-decides `in_place` from it, and a Move whose
+/// sealed selection decided something else would be refused as having changed
+/// its mind (#1585).
+///
+/// A profile-only Move of a container that records no size changes nothing
+/// about the environment, so it stays in place and is not given a size here.
+/// Inventing one would turn it into a rebuild, and the automatic quota switch,
+/// which only ever sends a profile-only selection, refuses a Move that changes
+/// the environment.
+///
+/// Returns whether the environment is kept, and whether the applied size is
+/// the destination's default.
+fn resolve_move_size_for_environment(
+    source: &mj_core::state::SessionRecord,
+    selection: &mut MoveSelection,
+    state: &mj_core::state::State,
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
+    target: &mj_core::config::TargetTemplate,
+    is_subagent: bool,
+    previous: Option<&MoveOperation>,
+) -> Result<(bool, bool)> {
+    let sealed = previous.is_some_and(MoveOperation::holds_source_environment);
+    // A clear request means "the destination's default", so it is resolved
+    // before the decision: when that default is the size the container
+    // already has, the environment is unchanged.
+    let mut sized_by_destination_default = selection.clear_resource_allocation
+        && !sealed
+        && resolve_move_destination_size(source, selection, state, target);
+    let in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
+    // A Move that provisions needs a size to create the container with. It
+    // takes the inherited one, else the destination's default.
+    if !in_place && !sealed && selection.resource_allocation.is_none() {
+        sized_by_destination_default |=
+            resolve_move_destination_size(source, selection, state, target);
+    }
+    Ok((in_place, sized_by_destination_default))
+}
+
+/// What a Move applies where its selection names no size, or where it clears
+/// the inherited one: the inherited size, or the destination's default.
+/// Returns whether the applied size is that default.
 ///
 /// A destination without a default -- a fixed host -- has none to give, so
 /// there the request keeps its own meaning, and the clear request is what
@@ -3305,22 +3338,15 @@ fn move_default_allocation(
 /// sealed selection names the size that will be applied, so no later reader
 /// has to work it out from the source record again.
 ///
-/// A retained Move whose selection is already sealed is never rewritten. Its
-/// selection is the Move's own record of what was decided, and execution
-/// re-prepares it and refuses a selection that differs. A Move sealed by a
-/// build that inherited sizing separately records no allocation at all, so
-/// resolving it here would change its meaning and leave that Move impossible
-/// to retry after an upgrade.
+/// The caller decides when this applies: never to a retained Move, whose
+/// sealed selection is its own record of what was decided and is re-prepared
+/// and compared by execution.
 fn resolve_move_destination_size(
     source: &mj_core::state::SessionRecord,
     selection: &mut MoveSelection,
     state: &mj_core::state::State,
     target: &mj_core::config::TargetTemplate,
-    previous: Option<&MoveOperation>,
 ) -> bool {
-    if previous.is_some_and(MoveOperation::holds_source_environment) {
-        return false;
-    }
     let Some(default_size) = move_default_allocation(state, target) else {
         return false;
     };
