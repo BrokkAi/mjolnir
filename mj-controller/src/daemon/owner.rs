@@ -646,6 +646,48 @@ impl RuntimeState {
     }
 }
 
+impl crate::worker_client::CredentialSyncRuntime for RuntimeState {
+    fn credential_targets(
+        &self,
+    ) -> Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>> {
+        self.credential_targets.clone()
+    }
+
+    fn credential_session_ids(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord> {
+        RuntimeState::credential_session_ids(self)
+    }
+
+    fn credential_session_ended(&self, session_id: &str) -> bool {
+        RuntimeState::credential_session_ended(self, session_id)
+    }
+
+    fn credential_profile_source_is_current(
+        &self,
+        target: &mj_core::credentials::CredentialSyncTarget,
+    ) -> bool {
+        RuntimeState::credential_profile_source_is_current(self, target)
+    }
+
+    fn credential_target_is_current(
+        &self,
+        target: &mj_core::credentials::CredentialSyncTarget,
+    ) -> Result<bool> {
+        RuntimeState::credential_target_is_current(self, target)
+    }
+
+    fn credential_sync_skips(
+        &self,
+        profile_id: &str,
+        fanout: bool,
+        caused_by: Option<&str>,
+        present: &dyn Fn(&str) -> bool,
+    ) -> Vec<(String, &'static str)> {
+        RuntimeState::credential_sync_skips(self, profile_id, fanout, caused_by, present)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::runtime_test_session;

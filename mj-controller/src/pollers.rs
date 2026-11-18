@@ -17,7 +17,6 @@ use anyhow::{Context, Result, bail};
 use mj_core::clock::epoch_seconds;
 use mj_core::credentials::{
     CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, CredentialSyncSignal,
-    CredentialSyncTarget,
 };
 use mj_core::state::{
     ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionState, State,
