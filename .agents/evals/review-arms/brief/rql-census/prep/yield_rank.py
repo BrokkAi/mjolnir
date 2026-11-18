@@ -76,13 +76,37 @@ def main():
         errors += bool(r.get("error"))
         sample[(r["repo"], r["window"])].append(r)
 
-    out = {"undated_candidates": undated, "blame_errors": errors,
+    # Clones that share history (forks, renames) are one repository: group repos whose candidate
+    # fix commits overlap, and keep the member with the most candidates.
+    by_hash = collections.defaultdict(set)
+    for c in cands:
+        by_hash[c["hash"]].add(c["repo"])
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for repos in by_hash.values():
+        repos = sorted(repos)
+        for other in repos[1:]:
+            parent[find(other)] = find(repos[0])
+    size = collections.Counter(c["repo"] for c in cands)
+    groups = collections.defaultdict(list)
+    for repo in size:
+        groups[find(repo)].append(repo)
+    keep = {max(members, key=lambda r: (size[r], r)) for members in groups.values()}
+    shared = {max(m, key=lambda r: (size[r], r)): sorted(m) for m in groups.values() if len(m) > 1}
+
+    out = {"undated_candidates": undated, "shared_history_groups": shared, "blame_errors": errors,
            "incomplete_traces": sum(1 for rs in sample.values() for r in rs if r.get("trace_complete") is False),
            "bug_precision": BUG_PRECISION, "admission": ADMISSION, "windows": {}}
     for label, (start, wins) in WINDOWS.items():
         per = collections.Counter()
         for (repo, w), count in n.items():
-            if w not in wins or not sample.get((repo, w)):
+            if repo not in keep or w not in wins or not sample.get((repo, w)):
                 continue
             s = sample[(repo, w)]
             good = sum(1 for r in s if not r.get("error") and r.get("strong") and r.get("multi_site_proxy")

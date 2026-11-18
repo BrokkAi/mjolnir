@@ -146,6 +146,32 @@ def changed_sites(repo, h):
     return set(paths), ranges, funcs
 
 
+SIZE_EXCLUDED = re.compile(r"(^|/)(Cargo\.lock|[^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$"
+                           r"|(^|/)(snapshots?|goldens?|fixtures?|testdata|test_data|expected)(/|$)"
+                           r"|\.(snap|golden|expected)$")
+
+
+def intro_size(repo, sha):
+    """Changed lines of the introducing commit as corpus/SPEC.md rule 7 counts them (goldens,
+    fixtures and lock files excluded), whether it is a merge (rule 6 rejects merges), and an
+    error if Git failed. Binary files count zero lines."""
+    rc, parents, se = git(repo, "rev-list", "--parents", "-n", "1", sha)
+    if rc:
+        return 0, False, "rev-list: " + se.strip()[-200:]
+    if len(parents.split()) > 2:
+        return 0, True, None
+    rc, so, se = git(repo, "show", "--numstat", "--format=", "--no-renames", sha, timeout=300)
+    if rc:
+        return 0, False, "numstat: " + se.strip()[-200:]
+    size = 0
+    for line in so.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or SIZE_EXCLUDED.search(parts[2]):
+            continue
+        size += sum(int(x) for x in parts[:2] if x.isdigit())
+    return size, False, None
+
+
 def blame_one(c):
     repo, h = c["repo"], c["hash"]
     rec = {k: c[k] for k in ("repo", "hash", "oneline", "window", "fix_ct", "p2p", "outcome", "validated_image")}
@@ -178,15 +204,14 @@ def blame_one(c):
             rec["traceable"] = False
             return rec
         top, n = counts.most_common(1)[0]
-        rc, so, se = git(repo, "show", "--shortstat", "--format=%ct", top, timeout=300)
-        if rc:
-            failed.append({"intro_size": top, "stderr": se.strip()[-200:]})
+        size, is_merge, err = intro_size(repo, top)
+        if err:
+            failed.append({"intro_size": top, "stderr": err})
             rec["trace_complete"] = False
-        lines = [l for l in so.splitlines() if l.strip()]
-        size = sum(int(x) for x in re.findall(r"(\d+) (?:insertion|deletion)", lines[-1])) if len(lines) > 1 else 0
+        rec["intro_is_merge"] = is_merge
         rec.update(traceable=True, top_share=n / total, intro_sha=top, intro_ct=ctimes.get(top),
                    intro_window=window(ctimes[top]) if top in ctimes else None, intro_size=size,
-                   strong=(not failed and n / total >= 0.3 and size <= 4000))
+                   strong=(not failed and not is_merge and n / total >= 0.3 and size <= 4000))
         rec["intro_same_window"] = rec["intro_window"] == rec["window"]
         return rec
     except Exception as e:

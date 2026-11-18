@@ -15,8 +15,8 @@ A positive result shows that the information helps when it's delivered this way.
 
 **Repositories.**
 - Development: mjolnir and bifrost-dev, with their frozen corpora.
-- Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs, from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
-- Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/scan.py`, then `yield_rank.py`, which turns the capped samples into per-repo yields: upper bound × bug precision 0.85 × admission rate 31/67; results in `yield.json` and `corpus-yield-summary.md`). Incompletely traced fixes never count as strong, and the ranker refuses to rank while any planned draw lacks a trace record. File paths come from Git's NUL-separated name list, not patch headers. Functions are counted from the old file's `fn` signatures, so the screen doesn't depend on a repo's diff drivers. Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output. The screen only orders repos: its multi-site proxy over-counts (for example, inline `#[cfg(test)]` hunks in production files), so a repo enters the test set only after tracing admits at least 8 relation diffs, going down the ranked list. Inputs are reproducible: `stage_a.py` derives `stage_a_candidates.jsonl.gz` from the SFT lists, then `scan.py` and `yield_rank.py` run on it.
+- Test: 12 Rust repos (fewer if fewer qualify), fixed before any test reviewer runs. Clones that share history (any common commit, such as forks or renamed repos) count as one repo; the screen groups them and keeps the member with the most candidates. Repos come from the local corpus (`~/Projects/brokkbench/sft-tools-commits/rust`, clones in `/nfs/morannon/nvme/repo-clones`, read only). Jonathan chose fewer repos with more bugs each, because Bifrost indexing is expensive per repo.
+- Selection rule: rank by realistic 2025+ yield from the screen (`rql-census/prep/scan.py`, then `yield_rank.py`, which turns the capped samples into per-repo yields: upper bound × bug precision 0.85 × admission rate 31/67; results in `yield.json` and `corpus-yield-summary.md`). The screen applies the corpus size rule (goldens, fixtures and lock files don't count) and rejects merge commits as introductions. Incompletely traced fixes never count as strong, and the ranker refuses to rank while any planned draw lacks a trace record. File paths come from Git's NUL-separated name list, not patch headers. Functions are counted from the old file's `fn` signatures, so the screen doesn't depend on a repo's diff drivers. Drop repos with indexing hazards: huge generated code, a non-Cargo build, heavy proc-macro output. The screen only orders repos: its multi-site proxy over-counts (for example, inline `#[cfg(test)]` hunks in production files), so a repo enters the test set only after tracing admits at least 8 relation diffs, going down the ranked list. Inputs are reproducible: `stage_a.py` derives `stage_a_candidates.jsonl.gz` from the SFT lists, then `scan.py` and `yield_rank.py` run on it.
 - Rank and measure at least 16 repos: one cold Bifrost index and one incremental re-index each, at a representative revision. Take the 12 that qualify with the most expected admitted bugs per indexing hour. Reaching ±10 needs about 12 repos if the between-repo SD is 10 points, and about 16 if it is 15. More bugs per repo can't substitute for more repos. If fewer than 12 qualify, use all that do; a wider interval then reads as the bands below say.
 - A repo counts only if it has at least 8 admitted relation diffs, decided before any reviewer runs on it.
 
@@ -85,6 +85,7 @@ It reports:
 - **N:** no brief.
 - **G:** grep writer. It gets the same step list in prose, so the contrast is the answers, not the checklist.
 - **R:** mocked-RQL writer, which keeps grep and the list.
+- **R0:** the same mocked engine with today's documented steps only (no added steps), keeping grep and the list. R − R0 is the added steps' own contribution, and R0 − G is what complete answers from today's steps add.
 - **H:** compute-matched. A grep writer that may ask a helper free-form questions. The helper has the same model and inputs as the answer engine. Its token budget equals all the engine model tokens spent answering R's queries on that diff, counted once per diff. That includes precomputed hops and classifications behind those answers, and rejected candidates, rejected hops and other work that produced no rows. A costly empty answer is still information R received. Matching on tokens, not call counts, matters because one RQL call can be a cached lookup or many classification and hop calls. Calls and tokens are reported for both arms.
 - **D (conditional):** R with answers degraded at random to the owner's realistic recall.
 
@@ -110,7 +111,7 @@ It reports:
 
 These set the test-phase sample. Pilot effects are development data and are never pooled into the reading.
 
-**Test:** the test repos, with arms N, G, R and H (and D if triggered).
+**Test:** the test repos, with arms N, G, R0, R and H (and D if triggered).
 
 ## Reading
 
@@ -121,14 +122,21 @@ These set the test-phase sample. Pilot effects are development data and are neve
   - the after-cutoff subset.
 - **Also reported:** per-repo effects, the between-repo SD and a prediction interval for a new repo.
 
-Decision bands (minimum effect set by Jonathan, 2026-11-18):
+Decision bands on R − G, which decide whether complete RQL is worth building for review (minimum effect set by Jonathan, 2026-11-18):
 - **Don't build for review:** upper bound below +10. This takes precedence.
 - **Build the features:** estimate at least +10 and lower bound above 0.
 - **Partial:** lower bound above 0, estimate below +10, and upper bound at least +10.
 - **Inconclusive:** anything else, including too few qualifying repos.
 
+Which features to build, when R − G reads Build or Partial (same repo-level t interval):
+- **Added steps:** build them if the lower bound of R − R0 is above 0.
+- **Otherwise:** the lift comes from complete answers to today's steps (R0 − G). The engine work then targets those steps' completeness and latency, not new steps.
+
 Also reported:
-- **H against R:** if H comes within 5 points of R, the useful product today is a writer with model helpers, and Bifrost's case rests on cost, latency and completeness.
+- **H against R** (paired R − H, same repo-level t interval):
+  - **Upper bound below +5:** a writer with model helpers matches RQL. The useful product today is that writer, and Bifrost's case rests on cost, latency and completeness.
+  - **Lower bound above 0:** RQL's structured rows add value over equal helper compute.
+  - **Otherwise:** unresolved.
 - **G − N:** the effect of the checklist-assisted grep writer over no brief. G gets the new step list in prose, which the shipped writer's prompt (`WRITER.md`) doesn't have, so this isn't a measure of the shipped writer itself.
 - **The census rankings.**
 - **Cost.**
@@ -142,9 +150,9 @@ Also reported:
 ## Cost and quota (estimates, refined by the pilot)
 
 - **Census:** about $1 per traced candidate, including both labellers, so about $200–300 for 8 repos plus development.
-- **Pilot:** about $300–400 in API-equivalent terms. That covers 35 relation diffs:
-  - about 560 Terra reviewer sessions;
-  - about 210 Sol writer sessions;
+- **Pilot:** about $350–500 in API-equivalent terms. That covers 35 relation diffs:
+  - about 700 Terra reviewer sessions;
+  - about 280 Sol writer sessions;
   - the simulator and the gold set.
 - **Test:** about 7 times the pilot for 12 repos.
 - **Indexing:** Bifrost and rust-analyzer compute for each bug's introducing commit, reusing incremental indexes within a repo. Runs on local clones copied from `/nfs/morannon` (never written).
