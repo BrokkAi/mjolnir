@@ -128,9 +128,11 @@ Decision bands on R − G, which decide whether complete RQL is worth building f
 - **Partial:** lower bound above 0, estimate below +10, and upper bound at least +10.
 - **Inconclusive:** anything else, including too few qualifying repos.
 
-Which features to build, when R − G reads Build or Partial (same repo-level t interval):
+Precedence for the engine decision: the helper comparison below can override R − G. If the R − H readout is "helper wins" or "equivalent", a Build or Partial R − G doesn't by itself justify engine work. The decision becomes a cost comparison: build only if real RQL can deliver the same rows at lower cost and latency than the helper's measured tokens and time per diff. Otherwise, R − G governs.
+
+Which features to build, when R − G reads Build or Partial and the helper readout doesn't override it (same repo-level t interval):
 - **Added steps:** if the lower bound of R − R0 is above 0, the added steps as a bundle are worth building. The study doesn't attribute that lift to individual steps. Build order comes from descriptive evidence: each step's share of the rows in briefs whose reviewers caught the bug, and the census rankings. As each step is built, it's measured on its own (milestone 5 adds and measures templates one at a time), and a step that adds nothing is dropped.
-- **Today's steps:** if the lower bound of R0 − G is above 0, complete answers to today's steps carry lift, and their completeness and latency are worth engine work. This can hold alongside the added steps.
+- **Today's steps:** if the lower bound of R0 − G is above 0 and every documented step served passed the fidelity gate, complete answers to today's steps carry lift, and their completeness and latency are worth engine work. This can hold alongside the added steps. If any served documented step failed the gate, R0 − G is reported as the effect of the answers actually served, at their measured fidelity, and supports no engine recommendation.
 - **Unresolved:** a contrast whose interval includes 0 is reported as unresolved. It is never read as showing that part contributed nothing.
 
 Also reported:
