@@ -215,7 +215,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
 - Decision: add `mj purge-untracked [--session <id> | --all] [--dry-run]` to reclaim space once the user no longer needs old untracked payloads.
   - For each suspended session whose archive was written in an old format, it rewrites the archive without its untracked-file payloads, keeping everything else byte for byte.
   - It verifies the new archive, replaces the file atomically, and updates the stored SHA-256 in the same transaction.
-  - It also deletes Move sources that were retained only to hold excluded untracked files.
+  - It rewrites archive payloads only. Move sources retained by earlier releases are whole environments and stay under the explicit `mj move-sources` cleanup.
   - It prints the space reclaimed per session. `--dry-run` reports without changing anything.
 
   Rationale: the user asked for "some kind of purge untracked tool to clean up my archives once I'm sure I don't need that stuff". Old untracked payloads stay restorable until the user explicitly purges them.
@@ -349,6 +349,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    In either case, when origin cannot be reached, exclude only the existing `refs/remotes/origin/*`, never local tags (a local tag may be unpublished), and set `remote_refs_stale`.
 3. **Pin the cut.** Read every ref once with `git for-each-ref`, plus each checkout's HEAD: a branch name or a detached commit, or the pre-operation position from step 1. Select the refs to keep:
    - **Managed checkout:** every ref under `refs/heads`, `refs/tags` and `refs/notes`, plus the durable Mjolnir refs under `refs/mj/` that the pre-push hook and review read (reviewed, overridden and push-base). Use the predicate today's clone capture applies for "durable Mjolnir refs" (`RepositoryMetadata::saved_refs`). Also the stash list.
+   - **Neither kind keeps `refs/stash` as a ref.** It points at the original stash commit, which may have a `-u` or `-a` payload. The stash list, with its sanitized replacements, owns stash capture and restore.
    - **Raw checkout:** the refs whose value differs from the launch record (Milestone 2 writes that record), plus the branch HEAD is on even when it is unchanged, plus stash entries absent from the launch record.
 
    The stash list is read with `git stash list --format=%H%x00%gs`, so the messages can be recreated.
@@ -357,7 +358,11 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 6. **Pack the delta.** Run `git pack-objects --revs <basename>`, which writes `<basename>-<hash>.pack` and its `.idx` straight to disk (a pack can be larger than memory should hold), feeding it on standard input:
    - the pinned SHAs: kept refs, every checkout's HEAD commit (attached or detached, primary and nested), working-state commits, and kept (or replaced) stash commits. A raw session that started on a branch with commits origin lacks, and only edited tracked files, depends on those commits;
    - a `--not` line;
-   - the exclusions: every `refs/remotes/origin/*` SHA, plus local tags whose SHA matches a tag that `git ls-remote --tags origin` reports when origin is reachable. A fresh clone fetches those tags, so their history need not travel.
+   - the exclusions, chosen by what step 2 learned:
+     - **Origin reachable:** exactly the SHAs origin advertises (`git ls-remote origin`, heads and tags) that exist locally, and never stale remote-tracking refs. A raw checkout's `refs/remotes/origin/*` may point at history origin has force-pushed away. A fresh clone fetches origin's heads and tags, so their history need not travel.
+     - **Origin unreachable:** the existing `refs/remotes/origin/*` only, with `remote_refs_stale` set.
+
+     For a managed checkout, the two rules coincide in practice, because it has just fetched with `--prune`.
 
    The result is a non-thin pack containing only what origin lacks; it may be empty. Packing from SHAs writes no ref at all. Two raw sessions sharing a Git common directory, or an export overlapping a suspend, therefore cannot disturb each other, and a crash leaves nothing to clean up.
 7. **Return a `WorkspaceSnapshot`:** the origin URL and push URLs, both passed through the existing `redact_origin_credentials` so no embedded token enters a snapshot, cache or destination, HEAD, the kept refs with their object IDs, the stash list (commits and messages), the working-state commit, the nested worktrees, `working_state_skipped`, `remote_refs_stale`, and the pack path.
@@ -366,7 +371,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
 1. Clone origin, then run `git fetch --tags origin`, so every tag the exclusions relied on is present. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
 2. Set `remote.origin.pushurl` to each saved (redacted) push URL; the destination's credential helper supplies credentials, as today's network-workspace restore does, so a workspace that reads from upstream and pushes to a fork keeps doing so.
-3. Copy the pack into `.git/objects/pack/` and run `git index-pack` on that file. Any saved tip, HEAD, working-state or stash commit that is still missing gets one `git fetch origin <sha>`. This covers a branch the session pushed and that was later deleted on origin: the snapshot deliberately keeps only its ref, and many servers still serve the commit by SHA. After the refs and stash entries are created, verify the whole object graph: `git rev-list --objects` over every saved tip, HEAD, working-state commit and stash commit must succeed. Checking only the tips is not enough, because origin may have rewritten history so that an excluded parent, tree or blob is gone. On failure, nothing is reported as restored, so a Move never retires its source over an incomplete destination.
+3. Copy the pack into `.git/objects/pack/` and run `git index-pack` on that file. Then run the missing-object check below. Every commit it reports missing, whether a saved tip or an interior parent the pack omitted because origin had it, gets one `git fetch origin <sha>`, and the check runs again. This covers a branch the session pushed and that was later deleted on origin, including a local unpushed commit built on it: the snapshot deliberately keeps only refs for what origin had, and many servers still serve a commit by SHA. After the refs and stash entries are created, verify the whole object graph: `git rev-list --objects --missing=print` over every saved tip, HEAD, working-state commit and stash commit must report no missing object (no line starting with `?`). Plain `--objects` lists blob IDs without checking that the blobs exist, and checking only the tips is not enough, because origin may have rewritten history so that an excluded parent, tree or blob is gone. On failure, nothing is reported as restored, so a Move never retires its source over an incomplete destination.
 4. Create every saved ref at its object ID.
 5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
 6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
@@ -426,18 +431,19 @@ Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal a
 **Freeze workspace writers before the final capture.** The relay barrier stops command dispatch, but a process the agent started earlier, such as a background command, a build or a dev server, can keep writing to the checkout. A file it creates after the consent check would then be deleted with the checkout, unseen.
 1. Under the barrier, after the early consent check, the worker sends `SIGSTOP` to every process group it owns for the session: the harness and the background commands it tracks.
 2. Capture then runs, as the single consent decision point.
-3. If capture refuses, the worker sends `SIGCONT` and the session continues untouched.
-4. If capture succeeds, the worker terminates those groups as teardown already does, process groups first and files second.
+3. On every exit other than success, the worker sends `SIGCONT` and the session continues untouched. That covers a consent refusal, a Git or I/O error, cancellation, and a lost daemon connection. Implement it as a guard that resumes on drop, so no path can skip it.
+4. Before sending `SIGSTOP`, the worker writes the frozen group IDs to its durable state. If the worker process dies while they are frozen, the next worker start (or the daemon's recovery of that worker) reads the record, sends `SIGCONT`, and clears it before doing anything else.
+5. The freeze lasts until the teardown decision is confirmed, not just until capture returns. Writing the pack and archive, transferring it and verifying it at the daemon all happen while the groups are stopped, and any failure along the way releases them as in step 3. The point of no return is the daemon's verified installation of the archive, which already gates target deletion. Only after the worker receives that confirmation does it terminate the groups, as teardown already does: process groups first and files second. It then clears the record.
 
-Processes that left the worker's process groups (daemonized with `setsid`) are outside this guarantee, exactly as they are outside today's teardown; say so in the code comment. Add a tricky-condition test: a background command creates a file after the preflight, and suspend without consent for it must refuse and then resume the command. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
+Processes that left the worker's process groups (daemonized with `setsid`) are outside this guarantee, exactly as they are outside today's teardown; say so in the code comment. Add tricky-condition tests: a background command creates a file after the preflight, and suspend without consent for it must refuse and then resume the command; a capture that fails with an injected Git error must also resume the frozen groups. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
 
 **Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
 
 **Spec version and older workers.** Raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that request `OriginDelta`.
 
-A session whose running worker predates this change must not fall back to the old capture. That capture stores untracked files and full clone history, which is exactly what the user excluded, and can mean gigabytes of upload. Instead, the capture step runs the daemon's own worker binary on the target, staged there the way worker upgrades already stage it (see `mj-worker-staging` and `mj-controller/src/controller/worker_restart.rs`). It is invoked as a separate export process under the existing barrier, while the old worker keeps owning the relay.
+A session whose running worker predates this change must not fall back to the old capture. That capture stores untracked files and full clone history, which is exactly what the user excluded, and can mean gigabytes of upload. An old worker also cannot freeze its writers. So suspending such a session first upgrades its worker through the existing atomic idle replacement (`mj-controller/src/controller/worker_restart.rs`, `IdleWorkspaceLease`), after interrupting any turn as suspend already does, and then proceeds exactly as for a current worker: consent, freeze, capture.
 
-Before relying on this, verify that a current worker binary's export command can read an older worker's on-disk state: its journal snapshot and native-state paths under the worker home. Older readers are kept by the compatibility rules, so this is expected. If the verification fails, the design changes to "suspend first upgrades the worker through the existing atomic idle replacement, then captures"; record that in the Decision Log. In neither case does a version-2 spec write a new archive.
+There is one suspend path, and no version-2 spec ever writes a new archive. If the replacement cannot happen, because the worker is not idle or the swap fails, suspend fails with that reason and the session keeps running. `--without-checkpoint` remains available.
 
 **Raw launch record.** For a raw session, record the checkout's refs (`git for-each-ref --format=%(refname)%00%(objectname)`), its stash list and its linked worktrees when the session launches. Store the record as a file in the repository's common Git directory, at `mj/sessions/<session-id>/launch`, written by the worker at launch. Mjolnir already writes under `refs/mj/` in user repositories for review pins, so this adds no new kind of side effect. Suspend reads the file. Destroy deletes it, and suspend keeps it. When the file is missing (a raw session launched before this change), capture treats every ref as unchanged except HEAD's branch and includes all stash entries. Record that in the Decision Log if it proves wrong in practice.
 
@@ -645,7 +651,7 @@ The archive is not installed on the daemon as the session's checkpoint; the daem
 
 Record which route each move used in the move's durable state, so a daemon restart resumes the same transfer or restarts it cleanly.
 
-**Keep directory on Move.** After the archive, transfer `.mj/keep/` as a tar stream over the same route, leaving out the paths named by `--skip`. Skipped paths are deleted when a managed source is retired; in a raw checkout they stay on disk. `--dry-run`, the CLI confirmation and the Move dialogs say this, listing each skipped path with its size, and passing `--skip` is the consent. Unpack it into the destination checkout's `.mj/keep/` before the agent starts. The keep directory never enters the archive, so it is never stored on the daemon. When the route is the daemon stream it does pass through the daemon's network, and the move's progress shows its size so the user can cancel and rerun with `--skip`.
+**Keep directory on Move.** After the archive, transfer `.mj/keep/` as a tar stream over the same route, leaving out the paths named by `--skip`. Skipped paths are deleted when a managed source is retired; in a raw checkout they stay on disk. `--dry-run`, the CLI confirmation and the Move dialogs say this, listing each skipped path with its size, and passing `--skip` is the consent. Unpack it into the destination checkout's `.mj/keep/` before the agent starts. The keep transfer must succeed at both ends: the source `tar` and the destination importer must both exit 0, and the importer must report the byte count the source sent. Only then may destination readiness allow the managed source to be retired. Otherwise the move fails and the source, with its scratch, stays intact. A `tar` that skips an unreadable file still produces a valid archive, so the exit status is what catches it. The keep directory never enters the archive, so it is never stored on the daemon. When the route is the daemon stream it does pass through the daemon's network, and the move's progress shows its size so the user can cancel and rerun with `--skip`.
 
 **Persisted state.** The new `MoveOperation` shape replaces the old one. Older binaries decode `MoveOperation` with `deny_unknown_fields` and treat a decode failure as no intent, so an older daemon opening the store could overlook an active move and the grants it owns. The change is therefore a **breaking** store revision. Advance the migration revision and raise the minimum compatible read and write revision in the same transaction, classified with that reason beside it as `AGENTS.md` requires. Test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. At startup, an old-format in-flight move is recovered according to its durable phase.
 Ownership is decided by the existing recovery classification, not by the phase name alone. Today's recovery already handles the crash window where the destination's session is durably `Running` while the operation still says `ResumingDestination`, and finishes forward there. Keep that classifier and its finish-forward steps as the reader for old records, and delete the rest of the old executor:
@@ -754,7 +760,7 @@ The Git commands at the heart of capture and restore, shown for one managed chec
     git stash store -m keepme <stash-entry-commit>
     git symbolic-ref HEAD refs/heads/feature && git reset --hard <head-commit>
     git stash apply --index <work>
-    git rev-list --objects <every saved tip> >/dev/null   # full graph present
+    git rev-list --objects --missing=print <every saved tip> | grep '^?' && exit 1   # full graph present
 
 
 ## Interfaces and Dependencies
@@ -766,7 +772,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
     pub struct WorkspaceSnapshot {
         pub origin: Option<String>,                // None only for a raw checkout without origin
         pub push_urls: Vec<String>,
-        pub head: SnapshotHead,                    // Branch(String) | Detached(String)
+        pub head: SnapshotHead,                    // Branch { name, commit } | Detached(commit); every checkout's HEAD carries its commit
         pub refs: BTreeMap<String, String>,        // full ref name -> object id
         pub stash: Vec<SnapshotStashEntry>,        // newest first: commit, message
         pub working_state: Option<String>,         // `git stash create` commit
@@ -917,3 +923,13 @@ Revision note (2026-11-18, review 5):
 - Raw checkouts are read with `ls-remote` instead of being fetched into.
 - EC2 grant acquisition waits on `installing` and `removing`.
 - Cache copies are tracked in their own table.
+
+Revision note (2026-11-18, review 6):
+- Raw exclusions use only refs origin advertises when it answers.
+- `refs/stash` is never a generic ref.
+- Every HEAD carries its commit.
+- Restore fetches missing prerequisites by SHA, and checks blobs with `--missing=print`.
+- The writer freeze lasts until the daemon confirms installation, is released on every other exit, and is recovered after a worker crash.
+- Older workers are upgraded before suspend, leaving one capture path.
+- The keep-directory transfer must succeed at both ends before the source is retired.
+- The purge decision no longer mentions retained Move sources.
