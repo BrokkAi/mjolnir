@@ -17,7 +17,8 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [ ] Measure what the `mj-daemon` test unit generates code for (see the code generation entry in Surprises) before choosing Milestone 2's cuts.
 - [x] (2026-11-18) Milestone 2a: no production code in `mj-controller`'s targets layer or store layer names a module above it (16 sites at the start). `scripts/check-controller-layers.py` enforces both boundaries in CI.
 - [x] (2026-11-18) Milestone 2b: no test crosses those boundaries either (22 sites at the start). `test_name` and `IsolatedTest` are `test_isolation`, in the targets layer; the store's record fixtures are `database::test_fixtures`; two tests of controller functions left `targets/tests.rs` and the test that renders a stored window through `compaction` sits with `compaction`'s tests. The same 1,845 tests run.
-- [ ] Milestone 2c: the targets layer is `mj-targets` (`brokk-mj-targets`) and the store layer is `mj-store` (`brokk-mj-store`, already registered).
+- [x] (2026-11-18) Milestone 2c, first half: the targets layer is `mj-targets` (`brokk-mj-targets`), 18,115 lines; `mj-controller` is 230,766. The same 1,845 tests run, 175 of them in `mj-targets`.
+- [ ] Milestone 2c, second half: the store layer is `mj-store` (`brokk-mj-store`, already registered).
 - [ ] Milestone 2: the review host and the pollers leave `mj-daemon`.
 - [ ] Milestone 3: `mj-daemon`'s `daemon` and `server_runtime` modules are separated and the crate is under the budget.
 - [ ] Milestone 4: `mj-controller` fans out above the store (accounts, import, worker staging, session runtime); starts when the storage layer is its own crate.
@@ -44,7 +45,13 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - Observation: making the server a crate needed 30 items widened from `pub(crate)` to `pub` and one feature. The daemon's tests read two counters in `server/viewer_types.rs` that existed only under `cfg(test)`; they are now behind `mj-server`'s `test-support` feature, which `mj-daemon` enables in its dev-dependencies.
   Evidence: the errors from `cargo check -p brokk-mj-daemon --all-targets` after the move.
 
+- Observation: a test that hands a file's path to a child process breaks silently when the file moves crates. Five `worker_client` tests write a stand-in `aws` script that prints `tests/fixtures/aws-sts-assume-role-access-denied.txt` by its path under `CARGO_MANIFEST_DIR`; the compiler found every `include_str!` of the moved fixtures, but not that. The fixtures are now constants in `mj_targets::aws_assume_role::test_fixtures` and the tests write the text to a scratch file. After a move, search for the fixture's file name, not only for compile errors.
+  Evidence: `the AWS CLI exited with status 254` in those five tests after the move.
+
 ## Decision Log
+- Decision: in a file that moves to a new crate, every `pub(crate)` becomes `pub`.
+  Rationale: widening only what the compiler rejects leaves crate-private inherent methods that callers above can no longer see, and a call to one silently binds to a trait method of the same name when one is in scope. Widening everything means nothing that was visible becomes invisible. The cost is a larger public surface on a crate that has no users outside this workspace. (`mj-server` was moved before this rule and widened item by item; no such rebinding was found there, since the build has warnings denied.)
+  Date/Author: 2026-11-18, Claude.
 
 - Decision: a budget of 50,000 lines of Rust per crate, tests included, checked in CI.
   Rationale: the test build is the unit that hurts and it contains the tests. 50,000 is about a fifth of today's largest unit and is a size the smaller crates here already compile at in seconds. The check reports the six crates that are over today without failing on them, because a hard cap would block unrelated work in crates other people edit daily; it fails only when a crate under the budget grows past it, or when a listed crate has shrunk enough to be removed from the list.

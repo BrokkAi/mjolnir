@@ -34,6 +34,7 @@ COPY mj-checkpoint/ mj-checkpoint/
 COPY mj-transcript/ mj-transcript/
 COPY mj-worker/ mj-worker/
 COPY mj-client/ mj-client/
+COPY mj-targets/ mj-targets/
 COPY mj-controller/ mj-controller/
 COPY mj-server/ mj-server/
 COPY mj-daemon/ mj-daemon/

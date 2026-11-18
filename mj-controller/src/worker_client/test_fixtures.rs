@@ -207,10 +207,8 @@ pub fn granting_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("granting-bin");
     std::fs::create_dir(&bin).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let output = dir.join("granted.json");
     std::fs::write(&output, serde_json::to_vec(&recorded).unwrap()).unwrap();

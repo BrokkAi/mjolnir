@@ -174,7 +174,7 @@ pub fn verify_ssh_nitro(
 }
 
 /// The volumes the engine creates for a sandbox, by name.
-pub(crate) fn nitro_workspace_volume(container: &str) -> String {
+pub fn nitro_workspace_volume(container: &str) -> String {
     format!("{container}-workspace")
 }
 

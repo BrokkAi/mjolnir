@@ -29,7 +29,7 @@ fn has_credential_source(environment: &BTreeMap<String, String>) -> bool {
 /// session's locator or from a configured target template; both matches are
 /// exhaustive, so a new target kind must decide here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionHost {
+pub enum SessionHost {
     /// The controller's own machine and user: the session reads the host's
     /// AWS files itself.
     RawLocal,
@@ -80,7 +80,7 @@ impl From<&mj_core::config::TargetTemplate> for SessionHost {
 /// sync and `mj doctor`: `None` means it does. Explicit credentials in the
 /// target's or the profile's environment stay with their owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CredentialsWithheld {
+pub enum CredentialsWithheld {
     /// The profile does not authenticate with the AWS credential chain.
     NotBedrock,
     RawLocal,
@@ -94,7 +94,7 @@ pub(crate) enum CredentialsWithheld {
 impl CredentialsWithheld {
     /// What to say about a `[profiles.<id>.aws]` table that therefore cannot
     /// apply, in terms of what the session uses instead.
-    pub(crate) fn why_a_role_cannot_apply(self) -> &'static str {
+    pub fn why_a_role_cannot_apply(self) -> &'static str {
         match self {
             Self::NotBedrock => {
                 "the profile does not authenticate with the AWS credential chain (Amazon Bedrock)"
@@ -113,7 +113,7 @@ impl CredentialsWithheld {
     }
 }
 
-pub(crate) fn credentials_withheld(
+pub fn credentials_withheld(
     profile: &HarnessProfile,
     host: SessionHost,
     target_environment: &BTreeMap<String, String>,
@@ -143,7 +143,7 @@ pub(crate) fn credentials_withheld(
 /// cannot be read is unknown, and with a role it is treated as Bedrock (see
 /// [`unreadable_provider`]). It decides whether credentials are minted, never
 /// whether a configured role withdraws the ones a session holds.
-pub(crate) fn is_bedrock(profile: &HarnessProfile) -> bool {
+pub fn is_bedrock(profile: &HarnessProfile) -> bool {
     profile.auth_scheme() == AuthScheme::AwsCredentialChain
         || unreadable_provider(profile).is_some()
 }
@@ -163,7 +163,7 @@ fn unreadable_provider(profile: &HarnessProfile) -> Option<String> {
         .map(|error| format!("{error:#}"))
 }
 
-pub(crate) fn receives_synced_credentials(
+pub fn receives_synced_credentials(
     profile: &HarnessProfile,
     host: SessionHost,
     target_environment: &BTreeMap<String, String>,
@@ -174,7 +174,7 @@ pub(crate) fn receives_synced_credentials(
 /// What to tell the person when a profile has a `[profiles.<id>.aws]` table
 /// that cannot apply to a session on this target, and why. The session runs
 /// without it rather than being refused.
-pub(crate) fn unused_role_notice(
+pub fn unused_role_notice(
     profile_id: &str,
     profile: &HarnessProfile,
     host: SessionHost,
@@ -189,7 +189,7 @@ pub(crate) fn unused_role_notice(
 }
 
 /// Explicit target credentials and EC2 instance roles stay target-owned.
-pub(crate) fn source(
+pub fn source(
     profile: &HarnessProfile,
     backend: &TargetLocator,
     target_environment: &BTreeMap<String, String>,
@@ -215,7 +215,7 @@ pub(crate) fn source(
 /// not rebuild the targets, and a file that cannot be read fails that cycle
 /// closed. Raw local and EC2 sessions have no credentials of Mjolnir's to
 /// withdraw.
-pub(crate) fn sync_source(
+pub fn sync_source(
     profile: &HarnessProfile,
     backend: &TargetLocator,
     target_environment: &BTreeMap<String, String>,
@@ -235,7 +235,7 @@ pub(crate) fn sync_source(
 /// The source with the AWS profile the harness's configuration selects, read
 /// now. The role-scoped mint calls this each time. An error means the
 /// configuration cannot be read: nothing can be minted for that attempt.
-pub(crate) fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSource> {
+pub fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSource> {
     let mut source = source.clone();
     // Codex can select its AWS profile inside the provider table.
     if let Some(selection) = &source.selection
@@ -265,7 +265,7 @@ pub(crate) fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSourc
 /// the controller host: the profile's own environment with the AWS profile
 /// it selects, read now. Callers have already decided that the profile
 /// receives synced credentials.
-pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
+pub fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
     let mut source = resolve(&base_source(profile))?;
     // Resolved, so nothing is left to read later.
     source.selection = None;
@@ -297,7 +297,7 @@ fn base_source(profile: &HarnessProfile) -> AwsCredentialSource {
     }
 }
 
-pub(crate) fn export(
+pub fn export(
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
 ) -> Result<AwsCredentials> {

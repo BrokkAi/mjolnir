@@ -5456,15 +5456,6 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
     assert!(!cleanup.scripts()[0].args.contains(&source_name));
 }
 
-/// The command an SSH remote line runs, without the macOS system PATH prefix
-/// every remote line carries.
-pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
-    let prefix = format!("{} ", mj_core::targets::remote_command_line(&[]));
-    remote
-        .strip_prefix(prefix.as_str())
-        .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
-}
-
 // Hard-won: #1508: a failed process probe was reported as worker death, allowing duplicate boots.
 #[cfg(unix)]
 #[test]

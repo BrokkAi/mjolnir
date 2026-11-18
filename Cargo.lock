@@ -706,6 +706,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-review",
+ "brokk-mj-targets",
  "brokk-mj-transcript",
  "brokk-mj-worker",
  "brokk-sessionwiki",
@@ -875,6 +876,31 @@ dependencies = [
  "toml",
  "tower",
  "tower-http",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "brokk-mj-targets"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "chrono",
+ "getrandom 0.3.4",
+ "hmac",
+ "libc",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
  "tracing",
  "url",
 ]

@@ -12,7 +12,7 @@ use mj_core::config::{
 };
 use mj_core::state::State;
 
-use crate::targets::tests::unwrapped_remote_line;
+use crate::targets::unwrapped_remote_line;
 use crate::targets::{
     self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost, RefreshWhen,
 };

@@ -16,7 +16,7 @@ path prefix.
 
 ## Target guides
 
-`mj-controller/docs/PODMAN.md` and `mj-controller/docs/DOCKER.md` at the repository
+`mj-targets/docs/PODMAN.md` and `mj-targets/docs/DOCKER.md` at the repository
 root are the canonical embedded runtime guides; this directory owns `SSH.md`
 and `AWS.md`. The `predev`, `precheck`, and `prebuild` hooks copy them into
 `src/content/docs/` with Starlight frontmatter. Edit the uppercase source,

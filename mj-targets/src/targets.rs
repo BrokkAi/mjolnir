@@ -37,7 +37,7 @@ pub use preflight::*;
 mod platform;
 pub use platform::*;
 mod provision;
-pub(crate) use provision::provision_local_bundle_plan;
+pub use provision::provision_local_bundle_plan;
 pub use provision::*;
 mod recovery;
 pub use recovery::*;
@@ -52,11 +52,11 @@ pub use bootstrap::*;
 mod container;
 mod container_upgrade;
 mod nitro;
-pub(crate) use container::inspect_container_storage;
+pub use container::inspect_container_storage;
 use container::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use container_upgrade::container_upgrade_test_plan;
-pub(crate) use container_upgrade::{
+pub use container_upgrade::{
     RetainedContainer, inspect_retained_container, recover_removed_container,
     retained_workspace_volume_exists,
 };
@@ -90,5 +90,16 @@ pub fn target_join(root: &str, relative: &Path) -> String {
     path
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+/// The command an SSH remote line runs, without the macOS system PATH prefix
+/// every remote line carries.
+pub fn unwrapped_remote_line(remote: &str) -> &str {
+    let prefix = format!("{} ", mj_core::targets::remote_command_line(&[]));
+    remote
+        .strip_prefix(prefix.as_str())
+        .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
+}
+
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

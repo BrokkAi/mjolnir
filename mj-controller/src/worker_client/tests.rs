@@ -1732,19 +1732,15 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
              if [ -f \"$MJ_AWS_ASSUME_FIXTURE\" ]; then exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"; fi\n\
              /bin/cat {denied} >&2; exit 254\n",
             calls = calls.display(),
-            denied = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
-                .display(),
+            denied = access_denied_reply(&bin).display(),
         ),
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
     // The recorded output, expiring far in the future so only the cache's
     // half-lifetime rule could ask for another call (it does not here).
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -1856,10 +1852,8 @@ async fn role_scoped_mints_for_one_profile_run_together() {
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -1930,10 +1924,8 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let fixture = scratch.path().join("assumed.json");
     std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
@@ -2003,9 +1995,7 @@ fn refusing_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
         &aws,
         format!(
             "#!/bin/sh\n/bin/cat {} >&2\nexit 254\n",
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
-                .display()
+            access_denied_reply(&bin).display()
         ),
     )
     .unwrap();
@@ -2228,10 +2218,8 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                   policy_fingerprint: &str,
                   source_identity: Option<&str>,
                   sign: bool| {
-        let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/aws-sts-assume-role.json"
-        ))
-        .unwrap();
+        let mut recorded: serde_json::Value =
+            serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
         recorded["Credentials"]["Expiration"] = expiration.into();
         let credentials = mj_core::aws_credentials::AwsCredentials::from_assume_role(
             "bedrock",
@@ -2576,10 +2564,8 @@ async fn a_matching_secret_without_a_scope_record_is_installed_again() {
     let cli = granting_aws_cli(root.path());
     // What the mint will return, already on the worker: installed before the
     // worker could record a scope.
-    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-sts-assume-role.json"
-    ))
-    .unwrap();
+    let mut recorded: serde_json::Value =
+        serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
     recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
     let minted = mj_core::aws_credentials::AwsCredentials::from_assume_role(
         "bedrock",
@@ -3036,10 +3022,8 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
         }
 
         fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
-            let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
-                "../../tests/fixtures/aws-sts-assume-role.json"
-            ))
-            .unwrap();
+            let mut recorded: serde_json::Value =
+                serde_json::from_str(crate::aws_assume_role::test_fixtures::ASSUME_ROLE).unwrap();
             recorded["Credentials"]["Expiration"] = chrono::DateTime::<chrono::Utc>::from(
                 std::time::SystemTime::now() + Duration::from_secs(3),
             )
@@ -5824,4 +5808,11 @@ async fn credential_install_readback_mismatch_concludes_the_delivery() {
         std::fs::read_to_string(attempts).unwrap().lines().count(),
         1
     );
+}
+
+/// AWS's recorded refusal, as a file the stand-in `aws` can print.
+fn access_denied_reply(directory: &std::path::Path) -> std::path::PathBuf {
+    let path = directory.join("access-denied.txt");
+    std::fs::write(&path, crate::aws_assume_role::test_fixtures::ACCESS_DENIED).unwrap();
+    path
 }

@@ -110,7 +110,7 @@ pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPref
 static APPLE_CONTAINER_ENSURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The single gate shared by startup, launch readiness, and image refresh.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(super) fn apple_container_runtime_gate() -> &'static std::sync::Mutex<()> {
     &APPLE_CONTAINER_ENSURE
 }
@@ -244,10 +244,10 @@ pub fn verify_ssh_docker(
 
 /// The remote commands the Apple container check runs on an SSH host, in
 /// order. The machine probe sends the same command lines in its one batch.
-pub(crate) const PLATFORM_PROBE: [&str; 2] = ["uname", "-sm"];
-pub(crate) const APPLE_CONTAINER_MACOS_PROBE: [&str; 2] = ["sw_vers", "-productVersion"];
-pub(crate) const APPLE_CONTAINER_VERSION_PROBE: [&str; 2] = ["container", "--version"];
-pub(crate) const APPLE_CONTAINER_STATUS_PROBE: [&str; 3] = ["container", "system", "status"];
+pub const PLATFORM_PROBE: [&str; 2] = ["uname", "-sm"];
+pub const APPLE_CONTAINER_MACOS_PROBE: [&str; 2] = ["sw_vers", "-productVersion"];
+pub const APPLE_CONTAINER_VERSION_PROBE: [&str; 2] = ["container", "--version"];
+pub const APPLE_CONTAINER_STATUS_PROBE: [&str; 3] = ["container", "system", "status"];
 
 /// What a reachable Apple container host reported about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,7 +541,7 @@ fn is_missing_program(error: &anyhow::Error) -> bool {
 }
 
 /// The command the Docker check runs: it answers only when a daemon does.
-pub(crate) const DOCKER_SERVER_VERSION: [&str; 4] = [
+pub const DOCKER_SERVER_VERSION: [&str; 4] = [
     "docker",
     "version",
     "--format",
@@ -657,7 +657,7 @@ pub fn verify_ssh_podman(
 
 /// One rootless Podman postcondition, with the wording used to report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PodmanPostcondition {
+pub enum PodmanPostcondition {
     Version,
     Rootless,
     Remote,
@@ -671,7 +671,7 @@ pub(crate) enum PodmanPostcondition {
 /// matters on macOS, where Podman always talks to a `podman machine` VM and
 /// the client is remote by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PodmanProbe {
+pub enum PodmanProbe {
     Version,
     Info,
 }
@@ -682,7 +682,7 @@ pub(crate) enum PodmanProbe {
 /// Carrying it on the error means the diagnosis never depends on matching
 /// message text that this repository itself produces.
 #[derive(Debug)]
-pub(crate) struct PodmanProbeFailure {
+pub struct PodmanProbeFailure {
     postcondition: PodmanPostcondition,
     /// What was observed, without the fix.
     observation: String,
@@ -699,7 +699,7 @@ impl std::fmt::Display for PodmanProbeFailure {
 impl std::error::Error for PodmanProbeFailure {}
 
 /// The postcondition that failed, when the error came from a probe.
-pub(crate) fn failed_podman_postcondition(error: &anyhow::Error) -> Option<PodmanPostcondition> {
+pub fn failed_podman_postcondition(error: &anyhow::Error) -> Option<PodmanPostcondition> {
     error
         .downcast_ref::<PodmanProbeFailure>()
         .map(|failure| failure.postcondition)
@@ -707,7 +707,7 @@ pub(crate) fn failed_podman_postcondition(error: &anyhow::Error) -> Option<Podma
 
 /// What a failed probe observed, without the fix, so a report that prints
 /// the fix separately does not repeat it.
-pub(crate) fn podman_probe_observation(error: &anyhow::Error) -> Option<&str> {
+pub fn podman_probe_observation(error: &anyhow::Error) -> Option<&str> {
     error
         .downcast_ref::<PodmanProbeFailure>()
         .map(|failure| failure.observation.as_str())
@@ -782,7 +782,7 @@ impl PodmanPostcondition {
         }
     }
 
-    pub(crate) fn remediation(self) -> &'static str {
+    pub fn remediation(self) -> &'static str {
         match self {
             Self::Version => {
                 "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
@@ -1237,7 +1237,7 @@ pub(super) const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
 /// runs another batched script as one of its probes uses different markers,
 /// so the inner script's frames stay opaque inside the outer one's.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProbeFrames {
+pub struct ProbeFrames {
     pub begin: &'static str,
     pub end: &'static str,
     pub status: &'static str,
@@ -1256,7 +1256,7 @@ const PODMAN_PROBE_FRAMES: ProbeFrames = ProbeFrames {
 /// inside its own frame, so multi-line and arbitrary output survives intact.
 /// The version probe short-circuits the rest: without Podman the later probes
 /// can only repeat its failure.
-pub(crate) const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
+pub const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
 exec 3>&1
 probe() {
     name=$1
@@ -1320,7 +1320,7 @@ pub(super) fn run_ssh_podman_probes(
 /// Tests across this crate stand in for a remote host, so they need the real
 /// framing rather than a second, drifting description of it.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
+pub fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
     let mut output = String::new();
     for (name, status, stdout, stderr) in probes {
         output.push_str(&format!("{PROBE_BLOCK_BEGIN} {name}.stderr\n"));
@@ -1344,10 +1344,7 @@ pub(super) fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, Comma
 
 /// Split framed output into one result per probe, as
 /// [`parse_podman_probe_output`] does for `frames`.
-pub(crate) fn parse_framed_probes(
-    stdout: &[u8],
-    frames: ProbeFrames,
-) -> BTreeMap<String, CommandOutput> {
+pub fn parse_framed_probes(stdout: &[u8], frames: ProbeFrames) -> BTreeMap<String, CommandOutput> {
     let text = String::from_utf8_lossy(stdout);
     let mut blocks: BTreeMap<String, String> = BTreeMap::new();
     let mut probes = BTreeMap::new();

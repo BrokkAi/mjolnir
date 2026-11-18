@@ -618,7 +618,11 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // Still full by measurement: still no restart.
     let now = chrono::Utc::now().timestamp() as u64;
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(host, 0, 40 << 30)],
+        &[crate::target_storage::test_storage_sample(
+            host,
+            0,
+            40 << 30,
+        )],
         now,
     );
     assert!(matches!(
@@ -630,7 +634,7 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // Space was freed. The old exit record predates this measurement, so it
     // no longer holds recovery back.
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(
+        &[crate::target_storage::test_storage_sample(
             host,
             40 << 30,
             40 << 30,
@@ -2204,7 +2208,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     // Space is freed: the storage owner's next measurement wakes the actor.
     let now = chrono::Utc::now().timestamp() as u64;
     crate::target_storage::record_samples(
-        &[crate::target_storage::tests::sample(
+        &[crate::target_storage::test_storage_sample(
             host,
             40 << 30,
             40 << 30,

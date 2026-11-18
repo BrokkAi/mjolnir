@@ -12,11 +12,11 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::process::Command;
 
-pub(crate) type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
-pub(crate) type ProxyReader = Box<dyn AsyncRead + Unpin + Send>;
+pub type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
+pub type ProxyReader = Box<dyn AsyncRead + Unpin + Send>;
 
 /// Whether a failed local launch means the program was not there.
-pub(crate) fn is_missing_program(error: &anyhow::Error) -> bool {
+pub fn is_missing_program(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -80,7 +80,7 @@ impl ProxyChild {
     }
 
     /// Synchronous, because the relay's drop reaper runs without a runtime.
-    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<ProxyExit>> {
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ProxyExit>> {
         let status = self.child.try_wait()?;
         if status.is_some() {
             self.kill_group();
@@ -90,7 +90,7 @@ impl ProxyChild {
         }))
     }
 
-    pub(crate) fn start_kill(&mut self) -> std::io::Result<()> {
+    pub fn start_kill(&mut self) -> std::io::Result<()> {
         self.kill_group();
         self.child.start_kill()
     }
@@ -114,7 +114,7 @@ pub async fn collect_bounded(mut reader: ProxyReader, limit: usize) -> std::io::
 }
 
 /// Start the relay proxy `spec` describes.
-pub(crate) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
+pub async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
     spawn_session_proxy(spec, None).await
 }
 

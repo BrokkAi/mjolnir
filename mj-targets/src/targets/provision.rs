@@ -249,7 +249,7 @@ pub fn provision_plan_named(
 
 /// An independent bundle workspace on the controller's host. The controller
 /// supplies the recorded worker root so provisioning and restoration agree.
-pub(crate) fn provision_local_bundle_plan(
+pub fn provision_local_bundle_plan(
     bundle: &ProjectBundleSpec,
     worker_root: &str,
     github_token: Option<&str>,

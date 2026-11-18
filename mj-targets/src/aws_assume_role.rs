@@ -21,7 +21,7 @@ type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// One process shares this cache between session launch, resume and the
 /// periodic credential sync. Entries are rebuildable: a daemon restart empties
 /// the cache and each live session then mints once.
-pub(crate) struct ScopedAwsCredentials {
+pub struct ScopedAwsCredentials {
     now: Clock,
     entries: Mutex<BTreeMap<ScopedKey, Arc<Mutex<Option<ScopedEntry>>>>>,
 }
@@ -69,7 +69,7 @@ impl ScopedAwsCredentials {
     /// the daemon holds a session's credentials for at most their own lifetime
     /// after the session stops being synced, and no expired secret survives a
     /// pass.
-    pub(crate) fn sweep_expired(&self) {
+    pub fn sweep_expired(&self) {
         let now = (self.now)();
         sweep(
             &mut self
@@ -108,11 +108,7 @@ impl ScopedAwsCredentials {
     /// no longer fresh and are due to be renewed; `None` when none are cached
     /// (or another caller is minting into the entry), or when they are due
     /// already: no wait is a reason to retry, not to renew again at once.
-    pub(crate) fn renew_in(
-        &self,
-        session_id: &str,
-        source: &AwsCredentialSource,
-    ) -> Option<Duration> {
+    pub fn renew_in(&self, session_id: &str, source: &AwsCredentialSource) -> Option<Duration> {
         self.peek(session_id, source, |entry, now| {
             entry
                 .refresh_at()
@@ -124,7 +120,7 @@ impl ScopedAwsCredentials {
 
     /// How long the cached credentials stay valid; `None` when none are cached
     /// or they have expired.
-    pub(crate) fn remaining_validity(
+    pub fn remaining_validity(
         &self,
         session_id: &str,
         source: &AwsCredentialSource,
@@ -165,7 +161,7 @@ impl ScopedAwsCredentials {
 
     /// Whether the cache holds credentials for the session.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn holds(&self, session_id: &str) -> bool {
+    pub fn holds(&self, session_id: &str) -> bool {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -173,7 +169,7 @@ impl ScopedAwsCredentials {
             .any(|key| key.session_id == session_id)
     }
 
-    pub(crate) fn shared() -> Arc<Self> {
+    pub fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<ScopedAwsCredentials>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_clock(Arc::new(SystemTime::now)))))
     }
@@ -193,7 +189,7 @@ impl ScopedAwsCredentials {
     /// A failed mint is an error even when the previous credentials have not
     /// yet expired. The session keeps what it has installed, and the caller
     /// reports the failure; nothing widens the scope.
-    pub(crate) fn credentials_for(
+    pub fn credentials_for(
         &self,
         session_id: &str,
         source: &AwsCredentialSource,
@@ -355,7 +351,7 @@ async fn scope_key_without_blocking() -> Result<&'static [u8]> {
 // Lets a test make the signing key unreadable on the thread that sets this.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static SIGNING_KEY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub static SIGNING_KEY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn scope_mac(
@@ -370,7 +366,7 @@ fn scope_mac(
 }
 
 /// The tag for a scope record describing the secret with this fingerprint.
-pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -> Result<String> {
+pub fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -> Result<String> {
     use hmac::Mac;
     let mac = scope_mac(scope_key()?, scope, secret_fingerprint);
     Ok(mj_core::hex::lower_hex(mac.finalize().into_bytes()))
@@ -381,7 +377,7 @@ pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -
 /// itself does not verify. An error means the answer is unknown (the signing
 /// key could not be read), which is not the same as "not authentic": callers
 /// must not act on it as if the record were forged.
-pub(crate) async fn scope_is_authentic(
+pub async fn scope_is_authentic(
     scope: &AwsCredentialScope,
     secret_fingerprint: &str,
 ) -> Result<bool> {
@@ -406,7 +402,7 @@ const STS_DEFAULT_DURATION: Duration = Duration::from_secs(3600);
 /// renewed (`ScopedEntry::refresh_at`). A renewal that keeps failing is retried
 /// no more slowly than this, because slower than this the credentials would
 /// run out between attempts.
-pub(crate) fn credential_half_life(role: &AwsRoleConfig) -> Duration {
+pub fn credential_half_life(role: &AwsRoleConfig) -> Duration {
     role.duration_seconds
         .map_or(STS_DEFAULT_DURATION, |seconds| {
             Duration::from_secs(u64::from(seconds))
@@ -417,10 +413,7 @@ pub(crate) fn credential_half_life(role: &AwsRoleConfig) -> Duration {
 /// Role-scoped credentials installed under the profile name the worker's
 /// configuration already has, which can differ from the host profile the mint
 /// ran as. The name is part of the secret, so the scope is signed again.
-pub(crate) fn for_worker_profile(
-    credentials: AwsCredentials,
-    profile: &str,
-) -> Result<AwsCredentials> {
+pub fn for_worker_profile(credentials: AwsCredentials, profile: &str) -> Result<AwsCredentials> {
     if credentials.profile() == profile {
         return Ok(credentials);
     }
@@ -433,12 +426,12 @@ pub(crate) fn for_worker_profile(
 /// The role session name: it appears in the assumed-role ARN of every
 /// CloudTrail event the session causes. A session id is 32 hex characters, so
 /// this fits STS's 64-character limit.
-pub(crate) fn session_name(session_id: &str) -> String {
+pub fn session_name(session_id: &str) -> String {
     format!("mj-{session_id}")
 }
 
 /// `aws sts assume-role` for one session, run with the host's own login.
-pub(crate) fn assume_role_command(
+pub fn assume_role_command(
     role: &AwsRoleConfig,
     host_profile: &str,
     session_name: &str,
@@ -548,7 +541,7 @@ fn assume_role_failure(stderr: &[u8], status: i32) -> String {
 /// when the profile sets it) has the shape of a real session's, `mj-` and 32
 /// random lowercase hex digits, because a trust policy may allow only that
 /// shape and a doctor probe must not be refused for looking different.
-pub(crate) fn probe(
+pub fn probe(
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
 ) -> Result<AwsCredentials> {
@@ -565,7 +558,7 @@ pub(crate) fn probe(
 /// The unscoped export for a profile without a role, the scoped mint for one
 /// with a role. Launch calls this; the credential sync calls the same two
 /// functions, because it exports once per profile and mints once per session.
-pub(crate) fn obtain(
+pub fn obtain(
     session_id: &str,
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
@@ -575,6 +568,16 @@ pub(crate) fn obtain(
     } else {
         crate::aws_credentials::export(source, executor)
     }
+}
+
+/// The STS replies recorded for tests of role assumption, here and in the
+/// crates that drive it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_fixtures {
+    pub const ASSUME_ROLE: &str = include_str!("../tests/fixtures/aws-sts-assume-role.json");
+    pub const ACCESS_DENIED: &str =
+        include_str!("../tests/fixtures/aws-sts-assume-role-access-denied.txt");
 }
 
 #[cfg(test)]

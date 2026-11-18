@@ -9,8 +9,8 @@
 )]
 
 mod antigravity_usage;
-mod aws_assume_role;
-mod aws_credentials;
+pub(crate) use mj_targets::aws_assume_role;
+pub(crate) use mj_targets::aws_credentials;
 pub mod backoff;
 mod claude_login;
 pub mod claude_usage;
@@ -43,25 +43,25 @@ pub mod review_selection;
 pub mod session_manager;
 pub mod sessionwiki;
 pub mod setup;
-pub mod signing_key;
-pub mod streamed_child;
-pub mod tailscale;
+pub use mj_targets::signing_key;
+pub use mj_targets::streamed_child;
+pub use mj_targets::tailscale;
 pub mod utility_llm;
 pub mod worker_client;
 pub mod worker_lifecycle;
 
 pub mod database;
 
-pub mod target_storage;
-pub mod targets;
+pub use mj_targets::target_storage;
+pub use mj_targets::targets;
 
-pub mod termination;
+pub use mj_targets::termination;
 
 pub(crate) mod project_memory_merge;
 
 pub mod checkpoint_transfer;
 
-pub mod image_pull_gate;
+pub use mj_targets::image_pull_gate;
 pub mod recovery_gate;
 
 pub mod github_item_verdict;
@@ -70,9 +70,9 @@ pub mod github_relevance;
 mod jev_transport;
 pub mod mailbox_outbox;
 #[cfg(any(test, feature = "test-support"))]
-pub mod test_isolation;
+pub use mj_targets::test_isolation;
 #[cfg(any(test, feature = "test-support"))]
-pub mod test_log;
+pub use mj_targets::test_log;
 pub mod upgrade;
 pub mod web_push;
 

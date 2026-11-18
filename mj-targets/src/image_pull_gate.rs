@@ -89,7 +89,7 @@ pub struct ImagePullLock {
 
 impl ImagePullLock {
     /// A lock that only this process sees.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn in_process() -> Self {
         Self {
             local: Mutex::new(()),

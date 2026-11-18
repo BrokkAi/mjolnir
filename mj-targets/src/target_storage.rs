@@ -179,7 +179,7 @@ pub fn record_samples(samples: &[HostStorageSample], sampled_at: u64) {
 /// A write on `host` failed because a disk is full. The filesystem of the
 /// path the failure names is marked; a failure that names no path holds the
 /// whole host until the measurement it asks for.
-pub(crate) fn observe_no_space(host: &str, detail: &str) {
+pub fn observe_no_space(host: &str, detail: &str) {
     let path = mj_core::targets::storage::no_space_path(detail);
     observe_no_space_at(host, path.as_deref(), detail, now_epoch_seconds());
 }
@@ -188,7 +188,7 @@ pub(crate) fn observe_no_space(host: &str, detail: &str) {
 /// seconds). A measurement taken after that already says what the disk holds
 /// now, so an old failure, such as a dead worker's exit record, does not
 /// override it.
-pub(crate) fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, at: u64) {
+pub fn observe_no_space_at(host: &str, path: Option<&str>, detail: &str, at: u64) {
     let board = board();
     let changed = {
         let mut hosts = board.hosts();
@@ -442,13 +442,13 @@ pub fn test_storage_sample(host: &str, root_free: u64, projects_free: u64) -> Ho
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use mj_core::targets::storage::WRITE_RESERVE_BYTES;
 
-    pub(crate) use super::test_storage_sample as sample;
+    pub use super::test_storage_sample as sample;
 
-    pub(crate) fn ssh_bare(host: &str) -> TargetLocator {
+    pub fn ssh_bare(host: &str) -> TargetLocator {
         TargetLocator::SshBare {
             ssh: mj_core::targets::SshTarget {
                 destination: format!("jonathan@{host}"),

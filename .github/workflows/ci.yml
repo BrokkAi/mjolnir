@@ -139,7 +139,7 @@ jobs:
         # licence text ships with it. `--list` does not build, so a crate whose
         # path dependencies are not on the registry yet still works here.
         for package in brokk-mj-core brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-voice-worker brokk-mj-worker \
-          brokk-mj-client brokk-mj-controller brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
+          brokk-mj-client brokk-mj-targets brokk-mj-controller brokk-mj-server brokk-mj-daemon brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"
         done

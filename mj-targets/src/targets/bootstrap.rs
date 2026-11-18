@@ -87,7 +87,7 @@ pub fn bootstrap_probe_plan(
 /// Complete container creation before clone/profile staging can write HOME.
 /// Query as the configured container user, then create/chown as container root.
 /// This also handles images whose non-root user's home is missing.
-pub(crate) fn initialize_container_home(
+pub fn initialize_container_home(
     locator: &TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
@@ -176,7 +176,7 @@ pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
 /// [`CommandPlan`], so a single fixed marker never mixes batches across plans.
 pub(super) const BUNDLE_REPOSITORIES_PARALLEL_GROUP: u32 = 1;
 
-pub(crate) fn clone_commands(
+pub fn clone_commands(
     bundle: &ProjectBundleSpec,
     workspace: &str,
     github_token: Option<&str>,

@@ -17,6 +17,7 @@
 !mj-transcript/
 !mj-worker/
 !mj-client/
+!mj-targets/
 !mj-controller/
 !mj-server/
 !mj-daemon/

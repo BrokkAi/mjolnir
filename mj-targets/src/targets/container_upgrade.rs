@@ -210,7 +210,7 @@ fn owned(record: &Inspection, session_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn inspect_retained_container(
+pub fn inspect_retained_container(
     locator: &TargetLocator,
     session_id: &str,
     target_image: &str,
@@ -466,7 +466,7 @@ impl RetainedContainer {
 
     /// Only the stopped worker's private control tree is copied. Every
     /// independent mount beneath it is excluded, including build caches.
-    pub(crate) fn capture_control_state(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn capture_control_state(&self, executor: &impl CommandExecutor) -> Result<()> {
         let Some(state) = &self.control_state else {
             return Ok(());
         };
@@ -523,7 +523,7 @@ impl RetainedContainer {
         Ok(())
     }
 
-    pub(crate) fn restore_control_state(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn restore_control_state(&self, executor: &impl CommandExecutor) -> Result<()> {
         let Some(state) = &self.control_state else {
             return Ok(());
         };
@@ -557,7 +557,7 @@ impl RetainedContainer {
         Ok(())
     }
 
-    pub(crate) fn source_is_current(&self, executor: &impl CommandExecutor) -> Result<bool> {
+    pub fn source_is_current(&self, executor: &impl CommandExecutor) -> Result<bool> {
         let (host, _) = host_and_name(&self.locator)?;
         Ok(inspect(&host, &self.name, executor)?.is_some_and(|record| record.id == self.source_id))
     }
@@ -688,7 +688,7 @@ impl RetainedContainer {
 
     /// Idempotent after the durable replacement boundary. The stopped source
     /// remains a rollback resource until the new worker is ready.
-    pub(crate) fn replace(&self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn replace(&self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
         let (host, _) = host_and_name(&self.locator)?;
         let image = self
             .prepared_image
@@ -1230,7 +1230,7 @@ fn retain_legacy_volume(
 }
 
 /// Read-only evidence for Resume; the replacement uses this same volume owner.
-pub(crate) fn retained_workspace_volume_exists(
+pub fn retained_workspace_volume_exists(
     locator: &TargetLocator,
     session: &str,
     executor: &impl CommandExecutor,
@@ -1254,7 +1254,7 @@ pub(crate) fn retained_workspace_volume_exists(
 /// Recovery only for a shipped recreation that already removed its source.
 /// Existing workspace storage wins over the archive, even if it contains
 /// files the archive never covered. No failure cleanup removes any storage.
-pub(crate) fn recover_removed_container(
+pub fn recover_removed_container(
     locator: &TargetLocator,
     template: &ContainerTemplate,
     session_id: &str,

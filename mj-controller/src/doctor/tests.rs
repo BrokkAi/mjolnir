@@ -2234,13 +2234,13 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         [("localhost".to_owned(), TargetTemplate::LocalBare)]
             .into_iter()
             .collect();
-    let recorded = include_str!("../../tests/fixtures/aws-sts-assume-role.json");
+    let recorded = crate::aws_assume_role::test_fixtures::ASSUME_ROLE;
     let granted = {
         let mut output: serde_json::Value = serde_json::from_str(recorded).unwrap();
         output["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
         serde_json::to_vec(&output).unwrap()
     };
-    let denied = include_str!("../../tests/fixtures/aws-sts-assume-role-access-denied.txt");
+    let denied = crate::aws_assume_role::test_fixtures::ACCESS_DENIED;
 
     let mut checks = Vec::new();
     // No role: sessions on the container target get the host's credentials.

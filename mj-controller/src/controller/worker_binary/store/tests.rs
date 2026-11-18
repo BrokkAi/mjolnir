@@ -944,7 +944,7 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
         CommandSpec::new("touch", ["-t", "200001010000", garbage.to_str().unwrap()]),
     )
     .unwrap();
-    let mut sample = crate::target_storage::tests::sample("local", 0, 0);
+    let mut sample = crate::target_storage::test_storage_sample("local", 0, 0);
     sample.filesystems.truncate(1);
     sample.filesystems[0].paths = vec![temp.path().to_string_lossy().into_owned()];
     crate::target_storage::record_samples(&[sample], 1);

@@ -1,17 +1,17 @@
 use super::*;
 use mj_core::targets::SshTrafficClass;
 
-pub(crate) fn container_temporary_volume_name(container: &str) -> String {
+pub fn container_temporary_volume_name(container: &str) -> String {
     format!("{container}-tmp")
 }
 
 #[derive(Debug)]
-pub(crate) struct ContainerStorage {
+pub struct ContainerStorage {
     pub managed_temporary_volume: bool,
     pub attachments: Vec<AdditionalMount>,
 }
 
-pub(crate) fn inspect_container_storage(
+pub fn inspect_container_storage(
     locator: &TargetLocator,
     attachments: &[AdditionalMount],
     executor: &impl CommandExecutor,

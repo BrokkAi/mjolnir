@@ -33,7 +33,7 @@ pub fn provision_on_locator_plan(
 }
 
 /// Reconstruct repositories without creating or retiring their target.
-pub(crate) fn recover_checkout_plan(
+pub fn recover_checkout_plan(
     locator: &TargetLocator,
     session_id: &str,
     bundle: &ProjectBundleSpec,

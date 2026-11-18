@@ -10,7 +10,7 @@ const WEB_ROOT = path.resolve(__dirname, '../../../mj-server/src/web');
 // Replaying them ties the page to what the daemon really sends, and a
 // request the page makes that the daemon side never recorded fails here.
 const EXCHANGE = JSON.parse(fs.readFileSync(
-  path.resolve(__dirname, '../../../mj-controller/tests/golden/viewer-settings-exchange.txt'),
+  path.resolve(__dirname, '../../../mj-server/tests/golden/viewer-settings-exchange.txt'),
   'utf8',
 ));
 const WORKSPACE_ID = 'workspace-settings';

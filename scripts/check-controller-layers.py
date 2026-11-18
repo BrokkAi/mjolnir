@@ -5,9 +5,9 @@ layer into a crate, and a crate cannot depend on one above it. (The daemon
 above mj-controller is already the crate mj-daemon, so the compiler enforces
 that boundary.)
 
-A layer is a set of top-level modules of mj-controller/src. The targets layer
-is the lowest and may name only itself; the store layer may name itself and
-the targets layer; every other module is above both. An enforced boundary
+A layer is a set of top-level modules of mj-controller/src. The store layer
+may name only itself (and the crate mj-targets below it); every other module
+is above it. An enforced boundary
 fails the check when production code crosses it. A test that crosses it is
 listed and does not fail: it moves up, or its fixtures move down, when the
 crate is created. Pass --all to print every site, not the summary.
@@ -23,14 +23,11 @@ import sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mj-controller', 'src')
 # Lowest first. A module in no layer is above all of them.
 LAYERS = [
-    ('targets', {'targets', 'target_storage', 'image_pull_gate', 'streamed_child', 'termination',
-                 'tailscale', 'aws_credentials', 'aws_assume_role', 'signing_key', 'test_log',
-                 'test_isolation'}),
     ('store', {'database', 'upgrade', 'recovery_gate', 'worker_lifecycle', 'web_push',
                'mailbox_outbox'}),
 ]
 # Boundaries that production code no longer crosses and must not cross again.
-ENFORCED = {'targets', 'store'}
+ENFORCED = {'store'}
 
 PATH = re.compile(r'\bcrate::([a-z_0-9]+)((?:::[A-Za-z_0-9]+)*)')
 GROUP = re.compile(r'\bcrate::\{')

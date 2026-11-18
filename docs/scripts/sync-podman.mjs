@@ -11,13 +11,13 @@ for (const guide of [
     description: 'Complete reference for Mjolnir config.toml, including profiles, secrets, bundles, machines, runtimes, review, viewer, paths, and environment overrides.',
   },
   {
-    source: '../mj-controller/docs/PODMAN.md',
+    source: '../mj-targets/docs/PODMAN.md',
     target: 'podman.md',
     title: 'Podman for Mjolnir',
     description: 'Rootless Podman installation, verification postconditions, and remediation for Mjolnir container targets.',
   },
   {
-    source: '../mj-controller/docs/DOCKER.md',
+    source: '../mj-targets/docs/DOCKER.md',
     target: 'docker.md',
     title: 'Docker for Mjolnir',
     description: 'Docker setup, OverlayFS attachments, lifecycle, and verification for Mjolnir container targets.',

@@ -2,7 +2,7 @@ use super::launch::*;
 use super::*;
 use mj_core::targets::SshTrafficClass;
 
-use crate::targets::tests::unwrapped_remote_line;
+use crate::targets::unwrapped_remote_line;
 
 /// The worker writes each harness's GitHub CLI approval into a file inside the
 /// session's staged profile, so the profile staging allowlist must carry that

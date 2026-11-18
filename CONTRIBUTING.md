@@ -110,6 +110,12 @@ it or introduce a dependency between sibling branches.
   durable command queue, and relay journal.
 - `brokk-mj-client` (`mj-client/`, library `mj_client`) holds client-facing
   contracts and shared presentation helpers. It uses the foundation.
+- `brokk-mj-targets` (`mj-targets/`, library `mj_targets`) is where a
+  session's worker runs (a local directory, a container, an SSH host, an EC2
+  instance) and the commands that provision, control and clean it up. It uses
+  the foundation and client branches and knows nothing of the store or of
+  session lifecycle. `mj_controller` re-exports its modules under their old
+  names.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client
@@ -195,7 +201,7 @@ Add the smallest regression test that would have caught the problem:
   `tests/e2e/run-browser-reliability.sh --seed N <mj binary>`.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
-- Update the embedded guides in `mj-controller/docs/`, `docs/SSH.md`,
+- Update the embedded guides in `mj-targets/docs/`, `docs/SSH.md`,
   `docs/AWS.md`, and the pages in `docs/src/content/docs/` when a user-visible
   command, keyboard action, setup flow, harness, target kind, configuration
   option, or limitation changes; `docs/scripts/sync-podman.mjs` copies the
