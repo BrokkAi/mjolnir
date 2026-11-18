@@ -1802,3 +1802,158 @@ fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
     drop(relay);
     DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 }
+
+#[test]
+fn restart_continuation_survives_each_recovery_write_boundary_without_duplicates() {
+    use crate::relay::commands::restart_continuation_id;
+    use mj_core::event_outcome::OutcomeReason;
+
+    for cut in 0..=2 {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        submit_relay(&mut relay, "interrupted-turn", prompt("finish the task"));
+        relay.claim_pending_commands(true).unwrap();
+        submit_relay(&mut relay, "later-user-input", prompt("next task"));
+        let recovery_id = restart_continuation_id("interrupted-turn");
+        if cut >= 1 {
+            relay
+                .queue_restart_continuation("interrupted-turn")
+                .unwrap();
+        }
+        if cut >= 2 {
+            // Crash after the terminal record, before turn cleanup/promotion.
+            relay
+                .append_relay_event(
+                    Some("interrupted-turn"),
+                    RelayObservation::CommandInterrupted {
+                        command_id: "interrupted-turn".into(),
+                        command: RelayCommandKind::Prompt,
+                        reason: Some(OutcomeReason::WorkerRestarted),
+                        message: "worker restarted".into(),
+                    },
+                )
+                .unwrap();
+        }
+        drop(relay);
+        for _ in 0..2 {
+            relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+            let before = relay.latest_ordinal();
+            relay
+                .record_command_interrupted(
+                    "interrupted-turn",
+                    OutcomeReason::WorkerRestarted,
+                    "repeated recovery",
+                )
+                .unwrap();
+            assert_eq!(relay.latest_ordinal(), before);
+            drop(relay);
+        }
+        relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(
+            retained_events(&relay)
+                .iter()
+                .filter(|event| matches!(
+                    &event.observation,
+                    RelayObservation::CommandQueued { command_id, .. } if command_id == &recovery_id
+                ))
+                .count(),
+            1,
+            "crash boundary {cut}"
+        );
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, recovery_id);
+        let text =
+            mj_core::acp::steering_text_context(&claimed[0].command.prompt_blocks().unwrap())
+                .unwrap()
+                .to_owned();
+        assert!(mj_core::continuation::is_control_origin_prompt(&text));
+        assert!(!mj_core::continuation::is_user_authored_message(
+            Some(&recovery_id),
+            &text
+        ));
+        assert!(text.contains("rerunning any command whose result you did not see"));
+
+        // A second restart interrupts recovery itself: it gets its own wake,
+        // still ahead of the user's queued work, without a retry budget.
+        drop(relay);
+        relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let second = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].command_id, restart_continuation_id(&recovery_id));
+        relay
+            .record_command_completed(
+                &second[0].command_id,
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                    work_facts: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "later-user-input"
+        );
+    }
+}
+
+#[test]
+fn restart_continuation_honors_cancellation_even_when_the_worker_dies_before_ack() {
+    use mj_core::event_outcome::OutcomeReason;
+
+    for cancel in [
+        None,
+        Some(RelayCommand::CancelTurn),
+        Some(RelayCommand::CancelTurnFor {
+            active_prompt_id: "interrupted-turn".into(),
+        }),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        submit_relay(&mut relay, "interrupted-turn", prompt("finish the task"));
+        relay.claim_pending_commands(true).unwrap();
+        if let Some(cancel) = cancel {
+            submit_relay(&mut relay, "cancel-command", cancel);
+            relay.claim_pending_commands(true).unwrap();
+        } else {
+            relay
+                .record_command_interrupted(
+                    "interrupted-turn",
+                    OutcomeReason::RequestedCancellation,
+                    "user pressed Esc",
+                )
+                .unwrap();
+        }
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        assert!(!retained_events(&relay).iter().any(|event| matches!(
+            &event.observation,
+            RelayObservation::CommandQueued { command_id, .. }
+                if command_id.starts_with("auto-continue-restart-")
+        )));
+    }
+}
+
+#[test]
+fn restart_continuation_leaves_native_goal_recovery_as_the_only_resume_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate": "session_info_update", "_meta": {
+            "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
+            "goal": {"objective": "finish campaign", "status": "active", "createdAt": 123},
+            "execution": {"version": 1, "status": "running"}
+        }
+    })).unwrap()).unwrap();
+    assert!(relay.snapshot.goal.active());
+    submit_relay(&mut relay, "interrupted-turn", prompt("finish the task"));
+    relay.claim_pending_commands(true).unwrap();
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    assert!(relay.snapshot.queued_prompts.is_empty());
+    assert!(relay.snapshot.active_prompt.is_none());
+    assert!(relay.snapshot.goal.active());
+}

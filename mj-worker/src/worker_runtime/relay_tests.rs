@@ -3960,53 +3960,90 @@ fn advertised_steering_enables_automatic_steering() {
 
 #[test]
 fn harness_restarting_interrupts_in_flight_commands() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    submit(&mut durable, "prompt-1", prompt("go"));
-    let relay = Arc::new(RelayCell::new(durable));
-    let mut in_flight = BTreeMap::new();
-    in_flight.insert("prompt-1".into(), prompt("go"));
-
-    unix::record_runtime_event(
-        &relay,
-        &mut in_flight,
-        RuntimeEvent::HarnessRestarting {
-            message: "ACP bridge exited; reloading the native session".into(),
-        },
-    )
-    .unwrap();
-
-    assert!(
-        in_flight.is_empty(),
-        "the in-flight prompt must be interrupted"
-    );
-    let events = relay
-        .lock()
-        .unwrap()
-        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+    for control in ["none", "cancel", "steer"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+        durable.set_steering_delivery_mode(mj_core::config::HarnessKind::Dsh, false);
+        submit(&mut durable, "prompt-1", prompt("go"));
+        let mut in_flight = BTreeMap::new();
+        for claimed in durable.claim_pending_commands(true).unwrap() {
+            in_flight.insert(claimed.command_id, claimed.command);
+        }
+        match control {
+            "cancel" => submit(
+                &mut durable,
+                "cancel-command",
+                RelayCommand::CancelTurnFor {
+                    active_prompt_id: "prompt-1".into(),
+                },
+            ),
+            "steer" => {
+                submit(&mut durable, "queued-input", prompt("new input"));
+                submit(
+                    &mut durable,
+                    "steer-command",
+                    RelayCommand::Steer {
+                        active_prompt_id: "prompt-1".into(),
+                        queued_prompt_id: "queued-input".into(),
+                    },
+                );
+            }
+            _ => submit(
+                &mut durable,
+                "queued-checkpoint",
+                RelayCommand::BeginCheckpoint {
+                    reason: Some("wait for the current turn".into()),
+                },
+            ),
+        }
+        for claimed in durable.claim_pending_commands(true).unwrap() {
+            in_flight.insert(claimed.command_id, claimed.command);
+        }
+        let relay = Arc::new(RelayCell::new(durable));
+        unix::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::HarnessRestarting {
+                message: "ACP bridge exited; reloading the native session".into(),
+            },
+        )
         .unwrap();
-    assert!(events.iter().any(|event| matches!(
-        &event.observation,
-        RelayObservation::Warning { message } if message.contains("reloading the native session")
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.observation,
-        RelayObservation::CommandInterrupted { command_id, .. } if command_id == "prompt-1"
-    )));
-    let interrupted = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event.observation,
-                RelayObservation::CommandInterrupted { .. }
-            )
-        })
-        .unwrap();
-    let restarted = events
-        .iter()
-        .position(|event| matches!(event.observation, RelayObservation::SessionRestarted))
-        .unwrap();
-    assert!(interrupted < restarted);
+        assert!(in_flight.is_empty());
+        let mut durable = relay.lock().unwrap();
+        let events = durable.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+        let interrupted = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.observation, RelayObservation::CommandInterrupted { command_id, .. }
+                        if command_id == "prompt-1"
+                )
+            })
+            .unwrap();
+        let restarted = events
+            .iter()
+            .position(|event| matches!(event.observation, RelayObservation::SessionRestarted))
+            .unwrap();
+        assert!(interrupted < restarted);
+        let claimed = durable.claim_pending_commands(true).unwrap();
+        if control == "cancel" {
+            assert!(
+                claimed.is_empty(),
+                "a pending cancel must survive restart ordering"
+            );
+        } else {
+            assert_eq!(claimed.len(), 1);
+            assert!(claimed[0].command_id.starts_with("auto-continue-restart-"));
+            if control == "steer" {
+                let state = durable.operational_state();
+                assert_eq!(state.queued_prompts[0].command_id, "queued-input");
+                assert_eq!(
+                    state.steering.unwrap().status,
+                    mj_core::relay::SteeringStatus::Unconfirmed
+                );
+            }
+        }
+    }
 }
 
 #[test]

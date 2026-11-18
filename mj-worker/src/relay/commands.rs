@@ -1,5 +1,24 @@
 use super::*;
 
+// Reuse the generated-prompt namespace understood by older daemon readers.
+const RESTART_CONTINUATION_SUFFIX: &str = "restart-";
+const RESTART_CONTINUATION_PROMPT: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted. Any tool calls that were running were lost; their results were not recorded. Continue the task from where you left off, rerunning any command whose result you did not see.";
+
+pub(super) fn restart_continuation_id(command_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // Hashing keeps repeated interruptions within the command-ID byte limit.
+    mj_core::continuation::GeneratedPrompt::AutoContinue.command_id(format!(
+        "{RESTART_CONTINUATION_SUFFIX}{}",
+        mj_core::hex::lower_hex(Sha256::digest(command_id.as_bytes()))
+    ))
+}
+
+fn is_restart_continuation(command_id: &str) -> bool {
+    mj_core::continuation::GeneratedPrompt::AutoContinue
+        .suffix(command_id)
+        .is_some_and(|suffix| suffix.starts_with(RESTART_CONTINUATION_SUFFIX))
+}
+
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -1925,8 +1944,22 @@ impl DurableRelay {
         reason: mj_core::event_outcome::OutcomeReason,
         message: impl Into<String>,
     ) -> Result<u64> {
+        // Terminal payloads have already been compacted out of dispatches.
+        // Repeated restart recovery must not create another event or wake.
+        if reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted
+            && let Some(terminal) = self
+                .snapshot
+                .handled_commands
+                .get(command_id)
+                .and_then(|handled| handled.terminal_ordinal)
+        {
+            return Ok(terminal);
+        }
         self.require_dispatch(command_id)?;
         let command = self.snapshot.dispatches[command_id].command.kind();
+        if reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted {
+            self.queue_restart_continuation(command_id)?;
+        }
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandInterrupted {
@@ -1945,6 +1978,48 @@ impl DurableRelay {
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
         Ok(ordinal)
+    }
+
+    /// Accept recovery before terminating the old command. If this process
+    /// crashes between those writes, the old command is still in flight and
+    /// recovery repeats this decision against the same durable command ID.
+    pub(super) fn queue_restart_continuation(&mut self, command_id: &str) -> Result<()> {
+        let dispatch = &self.snapshot.dispatches[command_id];
+        if dispatch.command.kind() != RelayCommandKind::Prompt
+            || dispatch.state != RelayDispatchState::InFlight
+            || self.snapshot.cancelling_prompt_id.as_deref() == Some(command_id)
+        {
+            return Ok(());
+        }
+        // Native goal recovery owns resumption of this work. Its saved resume
+        // decision and active goal are replayed by acp::goal::recover.
+        let goal = &self.snapshot.goal;
+        if goal.supports(mj_core::goal::GoalControlAction::Resume)
+            && (goal.active()
+                || goal.decision.as_ref().is_some_and(|decision| {
+                    decision.resume
+                        && goal.snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.same_goal(&decision.goal)
+                                && matches!(snapshot.status.as_str(), "active" | "paused")
+                        })
+                }))
+        {
+            return Ok(());
+        }
+        let recovery_id = restart_continuation_id(command_id);
+        if !self.snapshot.handled_commands.contains_key(&recovery_id) {
+            self.append_relay_event(
+                Some(&recovery_id),
+                RelayObservation::CommandQueued {
+                    command_id: recovery_id.clone(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from(RESTART_CONTINUATION_PROMPT.to_owned())],
+                    },
+                    created_at_ms: epoch_millis(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {
@@ -2079,8 +2154,14 @@ impl DurableRelay {
     }
 
     /// Start the head of the durable command queue once the relay is idle.
-    /// Entries run strictly one at a time, in the order they were accepted.
+    /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
+        let recovery = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .find(|queued| is_restart_continuation(&queued.command_id))
+            .cloned();
         // Keep turn-starting entries and configuration queue entries in this
         // durable FIFO during a live turn. Claude's adapter queues mid-cycle
         // prompts internally and cancel may discard them; ACP rejects
@@ -2090,24 +2171,29 @@ impl DurableRelay {
             // A cancel can outlive its prompt result. Drain it before a
             // replacement turn starts, so it cannot reach the newer turn.
             || self.turn_cancellation_pending()
-            || self
+            // Uncertain steering still holds its input, but must not block
+            // recovery of the interrupted turn. We never redeliver that input.
+            || (recovery.is_none() && self
                 .snapshot
                 .steering
                 .as_ref()
-                .is_some_and(|s| s.holds_queue())
+                .is_some_and(|s| s.holds_queue()))
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed
             )
-            || self.pending_checkpoint_barrier()
+            || (recovery.is_none() && self.pending_checkpoint_barrier())
             || self.close_requested()
         {
             return Ok(None);
         }
         self.expire_mailbox_hook_lease_at(epoch_millis())?;
-        let Some(queued) = self.snapshot.queued_prompts.first().cloned() else {
+        // The recovery command is durable before the interrupted command
+        // becomes terminal, so even a crash at that boundary preserves priority.
+        let Some(queued) = recovery.or_else(|| self.snapshot.queued_prompts.first().cloned())
+        else {
             if self.mailbox_wake_is_allowed() {
                 self.enqueue_mailbox_wake()?;
                 return self.promote_next_queued_command();

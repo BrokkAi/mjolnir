@@ -2382,10 +2382,26 @@ fn relay_runs_queued_prompts_in_order_without_a_controller() {
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].command_id, "command-two");
 
-    // A relay/process restart interrupts only the command actually handed
-    // to ACP and then continues the durable offline queue.
+    // Recovery resumes the interrupted turn before the durable offline queue.
     drop(relay);
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let continuation = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(continuation.len(), 1);
+    assert_eq!(
+        continuation[0].command_id,
+        super::commands::restart_continuation_id("command-two")
+    );
+    relay
+        .record_command_completed(
+            &continuation[0].command_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                work_facts: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
     let third = relay.claim_pending_commands(true).unwrap();
     assert_eq!(third.len(), 1);
     assert_eq!(third[0].command_id, "command-three");
