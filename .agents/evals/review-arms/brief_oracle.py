@@ -46,6 +46,8 @@ TASK_CENSUS = None
 TASK_JOBS = None
 TASK_NAME = None
 TASK_SCOPE = None
+# Strict-construction mode (brief/PLAN-bifrost-oracle-strict.md): fidelity check and cause gate.
+STRICT = False
 
 
 def sha(text):
@@ -102,7 +104,8 @@ def task_scope():
     return {"census": str(pathlib.Path(TASK_CENSUS).resolve()),
             "census_sha256": hashlib.sha256(pathlib.Path(TASK_CENSUS).read_bytes()).hexdigest(),
             "jobs": str(pathlib.Path(TASK_JOBS).resolve()),
-            "jobs_sha256": hashlib.sha256(pathlib.Path(TASK_JOBS).read_bytes()).hexdigest(), "name": TASK_NAME}
+            "jobs_sha256": hashlib.sha256(pathlib.Path(TASK_JOBS).read_bytes()).hexdigest(), "name": TASK_NAME,
+            **({"mode": "strict"} if STRICT else {})}
 
 
 def load_task_inputs():
@@ -536,7 +539,9 @@ def noleak_state(bug, upto):
             # next edit; the rejection says what the failed edit lost.
             leak_reasons = previous if previous and previous.get("kind") == "leak judges" else \
                 (previous or {}).get("leak")
-            previous = {"kind": "fact check rejected the last edit", "why": decision["why"],
+            previous = {"kind": ("fidelity check failed the last edit" if STRICT else
+                                 "fact check rejected the last edit"), "why": decision["why"],
+                        **({"elements_not_kept": decision.get("elements_not_kept")} if STRICT else {}),
                         "leak": leak_reasons}
             continue
         text = (W / "texts" / bug / f"round-{n}.md").read_text()
@@ -546,8 +551,19 @@ def noleak_state(bug, upto):
         if leak is None or leak["brief_sha256"] != hashlib.sha256(text.encode()).hexdigest():
             raise SystemExit(f"{bug}: round {n} leak check is missing or bound to other text")
         source = text
-        if leak["label"] == "missed":
+        if leak["label"] == "missed" and not STRICT:
             return n, source, None
+        if leak["label"] == "missed":
+            gate_path = W / f"round-{n}" / "gate-results.json"
+            if not gate_path.exists():
+                raise SystemExit(f"round {n} strict leak gate is not collected")
+            gate = json.loads(gate_path.read_text())["results"][bug]
+            if gate["pass"]:
+                return n, source, None
+            previous = {"kind": "strict leak gate", "why": gate["why"],
+                        "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale"),
+                                     "confidence": v.get("confidence")} for v in leak["verdicts"]]}
+            continue
         previous = {"kind": "leak judges", "label": leak["label"],
                     "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale")}
                                 for v in leak["verdicts"] if v["label"] != "missed"]}
@@ -594,10 +610,11 @@ def noleak_edit_build(n):
         unit = base / bug
         unit.mkdir(parents=True)
         save(unit / "item.json", item)
-        (unit / "NOLEAK.md").write_text((SCRIPTS / "brief/NOLEAK.md").read_text())
+        editor = "STRICT.md" if STRICT else "NOLEAK.md"
+        (unit / editor).write_text((SCRIPTS / "brief" / editor).read_text())
         (unit / "WRITER.md").write_text((SCRIPTS / "brief/WRITER.md").read_text())
         (unit / "INSTRUCTIONS.md").write_text(
-            "Read NOLEAK.md and WRITER.md and follow them exactly. Your item is item.json. "
+            f"Read {editor} and WRITER.md and follow them exactly. Your item is item.json. "
             "Read code only through git show or git diff at the item's intro and base commits; "
             "do not read code from the current checkout or other history. Do not read any other "
             "experiment data or history, use the network, build, test, or edit tracked files. "
@@ -672,18 +689,26 @@ def noleak_check_build(n):
     if unit.exists():
         raise SystemExit(f"{unit} exists")
     unit.mkdir(parents=True)
+    spec, output = ("FIDELITY.md", "fidelity.jsonl") if STRICT else ("FACTCHECK.md", "factcheck.jsonl")
     for r in edits:
         census = census_rows[r["id"]]
-        save(unit / f"item-{r['id']}.json", {
-            "id": r["id"], "intro": corpus[r["id"]]["intro_commit"], "base": corpus[r["id"]]["base_commit"],
-            "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
-            "brief": r["brief"], "brief_sha256": r["brief_sha256"]})
-    (unit / "FACTCHECK.md").write_text((SCRIPTS / "brief/FACTCHECK.md").read_text())
+        item = {"id": r["id"], "intro": corpus[r["id"]]["intro_commit"], "base": corpus[r["id"]]["base_commit"],
+                "census": {k: census[k] for k in ("fact", "evidence", "other_facts", "kind")},
+                "brief": r["brief"], "brief_sha256": r["brief_sha256"]}
+        if STRICT:
+            # Fidelity is always judged against the round L OT text, not an intermediate round.
+            original = (ROOT / "briefs" / "oracle" / r["id"] / "brief.md").read_text().splitlines()
+            edited = r["brief"].splitlines()
+            if len(original) != len(edited):
+                raise SystemExit(f"{r['id']}: edited brief does not keep the OT brief's lines")
+            item["pairs"] = [{"original": o, "edited": e} for o, e in zip(original, edited) if o != e]
+        save(unit / f"item-{r['id']}.json", item)
+    (unit / spec).write_text((SCRIPTS / "brief" / spec).read_text())
     (unit / "INSTRUCTIONS.md").write_text(
-        f"Read FACTCHECK.md and follow it exactly. Your item files are the {len(edits)} item-*.json files "
+        f"Read {spec} and follow it exactly. Your item files are the {len(edits)} item-*.json files "
         "in this folder. Read code only through git show or git diff at each item's intro and base commits. "
         "Do not read any other experiment data or history, use the network, build, test, or edit tracked "
-        "files. Write factcheck.jsonl in the repository working directory and edit no other file.")
+        f"files. Write {output} in the repository working directory and edit no other file.")
     print(json.dumps({"dir": str(unit.parent), "items": len(edits)}))
 
 
@@ -692,11 +717,14 @@ def noleak_check_collect(n):
     noleak_require_scope()
     edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
     out_path = W / f"round-{n}" / "check-results.json"
+    output = "fidelity.jsonl" if STRICT else "factcheck.jsonl"
     rows = [json.loads(line) for line in
-            (W / f"round-{n}" / "check" / "factcheck" / "factcheck.jsonl").read_text().splitlines() if line.strip()]
+            (W / f"round-{n}" / "check" / "factcheck" / output).read_text().splitlines() if line.strip()]
     if sorted(r.get("id") for r in rows) != sorted(edits):
         raise SystemExit("fact check must cover each edited brief exactly once")
     decisions = {}
+    if STRICT:
+        rows = [strict_fidelity_decision(r, edits.get(r.get("id"))) for r in rows]
     for r in rows:
         e = edits[r["id"]]
         if r.get("brief_sha256") != e["brief_sha256"] or r.get("decision") not in ("carries", "does not carry"):
@@ -706,7 +734,9 @@ def noleak_check_collect(n):
             if not isinstance(r.get("item"), str) or r["item"] not in e["brief"].splitlines() or not r["item"].startswith("- "):
                 raise SystemExit(f"{r['id']}: carrying item is not a complete line of the checked brief")
         decisions[r["id"]] = {"decision": r["decision"], "item": r.get("item"), "why": r.get("why"),
-                              "brief_sha256": e["brief_sha256"]}
+                              "brief_sha256": e["brief_sha256"],
+                              **({"elements_not_kept": r["elements_not_kept"], "fact_inferred": r["fact_inferred"]}
+                                 if STRICT else {})}
     if out_path.exists():
         if json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
             raise SystemExit(f"{out_path} holds different decisions")
@@ -732,6 +762,99 @@ def noleak_check_collect(n):
                       "rejected": sorted(b for b, d in decisions.items() if d["decision"] != "carries")}))
 
 
+def strict_fidelity_decision(r, e):
+    """Maps a fidelity row onto the fact-check decision shape. The checker's own `decision` is
+    not trusted alone: a pass also needs every element kept, no inference and a whole-line quote."""
+    if e is None or r.get("brief_sha256") != e["brief_sha256"]:
+        raise SystemExit(f"{r.get('id')}: fidelity row names another brief")
+    elements = r.get("elements")
+    if not isinstance(elements, list) or any(not isinstance(x, dict) or not isinstance(x.get("kept"), bool)
+                                             for x in elements):
+        raise SystemExit(f"{r['id']}: fidelity row has no valid element list")
+    if not isinstance(r.get("fact_inferred"), bool) or r.get("decision") not in ("pass", "fail"):
+        raise SystemExit(f"{r['id']}: fidelity row has an invalid decision or fact_inferred")
+    not_kept = [x.get("element") for x in elements if not x["kept"]]
+    quote = r.get("carrying_item")
+    whole_line = isinstance(quote, str) and quote.startswith("- ") and quote in e["brief"].splitlines()
+    ok = r["decision"] == "pass" and not not_kept and not r["fact_inferred"] and whole_line
+    return {"id": r["id"], "brief_sha256": r["brief_sha256"], "decision": "carries" if ok else "does not carry",
+            "item": quote if whole_line else None, "why": r.get("why"), "elements_not_kept": not_kept,
+            "fact_inferred": r["fact_inferred"]}
+
+
+def noleak_gate_build(n):
+    """Strict leak gate: both leak verdicts `missed` at high confidence go to one blind cause check;
+    any other round-n leak result fails the gate without one."""
+    if not STRICT:
+        raise SystemExit("the leak gate exists only in strict mode")
+    W = task_work()
+    noleak_require_scope()
+    unit = W / f"round-{n}" / "gate" / "cause"
+    if unit.exists():
+        raise SystemExit(f"{unit} exists")
+    checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
+    pending = 0
+    for bug, d in checks.items():
+        if d["decision"] != "carries":
+            continue
+        r = next((x for x in noleak_record(bug)["rounds"] if x["round"] == n), None)
+        if r is None:
+            raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
+        if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
+            continue
+        for v in r["verdicts"]:
+            unit.mkdir(parents=True, exist_ok=True)
+            # The cause check sees only the rationale and the fixed question in CAUSE.md.
+            save(unit / f"item-{bug}-{v['judge']}.json",
+                 {"id": bug, "judge": v["judge"], "rationale": v.get("rationale")})
+            pending += 1
+    if pending:
+        (unit / "CAUSE.md").write_text((SCRIPTS / "brief/CAUSE.md").read_text())
+        (unit / "INSTRUCTIONS.md").write_text(
+            f"Read CAUSE.md and follow it exactly. Your item files are the {pending} item-*.json files in this "
+            "folder. Do not read anything else, use the network, build, test, or edit tracked files. "
+            "Write cause.jsonl in the repository working directory and edit no other file.")
+    print(json.dumps({"round": n, "cause_checks": pending, "dir": str(unit.parent) if pending else None}))
+
+
+def noleak_gate_collect(n):
+    W = task_work()
+    noleak_require_scope()
+    out_path = W / f"round-{n}" / "gate-results.json"
+    checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
+    unit = W / f"round-{n}" / "gate" / "cause"
+    expected = {p.stem.removeprefix("item-") for p in unit.glob("item-*.json")} if unit.exists() else set()
+    causes = {}
+    if expected:
+        rows = [json.loads(line) for line in (unit / "cause.jsonl").read_text().splitlines() if line.strip()]
+        got = {f"{r.get('id')}-{r.get('judge')}": r for r in rows}
+        if set(got) != expected or len(rows) != len(expected):
+            raise SystemExit("cause check must answer each verdict exactly once")
+        causes = got
+    results = {}
+    for bug, d in checks.items():
+        if d["decision"] != "carries":
+            continue
+        r = next(x for x in noleak_record(bug)["rounds"] if x["round"] == n)
+        if r["label"] != "missed":
+            results[bug] = {"pass": False, "why": f"leak label {r['label']}"}
+        elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
+            results[bug] = {"pass": False, "why": "a missed verdict below high confidence: " +
+                            ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
+        else:
+            # Only a clear "no" passes; "yes", "unclear" or anything else fails the brief.
+            flagged = [causes[f"{bug}-{v['judge']}"] for v in r["verdicts"]
+                       if causes[f"{bug}-{v['judge']}"].get("answer") != "no"]
+            results[bug] = {"pass": not flagged,
+                            "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
+    record = {"round": n, "results": results}
+    if out_path.exists() and json.loads(out_path.read_text()) != record:
+        raise SystemExit(f"{out_path} holds different gate results")
+    save(out_path, record)
+    print(json.dumps({"round": n, "pass": sorted(b for b, x in results.items() if x["pass"]),
+                      "fail": {b: x["why"][:120] for b, x in results.items() if not x["pass"]}}))
+
+
 def noleak_publish(jobs_out):
     W = task_work()
     noleak_require_scope()
@@ -746,14 +869,15 @@ def noleak_publish(jobs_out):
         else:
             excluded.append({"bug": bug, "after_round": done, "last_check": previous})
     for r in retained:
-        d = ROOT / "briefs" / "oracle-noleak" / r["bug"]
+        d = ROOT / "briefs" / ("oracle-strict" if STRICT else "oracle-noleak") / r["bug"]
         text = (W / "texts" / r["bug"] / f"round-{r['round']}.md").read_text()
         if (d / "brief.md").exists() and (d / "brief.md").read_text() != text:
             raise SystemExit(f"{d}: a different brief is already published")
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(text)
     # ON and its same-image no-brief control AF, interleaved per diff (the plan's AF amendment).
-    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in ("ON", "AF")])
+    arms = ("OS", "AF2") if STRICT else ("ON", "AF")
+    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in arms])
     # Registered: fewer than 8 retained diffs reads Inconclusive whatever the scores. With none
     # retained there is nothing to review or score, so the outcome is recorded here.
     outcome = "Inconclusive (fewer than 8 retained diffs)" if len(retained) < 8 else None
@@ -768,7 +892,9 @@ if __name__ == "__main__":
     p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate",
                                     "edit-build", "edit-collect", "task-sync",
                                     "noleak-edit-build", "noleak-edit-collect", "noleak-check-build",
-                                    "noleak-check-collect", "noleak-publish"])
+                                    "noleak-check-collect", "noleak-gate-build", "noleak-gate-collect",
+                                    "noleak-publish"])
+    p.add_argument("--strict", action="store_true", help="noleak steps: strict construction (fidelity check, leak gate)")
     p.add_argument("--round", type=int, help="noleak steps: round 1..3")
     p.add_argument("--jobs-out", help="noleak-publish: where to write the ON jobs file")
     p.add_argument("path", nargs="?")
@@ -786,6 +912,9 @@ if __name__ == "__main__":
             p.error("--name must be a single path component")
         TASK_CENSUS, TASK_JOBS, TASK_NAME = a.census, a.bugs_from, a.name
         load_task_inputs()
+    if a.strict and not a.step.startswith("noleak-"):
+        p.error("--strict applies only to noleak steps")
+    STRICT = a.strict
     if a.step.startswith("noleak-"):
         if not TASK_NAME:
             p.error("noleak steps need --census, --bugs-from and --name")
@@ -797,7 +926,8 @@ if __name__ == "__main__":
             if a.round is None:
                 p.error("noleak steps need --round")
             {"noleak-edit-build": noleak_edit_build, "noleak-edit-collect": noleak_edit_collect,
-             "noleak-check-build": noleak_check_build, "noleak-check-collect": noleak_check_collect}[a.step](a.round)
+             "noleak-check-build": noleak_check_build, "noleak-check-collect": noleak_check_collect,
+             "noleak-gate-build": noleak_gate_build, "noleak-gate-collect": noleak_gate_collect}[a.step](a.round)
     elif a.step == "merge":
         merge(a.path)
     elif a.step == "blind-collect":

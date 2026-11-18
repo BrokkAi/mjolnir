@@ -452,7 +452,7 @@ def observations(round_name, groups, arm_conditions):
 
 def compare_same_sessions(round_name, reference_round, bugs, arms=("A", "BT"), model=REVIEW_MODEL):
     """Compare final labels for identical (bug, condition, session) observations across rounds."""
-    conditions = {"A": "no-brief", "BT": "blind", "OT": "oracle"}
+    conditions = {"A": "no-brief", "BT": "blind", "OT": "oracle", "ON": "oracle-noleak", "AF": "no-brief-fresh"}
     if not bugs or not arms or set(arms) - set(conditions):
         raise SystemExit(f"same-session comparison needs bugs and arms among {sorted(conditions)}")
     rounds = (round_name, reference_round)

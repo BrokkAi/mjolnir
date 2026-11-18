@@ -39,7 +39,7 @@ from driver import ARMS, CORPUS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
 # (brief/PLAN-oz.md), which carry no brief but a site_context tool.
 CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS},
              # A fresh no-brief cohort is its own condition, never pooled with the stored no-brief arms.
-             "AF": "no-brief-fresh"}
+             "AF": "no-brief-fresh", "AF2": "no-brief-fresh-2"}
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
@@ -80,11 +80,16 @@ def latency(session_dir):
     return round((done - prompt) / 1000, 1) if done and prompt else None
 
 
+def baseline_on():
+    """Whether the round includes the stored no-brief baseline arms (a reading can exclude them)."""
+    return READING is None or READINGS[READING].get("baseline", True)
+
+
 def sessions(arms):
     """Every finished high-effort Terra or Sol session with output on the 30 Hard-won diffs."""
     out = []
     for bug in sum(scoped_sets().values(), []):
-        for arm in (*BASELINE_ARMS, *arms):
+        for arm in (*(BASELINE_ARMS if baseline_on() else ()), *arms):
             done = ROOT / "runs" / bug / arm / "done.json"
             if not done.exists():
                 continue
@@ -105,12 +110,12 @@ def sessions(arms):
 
 def conditions(arms):
     """no-brief, then each brief kind (oracle, blind) the arms carry; kinds are never pooled."""
-    return ["no-brief", *sorted({CONDITION[a] for a in arms})]
+    return [*(["no-brief"] if baseline_on() else []), *sorted({CONDITION[a] for a in arms})]
 
 
 def planned_cells(arms):
     """Required sessions per diff: baseline minima and selected brief-arm counts."""
-    planned = collections.Counter({("no-brief", model): 3 for model in SELECTED_MODELS})
+    planned = collections.Counter({("no-brief", model): 3 for model in SELECTED_MODELS} if baseline_on() else {})
     for arm in arms:
         for spec in ARMS[arm]:
             model, effort = spec.rsplit(":", 1)
@@ -155,14 +160,15 @@ def build(arms, per_batch):
     corpus = CORPUS
     rows = sessions(arms)
     require_complete(rows, arms)
-    if READING == "bifrost-oracle-noleak":
-        # ON - AF reads a brief effect only if both arms ran on one image (the AF amendment).
+    paired = READINGS[READING].get("same_image") if READING else None
+    if paired:
+        # The paired brief/no-brief arms read a brief effect only if both ran on one image.
         # Carriers, and every reviewer whose runtime was observed (its own container or the carrier's).
         images = {json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json").read_text())["image"]
-                  for r in rows if r["arm"] in ("ON", "AF")}
+                  for r in rows if r["arm"] in paired}
         unobserved = 0
         for r in rows:
-            if r["arm"] not in ("ON", "AF"):
+            if r["arm"] not in paired:
                 continue
             runtime = pathlib.Path(r["dir"]) / "runtime.json"
             image = json.loads(runtime.read_text()).get("image") if runtime.exists() else None
@@ -171,11 +177,11 @@ def build(arms, per_batch):
             else:
                 unobserved += 1
         if len(images) != 1:
-            raise SystemExit(f"ON and AF ran on more than one image: {sorted(images)}")
+            raise SystemExit(f"{' and '.join(paired)} ran on more than one image: {sorted(images)}")
         # Each arm's review activity, from review start to its last status poll, for the readout's
         # overlap caveat (provisioning and carrier teardown are excluded).
         window = {}
-        for arm in ("ON", "AF"):
+        for arm in paired:
             spans = []
             for b in {r["bug"] for r in rows if r["arm"] == arm}:
                 run = ROOT / "runs" / b / arm
@@ -392,7 +398,16 @@ READINGS = {
     "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "AF", "OT"), "others": ("AF", "A", "OT"),
                               "primary": "AF", "extra": (("AF", "A"),), "diffs": None,
                               "diffs_rule": "1 to 17", "min_diffs": 8,
-                              "report_key": "bifrost_oracle_noleak", "reference_arms": ("A", "OT")},
+                              "report_key": "bifrost_oracle_noleak", "reference_arms": ("A", "OT"),
+                              "same_image": ("ON", "AF")},
+    # brief/PLAN-bifrost-oracle-strict.md: OS against its same-image fresh no-brief AF2 (primary), and
+    # round M's ON and AF; AF2 - AF compares the two fresh no-brief cohorts. No stored A. Fewer than 8
+    # retained diffs reads Inconclusive; the reference is round M's ON/AF labels.
+    "bifrost-oracle-strict": {"subject": "OS", "arms": ("OS", "AF2", "ON", "AF"), "others": ("AF2", "ON", "AF"),
+                              "primary": "AF2", "extra": (("AF2", "AF"),), "diffs": None,
+                              "diffs_rule": "1 to 17", "min_diffs": 8, "baseline": False,
+                              "report_key": "bifrost_oracle_strict", "reference_arms": ("ON", "AF"),
+                              "same_image": ("OS", "AF2")},
 }
 
 
@@ -447,7 +462,7 @@ def score():
                                 "sessions": sum(v[2] for v in per.values()),
                                 "catch_rate": round(statistics.fmean(caught), 3), "ci95": boot(caught),
                                 "partial_rate": round(statistics.fmean(v[1] for v in per.values()), 3)})
-    for kind, model in planned:
+    for kind, model in (planned if baseline_on() else ()):
         if kind == "no-brief":
             continue
         for group in sets:
@@ -477,7 +492,7 @@ def score():
         per_diff = {}
         for bug in bugs:
             per_diff[bug] = {}
-            for arm in ("A", *reading["arms"]):
+            for arm in ((("A",) if baseline_on() else ()) + reading["arms"]):
                 entries = [(oid, k) for oid, k in key.items() if k["bug"] == bug and k["arm"] == arm]
                 if len(entries) != 3 or any(k["model"] != "gpt-6.1-terra" for _, k in entries):
                     raise SystemExit(f"{bug} {arm}: requires exactly three Terra sessions")

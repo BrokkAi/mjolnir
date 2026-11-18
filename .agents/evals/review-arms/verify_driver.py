@@ -48,6 +48,9 @@ p.add_argument("--kind", choices=["verify", "judge", "task"], default="verify")
 p.add_argument("--output", help="task: the file each unit's session writes, fetched into the unit directory")
 p.add_argument("--model", default="opus")
 p.add_argument("--profiles", default=",".join(PROFILES), help="comma-separated mj profiles, used in turn")
+# Judge rounds normally run both judges with one model; --judges A (or B) runs one side, so the
+# two judges of a batch can use different models in two invocations (brief/PLAN-bifrost-oracle-strict.md).
+p.add_argument("--judges", default="A,B", help="judge: which of judges A and B this invocation runs")
 p.add_argument("--quota-scope", help="model pool for REVIEW_ARMS_QUOTA_FLOOR (for example gemini)")
 # Any mj target: each session gets SPEC.md and its batch uploaded into its workspace (INPUT), so the
 # session reads nothing of this host's filesystem and cannot reach the eval's results.
@@ -300,7 +303,10 @@ if a.kind == "task":
     batches = sorted(d for d in V.iterdir() if d.is_dir() and (d / "INSTRUCTIONS.md").exists())
 else:
     batches = sorted(V.glob("batch-*.json"), key=lambda f: int(f.stem.split("-")[1]))
-units = [(b, j) for b in batches for j in (["A", "B"] if a.kind == "judge" else [None])]
+JUDGES = a.judges.split(",")
+if a.kind == "judge" and (not JUDGES or set(JUDGES) - {"A", "B"} or len(set(JUDGES)) != len(JUDGES)):
+    p.error("--judges must name A, B or both")
+units = [(b, j) for b in batches for j in (JUDGES if a.kind == "judge" else [None])]
 failed = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
     futures = {pool.submit(run, b, j): (b, j) for b, j in units}
@@ -313,9 +319,12 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
             b, j = futures[f]
             print(json.dumps({"batch": b.stem + (f"-{j}" if j else ""), "state": "failed", "error": str(e)}),
                   flush=True)
-if a.kind == "judge" and not failed:
-    # The input brief_score.py collect reads (it was written by brief/workflow-judge.js before).
-    verdicts = [{**v, "judge": j} for b, j in units
+both = [(b, j) for b in batches for j in ("A", "B")]
+if a.kind == "judge" and not failed and all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+                                            for b, j in both):
+    # The input brief_score.py collect reads (it was written by brief/workflow-judge.js before);
+    # written by whichever invocation completes the last of both judges' verdicts.
+    verdicts = [{**v, "judge": j} for b, j in both
                 for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").read_text())["verdicts"]]
     save(V / "workflow-out.json", {"verdicts": verdicts, "missing": []})
 raise SystemExit(1 if failed else 0)
