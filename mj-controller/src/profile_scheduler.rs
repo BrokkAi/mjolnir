@@ -393,6 +393,14 @@ pub(crate) fn ineligibility(
     }
 }
 
+/// Candidate profiles split into those whose choices are known and those
+/// whose discovery failed, with the reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentCandidates {
+    pub offered: Vec<SubagentCandidate>,
+    pub unavailable: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

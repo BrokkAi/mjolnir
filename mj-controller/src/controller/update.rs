@@ -24,7 +24,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::github_watch::service::github_rate_limit_retry_at;
+use crate::github_rate_limit::github_rate_limit_retry_at;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
 const NPM_LATEST_URL: &str = "https://registry.npmjs.org/@brokkai%2Fmjolnir/latest";

@@ -418,15 +418,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-pub use crate::profile_scheduler::{CandidateQuota, SubagentCandidate};
-
-/// Candidate profiles split into those whose choices are known and those
-/// whose discovery failed, with the reason.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SubagentCandidates {
-    pub offered: Vec<SubagentCandidate>,
-    pub unavailable: Vec<(String, String)>,
-}
+pub use crate::profile_scheduler::{CandidateQuota, SubagentCandidate, SubagentCandidates};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubagentView {

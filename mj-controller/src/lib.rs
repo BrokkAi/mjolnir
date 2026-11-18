@@ -67,6 +67,7 @@ pub mod image_pull_gate;
 pub mod recovery_gate;
 
 pub mod github_item_verdict;
+mod github_rate_limit;
 pub(crate) mod github_relevance;
 mod github_watch;
 mod jev_transport;

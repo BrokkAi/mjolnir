@@ -195,7 +195,7 @@ fn save_turn_review_state_in_with(
     let transaction = connection.transaction()?;
     let previous = previous_active_group(&transaction, session_id)?;
     let events = if let Some(current) = state.active_group.as_ref() {
-        crate::review_host::partial_review_events(session_id, previous.as_ref(), current)
+        partial_review_events(session_id, previous.as_ref(), current)
     } else {
         Vec::new()
     };

@@ -13,7 +13,8 @@ import re
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mj-controller', 'src')
-TOP = {'daemon', 'server', 'server_runtime', 'pollers', 'web_viewer', 'recovery', 'worker_upgrade'}
+TOP = {'daemon', 'server', 'server_runtime', 'pollers', 'web_viewer', 'recovery', 'worker_upgrade',
+       'review_host', 'github_watch', 'observe'}
 STORE = {'database', 'targets', 'upgrade', 'recovery_gate', 'worker_lifecycle', 'target_storage',
          'image_pull_gate', 'streamed_child', 'termination', 'launch_timing', 'test_log'}
 # Boundaries whose upward references are already gone and must stay gone.
