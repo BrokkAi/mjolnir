@@ -1835,10 +1835,13 @@ fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_
     assert_eq!(
         tracker.drain_due(started),
         vec![(
-            "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure,
-            Some("old".into())
+            CredentialSyncCause {
+                session_id: "session".into(),
+                ordinal: 41,
+                reason: CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: Some("old".into()),
+            }
         )]
     );
 
@@ -1851,10 +1854,13 @@ fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_
     assert_eq!(
         tracker.drain_due(started + Duration::from_secs(1)),
         vec![(
-            "session".into(),
             "work".into(),
-            CredentialSyncReason::AuthenticationFailure,
-            None
+            CredentialSyncCause {
+                session_id: "session".into(),
+                ordinal: 42,
+                reason: CredentialSyncReason::AuthenticationFailure,
+                login_fingerprint: None,
+            }
         )]
     );
     // An observation already handled is not handled twice.
@@ -1884,10 +1890,13 @@ fn an_authentication_failure_is_handled_at_once_but_an_empty_response_waits_out_
     assert_eq!(
         tracker.drain_due(started + Duration::from_secs(1) + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
         vec![(
-            "session".into(),
             "new-profile".into(),
-            CredentialSyncReason::EmptyPromptResponse,
-            None
+            CredentialSyncCause {
+                session_id: "session".into(),
+                ordinal: 43,
+                reason: CredentialSyncReason::EmptyPromptResponse,
+                login_fingerprint: None,
+            }
         )]
     );
 }
@@ -2204,21 +2213,24 @@ fn github_tokens_sync_to_every_session_target() {
 
 // Hard-won: c94c68c0: the shared Claude refresh grant could expire during a long-running session
 #[test]
-fn a_claude_authentication_failure_offers_the_long_lived_token() {
-    use mj_core::config::HarnessKind;
-    use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+fn a_refused_claude_login_offers_the_long_lived_token() {
+    use mj_core::config::{HarnessKind, HarnessProfile};
+    use mj_core::credentials::{
+        CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, RejectedLogins,
+    };
 
     let result = CredentialSyncResult {
         profile_id: "claude-max".into(),
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
+            ordinal: 1,
             reason: CredentialSyncReason::AuthenticationFailure,
-            login_fingerprint: None,
+            login_fingerprint: Some("failed-token".into()),
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
-            unchanged_login: None,
-            current_access_token: None,
+            unchanged_login: Some(CredentialSnapshot::of(HarnessKind::Claude, b"fixture")),
+            current_access_token: Some("failed-token".into()),
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -2226,9 +2238,18 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         partial: false,
     };
 
-    let claude = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Claude), &State::default())
-        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let notice = |result: &CredentialSyncResult, harness| {
+        let profile = HarnessProfile::new(harness, home.path().to_path_buf());
+        let mut registry = RejectedLogins::default();
+        registry.accept(&result.profile_id, result.trigger.as_ref().unwrap());
+        let verdict = registry.conclude(result, Some(&profile));
+        CredentialSyncNotices::default()
+            .leveled_notice(result, Some(harness), &State::default(), verdict.as_ref())
+            .unwrap()
+            .text
+    };
+    let claude = notice(&result, HarnessKind::Claude);
     assert!(
         claude.ends_with(
             "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
@@ -2237,15 +2258,21 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     );
 
     // Only Claude can rotate ahead of expiry this way.
-    let codex = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Codex), &State::default())
-        .unwrap();
+    let codex = notice(&result, HarnessKind::Codex);
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
         "{codex}"
     );
 
-    // The advice also reaches a failed reconciliation, not only a clean one.
+    let mut stale = result.clone();
+    stale.outcomes[0].current_access_token = Some("renewed-token".into());
+    let stale = notice(&stale, HarnessKind::Claude);
+    assert!(
+        stale.contains("stale login") && !stale.contains("mj login"),
+        "{stale}"
+    );
+
+    // A failed check cannot establish that signing in again will help.
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
             unchanged_login: None,
@@ -2257,13 +2284,8 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         partial: false,
         ..result
     };
-    let claude_failure = CredentialSyncNotices::default()
-        .notice(&failed, Some(HarnessKind::Claude), &State::default())
-        .unwrap();
-    assert!(
-        claude_failure.contains("--setup-token`."),
-        "{claude_failure}"
-    );
+    let claude_failure = notice(&failed, HarnessKind::Claude);
+    assert!(!claude_failure.contains("mj login"), "{claude_failure}");
 }
 
 #[test]
@@ -2274,6 +2296,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         profile_id: "work".into(),
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
+            ordinal: 1,
             reason: CredentialSyncReason::EmptyPromptResponse,
             login_fingerprint: None,
         }),
@@ -2303,6 +2326,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         profile_id: "work".into(),
         trigger: Some(CredentialSyncCause {
             session_id: "018f9dd2-a3b4".into(),
+            ordinal: 1,
             reason: CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -2311,7 +2335,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         partial: false,
     };
     let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, None, &State::default())
+        .leveled_notice(&result, None, &State::default(), None)
         .unwrap();
     assert!(!leveled.routine, "a failed sync stays a warning");
     let notice = leveled.text;
@@ -3017,6 +3041,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             profile_id: "claude".into(),
             trigger: Some(CredentialSyncCause {
                 session_id: session_id.into(),
+                ordinal: 1,
                 reason,
                 login_fingerprint: None,
             }),
@@ -3081,8 +3106,14 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
     ];
     for result in &results {
         let notice = CredentialSyncNotices::default()
-            .notice(result, None, &state)
-            .unwrap();
+            .leveled_notice(
+                result,
+                None,
+                &state,
+                Some(&mj_core::credentials::LoginFailureVerdict::Renewed),
+            )
+            .unwrap()
+            .text;
         assert!(notice.contains("claude-a"), "{notice}");
         assert!(!notice.contains("790051c5"), "{notice}");
     }
@@ -3132,6 +3163,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             profile_id: "work".into(),
             trigger: Some(CredentialSyncCause {
                 session_id: "parked-child".into(),
+                ordinal: 1,
                 reason,
                 login_fingerprint: None,
             }),

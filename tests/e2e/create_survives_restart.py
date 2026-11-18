@@ -11,9 +11,12 @@ and that the session ends up running with no error. A `mj wait` started before
 the restart follows the session's turns, not the create wait; it only shows
 that the session settles without error across the restart. The dashboard's
 create wait is covered by `create_wait_tests` in mj-cli.
+With --failed-launch-retry the same hook fails the first launch and
+holds its accepted retry across the restart.
 """
 import argparse
 import json
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -34,11 +37,153 @@ def wait_for(predicate, description):
     raise RuntimeError(f"timed out waiting for {description}")
 
 
+def durable_rows(lab, sql, parameters=()):
+    database = sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True)
+    try:
+        return database.execute(sql, parameters).fetchall()
+    finally:
+        database.close()
+
+
+def failed_launch_retry(lab, cli, record, run, command, environment):
+    reached = lab.hooks / "create_after_target_provisioned.reached"
+    continuation = lab.hooks / "create_after_target_provisioned.continue"
+    (lab.hooks / "create_after_target_provisioned.fail").touch()
+    old_prompt = "this startup prompt failed before the worker existed"
+    new_prompt = "this new prompt ran after retry"
+    draft = "an unsent terminal draft"
+    session = json.loads(cli("new", "--workspace", "Create restart", "--profile", "fake",
+                             "--target", "localhost", "--project-directory", str(lab.project),
+                             "--title", "Retry this launch", "--subagents", "none",
+                             "--json", old_prompt))["session_id"]
+    wait_for(reached.exists, "the first attempt to reach its target")
+    lab.daemon_request({"action": "persist_terminal_draft", "arguments": {
+        "client_id": "retry-lab", "session_id": session, "owner_pid": os.getpid(),
+        "revision": 1, "draft": {"text": draft, "inherited_input": None},
+    }})
+    continuation.touch()
+
+    def failed():
+        row = record(session)
+        return row if row["state"] == "error" else None
+
+    before = wait_for(failed, "the launch to fail with Retry available")
+    assert "one-shot launch failure" in before["error"], before
+    startup = wait_for(lambda: durable_rows(
+        lab, "SELECT command_id,phase,error FROM startup_steps WHERE session_id=? AND phase='failed'",
+        (session,)), "the startup prompt to settle as failed")
+    assert len(startup) == 1, startup
+    before_settings = durable_rows(
+        lab, "SELECT c.workspace_id,s.project_directory,s.last_profile,s.target_template_id FROM sessions s JOIN session_contexts c USING(session_id) WHERE session_id=?",
+        (session,))
+    reached.unlink()
+    continuation.unlink()
+
+    refused = run("resume", "--session", session, "--profile", "another-profile", "--json")
+    assert refused.returncode != 0 and "stored launch request" in refused.stderr, refused.stderr
+    assert not durable_rows(lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?",
+                            (session,))
+    accepted = run("resume", "--session", session, "--json")
+    assert accepted.returncode == 0, (accepted.stdout, accepted.stderr)
+    assert json.loads(accepted.stdout)["session_id"] == session, accepted.stdout
+    assert "Prompts that failed with the previous launch are not resent." in accepted.stderr
+    assert len(durable_rows(lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?",
+                            (session,))) == 1
+    wait_for(reached.exists, "the accepted retry to reach its target")
+    assert record(session)["state"] != "running"
+
+    restart = subprocess.Popen(command("daemon", "restart"), env=environment(),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # A stopping daemon refuses ordinary IPC. Keep the old attempt held
+    # until we observe that refusal and require the new daemon to reach again.
+    attempt = reached.read_text()
+
+    def stopping():
+        try:
+            lab.daemon_request({"action": "session_record", "arguments": {"session_id": session}})
+        except reliability_lab.ScenarioFailure as error:
+            if "daemon is shutting down" in str(error):
+                return True
+            raise
+        except (ConnectionError, FileNotFoundError):
+            return True
+        return False
+
+    try:
+        wait_for(stopping, "old daemon to stop serving while the retry is held")
+        reached.unlink()
+    finally:
+        continuation.touch()
+    stdout, stderr = restart.communicate(timeout=WAIT)
+    assert restart.returncode == 0, (stdout, stderr)
+
+    ready = wait_for(lambda: (row if (row := record(session))["state"] == "running" else None),
+                     "the same session to run after daemon restart")
+    assert not ready.get("has_error"), ready
+    assert reached.read_text() != attempt, "the restarted daemon never provisioned the retry"
+    assert ready["title"] == "Retry this launch", ready
+    assert durable_rows(
+        lab, "SELECT c.workspace_id,s.project_directory,s.last_profile,s.target_template_id FROM sessions s JOIN session_contexts c USING(session_id) WHERE session_id=?",
+        (session,)) == before_settings
+    assert not durable_rows(lab, "SELECT command_id FROM startup_steps WHERE session_id=?", (session,))
+    waited = json.loads(cli("wait", "--session", session, "--json", "--timeout", str(WAIT)))
+    assert waited["outcome"] == "finished", waited
+    assert not durable_rows(lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?",
+                            (session,))
+    assert durable_rows(lab, "SELECT text FROM detached_drafts WHERE session_id=? AND source='retry-lab'",
+                        (session,)) == [(draft,)]
+    cli("prompt", "--session", session, "--json", "--timeout", str(WAIT), new_prompt)
+    harness = [json.loads(line) for line in (lab.runtime_root / "fake-acp.log").read_text().splitlines()]
+    prompts = [message for message in harness if message.get("method") == "session/prompt"]
+    assert len(prompts) == 1 and new_prompt in json.dumps(prompts[0]), prompts
+    assert old_prompt not in json.dumps(prompts) and draft not in json.dumps(prompts), prompts
+
+    # A new failed row gives Resume and Destroy the same starting state.
+    # Destroy can preempt an owned Create, but it must also retire its intent
+    # so a late retry cannot recreate the destroyed session.
+    reached.unlink()
+    (lab.hooks / "create_after_target_provisioned.fail").touch()
+    doomed = json.loads(cli("new", "--workspace", "Create restart", "--profile", "fake",
+                            "--target", "localhost", "--project-directory", str(lab.project),
+                            "--subagents", "none", "--json"))["session_id"]
+    wait_for(lambda: record(doomed)["state"] == "error", "a second session's failed launch")
+    failure_generation = durable_rows(lab, "SELECT failure_generation FROM sessions WHERE session_id=?",
+                                      (doomed,))[0][0]
+    reached.unlink()
+    continuation.unlink()
+    (lab.hooks / "create_after_target_provisioned.fail").touch()
+    cli("resume", "--session", doomed, "--json")
+    wait_for(reached.exists, "the next failed attempt to reach its target")
+    continuation.touch()
+    wait_for(lambda: durable_rows(
+        lab, "SELECT failure_generation FROM sessions WHERE session_id=? AND state='error' AND failure_generation > ?",
+        (doomed, failure_generation)), "the retry to record another launch error")
+    # Leave the hook open so Destroy can cancel a winning retry without
+    # waiting on a fixture that cannot observe provisioning cancellation.
+    retry = subprocess.Popen(command("resume", "--session", doomed, "--json"), env=environment(),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    cli("destroy", "--session", doomed, "--json")
+    stdout, stderr = retry.communicate(timeout=WAIT)
+    if retry.returncode == 0:
+        assert json.loads(stdout)["session_id"] == doomed, stdout
+    else:
+        assert stderr.strip(), (stdout, stderr)
+
+    def destroyed():
+        rows = durable_rows(lab, "SELECT archived FROM sessions WHERE session_id=?", (doomed,))
+        return (not rows or rows == [(1,)]) and not durable_rows(
+            lab, "SELECT operation_id FROM session_create_intents WHERE session_id=?", (doomed,))
+
+    wait_for(destroyed, "Destroy to settle the session and any competing create intent")
+    print(json.dumps({"session": session, "race_session": doomed, "artifacts": str(lab.root)}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
+    parser.add_argument("--failed-launch-retry", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named instance")
@@ -53,9 +198,15 @@ def main():
             return {**lab.environment(), "MJ_INSTANCE": args.instance,
                     "MJ_WORKER_BINARY": str(args.worker.resolve())}
 
+        def command(*arguments):
+            return [str(args.mj.resolve()), "--instance", args.instance, *arguments]
+
+        def run(*arguments):
+            return subprocess.run(command(*arguments), env=environment(),
+                                  capture_output=True, text=True, timeout=WAIT)
+
         def cli(*arguments):
-            result = subprocess.run([str(args.mj.resolve()), "--instance", args.instance, *arguments],
-                                    env=environment(), capture_output=True, text=True, timeout=WAIT)
+            result = run(*arguments)
             assert result.returncode == 0, (arguments, result.stdout, result.stderr)
             return result.stdout
 
@@ -63,6 +214,9 @@ def main():
             return json.loads(cli("sessions", "--session", session, "--json"))
 
         cli("workspaces", "create", "Create restart")
+        if args.failed_launch_retry:
+            failed_launch_retry(lab, cli, record, run, command, environment)
+            return
         session = json.loads(cli("new", "--workspace", "Create restart", "--profile", "fake",
                                  "--target", "localhost", "--project-directory", str(lab.project),
                                  "--subagents", "none", "--json"))["session_id"]
@@ -112,7 +266,15 @@ def main():
         print(json.dumps({"session": session, "restart_seconds": restart_seconds,
                           "artifacts": str(lab.root)}))
     finally:
-        # Keep the daemon logs with the artifacts; the runtime root is removed.
+        if (lab.data / "daemon.json").exists():
+            (lab.hooks / "create_after_target_provisioned.continue").touch()
+            try:
+                cli("daemon", "stop")
+            except (AssertionError, subprocess.TimeoutExpired) as error:
+                print(f"Graceful daemon stop failed: {error}")
+        # Keep the daemon logs with the artifacts.
+        if (lab.data / "daemon.log").exists():
+            (lab.root / "daemon.log").write_bytes((lab.data / "daemon.log").read_bytes())
         for log in (lab.data / "logs").glob("*.log"):
             (lab.root / log.name).write_bytes(log.read_bytes())
         lab.cleanup_owned()

@@ -77,23 +77,26 @@ pub(super) fn insert_create_intent(
     tx: &Transaction<'_>,
     session: &SessionRecord,
     remember_launch_choices: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     // Sessions registered already past creation (fixtures, imports) own none.
     if !holds_create_intent(session.state) {
-        return Ok(());
+        return Ok(None);
     }
     let operation_id = crate::session_manager::new_command_id("create")?;
-    tx.execute(
-        "INSERT OR IGNORE INTO session_create_intents(session_id, operation_id, remember_launch_choices, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+    tx.query_row(
+        "INSERT INTO session_create_intents(session_id, operation_id, remember_launch_choices, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO NOTHING RETURNING operation_id",
         params![
             session.id,
             operation_id,
             remember_launch_choices,
             Utc::now().to_rfc3339()
         ],
-    )?;
-    Ok(())
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Every session write calls this with the state it writes: a state outside
@@ -154,7 +157,73 @@ pub(super) fn restore_create_intent_for_retry(
     tx: &Transaction<'_>,
     session: &SessionRecord,
 ) -> Result<()> {
-    insert_create_intent(tx, session, false)
+    insert_create_intent(tx, session, false).map(|_| ())
+}
+
+/// The only classification of a failed create that Resume may launch again.
+pub(crate) fn failed_first_launch(
+    session: &SessionRecord,
+    is_subagent: bool,
+    movement: Option<&mj_core::state::MoveOperation>,
+) -> bool {
+    !is_subagent
+        && !mj_core::native_agent::is_view_id(&session.id)
+        && !session.archived
+        && session.checkpoint.is_none()
+        && session.native_session_id.is_none()
+        && (session.state == SessionState::StartupCleanup
+            || (session.state == SessionState::Error && session.target.is_none()))
+        && !movement.is_some_and(|movement| {
+            movement.is_active()
+                || movement.holds_source_environment()
+                || (movement.queue_admission_started && !movement.queue_admission_finished)
+        })
+}
+
+fn failed_launch_record_with(connection: &Connection, id: &str) -> Result<Option<SessionRecord>> {
+    let Some(record) = state_io::load_session_with(connection, id)? else {
+        return Ok(None);
+    };
+    let is_subagent: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    let movement = session_move::load_move_operation_with(connection, id)?;
+    Ok(failed_first_launch(&record, is_subagent, movement.as_ref()).then_some(record))
+}
+
+pub(crate) fn read_failed_launch_record(id: &str) -> Result<Option<SessionRecord>> {
+    let mut connection = open_reader(&database_path())?;
+    let snapshot = connection.transaction()?;
+    failed_launch_record_with(&snapshot, id)
+}
+
+/// Accept the retry and publish a recoverable create in the same transaction.
+pub(crate) fn begin_failed_launch_retry(expected: SessionRecord) -> Result<Option<String>> {
+    submit_database_write("begin failed launch retry", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(mut record) = failed_launch_record_with(&tx, &expected.id)? else {
+            return Ok(None);
+        };
+        if record.workspace_id != expected.workspace_id
+            || record.last_profile != expected.last_profile
+            || record.target_template_id != expected.target_template_id
+            || record.resource_allocation != expected.resource_allocation
+            || record.additional_mounts != expected.additional_mounts
+        {
+            return Ok(None);
+        }
+        record.state = SessionState::Provisioning;
+        record.last_error = None;
+        record.updated_at = Utc::now().to_rfc3339();
+        update_lifecycle_fields(&tx, &record)?;
+        let operation_id = insert_create_intent(&tx, &record, false)?
+            .context("failed session still has a create intent")?;
+        startup::dismiss_failed_startup_groups_with(&tx, &record.id)?;
+        tx.commit()?;
+        Ok(Some(operation_id))
+    })
 }
 
 /// Reset a session to its registered form so its create can run again: the

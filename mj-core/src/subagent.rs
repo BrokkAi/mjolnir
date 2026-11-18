@@ -1367,8 +1367,8 @@ pub fn failed_turn(
     Some((state, reason))
 }
 
-/// Whether a child's last finished turn failed because the provider refused
-/// its profile's login: the turn's diagnostic says so (an error kind such as
+/// Whether a child's last finished turn reported an authentication failure.
+/// The diagnostic indicates it (an error kind such as
 /// Codex's `unauthorized`, or an auth failure sentence), or the turn failed
 /// with such a sentence as its reason. A usage limit is never one.
 ///
@@ -1386,6 +1386,36 @@ pub fn turn_failed_on_login(turn: &crate::state::MaterializedTurnOutcome) -> boo
     failed_turn(turn, None).is_some_and(|(state, reason)| {
         state == "failed" && crate::credentials::text_reports_auth_failure(&reason)
     })
+}
+
+/// Authentication evidence from a wake that staged an identifiable login.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WakeFailure {
+    Authentication {
+        profile_id: String,
+        staged_login: crate::credentials::LoginFingerprint,
+    },
+}
+
+impl WakeFailure {
+    const SEPARATOR: &str = "\nMjolnir wake evidence: ";
+
+    /// Keep the existing human-readable detail first for older readers.
+    pub fn encode(&self, detail: &str) -> serde_json::Result<String> {
+        Ok(format!(
+            "{detail}{}{}",
+            Self::SEPARATOR,
+            serde_json::to_string(self)?
+        ))
+    }
+
+    pub fn decode(error: &str) -> (&str, Option<Self>) {
+        error
+            .rsplit_once(Self::SEPARATOR)
+            .and_then(|(detail, evidence)| Some((detail, serde_json::from_str(evidence).ok()?)))
+            .map_or((error, None), |(detail, evidence)| (detail, Some(evidence)))
+    }
 }
 
 /// What a parent is told about a profile whose login the provider refused.

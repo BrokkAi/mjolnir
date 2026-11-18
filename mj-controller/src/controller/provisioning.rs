@@ -1069,6 +1069,20 @@ impl Controller {
                 // Holds a create after its target exists, so a test can restart
                 // the daemon in the middle of it.
                 mj_core::test_hooks::reach_test_hook("create_after_target_provisioned")?;
+                #[cfg(feature = "test-hooks")]
+                if std::env::var("MJ_TEST_HOOK").as_deref() == Ok("create_after_target_provisioned")
+                    && let Some(directory) = std::env::var_os("MJ_TEST_HOOK_DIR")
+                {
+                    let marker = PathBuf::from(directory).join("create_after_target_provisioned.fail");
+                    match std::fs::remove_file(marker) {
+                        Ok(()) => {
+                            let failure = anyhow::anyhow!("test requested a one-shot launch failure after target provisioning");
+                            return Err(self.rollback_unless_interrupted(session_id, failure, interrupted)?);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error).context("read the launch failure test marker"),
+                    }
+                }
                 let runtime = self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")
                     .target_runtime.as_mut().context("selected runtime disappeared")?;
@@ -1184,7 +1198,7 @@ impl Controller {
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        let launch = self.stage_worker_files_for(
+        let (launch, _) = self.stage_worker_files_for(
             session_id,
             &backend,
             &worker_root,

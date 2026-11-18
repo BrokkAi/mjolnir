@@ -1,7 +1,12 @@
 use super::*;
 use crate::session_manager::{RelayConnectionJob, RelayJobDeferred, SessionManagerControl};
+use futures::StreamExt;
 use mj_core::config::harness_authentication_marker;
-use mj_core::credentials::{credential_copy_for_harness, credential_holds_refresh_token};
+use mj_core::credentials::{
+    LoginDeliveryState, RejectedLogins, credential_copy_for_harness, credential_holds_refresh_token,
+};
+
+type DeliveryRegistry = Arc<std::sync::Mutex<RejectedLogins>>;
 
 /// How a reconciliation reaches each session's worker.
 #[derive(Clone)]
@@ -273,12 +278,12 @@ pub(super) struct SessionAccess<'a> {
     pub(super) steps: &'a SessionSteps,
 }
 
-/// What a profile's spawned reconcile tells the coordinator loop, which alone
-/// owns the profile's busy slot.
 enum PassEvent {
-    /// The reconcile ended: the profile can be synced again.
-    Released(String),
-    /// The trigger's answer, once everything it waits for has ended.
+    Pulled(String),
+    Attempted {
+        target: Box<CredentialSyncTarget>,
+        retry: bool,
+    },
     Finished(CredentialSyncResult),
 }
 
@@ -316,22 +321,43 @@ impl CredentialSyncCoordinator {
         manager: SessionManagerControl,
         gate: Arc<crate::recovery_gate::RecoveryGate>,
         runtime: Arc<crate::daemon::RuntimeState>,
+        rejected: DeliveryRegistry,
     ) -> Self {
-        Self::spawn_inner(
+        Self::spawn_with_registry(
             SessionRelays::Actors(manager),
             Some(gate),
             Some(runtime),
             mj_core::slopcop::host_login,
             SYNC_INTERVAL,
+            rejected,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
         slopcop_login: SlopcopLoginSource,
         renewal_retry: Duration,
+    ) -> Self {
+        Self::spawn_with_registry(
+            relays,
+            gate,
+            runtime,
+            slopcop_login,
+            renewal_retry,
+            Default::default(),
+        )
+    }
+
+    pub(super) fn spawn_with_registry(
+        relays: SessionRelays,
+        gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+        runtime: Option<Arc<crate::daemon::RuntimeState>>,
+        slopcop_login: SlopcopLoginSource,
+        renewal_retry: Duration,
+        rejected: DeliveryRegistry,
     ) -> Self {
         let targets_tx = runtime
             .as_ref()
@@ -348,13 +374,11 @@ impl CredentialSyncCoordinator {
                 SYNC_INTERVAL,
             );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // A pull rewrites the canonical file, so one profile is never
-            // reconciled twice at once. The loop alone inserts and removes:
-            // each insert is matched by one `PassEvent::Released`, sent as soon
-            // as the reconcile has ended (or panicked), and never later than
-            // the trigger's answer, which can wait for a renewal.
-            let mut busy = BTreeSet::<String>::new();
+            let mut profiles = BTreeMap::<String, Arc<ProfileLogin>>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
+            let mut renewal_logs = BTreeSet::new();
+            let mut scoped = BTreeMap::<String, BTreeSet<String>>::new();
+            let mut retries = BTreeMap::<String, (u32, Option<tokio::time::Instant>)>::new();
             // Role-scoped AWS credentials are renewed by a task per session,
             // never by the profile's pass: a pass that waits on one stalled
             // session must not hold back another session's renewal.
@@ -372,7 +396,25 @@ impl CredentialSyncCoordinator {
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
             let mut lease_returns = gate.as_ref().map(|gate| gate.credential_wakes());
             loop {
+                let next_retry = retries.values().filter_map(|(_, due)| *due).min();
                 tokio::select! {
+                    () = async {
+                        if let Some(due) = next_retry {
+                            tokio::time::sleep_until(due).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        let now = tokio::time::Instant::now();
+                        for target in &*targets_rx.borrow() {
+                            if let Some((_, due)) = retries.get_mut(&target.session_id)
+                                && due.is_some_and(|due| due <= now)
+                            {
+                                *due = None;
+                                queue_session(&mut queue, &mut scoped, target);
+                            }
+                        }
+                    }
                     () = async {
                         match lease_returns.as_mut() {
                             Some(wakes) => { let _ = wakes.changed().await; }
@@ -381,11 +423,10 @@ impl CredentialSyncCoordinator {
                     } => {
                         if let Some(gate) = &gate {
                             let sessions = gate.take_credential_wakes();
-                            let profiles: BTreeSet<_> = targets_rx.borrow().iter()
+                            for target in targets_rx.borrow().iter()
                                 .filter(|target| sessions.contains(&target.session_id))
-                                .map(|target| target.profile_id.clone()).collect();
-                            for profile_id in profiles {
-                                enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
+                            {
+                                queue_session(&mut queue, &mut scoped, target);
                             }
                         }
                     }
@@ -395,6 +436,7 @@ impl CredentialSyncCoordinator {
                         crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
                         renewals.sync(&targets_rx.borrow(), &renewals_env);
                         for profile_id in profiles_with_targets(&targets_rx.borrow()) {
+                            scoped.remove(&profile_id);
                             enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
                         }
                     }
@@ -404,28 +446,72 @@ impl CredentialSyncCoordinator {
                         // Removed sessions have nothing left to reconcile.
                         let targets = targets_rx.borrow_and_update();
                         renewals.sync(&targets, &renewals_env);
-                        let changed_profiles: BTreeSet<_> = targets.iter()
-                            .filter(|target| previous_targets.get(&target.session_id) != Some(target))
-                            .map(|target| target.profile_id.clone())
-                            .collect();
-                        previous_targets = targets.iter()
+                        let next: BTreeMap<_, _> = targets.iter()
                             .map(|target| (target.session_id.clone(), target.clone()))
                             .collect();
-                        for profile_id in changed_profiles {
-                            enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
+                        for (id, old) in &previous_targets {
+                            if next.get(id) == Some(old) { continue; }
+                            retries.remove(id);
+                            let conclusion = if next.contains_key(id) {
+                                Some("credential target changed")
+                            } else if runtime.as_ref().is_none_or(|runtime| runtime.credential_session_ended(id)) {
+                                Some("session ended")
+                            } else {
+                                None
+                            };
+                            if let Some(reason) = conclusion {
+                                rejected.lock().expect("rejected logins poisoned")
+                                    .end_delivery(old, None, reason.into());
+                            }
                         }
+                        for target in targets.iter()
+                            .filter(|target| previous_targets.get(&target.session_id) != Some(target))
+                        {
+                            queue_session(&mut queue, &mut scoped, target);
+                        }
+                        previous_targets = next;
+                        if let Some(runtime) = &runtime {
+                            let owner = runtime.credential_session_ids();
+                            rejected.lock().expect("rejected logins poisoned")
+                                .retain_deliveries(|id| owner.contains_key(id));
+                        } else {
+                            rejected.lock().expect("rejected logins poisoned")
+                                .retain_deliveries(|id| previous_targets.contains_key(id));
+                        }
+                        // Keep the same profile owner across a temporary loss of
+                        // its last target while an earlier pass can still adopt.
+                        profiles.retain(|profile_id, profile| Arc::strong_count(profile) > 1
+                            || targets.iter().any(|target| target.profile_id == *profile_id));
                     }
                     trigger = triggers_rx.recv() => {
                         let Some(trigger) = trigger else { break };
+                        // Explicit requests without a cause come from quota/login renewal.
+                        if trigger.cause.is_none() {
+                            scoped.remove(&trigger.profile_id);
+                            renewal_logs.insert(trigger.profile_id.clone());
+                        }
                         enqueue(&mut queue, trigger);
                     }
                     completed = completed_rx.recv() => {
                         let Some(event) = completed else { break };
                         match event {
-                            // The queued triggers are looked at below, so one
-                            // deferred by this slot starts at once.
-                            PassEvent::Released(profile_id) => {
-                                busy.remove(&profile_id);
+                            PassEvent::Pulled(profile_id) => {
+                                scoped.remove(&profile_id);
+                                renewal_logs.insert(profile_id.clone());
+                                enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
+                            }
+                            PassEvent::Attempted { target, retry } => {
+                                if previous_targets.get(&target.session_id) != Some(target.as_ref()) {
+                                    continue;
+                                }
+                                if retry {
+                                    let (failures, due) = retries.entry(target.session_id)
+                                        .or_insert((0, None));
+                                    *failures = failures.saturating_add(1);
+                                    *due = Some(tokio::time::Instant::now() + backoff(Duration::from_secs(1), *failures, SYNC_INTERVAL));
+                                } else {
+                                    retries.remove(&target.session_id);
+                                }
                             }
                             PassEvent::Finished(result)
                                 if result.trigger.is_some()
@@ -446,19 +532,31 @@ impl CredentialSyncCoordinator {
                     }
                 }
 
-                let mut deferred = VecDeque::new();
                 while let Some(trigger) = queue.pop_front() {
-                    if busy.contains(&trigger.profile_id) {
-                        deferred.push_back(trigger);
-                        continue;
-                    }
+                    let sessions = if trigger.cause.is_none() {
+                        scoped.remove(&trigger.profile_id)
+                    } else {
+                        None
+                    };
                     let targets: Vec<_> = targets_rx
                         .borrow()
                         .iter()
-                        .filter(|target| target.profile_id == trigger.profile_id)
+                        .filter(|target| {
+                            target.profile_id == trigger.profile_id
+                                && sessions
+                                    .as_ref()
+                                    .is_none_or(|ids| ids.contains(&target.session_id))
+                        })
                         .cloned()
                         .collect();
+                    let full_fanout = sessions.is_none();
+                    let mut log = SyncLog::new(
+                        trigger.cause.as_ref(),
+                        renewal_logs.remove(&trigger.profile_id),
+                    );
+                    log.targeted = !full_fanout;
                     if targets.is_empty() {
+                        log_missing_targets(runtime.as_ref(), &trigger.profile_id, &targets, log);
                         if trigger.cause.is_some() {
                             let profile_id = trigger.profile_id.clone();
                             if results_tx
@@ -480,10 +578,18 @@ impl CredentialSyncCoordinator {
                         }
                         continue;
                     }
-                    busy.insert(trigger.profile_id.clone());
+                    let profile = profiles
+                        .entry(trigger.profile_id.clone())
+                        .or_insert_with(|| {
+                            Arc::new(ProfileLogin::new(
+                                Some(completed_tx.clone()),
+                                rejected.clone(),
+                            ))
+                        })
+                        .clone();
                     let completed_tx = completed_tx.clone();
-                    // The join is awaited so a panicked reconcile is reported
-                    // and its profile always leaves the busy set. The reconcile
+                    // The join is awaited so a panicked reconcile is reported.
+                    // The reconcile
                     // runs as an ordinary task, never as `Handle::block_on` on
                     // a blocking thread: the scheduler cancels tasks before it
                     // shuts the timer driver, whereas a blocking thread keeps
@@ -502,9 +608,16 @@ impl CredentialSyncCoordinator {
                     let relays = relays.clone();
                     let runtime = runtime.clone();
                     let steps = steps.clone();
+                    let log = log.into_owned();
                     tokio::spawn(async move {
-                        let joined = tokio::spawn(async move {
-                            reconcile_profile_guarded(
+                        let (focus_tx, focus_rx) = if triggered_by.is_some() {
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            (Some(tx), Some(rx))
+                        } else {
+                            (None, None)
+                        };
+                        let reconcile = tokio::spawn(async move {
+                            reconcile_profile_observed(
                                 &SessionAccess {
                                     relays: &relays,
                                     gate: gate.as_ref(),
@@ -514,63 +627,55 @@ impl CredentialSyncCoordinator {
                                 &targets,
                                 triggered_by.as_deref(),
                                 slopcop_login,
+                                log.as_ref(),
+                                &profile,
+                                focus_tx,
                             )
                             .await
-                        })
-                        .await;
-                        let profile_id = trigger.profile_id.clone();
-                        // The profile's slot covers the reconcile only. It is
-                        // released here, on every path (a panicked reconcile
-                        // included), before anything waits for a renewal:
-                        // a renewal stalled in STS must not hold up the
-                        // profile's login, token and skills syncs.
-                        if completed_tx
-                            .send(PassEvent::Released(profile_id.clone()))
-                            .is_err()
+                        });
+                        let mut focus = trigger.cause;
+                        // The authentication verdict only awaits its session
+                        // and that session's AWS outcome. Peers report routine
+                        // successes or failures when their own pass finishes.
+                        if let Some(answer) = focus_rx
+                            && let Ok(outcome) = answer.await
                         {
-                            tracing::debug!(
-                                %profile_id,
-                                operation = "credential_sync_completion",
-                                "credential sync coordinator stopped before receiving completion"
+                            let mut outcomes = outcome.into_iter().collect();
+                            if let Some(report) = aws_report {
+                                let report = report.await.unwrap_or_else(|_| {
+                                    unknown_renewal_outcome(
+                                        focus.as_ref().map_or("", |cause| &cause.session_id),
+                                    )
+                                });
+                                merge_report(&mut outcomes, report);
+                            }
+                            finish_pass(
+                                &completed_tx,
+                                CredentialSyncResult {
+                                    profile_id: trigger.profile_id.clone(),
+                                    trigger: focus.take(),
+                                    failure: None,
+                                    outcomes,
+                                    partial: false,
+                                },
                             );
                         }
-                        let (failure, mut outcomes) = match joined {
+                        let (failure, outcomes) = match reconcile.await {
                             Ok(outcomes) => (None, outcomes),
                             Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
                         };
-                        if let Some(report) = aws_report {
-                            // The trigger's answer includes the renewal's
-                            // outcome, so it is sent when both have ended.
-                            // A renewal task stopped before it answered
-                            // (its session closed or its target changed)
-                            // leaves the outcome unknown, which the answer
-                            // says; its replacement reports for itself.
-                            let report = report.await.unwrap_or_else(|_| {
-                                unknown_renewal_outcome(
-                                    trigger.cause.as_ref().map_or("", |c| &c.session_id),
-                                )
-                            });
-                            merge_report(&mut outcomes, report);
-                        }
-                        if completed_tx
-                            .send(PassEvent::Finished(CredentialSyncResult {
+                        finish_pass(
+                            &completed_tx,
+                            CredentialSyncResult {
                                 profile_id: trigger.profile_id,
-                                trigger: trigger.cause,
+                                trigger: focus,
                                 failure,
                                 outcomes,
                                 partial: false,
-                            }))
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                %profile_id,
-                                operation = "credential_sync_completion",
-                                "credential sync coordinator stopped before receiving completion"
-                            );
-                        }
+                            },
+                        );
                     });
                 }
-                queue = deferred;
             }
         });
         Self {
@@ -655,11 +760,152 @@ pub(super) async fn reconcile_profile(
 /// `triggered_by`, the session whose failure asked for this sync: that it was
 /// reached and had nothing to change is what shows the profile's own login
 /// is the one the provider refused.
+fn finish_pass(completed: &mpsc::UnboundedSender<PassEvent>, result: CredentialSyncResult) {
+    let profile_id = result.profile_id.clone();
+    if completed.send(PassEvent::Finished(result)).is_err() {
+        tracing::debug!(
+            %profile_id,
+            "credential sync coordinator stopped before receiving completion"
+        );
+    }
+}
+
+// A deferral or change wakes only the session that became available.
+fn queue_session(
+    queue: &mut VecDeque<SyncTrigger>,
+    scoped: &mut BTreeMap<String, BTreeSet<String>>,
+    target: &CredentialSyncTarget,
+) {
+    if queue
+        .iter()
+        .any(|request| request.profile_id == target.profile_id && request.cause.is_none())
+        && !scoped.contains_key(&target.profile_id)
+    {
+        return; // An already-queued profile-wide pass covers this session.
+    }
+    scoped
+        .entry(target.profile_id.clone())
+        .or_default()
+        .insert(target.session_id.clone());
+    if !queue
+        .iter()
+        .any(|request| request.profile_id == target.profile_id && request.cause.is_none())
+    {
+        queue.push_back(SyncTrigger {
+            profile_id: target.profile_id.clone(),
+            cause: None,
+        });
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn reconcile_profile_guarded(
     access: &SessionAccess<'_>,
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
     slopcop_login: SlopcopLoginSource,
+) -> Vec<CredentialSyncOutcome> {
+    reconcile_profile_observed(
+        access,
+        targets,
+        triggered_by,
+        slopcop_login,
+        SyncLog::default(),
+        &Arc::new(ProfileLogin::new(None, Default::default())),
+        None,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Default)]
+struct SyncLog<'a> {
+    cause: Option<&'a mj_core::credentials::CredentialSyncCause>,
+    fanout: bool,
+    targeted: bool,
+}
+
+impl<'a> SyncLog<'a> {
+    fn new(cause: Option<&'a mj_core::credentials::CredentialSyncCause>, fanout: bool) -> Self {
+        Self {
+            cause: cause.filter(|cause| {
+                cause.reason == mj_core::credentials::CredentialSyncReason::AuthenticationFailure
+            }),
+            fanout,
+            targeted: false,
+        }
+    }
+
+    fn into_owned(self) -> OwnedSyncLog {
+        OwnedSyncLog {
+            cause: self.cause.cloned(),
+            fanout: self.fanout,
+            targeted: self.targeted,
+        }
+    }
+
+    fn record(self, profile_id: &str, session_id: &str, reason: &str) {
+        tracing::info!(
+            %profile_id,
+            %session_id,
+            cause_ordinal = self.cause.map(|cause| cause.ordinal),
+            reason,
+            "credential sync session disposition"
+        );
+    }
+}
+
+struct OwnedSyncLog {
+    cause: Option<mj_core::credentials::CredentialSyncCause>,
+    fanout: bool,
+    targeted: bool,
+}
+
+impl OwnedSyncLog {
+    fn as_ref(&self) -> SyncLog<'_> {
+        SyncLog {
+            cause: self.cause.as_ref(),
+            fanout: self.fanout,
+            targeted: self.targeted,
+        }
+    }
+}
+
+fn log_missing_targets(
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    profile_id: &str,
+    targets: &[CredentialSyncTarget],
+    log: SyncLog<'_>,
+) {
+    let present = |id: &str| targets.iter().any(|target| target.session_id == id);
+    if let Some(runtime) = runtime {
+        let skipped = runtime.credential_sync_skips(
+            profile_id,
+            log.fanout && !log.targeted,
+            log.cause.map(|cause| cause.session_id.as_str()),
+            present,
+        );
+        for (session_id, reason) in skipped {
+            log.record(profile_id, &session_id, reason);
+        }
+    } else if let Some(cause) = log.cause
+        && !present(&cause.session_id)
+    {
+        log.record(
+            profile_id,
+            &cause.session_id,
+            "not an eligible target: no published credential sync target",
+        );
+    }
+}
+
+async fn reconcile_profile_observed(
+    access: &SessionAccess<'_>,
+    targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
+    slopcop_login: SlopcopLoginSource,
+    mut log: SyncLog<'_>,
+    profile: &Arc<ProfileLogin>,
+    mut focus: Option<tokio::sync::oneshot::Sender<Option<CredentialSyncOutcome>>>,
 ) -> Vec<CredentialSyncOutcome> {
     let SessionAccess {
         relays,
@@ -670,6 +916,18 @@ pub(super) async fn reconcile_profile_guarded(
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
+    if let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync)
+        && profile.refresh(runtime, target).await
+        && log.targeted
+    {
+        profile.send(PassEvent::Pulled(target.profile_id.clone()));
+    }
+    for target in targets
+        .iter()
+        .filter(|target| !target.skips_login_file_sync)
+    {
+        profile.begin_delivery(runtime, target);
+    }
     // Read once per pass, and only when a session needs a copy: a raw
     // localhost session reads the host's own login.
     let slopcop_login = if targets.iter().any(syncs_slopcop_login) {
@@ -715,14 +973,21 @@ pub(super) async fn reconcile_profile_guarded(
     };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
+    let skills_target = first.clone();
     let skills = Arc::new(
-        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&first))
+        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&skills_target))
             .await
             .unwrap_or_else(|error| {
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
             }),
     );
-    let login = login_for_pass(targets).await;
+    if let Some(session_id) = triggered_by
+        && !targets.iter().any(|target| target.session_id == session_id)
+        && let Some(focus) = focus.take()
+    {
+        let _ = focus.send(None);
+    }
+    let login = PassLogin::Shared(profile.clone());
     let pass_context = PassContext {
         relays,
         gate,
@@ -730,10 +995,11 @@ pub(super) async fn reconcile_profile_guarded(
         skills: &skills,
         slopcop_login: &slopcop_login,
         login: &login,
+        profile,
         triggered_by,
         steps,
     };
-    // The AWS step of the sequential pass: the profile's one export. A
+    // Use the profile's one AWS export. A
     // role-scoped session's AWS credentials are installed by its own
     // operation, the renewal task's.
     let aws_for_login = targets
@@ -753,19 +1019,37 @@ pub(super) async fn reconcile_profile_guarded(
         .collect::<Vec<_>>();
     let login_pass = async {
         let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
+        let mut skipped = Vec::new();
         for pass in 0..2 {
             let mut pulled = false;
-            for (index, target) in targets.iter().enumerate() {
-                let reported = outcomes.contains_key(&target.session_id);
-                let result = Box::pin(reconcile_target(
-                    &pass_context,
-                    target,
-                    &aws_for_login[index],
-                    pass,
-                    reported,
-                ))
-                .await;
+            let mut reconciles: futures::stream::FuturesUnordered<_> = targets
+                .iter()
+                .zip(&aws_for_login)
+                .map(|(target, aws)| {
+                    let reported = outcomes.contains_key(&target.session_id);
+                    let pass_context = &pass_context;
+                    async move {
+                        (
+                            target,
+                            Box::pin(reconcile_target(pass_context, target, aws, pass, reported))
+                                .await,
+                        )
+                    }
+                })
+                .collect();
+            while let Some((target, result)) = reconciles.next().await {
                 pulled |= result.pulled;
+                if log.cause.is_some() || (log.fanout && result.login_skipped) {
+                    log.record(&target.profile_id, &target.session_id, &result.reason);
+                } else if result.login_skipped {
+                    skipped.push((target.session_id.clone(), result.reason));
+                }
+                if triggered_by == Some(target.session_id.as_str())
+                    && let Some(focus) = focus.take()
+                {
+                    let _ = focus.send(result.outcome);
+                    continue;
+                }
                 match result.outcome {
                     Some(outcome) => {
                         outcomes.insert(target.session_id.clone(), outcome);
@@ -776,13 +1060,26 @@ pub(super) async fn reconcile_profile_guarded(
                     None => {}
                 }
             }
-            if !pulled || pass == 1 {
+            log.fanout |= pulled
+                || outcomes.values().any(|outcome| {
+                    outcome
+                        .outcome
+                        .as_ref()
+                        .is_ok_and(|actions| actions.contains(&CredentialSyncAction::Pushed))
+                });
+            if log.fanout && log.cause.is_none() {
+                for (session_id, reason) in skipped.drain(..) {
+                    log.record(&first.profile_id, &session_id, &reason);
+                }
+            }
+            if !pulled || pass == 1 || profile.events.is_some() {
                 break;
             }
         }
         outcomes
     };
     let outcomes = login_pass.await;
+    log_missing_targets(runtime, &first.profile_id, targets, log);
     outcomes.into_values().collect()
 }
 
@@ -981,6 +1278,10 @@ pub(super) struct SessionSync {
     /// The AWS profile the session's worker was staged with, when the work
     /// asked for it (`SyncWork::StagedProfile`).
     pub(super) staged_profile: Option<String>,
+    /// The login install response arrives before the daemon can publish the
+    /// worker's operational observation. New workers acknowledge delivery
+    /// through that observation so a child cannot be held on a stale view.
+    reports_held_login: bool,
 }
 
 /// The role, role session and session policy credentials were issued for.
@@ -1026,12 +1327,15 @@ struct PassContext<'a> {
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     login: &'a PassLogin,
+    profile: &'a Arc<ProfileLogin>,
     triggered_by: Option<&'a str>,
     steps: &'a SessionSteps,
 }
 
 /// What reconciling one session in one pass found.
 struct TargetResult {
+    reason: String,
+    login_skipped: bool,
     outcome: Option<CredentialSyncOutcome>,
     /// A fresher copy of the profile's login was pulled from the session.
     pulled: bool,
@@ -1092,7 +1396,7 @@ async fn target_is_current(
 /// still current. `None` means the work was deferred. `work` receives the hold
 /// (the admission, the session's turn and its install lock) to pass on to
 /// whatever outlives this future.
-pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+async fn admitted_with_reason<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
@@ -1107,7 +1411,7 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
                 crate::recovery_gate::BackgroundWork::CredentialSync,
                 |admission| async move {
                     if !target_is_current(runtime, target).await? {
-                        return Ok(None);
+                        return Err(RelayJobDeferred("credential target snapshot is stale").into());
                     }
                     work(JobHold::new(
                         Some(admission),
@@ -1119,8 +1423,30 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
                 },
             )
             .await
-            .unwrap_or_else(|| Ok(None)),
+            .unwrap_or_else(|| {
+                Err(RelayJobDeferred("credential sync admission unavailable").into())
+            }),
         None => work(JobHold::new(None, Some(turn), installing, runtime.cloned())).await,
+    }
+}
+
+// Callers outside the login pass only need to distinguish a deferral from failure.
+#[cfg(test)]
+pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    target: &CredentialSyncTarget,
+    turn: SessionTurn,
+    installing: Option<SessionTurn>,
+    work: impl FnOnce(JobHold) -> F,
+) -> Result<Option<T>> {
+    defer_as_none(admitted_with_reason(gate, runtime, target, turn, installing, work).await)
+}
+
+fn defer_as_none<T>(result: Result<Option<T>>) -> Result<Option<T>> {
+    match result {
+        Err(error) if RelayJobDeferred::marks(&error) => Ok(None),
+        result => result,
     }
 }
 
@@ -1140,13 +1466,17 @@ async fn reconcile_target(
         skills,
         slopcop_login,
         login,
+        profile,
         triggered_by,
         steps,
     } = context;
-    // After the same session's AWS install, if it is running, never racing it
-    // for the session's admission slot.
+    // Keep the delivery result ordered with the next attempt on this session;
+    // the actor itself releases the AWS/relay turn before handing us its result.
+    let _delivery = profile.deliveries.enter(&target.session_id).await;
+    let requested = profile.fingerprint(target);
+    // An AWS install also uses this relay/admission turn.
     let turn = steps.enter(&target.session_id).await;
-    let result = admitted(*gate, *runtime, target, turn, None, |hold| async move {
+    let result = admitted_with_reason(*gate, *runtime, target, turn, None, |hold| async move {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
         let github = if target.sync_github_token {
@@ -1177,21 +1507,65 @@ async fn reconcile_target(
         .await
     })
     .await;
+    let deferred = matches!(&result, Err(error) if RelayJobDeferred::marks(error));
+    let retry = deferred
+        && !matches!(&result, Err(error) if error.downcast_ref::<RelayJobDeferred>().is_some_and(|error| {
+            error.0 == crate::session_manager::RELAY_JOB_LEASED
+                || (runtime.is_some() && error.0 == crate::session_manager::RELAY_JOB_RECONNECTING)
+        }));
+    profile.send(PassEvent::Attempted {
+        target: Box::new(target.clone()),
+        retry,
+    });
+    let awaits_worker_observation = runtime.is_some()
+        && matches!(&result, Ok(Some(sync)) if sync.reports_held_login
+            && (sync.unchanged_login.is_some() || sync.actions.contains(&CredentialSyncAction::Pushed))
+            && !sync.failures.iter().any(|failure| failure.step == SyncStep::HarnessLogin));
+    if !deferred
+        && !awaits_worker_observation
+        && !target.skips_login_file_sync
+        && let Some(requested) = requested.as_deref()
+        && profile.fingerprint(target).as_deref() == Some(requested)
+    {
+        let reason = match &result {
+            Ok(Some(sync)) => login_disposition(
+                target,
+                sync.unchanged_login.as_ref(),
+                &sync.actions,
+                &sync.failures,
+            ),
+            Err(error) => format!("{error:#}"),
+            Ok(None) => "credential sync did not reach the session".into(),
+        };
+        profile
+            .rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .end_delivery(target, Some(requested), reason);
+    }
     match result {
         // Deferral is not a successful credential check: in particular
         // it must not mark an authentication-triggered login refused.
-        Ok(None) => TargetResult {
+        Ok(None) => unreachable!("a deferred login sync carries a reason"),
+        Err(error) if RelayJobDeferred::marks(&error) => TargetResult {
+            reason: format!("{error:#}"),
+            login_skipped: true,
             outcome: None,
             pulled: false,
             clean: false,
         },
         Ok(Some(SessionSync {
-            actions, failures, ..
+            actions,
+            failures,
+            unchanged_login,
+            ..
         })) if actions.is_empty()
             && failures.is_empty()
             && (*triggered_by != Some(target.session_id.as_str()) || reported) =>
         {
             TargetResult {
+                reason: login_disposition(target, unchanged_login.as_ref(), &actions, &failures),
+                login_skipped: true,
                 outcome: None,
                 pulled: false,
                 clean: true,
@@ -1214,6 +1588,13 @@ async fn reconcile_target(
                 );
             }
             TargetResult {
+                reason: login_disposition(target, unchanged_login.as_ref(), &actions, &failures),
+                login_skipped: !actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        CredentialSyncAction::Pushed | CredentialSyncAction::Pulled
+                    )
+                }),
                 pulled: actions.contains(&CredentialSyncAction::Pulled),
                 clean: failures.is_empty(),
                 outcome: Some(CredentialSyncOutcome {
@@ -1234,6 +1615,8 @@ async fn reconcile_target(
                 "credential synchronization failed for relay session"
             );
             TargetResult {
+                reason: format!("{error:#}"),
+                login_skipped: true,
                 pulled: false,
                 clean: false,
                 outcome: Some(CredentialSyncOutcome {
@@ -1245,6 +1628,30 @@ async fn reconcile_target(
                 }),
             }
         }
+    }
+}
+
+fn login_disposition(
+    target: &CredentialSyncTarget,
+    unchanged_login: Option<&CredentialSnapshot>,
+    actions: &[CredentialSyncAction],
+    failures: &[StepFailure],
+) -> String {
+    if let Some(failure) = failures
+        .iter()
+        .find(|failure| failure.step == SyncStep::HarnessLogin)
+    {
+        format!("login sync failed: {}", failure.detail)
+    } else if actions.contains(&CredentialSyncAction::Pulled) {
+        "pulled the session's fresher login".into()
+    } else if actions.contains(&CredentialSyncAction::Pushed) {
+        "pushed the current profile login".into()
+    } else if target.skips_login_file_sync {
+        "not an eligible login target: shares the profile login or uses another authentication scheme".into()
+    } else if unchanged_login.is_some() {
+        "session already holds the current login".into()
+    } else {
+        "no eligible credential transfer for the reported copies".into()
     }
 }
 
@@ -1381,6 +1788,7 @@ pub(super) async fn aws_cycle(
                         detail: details.join("; "),
                     }],
                     staged_profile: None,
+                    reports_held_login: false,
                 })),
             );
         }
@@ -1456,15 +1864,17 @@ async fn aws_job(
     work: SyncWork,
 ) -> Result<Option<SessionSync>> {
     let turn = access.steps.enter(&target.session_id).await;
-    admitted(
-        access.gate,
-        access.runtime,
-        target,
-        turn,
-        installing,
-        |hold| async move { run_on_session(access.relays, target, work, hold).await },
+    defer_as_none(
+        admitted_with_reason(
+            access.gate,
+            access.runtime,
+            target,
+            turn,
+            installing,
+            |hold| async move { run_on_session(access.relays, target, work, hold).await },
+        )
+        .await,
     )
-    .await
 }
 
 /// What a session's renewal task needs, shared by all of them.
@@ -1945,6 +2355,8 @@ impl CanonicalSkills {
 
 /// The profile's login as the controller holds it.
 pub(super) struct CanonicalLogin {
+    profile_home: std::path::PathBuf,
+    harness: mj_core::config::HarnessKind,
     /// How the controller reads and writes it.
     pub(super) access: LoginAccess,
     pub(super) credential: CredentialSnapshot,
@@ -1952,6 +2364,7 @@ pub(super) struct CanonicalLogin {
 }
 
 /// A login as read from where its store keeps it.
+#[cfg(test)]
 type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
 
 /// How the controller reads and writes a profile's login: its store
@@ -2074,8 +2487,7 @@ pub(super) struct HostLogins<'a> {
 /// [`mj_core::config::HarnessKind::login_store`], so every session of the
 /// profile agrees on it.
 pub(super) enum PassLogin {
-    /// A file (or a login database): each session reads it when its turn
-    /// comes, so a refresh during the pass is seen.
+    Shared(Arc<ProfileLogin>),
     PerSession,
     /// The macOS Keychain, read once for the whole pass: every session of the
     /// profile reconciles against the same item, and each read spawns
@@ -2083,6 +2495,7 @@ pub(super) enum PassLogin {
     /// is reached is harmless: a pull rereads under the locks and installs
     /// only a strictly newer login, and a push of an older login is refused by
     /// the session for being older.
+    #[cfg(test)]
     Keychain {
         read: Arc<LoginRead>,
         access: LoginAccess,
@@ -2111,35 +2524,175 @@ pub async fn current_claude_access_token(
     mj_core::credentials::claude_access_token_fingerprint(&bytes)
 }
 
-/// Decide where the pass finds the profile's login, and read it when that is
-/// the Keychain and any of the pass's sessions needs it.
-async fn login_for_pass(targets: &[CredentialSyncTarget]) -> PassLogin {
-    let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync) else {
-        return PassLogin::PerSession;
+/// Serializes reads and adoption of the single profile login. Session relay
+/// calls never hold this lock: an unreachable worker cannot hold up a new
+/// canonical decision or delivery to a different worker.
+pub(super) struct ProfileLogin {
+    decide: tokio::sync::Mutex<()>,
+    current: watch::Sender<Option<Result<Arc<CanonicalLogin>, String>>>,
+    deliveries: SessionSteps,
+    rejected: DeliveryRegistry,
+    events: Option<mpsc::UnboundedSender<PassEvent>>,
+}
+
+impl ProfileLogin {
+    fn new(events: Option<mpsc::UnboundedSender<PassEvent>>, rejected: DeliveryRegistry) -> Self {
+        Self {
+            decide: Default::default(),
+            current: watch::Sender::new(None),
+            deliveries: Default::default(),
+            rejected,
+            events,
+        }
+    }
+
+    async fn refresh(
+        &self,
+        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        target: &CredentialSyncTarget,
+    ) -> bool {
+        let _decision = self.decide.lock().await;
+        let before = self.for_target(target).ok();
+        let login = self.read(target).await;
+        if runtime.is_some_and(|runtime| !runtime.credential_profile_source_is_current(target)) {
+            return false;
+        }
+        let changed = before.as_ref().map(|before| &before.credential)
+            != login.as_ref().ok().map(|after| &after.credential);
+        self.current.send_replace(Some(login));
+        changed && before.is_some()
+    }
+
+    async fn read(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>, String> {
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || read_canonical_login(&target, &PassLogin::PerSession))
+            .await
+            .context("profile login reader stopped")
+            .and_then(|result| result)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn for_target(&self, target: &CredentialSyncTarget) -> Result<Arc<CanonicalLogin>> {
+        self.current
+            .borrow()
+            .as_ref()
+            .cloned()
+            .context("profile login has not been read")?
+            .map_err(|error| anyhow!("{error}"))
+            .and_then(|login| {
+                anyhow::ensure!(
+                    login.profile_home == target.profile_home && login.harness == target.harness,
+                    "profile login location changed"
+                );
+                Ok(login)
+            })
+    }
+
+    fn fingerprint(&self, target: &CredentialSyncTarget) -> Option<String> {
+        let login = self.for_target(target).ok()?;
+        if target.harness == mj_core::config::HarnessKind::Claude {
+            mj_core::credentials::claude_access_token_fingerprint(&login.bytes)
+        } else {
+            login
+                .credential
+                .present
+                .then(|| login.credential.fingerprint.clone())
+        }
+    }
+
+    fn begin_delivery(
+        &self,
+        runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+        target: &CredentialSyncTarget,
+    ) {
+        if runtime.is_some_and(|runtime| runtime.credential_session_ended(&target.session_id)) {
+            return;
+        }
+        let Some(fingerprint) = self.fingerprint(target) else {
+            self.rejected
+                .lock()
+                .expect("rejected logins poisoned")
+                .end_delivery(target, None, "profile has no current readable login".into());
+            return;
+        };
+        self.rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .start_delivery(target, &fingerprint);
+    }
+
+    fn send(&self, event: PassEvent) {
+        if let Some(events) = &self.events
+            && events.send(event).is_err()
+        {
+            tracing::debug!("credential sync coordinator stopped before receiving delivery state");
+        }
+    }
+
+    async fn adopt(
+        &self,
+        target: &CredentialSyncTarget,
+        bytes: &[u8],
+    ) -> Result<mj_core::credentials::CredentialInstall> {
+        let _decision = self.decide.lock().await;
+        let login = self.for_target(target)?;
+        let installed = login.access.install_if_newer(target.harness, bytes).await?;
+        if installed.installed || installed.snapshot != login.credential {
+            // A pull and the host's own concurrent renewal both invalidate the
+            // deliveries selected against the previous generation.
+            self.current.send_replace(Some(self.read(target).await));
+            self.send(PassEvent::Pulled(target.profile_id.clone()));
+        }
+        Ok(installed)
+    }
+}
+
+fn read_canonical_login(
+    target: &CredentialSyncTarget,
+    login: &PassLogin,
+) -> Result<Arc<CanonicalLogin>> {
+    let kind = target.harness;
+    let (access, credential, bytes) = match login {
+        PassLogin::Shared(owner) => return owner.for_target(target),
+        #[cfg(test)]
+        PassLogin::Keychain { read, access } => {
+            let (credential, bytes) = read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
+            (access.clone(), credential, bytes)
+        }
+        PassLogin::PerSession if kind.keeps_logins_in_database() => {
+            let access =
+                LoginAccess::file(harness_authentication_marker(kind, &target.profile_home));
+            let (credential, bytes) =
+                match crate::opencode_logins::home_logins(&target.profile_home)? {
+                    Some(bytes) => (CredentialSnapshot::of(kind, &bytes), bytes),
+                    None => (CredentialSnapshot::absent(), Vec::new()),
+                };
+            (access, credential, bytes)
+        }
+        PassLogin::PerSession => {
+            let access = LoginAccess::bounded(kind.login_store(
+                mj_core::config::HarnessHost::current(),
+                &target.profile_home,
+            ));
+            let (credential, bytes) = access.read(kind)?;
+            (access, credential, bytes)
+        }
     };
-    let store = target.harness.login_store(
-        mj_core::config::HarnessHost::current(),
-        &target.profile_home,
-    );
-    if store != mj_core::config::HarnessLoginStore::MacKeychain {
-        return PassLogin::PerSession;
-    }
-    let access = LoginAccess::bounded(store);
-    let read = access
-        .read_blocking(target.harness)
-        .await
-        .map_err(|error| format!("{error:#}"));
-    PassLogin::Keychain {
-        read: Arc::new(read),
+    Ok(Arc::new(CanonicalLogin {
         access,
-    }
+        credential,
+        bytes,
+        profile_home: target.profile_home.clone(),
+        harness: kind,
+    }))
 }
 
 /// What one session is reconciled against, read on the controller before its
 /// worker is asked anything. Nothing here fails the session as a whole: each
 /// part that could not be read is the failure of the one step that needs it.
 pub(super) struct SessionCanonical {
-    pub(super) login: Result<CanonicalLogin, String>,
+    profile: Option<Arc<ProfileLogin>>,
+    pub(super) login: Result<Arc<CanonicalLogin>, String>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github: GithubSync,
     pub(super) aws: AwsSync,
@@ -2153,51 +2706,16 @@ impl SessionCanonical {
         github: GithubSync,
         login: &PassLogin,
     ) -> Self {
-        let read_login = || -> Result<CanonicalLogin> {
-            // A login database is read where the harness keeps it; the
-            // profile home holds no copy of it.
-            if target.harness.keeps_logins_in_database() {
-                let marker = harness_authentication_marker(target.harness, &target.profile_home);
-                let (credential, bytes) =
-                    match crate::opencode_logins::home_logins(&target.profile_home)? {
-                        Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
-                        None => (CredentialSnapshot::absent(), Vec::new()),
-                    };
-                return Ok(CanonicalLogin {
-                    access: LoginAccess::file(marker),
-                    credential,
-                    bytes,
-                });
-            }
-            match login {
-                // The pass read the Keychain for every session of the profile.
-                PassLogin::Keychain { read, access } => {
-                    let (credential, bytes) =
-                        read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
-                    Ok(CanonicalLogin {
-                        access: access.clone(),
-                        credential,
-                        bytes,
-                    })
-                }
-                PassLogin::PerSession => {
-                    let marker =
-                        harness_authentication_marker(target.harness, &target.profile_home);
-                    let (credential, bytes) = read_credential_file(target.harness, &marker)?;
-                    Ok(CanonicalLogin {
-                        access: LoginAccess::file(marker),
-                        credential,
-                        bytes,
-                    })
-                }
-            }
-        };
         Self {
             // A profile without a login file has nothing to read.
             login: if target.skips_login_file_sync {
                 Err("not synchronized".to_owned())
             } else {
-                read_login().map_err(|error| format!("{error:#}"))
+                read_canonical_login(target, login).map_err(|error| format!("{error:#}"))
+            },
+            profile: match login {
+                PassLogin::Shared(owner) => Some(owner.clone()),
+                _ => None,
             },
             skills,
             github,
@@ -2247,11 +2765,10 @@ pub(super) async fn run_on_session(
     match relays {
         SessionRelays::Actors(manager) => {
             let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
-                tracing::debug!(
-                    session_id = %target.session_id,
-                    "credential sync waits for the session's relay actor"
-                );
-                return Ok(None);
+                return Err(RelayJobDeferred(
+                    "credential sync waits for the session's relay actor",
+                )
+                .into());
             };
             let (job, response, _queued) = CredentialSyncJob::queue(target.clone(), work, hold);
             handle.run_on_connection(Box::new(job)).await;
@@ -2260,14 +2777,6 @@ pub(super) async fn run_on_session(
                 .context("the session actor dropped the credential sync")?
             {
                 Ok(sync) => Ok(Some(sync)),
-                Err(error) if RelayJobDeferred::marks(&error) => {
-                    tracing::debug!(
-                        session_id = %target.session_id,
-                        reason = %error,
-                        "credential sync deferred until the relay is available"
-                    );
-                    Ok(None)
-                }
                 Err(error) => Err(error),
             }
         }
@@ -2301,6 +2810,7 @@ async fn run_work(
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: None,
+                reports_held_login: false,
             };
             reconcile_aws_step(client, &aws, &mut sync).await;
             Ok(sync)
@@ -2331,6 +2841,7 @@ async fn run_work(
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: Some(profile),
+                reports_held_login: false,
             })
         }
     }
@@ -2353,6 +2864,7 @@ pub(super) async fn reconcile_on(
         actions: Vec::new(),
         failures: Vec::new(),
         staged_profile: None,
+        reports_held_login: client.protocol_version() >= mj_core::relay::RELAY_HELD_LOGIN_PROTOCOL,
     };
     reconcile_aws_step(client, &canonical.aws, &mut sync).await;
     let SessionSync {
@@ -2371,7 +2883,12 @@ pub(super) async fn reconcile_on(
     // Profiles without a harness login file already receive credentials
     // through their environment or target credential chain.
     if !target.skips_login_file_sync {
-        match &canonical.login {
+        let fresh = canonical.profile.as_ref().map(|owner| {
+            owner
+                .for_target(target)
+                .map_err(|error| format!("{error:#}"))
+        });
+        match fresh.as_ref().unwrap_or(&canonical.login) {
             Ok(login) => {
                 *current_access_token =
                     mj_core::credentials::claude_access_token_fingerprint(&login.bytes);
@@ -2382,6 +2899,7 @@ pub(super) async fn reconcile_on(
                     &login.credential,
                     &login.bytes,
                     actions,
+                    canonical.profile.as_deref(),
                 )
                 .await
                 {
@@ -2595,6 +3113,10 @@ impl RelayConnectionJob for CredentialSyncJob {
         lease.defer_credentials();
     }
 
+    fn deferred_by_reconnect(&self) -> bool {
+        true
+    }
+
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             let Self {
@@ -2680,16 +3202,37 @@ pub(super) async fn reconcile_credentials(
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
     actions: &mut Vec<CredentialSyncAction>,
+    owner: Option<&ProfileLogin>,
 ) -> Result<Option<CredentialSnapshot>> {
     let mut session = client.credential_state().await?;
+    if let Some(owner) = owner
+        && let Some(fingerprint) = owner.fingerprint(target)
+        && owner
+            .rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .delivery_mismatch(target, &fingerprint, &session)
+    {
+        bail!("worker did not retain the installed profile login");
+    }
     if target.harness.keeps_logins_in_database() {
         if let Some(bytes) = stored_logins_push(canonical, canonical_bytes, &session) {
-            let installed = client.install_credentials(bytes).await?;
+            let installed = client
+                .install_credentials(bytes)
+                .await
+                .context("push profile login")?;
             // An empty export is still a present staged file on the worker.
             if installed.present
                 && installed.fingerprint == mj_core::credentials::credential_fingerprint(bytes)
             {
                 actions.push(CredentialSyncAction::Pushed);
+            } else {
+                return Err(login_install_mismatch(
+                    owner,
+                    target,
+                    canonical_bytes,
+                    installed,
+                ));
             }
         }
         return Ok(None);
@@ -2737,33 +3280,20 @@ pub(super) async fn reconcile_credentials(
                     .then_some(current));
             }
             SyncAction::Push => {
-                let installed = client.install_credentials(&desired_bytes).await?;
+                let installed = client
+                    .install_credentials(&desired_bytes)
+                    .await
+                    .context("push profile login")?;
                 if installed.present && installed.fingerprint == desired.fingerprint {
                     log_credential_transfer("pushed", target, &session, &installed);
                     actions.push(CredentialSyncAction::Pushed);
                     return Ok(None);
                 }
-                if kind.copies_omit_refresh_token()
-                    && installed == session
-                    && installed.freshness_epoch_ms == desired.freshness_epoch_ms
-                {
-                    // A worker that predates the same-expiry delivery rule
-                    // keeps the copy it has. It converges when the next
-                    // refresh moves the profile's expiry forward, which that
-                    // worker does accept.
-                    tracing::debug!(
-                        session_id = %target.session_id,
-                        profile_id = %target.profile_id,
-                        "the session's worker keeps its same-expiry credential copy; it will take the next refresh"
-                    );
-                    return Ok(None);
+                if session_copy_action(kind, &current, &desired, &installed) != SyncAction::Pull {
+                    return Err(login_install_mismatch(owner, target, &bytes, installed));
                 }
-                anyhow::ensure!(
-                    installed != session,
-                    "session {} retained its credentials without accepting the newer profile login or reporting a changed snapshot",
-                    target.session_id
-                );
                 session = installed;
+                continue;
             }
             SyncAction::Pull => {
                 let received = client.read_credentials().await?;
@@ -2790,15 +3320,16 @@ pub(super) async fn reconcile_credentials(
                 // Into where the profile's login is kept: its file, or on a
                 // Mac the Keychain (#1491 review: a session that refreshed
                 // the shared grant holds the only live refresh token).
-                let installed = access
-                    .install_if_newer(kind, &received)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "install fresher credentials from session {} for profile {}",
-                            target.session_id, target.profile_id
-                        )
-                    })?;
+                let installed = match owner {
+                    Some(owner) => owner.adopt(target, &received).await,
+                    None => access.install_if_newer(kind, &received).await,
+                }
+                .with_context(|| {
+                    format!(
+                        "install fresher credentials from session {} for profile {}",
+                        target.session_id, target.profile_id
+                    )
+                })?;
                 if installed.installed {
                     log_credential_transfer("pulled", target, &current, &installed.snapshot);
                     actions.push(CredentialSyncAction::Pulled);
@@ -2822,8 +3353,47 @@ pub(super) async fn reconcile_credentials(
         // state now, rather than turning a stale decision into a clean check.
         // Every repeat follows a changed snapshot; no lock spans relay I/O.
         unchanged = false;
-        (current, bytes) = access.read_blocking(kind).await?;
+        (current, bytes) = match owner {
+            Some(owner) => {
+                let login = owner.for_target(target)?;
+                (login.credential.clone(), login.bytes.clone())
+            }
+            None => access.read_blocking(kind).await?,
+        };
     }
+}
+
+fn login_install_mismatch(
+    owner: Option<&ProfileLogin>,
+    target: &CredentialSyncTarget,
+    requested: &[u8],
+    observed: CredentialSnapshot,
+) -> anyhow::Error {
+    let reason = "worker did not retain the installed profile login";
+    if let Some(owner) = owner
+        && let Some(fingerprint) = owner.fingerprint(target)
+        && (if target.harness == mj_core::config::HarnessKind::Claude {
+            mj_core::credentials::claude_access_token_fingerprint(requested)
+        } else {
+            Some(mj_core::credentials::credential_fingerprint(requested))
+        })
+        .as_deref()
+            == Some(&fingerprint)
+    {
+        owner
+            .rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .record_delivery(
+                target,
+                &fingerprint,
+                LoginDeliveryState::Concluded {
+                    reason: reason.into(),
+                },
+                Some(observed),
+            );
+    }
+    anyhow!("{reason}")
 }
 
 /// Which way a session's copy and the profile's login converge. `desired` is

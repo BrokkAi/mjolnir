@@ -14,7 +14,7 @@ use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
 #[test]
-fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
+fn web_suspend_restart_resume_and_move_use_the_lifecycle_cancellation_control() {
     let move_request = serde_json::from_value(serde_json::json!({
         "preparation": {
             "selection": {"session_id": "move-web-session"},
@@ -37,12 +37,21 @@ fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
         ControllerAction::Move {
             request: Box::new(move_request),
         },
+        ControllerAction::Resume {
+            session_id: "resume-web-session".into(),
+            workspace_id: "workspace".into(),
+            profile_id: "profile".into(),
+            target_id: "target".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        },
     ] {
         let control = PhoneActionControl::for_action(&action);
         let lifecycle_control = control
             .lifecycle
             .as_ref()
-            .expect("web Suspend, Restart and Move share their lifecycle cancellation control");
+            .expect("web lifecycle actions share their lifecycle cancellation control");
         assert!(Arc::ptr_eq(
             &control.cancelled,
             &lifecycle_control.cancelled
@@ -732,6 +741,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         capacity_retry: None,
         retry_assessment_pending: false,
         authentication_retry_waiting: None,
+        held_login_fingerprint: None,
         activity_turn_started_at_ms: None,
         session_id: "session-1".into(),
         store_id: None,

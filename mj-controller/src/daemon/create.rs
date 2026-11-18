@@ -1,18 +1,8 @@
-use super::views::{CreateProgress, StalledCreate};
+use super::views::{LifecycleStallProgress, StalledLifecycle};
 use super::*;
 
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The existing ten-minute reviewer Create idle bound (#1438) also measures
-/// time since the last byte of an active transfer (#1583).
-///
-/// The longest single stage measured on 2026-11-06 under a load average of
-/// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
-/// three times that worst case. The bound exists because the Create's
-/// executor and `CommandSpec` have no per-command timeout, so a remote command
-/// that hangs on a live connection would otherwise wait for ever (#1438).
-pub(super) const CREATE_STALL_BOUND: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Bounds one reviewer readiness wait that runs with no Create to end it.
 ///
@@ -231,7 +221,7 @@ impl RuntimeState {
         // accepted Create mid-provision, which left the child without a worker
         // root (#1438). While the Create runs, each wait ends with its
         // outcome: the child is ready, its record says the Create failed or
-        // it was closed, or the Create stalled for `CREATE_STALL_BOUND` and
+        // it was closed, or the Create stalled for `LIFECYCLE_STALL_BOUND` and
         // was cancelled. Once no Create is running (it finished, or the
         // reviewer was restored without one) nothing else ends a wait, so
         // `PostCreateWait` bounds it.
@@ -296,14 +286,14 @@ impl RuntimeState {
     /// Fail unless the reviewer child's record is still one a Create can
     /// finish: missing, closed, failed or destroyed children never become
     /// ready, so waiting for them would never end. Also fail, and cancel, a
-    /// Create that has stalled (see [`CREATE_STALL_BOUND`]), and a readiness
+    /// Create that has stalled (see [`LIFECYCLE_STALL_BOUND`]), and a readiness
     /// wait that has gone on too long with no Create running.
     fn reviewer_child_can_still_start(
         &self,
         child: &str,
         waiting: &mut PostCreateWait,
     ) -> Result<()> {
-        self.check_create_progress(child, CREATE_STALL_BOUND, waiting)?;
+        self.check_create_progress(child, LIFECYCLE_STALL_BOUND, waiting)?;
         let Some(record) = self.session_record(child) else {
             anyhow::bail!("reviewer child {child} no longer exists");
         };
@@ -338,13 +328,13 @@ impl RuntimeState {
         bound: Duration,
         waiting: &mut PostCreateWait,
     ) -> Result<()> {
-        match self.cancel_stalled_create(child, bound) {
-            CreateProgress::NotRunning => waiting.check(child),
-            CreateProgress::Running => {
+        match self.cancel_stalled_lifecycle(child, LifecycleKind::Create, bound) {
+            LifecycleStallProgress::NotRunning => waiting.check(child),
+            LifecycleStallProgress::Running(_) => {
                 waiting.create_running();
                 Ok(())
             }
-            CreateProgress::Stalled {
+            LifecycleStallProgress::Stalled {
                 idle,
                 stages,
                 stream,
@@ -356,9 +346,9 @@ impl RuntimeState {
                     stages.join(" + ")
                 };
                 let outcome = match phase {
-                    StalledCreate::Cancelled => "its Create was cancelled",
-                    StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
-                    StalledCreate::Committed => "its Create had committed and was left running",
+                    StalledLifecycle::Cancelled => "its Create was cancelled",
+                    StalledLifecycle::AlreadyCancelling => "its Create was already being cancelled",
+                    StalledLifecycle::Committed => "its Create had committed and was left running",
                 };
                 tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?stream, ?phase, "reviewer child Create stalled");
                 let detail = match stream {
@@ -612,129 +602,213 @@ impl RuntimeState {
             start = start.automatic();
         }
         self.admit_lifecycle(
-            session_id, LifecycleKind::Create, start,
+            session_id,
+            LifecycleKind::Create,
+            start,
             move |state, session_id, cancelled, _session_admission| async move {
-                tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
-                    "session launch lifecycle scheduled");
-                let _total =
-                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
-                let loading =
-                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
-                let mut controller = tokio::task::spawn_blocking(Controller::load)
+                state
+                    .run_admitted_create(
+                        session_id,
+                        cancelled,
+                        control,
+                        inputs,
+                        recovering,
+                        scheduled_at,
+                    )
                     .await
-                    .context("load controller for daemon create task")??;
-                drop(loading);
-                // Recovery may already have settled this registration before
-                // admission; replay never provisions a finished session. A
-                // recovering create is checked by its reset instead.
-                if !recovering
-                    && controller.state.sessions.get(&session_id).is_none_or(|record| {
-                        record.state != mj_core::state::SessionState::Provisioning
-                    })
-                {
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-                let (kind, publication, parent): (_, Option<Publication>, Option<String>) = match inputs {
-                    CreateInputs::TopLevel {
-                        publication,
-                        remember_launch_choices,
-                    } => (
-                        crate::controller::CreateKind::TopLevel {
-                            remember_launch_choices,
-                        },
-                        publication,
-                        None,
-                    ),
-                    CreateInputs::Subagent(relation) => (
-                        crate::controller::CreateKind::Subagent,
-                        None,
-                        Some(relation.parent_session_id),
-                    ),
-                };
-                let publication_timing =
-                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
-                let publication_error = if let Some(publication) = publication {
-                    let published = tokio::select! {
-                        result = publication => result.context("session publication owner stopped")
-                            .and_then(|result| result.map_err(anyhow::Error::msg)),
-                        () = async {
-                            while !cancelled.load(Ordering::Acquire) {
-                                tokio::time::sleep(Duration::from_millis(25)).await;
-                            }
-                        } => Err(anyhow!("session creation cancelled before publication")),
-                    };
-                    published.err()
-                } else {
-                    None
-                };
-                drop(publication_timing);
-                if publication_error.is_some() {
-                    control.request_cancel("session publication failed");
-                }
-                let executor = DaemonStageReportingExecutor::new(
-                    CancellableProcessExecutor::new(cancelled),
-                    state.clone(),
-                    session_id.clone(),
-                );
-                // The commit and the write that marks the session running
-                // are the one stretch a handoff waits for: a daemon replaced
-                // between them would redo a create that had just succeeded.
-                let commit_admission = Mutex::new(None);
-                let commit = || {
-                    let admission = match crate::upgrade::activity("session create commit") {
-                        Ok(admission) => admission,
-                        Err(error) => {
-                            // The daemon is being replaced: the next one owns
-                            // this create, which has not committed.
-                            control.cancel_for_shutdown();
-                            return Err(error);
-                        }
-                    };
-                    ensure!(
-                        control.grant_commit(),
-                        "session creation cancelled before commit"
-                    );
-                    *commit_admission
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(admission);
-                    Ok(())
-                };
-                // A create stopped before the phone was told it exists is
-                // discarded by the ordinary rollback, not left for the next
-                // daemon to provision for a client that was never answered.
-                let published = publication_error.is_none();
-                let interrupted = || published && control.stopped_for_shutdown();
-                let provision = controller
-                    .run_create(&session_id, &executor, kind, recovering, commit, &interrupted)
-                    .await;
-                drop(commit_admission);
-                if let Some(parent) = parent
-                    && provision.is_err()
-                {
-                    drop(controller);
-                    state.reload_controller().await?;
-                    if let Err(prompt_error) = state.reconcile_parent_reports(&parent).await {
-                        tracing::warn!(
-                            child_session_id = %session_id,
-                            parent_session_id = parent,
-                            error = format!("{prompt_error:#}"),
-                            "could not enqueue the parent's finished child reports after provisioning failure"
-                        );
-                    }
-                }
-                if let Some(error) = publication_error {
-                    return match provision {
-                        Ok(()) => Err(error),
-                        Err(rollback) => {
-                            Err(error.context(format!("discard unpublished session: {rollback:#}")))
-                        }
-                    };
-                }
-                provision?;
-                Ok(DaemonLifecycleResult::Done)
             },
-        ).await?;
+        )
+        .await?;
         Ok(())
+    }
+
+    pub(super) async fn start_failed_launch_retry(
+        self: &Arc<Self>,
+        record: SessionRecord,
+        request_key: String,
+        control: LifecycleControl,
+    ) -> Result<StartedLifecycle> {
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let scheduled_at = std::time::Instant::now();
+        self.admit_prepared_lifecycle(
+            record.id.clone(),
+            LifecycleKind::Create,
+            super::lifecycle::LifecycleStart::request(request_key, None, Some(control.clone())),
+            Some(acceptance),
+            move |state, session_id, cancelled, _session_admission| async move {
+                let capacity = state
+                    .admit_container_launch(
+                        &record.target_template_id,
+                        record.resource_allocation.clone(),
+                        Some(&session_id),
+                        BTreeSet::from([session_id.clone()]),
+                        None,
+                    )
+                    .await?;
+                {
+                    let _handoff = crate::upgrade::activity_unless_draining("failed launch retry admission")?;
+                    ensure!(!cancelled.load(Ordering::Acquire), "launch retry cancelled before admission");
+                    let Some(operation_id) = blocking(move || crate::database::begin_failed_launch_retry(record)).await? else {
+                        return Err(Refusal::precondition(
+                            "This session changed while Retry launch was waiting. Check its current status.",
+                        ).into());
+                    };
+                    tracing::info!(%session_id, %operation_id, "accepted retry of failed session launch");
+                    state.push_public_notice(
+                        &session_id,
+                        "Relaunching the stored launch request. Prompts that failed with the previous launch are not resent.",
+                    );
+                    accepted.send_replace(Some(Ok(())));
+                }
+                state.reload_controller().await?;
+                drop(capacity);
+                state.run_admitted_create(
+                    session_id,
+                    cancelled,
+                    control,
+                    CreateInputs::TopLevel { publication: None, remember_launch_choices: false },
+                    true,
+                    scheduled_at,
+                ).await
+            },
+        ).await
+    }
+
+    async fn run_admitted_create(
+        self: Arc<Self>,
+        session_id: String,
+        cancelled: Arc<AtomicBool>,
+        control: LifecycleControl,
+        inputs: CreateInputs,
+        recovering: bool,
+        scheduled_at: std::time::Instant,
+    ) -> Result<DaemonLifecycleResult> {
+        let state = self;
+        tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
+            "session launch lifecycle scheduled");
+        let _total = crate::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
+        let loading = crate::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
+        let mut controller = tokio::task::spawn_blocking(Controller::load)
+            .await
+            .context("load controller for daemon create task")??;
+        drop(loading);
+        // Recovery may already have settled this registration before
+        // admission; replay never provisions a finished session. A
+        // recovering create is checked by its reset instead.
+        if !recovering
+            && controller
+                .state
+                .sessions
+                .get(&session_id)
+                .is_none_or(|record| record.state != mj_core::state::SessionState::Provisioning)
+        {
+            return Ok(DaemonLifecycleResult::Done);
+        }
+        let (kind, publication, parent): (_, Option<Publication>, Option<String>) = match inputs {
+            CreateInputs::TopLevel {
+                publication,
+                remember_launch_choices,
+            } => (
+                crate::controller::CreateKind::TopLevel {
+                    remember_launch_choices,
+                },
+                publication,
+                None,
+            ),
+            CreateInputs::Subagent(relation) => (
+                crate::controller::CreateKind::Subagent,
+                None,
+                Some(relation.parent_session_id),
+            ),
+        };
+        let publication_timing =
+            crate::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
+        let publication_error = if let Some(publication) = publication {
+            let published = tokio::select! {
+                result = publication => result.context("session publication owner stopped")
+                    .and_then(|result| result.map_err(anyhow::Error::msg)),
+                () = async {
+                    while !cancelled.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                } => Err(anyhow!("session creation cancelled before publication")),
+            };
+            published.err()
+        } else {
+            None
+        };
+        drop(publication_timing);
+        if publication_error.is_some() {
+            control.request_cancel("session publication failed");
+        }
+        let executor = DaemonStageReportingExecutor::new(
+            CancellableProcessExecutor::new(cancelled),
+            state.clone(),
+            session_id.clone(),
+        );
+        // The commit and the write that marks the session running
+        // are the one stretch a handoff waits for: a daemon replaced
+        // between them would redo a create that had just succeeded.
+        let commit_admission = Mutex::new(None);
+        let commit = || {
+            let admission = match crate::upgrade::activity("session create commit") {
+                Ok(admission) => admission,
+                Err(error) => {
+                    // The daemon is being replaced: the next one owns
+                    // this create, which has not committed.
+                    control.cancel_for_shutdown();
+                    return Err(error);
+                }
+            };
+            ensure!(
+                control.grant_commit(),
+                "session creation cancelled before commit"
+            );
+            *commit_admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(admission);
+            Ok(())
+        };
+        // A create stopped before the phone was told it exists is
+        // discarded by the ordinary rollback, not left for the next
+        // daemon to provision for a client that was never answered.
+        let published = publication_error.is_none();
+        let interrupted = || published && control.stopped_for_shutdown();
+        let provision = controller
+            .run_create(
+                &session_id,
+                &executor,
+                kind,
+                recovering,
+                commit,
+                &interrupted,
+            )
+            .await;
+        drop(commit_admission);
+        if let Some(parent) = parent
+            && provision.is_err()
+        {
+            drop(controller);
+            state.reload_controller().await?;
+            if let Err(prompt_error) = state.reconcile_parent_reports(&parent).await {
+                tracing::warn!(
+                    child_session_id = %session_id,
+                    parent_session_id = parent,
+                    error = format!("{prompt_error:#}"),
+                    "could not enqueue the parent's finished child reports after provisioning failure"
+                );
+            }
+        }
+        if let Some(error) = publication_error {
+            return match provision {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("discard unpublished session: {rollback:#}")))
+                }
+            };
+        }
+        provision?;
+        Ok(DaemonLifecycleResult::Done)
     }
 
     /// Re-admit the creates a previous daemon's shutdown interrupted. Runs at

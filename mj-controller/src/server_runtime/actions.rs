@@ -356,28 +356,9 @@ pub(super) async fn apply_phone_action(
                 .force_destroy_session(session_id, branch)
                 .await
         }
-        ControllerAction::Resume {
-            session_id,
-            workspace_id,
-            profile_id,
-            target_id,
-            queue,
-            additional_mounts,
-            resource_allocation,
-        } => services
-            .daemon_runtime
-            .resume_session(ResumeSessionRequest {
-                session_id,
-                workspace_id,
-                profile_id,
-                target_template_id: target_id,
-                additional_mounts,
-                resource_allocation,
-                discard_queue: queue == ResumeQueueDisposition::Discard,
-                repository_preflight: None,
-            })
-            .await
-            .map(|_| ()),
+        ControllerAction::Resume { .. } => {
+            unreachable!("Resume is admitted by the phone control loop")
+        }
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(*request).await?;
             finish_phone_lifecycle(crate::daemon::DaemonReply::MoveOutcome(outcome))

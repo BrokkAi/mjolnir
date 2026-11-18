@@ -1303,6 +1303,10 @@ impl DashboardState {
     }
 
     /// Replace what new-session defaults are chosen from.
+    pub fn set_failed_launch_retries(&mut self, sessions: std::collections::BTreeSet<String>) {
+        self.failed_launch_retries = sessions;
+    }
+
     pub fn set_container_upgrade_sessions(&mut self, sessions: std::collections::BTreeSet<String>) {
         self.container_upgrade_sessions = sessions;
     }

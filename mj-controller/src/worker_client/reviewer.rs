@@ -327,12 +327,11 @@ impl RelayClient {
     }
 
     pub async fn detach(mut self) -> Result<()> {
-        self.input
-            .take()
-            .expect("connected relay owns proxy stdin")
-            .shutdown()
-            .await
-            .context("close relay proxy stdin")?;
+        // An abandoned exchange (a dropped memory transfer, an unexpected
+        // response) has already closed stdin; the proxy still needs reaping.
+        if let Some(mut input) = self.input.take() {
+            input.shutdown().await.context("close relay proxy stdin")?;
+        }
         let mut child = self.child.take().expect("connected relay owns proxy child");
         match tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, child.wait()).await {
             Ok(status) => {

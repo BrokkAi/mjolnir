@@ -537,6 +537,8 @@ impl RelayClient {
             self.input.take();
             bail!("relay returned an unexpected project-memory snapshot start response");
         };
+        let started = Instant::now();
+        let session_id = self.session_id.clone();
         let mut transfer = ProjectMemoryTransfer {
             client: Some(self),
             id: transfer_id,
@@ -544,6 +546,7 @@ impl RelayClient {
         let result = async {
             let mut bytes = Vec::new();
             let mut offset = 0u64;
+            let mut pages = 0u64;
             loop {
                 let MemoryResult::SnapshotPage {
                     transfer_id: page_id,
@@ -578,15 +581,24 @@ impl RelayClient {
                 );
                 bytes.extend_from_slice(&chunk);
                 offset = next_offset;
+                pages += 1;
                 if complete {
-                    return Ok(bytes);
+                    return Ok((bytes, pages));
                 }
             }
         }
         .await;
         let bytes = match result {
-            Ok(bytes) => {
+            Ok((bytes, pages)) => {
                 transfer.complete();
+                tracing::info!(
+                    %session_id,
+                    direction = "download",
+                    bytes = bytes.len(),
+                    pages,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "project-memory transfer finished"
+                );
                 bytes
             }
             Err(error) => return Err(transfer.abort(error).await),
@@ -628,6 +640,10 @@ impl RelayClient {
             self.input.take();
             bail!("relay returned an unexpected project-memory upload start response");
         };
+        let started = Instant::now();
+        let session_id = self.session_id.clone();
+        let total_bytes = bytes.len();
+        let mut pages = 0u64;
         let mut transfer = ProjectMemoryTransfer {
             client: Some(self),
             id: transfer_id,
@@ -655,6 +671,7 @@ impl RelayClient {
                     "project-memory upload offset changed"
                 );
                 offset = next_offset;
+                pages += 1;
             }
             match transfer
                 .call(MemoryAction::CommitUpload { transfer_id })
@@ -668,6 +685,14 @@ impl RelayClient {
         match result {
             Ok(outcome) => {
                 transfer.complete();
+                tracing::info!(
+                    %session_id,
+                    direction = "upload",
+                    bytes = total_bytes,
+                    pages,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "project-memory transfer finished"
+                );
                 Ok(outcome)
             }
             Err(error) => Err(transfer.abort(error).await),

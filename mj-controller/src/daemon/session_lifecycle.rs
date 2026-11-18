@@ -61,7 +61,10 @@ impl RuntimeState {
                 self.start_restart_session(session_id, acknowledge_container_recreation, None)
                     .await?
             }
-            SessionLifecycleRequest::Resume(request) => self.start_resume_session(*request).await?,
+            SessionLifecycleRequest::Resume(request) => {
+                self.start_resume_session(*request, LifecycleControl::default())
+                    .await?
+            }
             SessionLifecycleRequest::Move(request) => {
                 self.start_move_session(*request, LifecycleControl::default())
                     .await?
