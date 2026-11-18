@@ -6647,6 +6647,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut cleared,
         &state,
         &config.targets["local-bare"],
+        None,
     ));
     assert!(cleared.clear_resource_allocation);
     assert_eq!(cleared.resource_allocation, None);
@@ -6662,6 +6663,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut no_default,
         &state,
         &fixed_host,
+        None,
     ));
     assert_eq!(no_default.resource_allocation, None);
     assert!(!no_default.clear_resource_allocation);
@@ -6673,6 +6675,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut cleared_on_fixed,
         &state,
         &fixed_host,
+        None,
     ));
     assert!(cleared_on_fixed.clear_resource_allocation);
     assert_eq!(cleared_on_fixed.resource_allocation, None);
@@ -6685,6 +6688,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut defaulted,
         &state,
         &config.targets["podman"],
+        None,
     ));
     assert_eq!(defaulted.resource_allocation, container_size(4, 8));
     assert!(!defaulted.clear_resource_allocation);
@@ -6696,6 +6700,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut explicit,
         &state,
         &config.targets["podman"],
+        None,
     ));
     assert_eq!(explicit.resource_allocation, container_size(6, 16));
 
@@ -6708,6 +6713,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut inheriting,
         &state,
         &config.targets["podman"],
+        None,
     ));
     assert_eq!(inheriting.resource_allocation, container_size(16, 32));
 
@@ -6724,6 +6730,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut remembered,
         &state,
         &config.targets["podman"],
+        None,
     );
     assert_eq!(remembered.resource_allocation, container_size(12, 24));
 
@@ -6744,6 +6751,7 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut same_size,
         &state,
         &config.targets["podman"],
+        None,
     ));
     assert!(
         super::move_in_place_for_record(
@@ -6781,11 +6789,59 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         &mut legacy_cleared,
         &state,
         &config.targets["podman"],
+        None,
     );
     assert!(
         !super::move_in_place_for_record(&legacy, &legacy_cleared, &config.targets, false, None,)
             .unwrap()
     );
+
+    // A Move sealed by a build that recorded inherited sizing separately
+    // stores no allocation at all. Preparation must leave that record exactly
+    // as sealed: execution re-prepares it and refuses a selection that
+    // differs, so resolving it here would make the retained Move impossible
+    // to retry after an upgrade.
+    let mut legacy_sealed = selection("podman", None, false);
+    let mut retained = prepared_operation(&legacy_sealed);
+    retained.in_place = false;
+    let mut retried_selection = selection("podman", None, false);
+    super::reconcile_retry_resource_selection(&legacy_sealed, false, &mut retried_selection);
+    assert!(!super::resolve_move_destination_size(
+        &sized_source(container_size(16, 32)),
+        &mut retried_selection,
+        &state,
+        &config.targets["podman"],
+        Some(&retained),
+    ));
+    assert_eq!(
+        retried_selection, legacy_sealed,
+        "a sealed selection is not rewritten, so the retry can run"
+    );
+    // The same Move re-prepared with its own sealed selection keeps matching.
+    assert_eq!(retried_selection, retained.selection);
+    // A sealed clear request is part of that record too.
+    legacy_sealed.clear_resource_allocation = true;
+    retained.selection = legacy_sealed.clone();
+    let mut cleared_retry = selection("podman", None, true);
+    super::reconcile_retry_resource_selection(&legacy_sealed, false, &mut cleared_retry);
+    super::resolve_move_destination_size(
+        &sized_source(container_size(16, 32)),
+        &mut cleared_retry,
+        &state,
+        &config.targets["podman"],
+        Some(&retained),
+    );
+    assert_eq!(cleared_retry, retained.selection);
+    // Without a retained Move the same request resolves as it always does.
+    let mut fresh = selection("podman", None, true);
+    assert!(super::resolve_move_destination_size(
+        &sized_source(container_size(16, 32)),
+        &mut fresh,
+        &state,
+        &config.targets["podman"],
+        None,
+    ));
+    assert_eq!(fresh.resource_allocation, container_size(12, 24));
 
     // Retrying the same command after a container Move was sealed carries the
     // sealed default, so the retry is accepted rather than refused as a
