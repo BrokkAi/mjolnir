@@ -2350,6 +2350,35 @@ pub(super) fn advance_viewed_through_event_ordinal_to(
     Ok(receipt)
 }
 
+/// The attention projection publishes a question only after this write commits.
+pub(crate) fn advance_questions_shown_through(session_id: &str, through: u64) -> Result<u64> {
+    let session_id = session_id.to_owned();
+    submit_database_write("advance_questions_shown_through", move |_| {
+        advance_questions_shown_through_to(&database_path(), &session_id, through)
+    })
+}
+
+pub(super) fn advance_questions_shown_through_to(
+    path: &Path,
+    session_id: &str,
+    through: u64,
+) -> Result<u64> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
+        "UPDATE sessions SET questions_shown_through = max(questions_shown_through, ?2)
+         WHERE session_id = ?1",
+        params![session_id, through],
+    )?;
+    let receipt = tx.query_row(
+        "SELECT questions_shown_through FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    tx.commit()?;
+    Ok(receipt)
+}
+
 /// Decode a stored transcript body, merging runs of streamed text chunks.
 ///
 /// Rows written before streamed text was merged on the way in hold one chunk

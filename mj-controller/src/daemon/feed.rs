@@ -14,6 +14,7 @@ type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
     capacity: super::capacity::ContainerCapacityProjection,
+    pub(super) question_advances: BTreeMap<String, u64>,
     incarnation: String,
     sequence: u64,
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
@@ -336,7 +337,12 @@ impl RuntimeState {
             history.full.metadata.launch_recency.clone()
         };
         let mut source = full.clone();
-        super::attention::update(&history.attention_source, &mut full, committed.as_deref());
+        let question_advances =
+            super::attention::update(&history.attention_source, &mut full, committed.as_deref());
+        for (id, through) in question_advances {
+            let pending = history.question_advances.entry(id).or_default();
+            *pending = (*pending).max(through);
+        }
         // Preserve decorated rows as well as the attention tree across polls.
         let mut sessions = history.full.sessions.clone();
         for (id, view) in history.attention_source.sessions.changes(&source.sessions) {

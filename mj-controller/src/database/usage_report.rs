@@ -331,7 +331,8 @@ mod tests {
         // Reconstruct the previous revision, with a turn written before the index.
         super::super::legacy_schema::ensure_session_container_override_columns(&connection)?;
         connection.execute_batch(
-            "DROP INDEX session_turn_usage_completed_time;
+            "ALTER TABLE sessions DROP COLUMN questions_shown_through;
+             DROP INDEX session_turn_usage_completed_time;
              DROP INDEX materialized_sessions_active_usage;
              DELETE FROM schema_migrations WHERE version>=125;
              UPDATE schema_compatibility SET minimum_compatible_version=124;
@@ -433,7 +434,8 @@ mod tests {
         }
         let connection = open(&path)?;
         connection.execute_batch(
-            "DROP TRIGGER subagent_accounting_kind_insert;
+            "ALTER TABLE sessions DROP COLUMN questions_shown_through;
+             DROP TRIGGER subagent_accounting_kind_insert;
              DROP TRIGGER subagent_accounting_kind_update;
              ALTER TABLE subagent_accounting DROP COLUMN kind;
              DELETE FROM schema_migrations WHERE version>134;

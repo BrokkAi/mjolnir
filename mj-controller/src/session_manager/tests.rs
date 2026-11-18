@@ -3374,6 +3374,7 @@ pub(crate) fn register_leased_relay_session() {
         created_at: "2026-08-12T00:00:00Z".into(),
         updated_at: "2026-08-12T00:00:00Z".into(),
         viewed_through_event_ordinal: 0,
+        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,

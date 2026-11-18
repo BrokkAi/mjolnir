@@ -580,6 +580,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         created_at: "2026-08-12T00:00:00Z".into(),
         updated_at: "2026-08-12T01:00:00Z".into(),
         viewed_through_event_ordinal: 7,
+        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,

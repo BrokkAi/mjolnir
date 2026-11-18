@@ -1766,6 +1766,7 @@ pub(crate) fn runtime_test_session(
         created_at: "2026-09-03T00:00:00Z".into(),
         updated_at: "2026-09-03T00:00:00Z".into(),
         viewed_through_event_ordinal: 0,
+        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
@@ -15243,6 +15244,33 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .publish_session("session-1".into(), question_view(false))
         .await
         .unwrap();
+    let held = state.runtime_publication().unwrap();
+    assert_eq!(held.records["session-1"].questions_shown_through, 0);
+    assert_eq!(
+        held.metadata.notification_cards.as_ref().unwrap()["session-1"].badge,
+        NotificationKind::Important
+    );
+    let cancellation = CancellationToken::new();
+    let persistence = tokio::spawn(super::attention::prune_read_notifications(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut revisions = state.revisions.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            revisions.borrow_and_update();
+            if state.runtime_publication().unwrap().records["session-1"].questions_shown_through
+                == 9
+            {
+                break;
+            }
+            revisions.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("question cursor commits and publishes");
+    cancellation.cancel();
+    persistence.await.unwrap().unwrap();
     let served = state.runtime_publication().unwrap();
     assert_eq!(
         served.metadata.session_attention["session-1"],

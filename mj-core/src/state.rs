@@ -1733,6 +1733,9 @@ pub struct SessionRecord {
     pub updated_at: String,
     #[serde(default, alias = "detached_after_event_ordinal")]
     pub viewed_through_event_ordinal: u64,
+    /// Questions already shown remain visible until the worker clears its stack.
+    #[serde(default)]
+    pub questions_shown_through: u64,
     /// Unsent chat input carried across a detach, so returning to a session
     /// restores what the user was typing. Empty means no draft.
     #[serde(default, skip_serializing_if = "String::is_empty")]

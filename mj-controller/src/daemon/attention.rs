@@ -27,7 +27,7 @@ pub(super) fn update(
     previous: &RuntimeProjection,
     next: &mut RuntimeProjection,
     committed: Option<&CommittedState>,
-) {
+) -> BTreeMap<String, u64> {
     let global = previous.metadata.config != next.metadata.config
         || previous.metadata.reviews != next.metadata.reviews
         || previous.metadata.lifecycles != next.metadata.lifecycles
@@ -78,7 +78,7 @@ pub(super) fn update(
                 .clone()
                 .unwrap_or_default(),
         );
-        return;
+        return BTreeMap::new();
     }
     for id in ids.clone() {
         for runtime in [previous, &*next] {
@@ -102,6 +102,7 @@ pub(super) fn update(
         holders,
         cards,
         held_questions,
+        question_advances,
     } = project_states(next, ids.clone(), committed);
     next.metadata.form_holders = previous.metadata.form_holders.clone();
     next.metadata.session_attention = previous.metadata.session_attention.clone();
@@ -145,7 +146,8 @@ pub(super) fn update(
             .and_then(|live| live.open_request.as_ref())
         {
             let work = request_hold(next, &id);
-            let held = held_questions.contains(&id);
+            let held = held_questions.contains(&id)
+                && states.get(&id) != Some(&SessionAttention::NeedsInput);
             let was_held = matches!(
                 previous.metadata.session_attention.get(&id),
                 Some(SessionAttention::Working | SessionAttention::Important)
@@ -192,6 +194,7 @@ pub(super) fn update(
         }
     }
     next.metadata.notification_cards = Some(published_cards);
+    question_advances
 }
 
 /// Read receipts are durable before the worker reclaims any entries. The
@@ -208,6 +211,36 @@ pub(super) async fn prune_read_notifications(
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         revisions.borrow_and_update();
+        // Capture also queues advances from the sole question-raising decision.
+        state.runtime_publication()?;
+        let advances = std::mem::take(
+            &mut state
+                .feed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .question_advances,
+        );
+        for (id, through) in advances {
+            let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
+            else {
+                continue;
+            };
+            let state = state.clone();
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let _admission = admission;
+                    crate::database::advance_questions_shown_through(&id, through)
+                })
+                .await;
+                match result {
+                    Ok(Ok(_)) => {
+                        state.publish_revision();
+                    }
+                    Ok(Err(error)) => tracing::error!(%error, "could not persist shown question"),
+                    Err(error) => tracing::error!(%error, "shown question persistence task failed"),
+                }
+            });
+        }
         let (records, views) = {
             let owner = state.owner();
             (
@@ -478,6 +511,7 @@ struct AttentionProjection {
     holders: BTreeMap<String, String>,
     cards: BTreeMap<String, NotificationCard>,
     held_questions: BTreeSet<String>,
+    question_advances: BTreeMap<String, u64>,
 }
 
 fn project_states(
@@ -590,6 +624,7 @@ fn project_states(
     }
     let mut cards = BTreeMap::new();
     let mut held_questions = BTreeSet::new();
+    let mut question_advances = BTreeMap::new();
     let mut attention: BTreeMap<_, _> = ids
         .iter()
         .filter_map(|id| runtime.records.get(id).map(|record| (id, record)))
@@ -650,8 +685,15 @@ fn project_states(
             } else if let Some(live) = live {
                 if let Some(question) = semantic_question(runtime, id) {
                     if request_hold(runtime, id).is_empty() {
-                        raised_question = Some(question);
-                        NeedsInput
+                        if live.supports_notification_stack()
+                            && question.completed_ordinal > record.questions_shown_through
+                        {
+                            question_advances.insert(id.clone(), question.completed_ordinal);
+                            Idle
+                        } else {
+                            raised_question = Some(question);
+                            NeedsInput
+                        }
                     } else {
                         held_questions.insert(id.clone());
                         Working
@@ -815,6 +857,7 @@ fn project_states(
         holders,
         cards,
         held_questions,
+        question_advances,
     }
 }
 
@@ -884,7 +927,9 @@ fn notification_card(
                 NotificationKind::Important => {
                     entry.completed_ordinal > record.viewed_through_event_ordinal
                 }
-                NotificationKind::NeedsInput => raised_question.is_some(),
+                NotificationKind::NeedsInput => {
+                    entry.completed_ordinal <= record.questions_shown_through
+                }
             })
             .cloned()
             .collect();
@@ -944,7 +989,11 @@ fn notification_card(
             .and_then(|_| dismissal(runtime, id, attention));
         (entry.into_iter().collect(), dismissal)
     };
-    let badge = if attention == SessionAttention::NeedsInput {
+    let badge = if attention == SessionAttention::NeedsInput
+        || entries
+            .iter()
+            .any(|entry| entry.kind == NotificationKind::NeedsInput)
+    {
         NotificationKind::NeedsInput
     } else if entries.is_empty() {
         return None;
@@ -1195,7 +1244,12 @@ mod tests {
             .clear();
         next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
         next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
-        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
+        assert_eq!(
+            project_states(&next, next.records.keys().cloned().collect())
+                .question_advances
+                .get("parent"),
+            Some(&10)
+        );
         next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
         next.records.get_mut("parent").unwrap().last_profile = "claude".into();
         child.harness_turn = None;
@@ -1217,7 +1271,29 @@ mod tests {
         let previous = next.clone();
         child.background_commands.clear();
         next.sessions.get_mut("child").unwrap().operational = Some(child.into());
-        update(&previous, &mut next);
+        let advances = super::update(&previous, &mut next, None);
+        assert_eq!(advances.get("parent"), Some(&10));
+        assert!(
+            !next
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .contains_key("parent")
+        );
+        assert!(
+            !crate::web_push::card_entries(&next)
+                .unwrap()
+                .values()
+                .any(|entry| entry.session == "parent")
+        );
+        // Committed cursor publication, never the eligibility decision, exposes it.
+        let before_commit = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .questions_shown_through = 10;
+        update(&before_commit, &mut next);
         assert_eq!(
             next.metadata.session_attention["parent"],
             SessionAttention::NeedsInput
@@ -1251,10 +1327,10 @@ mod tests {
                 .activity_state(),
             mj_core::activity::ActivityState::Background { .. }
         ));
-        assert_eq!(project(&next)["parent"], SessionAttention::Working);
+        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
         next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
         next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
-        assert_eq!(project(&next)["parent"], SessionAttention::Working);
+        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
         // A background command alone never holds, even when judged needed: a
         // monitor or server can outlive any wait and hide the question
         // indefinitely. The worker inferred idle here, as after a needs-input
@@ -1267,6 +1343,53 @@ mod tests {
             Some(mj_core::activity::ActivityState::Idle { since_ms: Some(1) });
         next.sessions.get_mut("parent").unwrap().operational = Some(idle_with_background.into());
         assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
+        for connected in [false, true] {
+            let previous = next.clone();
+            next.sessions.get_mut("child").unwrap().connected = connected;
+            let mut child = mj_core::relay::RelaySnapshot::new("child".into()).operational_state();
+            child.harness_turn = Some(HarnessTurn { started_at_ms: 2 });
+            next.sessions.get_mut("child").unwrap().operational = Some(child.into());
+            update(&previous, &mut next);
+            assert_eq!(
+                next.metadata.session_attention["parent"],
+                SessionAttention::NeedsInput
+            );
+            assert_eq!(
+                next.metadata.notification_cards.as_ref().unwrap()["parent"].badge,
+                NotificationKind::NeedsInput
+            );
+        }
+        // A later agent-only turn and a missing child view cannot hide it either.
+        let previous = next.clone();
+        next.sessions.remove("child");
+        let mut working = (*next.sessions["parent"].operational.clone().unwrap()).clone();
+        working.harness_turn = Some(HarnessTurn { started_at_ms: 3 });
+        working.activity = None;
+        next.sessions.get_mut("parent").unwrap().operational = Some(working.clone().into());
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::NeedsInput
+        );
+        assert_eq!(crate::web_push::card_entries(&next).unwrap().len(), 1);
+        // Clear and person admission both publish an empty worker stack.
+        let previous = next.clone();
+        working.notification_stack = Default::default();
+        working.open_request = None;
+        next.sessions.get_mut("parent").unwrap().operational = Some(working.into());
+        update(&previous, &mut next);
+        assert!(
+            !next
+                .metadata
+                .notification_cards
+                .as_ref()
+                .unwrap()
+                .contains_key("parent")
+        );
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Working
+        );
     }
 
     // Hard-won: 8dd7f6384: native requests shared one push identity and review verdicts had none.
@@ -1521,6 +1644,12 @@ mod tests {
             .notifications_ignored = false;
         worker.harness_turn = None;
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
+        let uncommitted = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(uncommitted.entries.len(), 1);
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .questions_shown_through = 11;
         let mixed = publish(&mut previous, &mut next).unwrap();
         assert_eq!(mixed.entries.len(), 2);
         assert_eq!(mixed.since_ms, 20);
@@ -1531,7 +1660,9 @@ mod tests {
             .get_mut("parent")
             .unwrap()
             .viewed_through_event_ordinal = 12;
-        assert!(publish(&mut previous, &mut next).is_none());
+        let working = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(working.badge, NotificationKind::NeedsInput);
+        assert_eq!(working.entries, &worker.notification_stack.entries[1..]);
 
         worker.harness_turn = None;
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());

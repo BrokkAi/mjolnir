@@ -2084,6 +2084,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         created_at: "2026-08-14T00:00:00Z".into(),
         updated_at: "2026-08-14T00:00:00Z".into(),
         viewed_through_event_ordinal,
+        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,

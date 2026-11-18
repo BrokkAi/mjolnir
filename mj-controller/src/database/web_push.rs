@@ -749,10 +749,11 @@ mod tests {
         let subscription = subscription();
         push_subscribe_with(&db, subscription.clone()).unwrap();
         db.execute_batch(
-            "DROP TABLE push_entry_deliveries;
+            "ALTER TABLE sessions DROP COLUMN questions_shown_through;
+             DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;
              DROP TABLE push_entry_cutover;
-             DELETE FROM schema_migrations WHERE version=138;
+             DELETE FROM schema_migrations WHERE version>=138;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )
@@ -763,7 +764,7 @@ mod tests {
         ).unwrap();
         schema::migrate_schema(&db).unwrap();
         let schema = schema::read_schema_state(&db).unwrap();
-        assert_eq!(schema.revision, 138);
+        assert_eq!(schema.revision, super::super::SCHEMA_VERSION);
         schema.ensure_supported_by(137).unwrap();
 
         let mut runtime = runtime(true);
