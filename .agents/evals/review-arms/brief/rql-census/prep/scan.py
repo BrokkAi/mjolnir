@@ -309,6 +309,7 @@ def main():
     import hashlib
     population = hashlib.sha256("\n".join(sorted(f"{c['repo']} {c['hash']}" for c in cands)).encode()).hexdigest()
     json.dump({"candidates": len(cands), "candidates_sha256": population,
+               "cell_sizes": {f"{repo} {w}": len(cs) for (repo, w), cs in sorted(cells.items())},
                "dated": sum(1 for c in cands if c["window"]),
                "sample": len(sample), "todo": len(todo),
                "sample_ids": sorted(f"{c['repo']} {c['hash']}" for c in sample),

@@ -85,6 +85,10 @@ def main():
     population = hashlib.sha256("\n".join(sorted(f"{c['repo']} {c['hash']}" for c in cands)).encode()).hexdigest()
     if plan.get("candidates_sha256") != population:
         sys.exit("plan.json was drawn from a different candidate population; rerun scan.py on this file")
+    # The sample must also have been drawn from the same dated cells the ranker scales by.
+    sizes = {f"{repo} {w}": k for (repo, w), k in n.items()}
+    if plan.get("cell_sizes") != sizes:
+        sys.exit("plan.json was drawn before the current dates; rerun scan.py to redraw the sample")
     current = set(plan["sample_ids"])
     present = set()
     for l in open(scan / "blame.jsonl"):
