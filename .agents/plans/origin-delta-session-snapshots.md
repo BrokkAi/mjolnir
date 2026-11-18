@@ -854,10 +854,11 @@ No new external dependencies. Git 2.30 or newer (Debian 11's version) is the min
 In `mj-checkpoint/src/snapshot.rs`, define:
 
     pub struct WorkspaceSnapshot {
-        pub origin: Option<SnapshotRemoteUrl>,     // None only for a raw checkout without origin
-        // SnapshotRemoteUrl { configured: String, effective: String }: both redacted; effective == configured when nothing rewrote it
+        pub origin: Option<SnapshotUrlRewrite>,    // None only for a raw checkout without origin
+        // SnapshotUrlRewrite { configured: String, effective: String }: both redacted; effective == configured when nothing rewrote it
         pub object_format: String,                 // "sha1" or "sha256", from `git rev-parse --show-object-format`; restore runs `git init --object-format`
-        pub push: SnapshotPush,                    // Explicit(Vec<SnapshotRemoteUrl>) | Fallback { effective: String }: explicit pushurls, or the fetch-URL fallback and where it really pushes
+        pub push_urls: Vec<SnapshotUrlRewrite>,    // the explicit pushurls, or the fetch-URL fallback destinations
+        pub explicit_push_urls: bool,              // whether the source set remote.origin.pushurl
         pub head: SnapshotHead,                    // Branch { name, commit } | Detached(commit); every checkout's HEAD carries its commit
         pub refs: BTreeMap<String, String>,        // full ref name -> object id
         pub stash: Vec<SnapshotStashEntry>,        // newest first: commit, message
