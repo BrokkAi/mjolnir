@@ -2066,6 +2066,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
 
     let result = connection
         .sync_project_memory(
+            &target.spec,
             &mj_core::config::Config::default(),
             tokio_util::sync::CancellationToken::new(),
         )
