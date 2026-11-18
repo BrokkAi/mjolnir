@@ -154,7 +154,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Rationale: the user wants agents using Mjolnir's tooling to understand that Move will lose data unless they stage it, and asked for the rules to be in the `AGENTS.md` Mjolnir creates.
   Date/Author: 2026-11-18, user.
 
-- Decision: each session gets `.mj/keep/` at the top of its checkout, a Mjolnir-owned scratch directory exposed to the agent as `MJ_KEEP_DIR` and excluded from Git through `.git/info/exclude`, as `.mj/agents/` already is.
+- Decision: each session gets `.mj/keep/<session-id>/` at the top of its checkout, a Mjolnir-owned scratch directory exposed to the agent as `MJ_KEEP_DIR` and excluded from Git through `.git/info/exclude`, as `.mj/agents/` already is. The per-session subdirectory means two raw sessions sharing a checkout never carry each other's scratch, and Mjolnir never treats a pre-existing user directory as its own. (Where the rest of this plan says `.mj/keep/`, it means the session's own subdirectory.)
   - A cross-target Move carries it to the destination by direct transfer.
   - Suspend never saves it.
   - Suspend's preflight lists it with its size among the things that will not be kept, under the same consent as untracked files.
@@ -185,7 +185,9 @@ To see it working, use an isolated test instance named `snapshot-test`:
   - Earlier, when a harness reports a successful context compaction. Claude and Codex report one today; Muse is added after its pinned wire shape is verified.
 
   The compaction boundary is the last completed turn that ended before the compaction started. It excludes unfinished tool calls, failed or no-op compactions, replayed events and child-session events. There is no age-based or count-based trigger.
-  Rationale: the user asked to tie compaction to harness compaction. A numeric age or count would be a speculative cap, which `AGENTS.md` forbids. The full tool output remains in the agent's own files on the target and in the suspend snapshot.
+  Rationale: the user asked to tie compaction to harness compaction. A numeric age or count would be a speculative cap, which `AGENTS.md` forbids.
+
+  Accepted loss: the snapshot's canonical transcript is built from this projection. So once a tool call before a harness compaction is compacted, Mjolnir keeps only its summary (tool, target, result and diffstat) everywhere it keeps the transcript. The full body survives only where the harness's own native history kept it, and that history travels in the snapshot. These calls are already out of the agent's context. The user accepted the summary-only view for them when choosing this trigger.
   Date/Author: 2026-11-18, user and plan author.
 
 - Decision: the worker's relay journal is retained until the daemon acknowledges it, no longer also until a checkpoint covers it. This depends on the Milestone 4 verification that nothing needs journal history below the acknowledgement.
@@ -209,7 +211,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Date/Author: 2026-11-18, plan author.
 
 - Decision: add `mj purge-untracked [--session <id> | --all] [--dry-run]` to reclaim space once the user no longer needs old untracked payloads.
-  - For each suspended session whose archive was written in an old format, it rewrites the archive without its untracked-file payloads and saved operation state, keeping everything else byte for byte.
+  - For each suspended session whose archive was written in an old format, it rewrites the archive without its untracked-file payloads, keeping everything else byte for byte.
   - It verifies the new archive, replaces the file atomically, and updates the stored SHA-256 in the same transaction.
   - It also deletes Move sources that were retained only to hold excluded untracked files.
   - It prints the space reclaimed per session. `--dry-run` reports without changing anything.
@@ -328,6 +330,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
       - Untracked items are paths and stash untracked payloads. `UntrackedConsent::None` covers none of them, `Any` (the CLI flag) covers all, and `Shown(items)` (a dialog) covers only what the dialog displayed. An item that has since disappeared is fine; a new one is not.
       - In a managed checkout, each operation, identified by checkout path and kind, must be covered by `OperationConsent::Any` or by a matching `Shown` entry.
       - If anything is not covered, capture changes nothing and fails with `SnapshotRefused::Untracked(items)` or `SnapshotRefused::OperationInProgress(path, kind)`.
+      - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has tracked changes, or its checked-out commit differs from the gitlink without being reachable from the submodule's remote-tracking refs, capture refuses with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
 
       Capture itself is the single decision point, so nothing can appear between a separate check and the capture.
    3. Managed checkouts: run each covered abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
@@ -340,24 +343,24 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 2. **Best-effort `git fetch --prune origin`.** On failure, set `remote_refs_stale` and continue.
 3. **Pin the cut.** Read every ref once with `git for-each-ref`, plus each checkout's HEAD: a branch name or a detached commit, or the pre-operation position from step 1. Select the refs to keep:
    - **Managed checkout:** every ref under `refs/heads`, `refs/tags` and `refs/notes`, plus the durable Mjolnir refs under `refs/mj/` that the pre-push hook and review read (reviewed, overridden and push-base). Use the predicate today's clone capture applies for "durable Mjolnir refs" (`RepositoryMetadata::saved_refs`). Also the stash list.
-   - **Raw checkout:** only the refs whose value differs from the launch record (Milestone 2 writes that record), plus HEAD, plus stash entries absent from the launch record.
+   - **Raw checkout:** the refs whose value differs from the launch record (Milestone 2 writes that record), plus the branch HEAD is on even when it is unchanged, plus stash entries absent from the launch record.
 
    The stash list is read with `git stash list --format=%H%x00%gs`, so the messages can be recreated.
 4. **Working state.** Run `git stash create` in each checkout not marked `working_state_skipped`. Empty output means a clean state; otherwise the result is a commit whose first parent is HEAD and whose second records the index. For each kept stash entry with a third parent, write a replacement without it, `git commit-tree <stash>^{tree} -p <stash>^1 -p <stash>^2 -m <message>`. It keeps the entry's tracked content; its untracked payload was consented to in step 1.
 5. **Verify the cut.** Each working-state commit's first parent must equal its checkout's pinned HEAD, and a second `for-each-ref` must match the pinned set. If anything moved (possible during a barrier-free export), start again from step 3 after a short backoff; the change in state is what ends the loop. If nothing is stable after a few attempts, fail with a clear error. Under the suspend barrier, the first pass succeeds.
-6. **Pack the delta.** Run `git pack-objects --revs --stdout`, feeding it on standard input:
-   - the pinned SHAs: kept refs, every detached HEAD, working-state commits and kept (or replaced) stash commits;
+6. **Pack the delta.** Run `git pack-objects --revs <basename>`, which writes `<basename>-<hash>.pack` and its `.idx` straight to disk (a pack can be larger than memory should hold), feeding it on standard input:
+   - the pinned SHAs: kept refs, every checkout's HEAD commit (attached or detached, primary and nested), working-state commits, and kept (or replaced) stash commits. A raw session that started on a branch with commits origin lacks, and only edited tracked files, depends on those commits;
    - a `--not` line;
    - the exclusions: every `refs/remotes/origin/*` SHA, plus local tags whose SHA matches a tag that `git ls-remote --tags origin` reports when origin is reachable. A fresh clone fetches those tags, so their history need not travel.
 
    The result is a non-thin pack containing only what origin lacks; it may be empty. Packing from SHAs writes no ref at all. Two raw sessions sharing a Git common directory, or an export overlapping a suspend, therefore cannot disturb each other, and a crash leaves nothing to clean up.
-7. **Return a `WorkspaceSnapshot`:** the origin URL and push URLs, HEAD, the kept refs with their object IDs, the stash list (commits and messages), the working-state commit, the nested worktrees, `working_state_skipped`, `remote_refs_stale`, and the pack path.
+7. **Return a `WorkspaceSnapshot`:** the origin URL and push URLs, both passed through the existing `redact_origin_credentials` so no embedded token enters a snapshot, cache or destination, HEAD, the kept refs with their object IDs, the stash list (commits and messages), the working-state commit, the nested worktrees, `working_state_skipped`, `remote_refs_stale`, and the pack path.
 
 **Restore**, into a target directory:
 
 1. Clone origin, then run `git fetch --tags origin`, so every tag the exclusions relied on is present. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
-2. Set `remote.origin.pushurl` to each saved push URL, as today's network-workspace restore does, so a workspace that reads from upstream and pushes to a fork keeps doing so.
-3. Load the pack with `git index-pack --stdin`. Then check with `git cat-file -e` that every object the snapshot names exists.
+2. Set `remote.origin.pushurl` to each saved (redacted) push URL; the destination's credential helper supplies credentials, as today's network-workspace restore does, so a workspace that reads from upstream and pushes to a fork keeps doing so.
+3. Copy the pack into `.git/objects/pack/` and run `git index-pack` on that file. After the refs and stash entries are created, verify the whole object graph: `git rev-list --objects` over every saved tip, HEAD, working-state commit and stash commit must succeed. Checking only the tips is not enough, because origin may have rewritten history so that an excluded parent, tree or blob is gone. On failure, nothing is reported as restored, so a Move never retires its source over an incomplete destination.
 4. Create every saved ref at its object ID.
 5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
 6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
@@ -385,6 +388,7 @@ The suspend warnings in Milestone 3 present this result.
 - a nested linked worktree with an unpushed detached commit and an unstaged edit;
 - a merge with conflicts, aborted in a managed checkout and left alone in a raw one;
 - a raw checkout where a user branch that existed at launch is excluded;
+- a raw checkout on a pre-existing unpushed branch with only working changes, restored onto a fresh clone;
 - stale remote-tracking refs after origin becomes unreachable (rename the bare directory), still producing a restorable snapshot while origin is back;
 - origin force-pushed after capture so a recorded object is gone, with a clear error.
 - a clean managed checkout whose only unpushed commit is reachable from a detached HEAD;
@@ -393,6 +397,10 @@ The suspend warnings in Milestone 3 present this result.
 - a raw checkout mid-rebase, which must record the original branch as HEAD;
 - a raw checkout without an origin remote, which must capture HEAD only and be refused by restore;
 - a `git stash -u` entry, whose tracked part restores while its untracked file is gone and required consent;
+- a pack larger than 64 KB, written and loaded through files;
+- an origin URL with an embedded token, which must not appear in the snapshot;
+- a dirty submodule, which must be refused;
+- an inventory taken during a conflicted merge, which must succeed without running `git stash create`;
 - a dialog-style `Shown` consent for one file while a second appears, which must be refused naming only the new file, with nothing changed;
 - a nested worktree in the middle of a multi-commit cherry-pick, whose abort moves its branch; the snapshot records the post-abort tip;
 - an origin workspace with a separate push URL, which keeps it after restore;
@@ -422,7 +430,7 @@ Before relying on this, verify that a current worker binary's export command can
 
 - **Raw session on its own raw target:** do not restore the repository half. The checkout is authoritative; this matches today's behavior.
 - **Raw session on another target (raw-to-workspace conversion):** provision a managed clone of origin there and restore the snapshot into it.
-  - A raw session suspended by an earlier release has a `MetadataOnly` archive without tracked edits, and its conversion has always read them from the raw checkout at resume. Keep that behavior for those archives, but produce the snapshot with Milestone 1's `capture_workspace_snapshot`, run on the raw checkout at resume time (with no launch record), instead of the old code.
+  - A raw session suspended by an earlier release has a `MetadataOnly` archive without tracked edits, and its conversion has always read them from the raw checkout at resume. Keep that behavior for those archives, but produce the snapshot with Milestone 1's `capture_workspace_snapshot`, run on the raw checkout at resume time (with no launch record and `UntrackedConsent::Any`), instead of the old code. The old conversion also carried untracked files. The new one does not, but nothing is lost: the raw checkout is left untouched and keeps them. The resume notice lists the untracked files that stayed behind in the raw checkout.
   - Then delete the old resume-time snapshot code (`raw_checkout_snapshot`, `conversion_checkpoint`, around lines 2057–2110).
   - When the raw checkout has no origin, the resume dialogs do not offer other targets for that session and state the reason.
 - **Workspace to raw:** create a new managed clone on the raw target and restore into it. `WorkspaceToRawConversion` in `worktree.rs` (around line 981) currently creates a linked worktree on `mj/<session>`; change it to create a clone.
@@ -471,14 +479,15 @@ Aborting an operation needs its own consent because it discards conflict resolut
 **Surfaces.**
 
 - **CLI:** `mj suspend --session <id> [--discard-untracked] [--abort-operation] [--without-checkpoint] [--dry-run] [--json]`.
-- **Terminal UI:** the suspend dialog (`Confirmation::SuspendSession` in `mj-tui/src/dialogs.rs`) gains the untracked list (truncated with a count) and the operation warning. Its buttons are "Cancel" and "Continue anyway" when there is something to warn about, and "Cancel" and "Suspend session" otherwise. The "suspend without dialog when idle" shortcut in `actions.rs` (around line 2018) applies only when the preflight finds nothing to warn about.
+- **Terminal UI:** the suspend dialog (`Confirmation::SuspendSession` in `mj-tui/src/dialogs.rs`) gains the untracked list and the operation warning. When the list is longer than fits, it shows the first entries and "and N more (v to view all)", which opens a scrollable view of the full list. The button reads "Discard N files and continue", so the count is always visible. Its buttons are "Cancel" and "Continue anyway" when there is something to warn about, and "Cancel" and "Suspend session" otherwise. The "suspend without dialog when idle" shortcut in `actions.rs` (around line 2018) applies only when the preflight finds nothing to warn about.
 - **Web viewer:** replace the native `confirm()` with a custom dialog built from the existing Destroy dialog's shell (`viewer.js`, around lines 6533–6583), with the same content and buttons.
 - **Move:** `mj move` and the terminal and web Move dialogs run the same preflight. They require the same consent through `--discard-untracked` and `--abort-operation`, or "Continue anyway", since a cross-target Move loses untracked files exactly as suspend does. In-place profile switches skip the warning because they keep the environment.
 
-**The keep directory.** Create `.mj/keep/` when a session launches. Add `/.mj/keep/` to `.git/info/exclude` with the same helper that excludes `/.mj/agents/` (see `mj-core/src/subagent.rs`, around line 1140), and export `MJ_KEEP_DIR` to the harness. The preflight reports the directory's total size. On suspend of a managed checkout it is listed among the things that will not be kept, under the same consent; Milestone 5 carries it on Move.
+**The keep directory.** Create `.mj/keep/<session-id>/` when a session launches. Add `/.mj/keep/` to `.git/info/exclude` with the same helper that excludes `/.mj/agents/` (see `mj-core/src/subagent.rs`, around line 1140), and export `MJ_KEEP_DIR` to the harness. The preflight reports the directory's total size. On suspend of a managed checkout it is listed among the things that will not be kept, under the same consent; Milestone 5 carries it on Move.
 
 **Dry run.** `mj suspend --dry-run` and `mj move --dry-run` call the preflight plus a size estimate and change nothing:
-- The Git delta size comes from `git rev-list --objects --disk-usage <selected refs, detached HEAD, stash commits and working-state commit> --not --remotes=origin`. The working-state commit is made by running `git stash create`. That writes unreachable objects but changes no ref, index or file, so the estimate includes the staged and unstaged content capture would save; a pushed branch with large tracked edits does not look empty.
+- While an operation is in progress, the dry run reports the operation, the untracked items and the sizes it can measure, and says "Git size estimate unavailable during <operation>". It does not run `git stash create`, which fails on an unmerged index and could not estimate the post-abort state anyway.
+- Otherwise, the Git delta size comes from `git rev-list --objects --disk-usage <selected refs, detached HEAD, stash commits and working-state commit> --not --remotes=origin`. The working-state commit is made by running `git stash create`. That writes unreachable objects but changes no ref, index or file, so the estimate includes the staged and unstaged content capture would save; a pushed branch with large tracked edits does not look empty.
 - The session-state size is the sum of the native and canonical files that capture would read.
 - Move also reports each top-level entry of `.mj/keep/` with its size, minus any `--skip` paths, and the transfer route Milestone 5's probe would choose.
 
@@ -502,7 +511,7 @@ For the staged instructions file, add a new asset, `mj-core/assets/session-state
     unless you `git add` them first. Git-ignored files are never kept.
 
     Put scratch you will need after a move to another machine (evidence,
-    receipts, results) in `$MJ_KEEP_DIR` (`.mj/keep/` in the checkout). It
+    receipts, results) in `$MJ_KEEP_DIR`. It
     travels with Move but is not saved when the session is suspended. Never put
     build outputs or other rebuildable files there.
 
@@ -537,8 +546,10 @@ Remove the terminal UI's "Discard changes since checkpoint…" and "Ignore and S
 
 - Automatic recovery copies: `RecoveryCoordinator` and the snapshot observations that feed it (`mj-daemon/src/recovery.rs`, `mj-daemon/src/daemon/snapshot.rs`). `mj-daemon/src/daemon/continuation.rs` borrows `AUTO_CHECKPOINT_INTERVAL` as the ceiling of its quota-retry backoff; give it its own named constant with a comment explaining the value.
 - The explicit checkpoint action: the daemon action, the HTTP route, the terminal UI and web commands, and the views (`actions.rs` around line 540, `views.rs` around line 361, controller `checkpoint/capture.rs`).
-- The checkpoint taken by bundle export. Export of a live session computes Milestone 1's snapshot directly through the worker, without the barrier and without touching the checkpoint row. Capture's pinned-cut check (step 5) keeps the exported refs and working state consistent while the agent keeps working, and the export converts the pack plus pinned refs into the `git bundle` users expect. Export of a stopped session reads its suspend snapshot.
+- The checkpoint taken by bundle export. Export of a live session computes Milestone 1's snapshot directly through the worker, without the barrier and without touching the checkpoint row. Capture's pinned-cut check (step 5) keeps the exported refs and working state consistent while the agent keeps working, The export keeps its current range (the session's commits beyond its base, as today's export computes it), independent of the snapshot's origin exclusions. A session that pushed everything still exports its work. It builds the user-facing `git bundle` from the pinned refs over that range. Export of a stopped session reads its suspend snapshot plus a clone of origin for the part origin holds.
 - Checkpoint-based agent restart: `mj-daemon/src/daemon/restart.rs` around line 449, `lifecycle.rs` around line 183, and the restart intent's checkpoint fields in `mj-store/src/database/session_restart.rs`. Restart stops the harness and starts it again in the same worker from its native state, as worker upgrades already do (`mj-controller/src/controller/worker_restart.rs`). First read why restart used checkpoint-and-restore: the likely reason is model or harness switches (`/model`). Keep that case working through the harness's own resume; record what you find in Surprises & Discoveries.
+
+  An upgrade can find a Restart already accepted and past its checkpoint phase: the old harness is stopped, and its recovery archive is referenced only by the persisted restart intent. Keep a reader and completion path for those old intents, restoring from the referenced archive exactly as today, so the accepted restart finishes. Delete only the path that creates new checkpoint-based restarts. Add an upgrade regression.
 
 **Remove the live-copy machinery.** In `mj-controller/src/controller/checkpoint/`, remove:
 
@@ -560,7 +571,9 @@ Leave `checkpoint_operations` rows in the store unwritten rather than dropping t
 2. If nothing does, make `retained_through` equal `acknowledged_through` and delete the recovery-floor fields' advancement. Keep reading the stored fields, so older snapshots decode.
 3. If a specific record is needed, give that record its own retention instead of holding the whole journal.
 
-**Tool-output compaction.** Call `compact_materialized_transcript_through` in two places:
+**Tool-output compaction.** Suspend builds the snapshot's canonical transcript from the daemon's projection. Compacting the projection on a harness signal therefore also removes full tool bodies from later snapshots. Once journal retention follows acknowledgement, the relay no longer holds them either. This plan accepts that, and says so in the Decision Log: for tool calls before a successful harness compaction, which are already out of the agent's context, Mjolnir keeps the summary (tool, target, result and diffstat). The full body survives only where the harness's own native history kept it, and that history travels in the snapshot.
+
+Call `compact_materialized_transcript_through` in two places:
 
 - at suspend, after the archive is verified (it already runs there);
 - when the daemon's projection ingests a completed tool card that carries `_meta.jetbrains.air.contextCompaction` (Claude, Codex) with a successful completion. The boundary is the position of the last completed turn that ended before that card's start event. Exclude cards that failed or reported nothing to compact, cards replayed from history, and child sessions' events. Items whose tool call was not completed by the boundary are left alone.
@@ -591,7 +604,7 @@ The archive is not installed on the daemon as the session's checkpoint; the daem
 
 1. **Same host.** When both targets resolve to the same machine (the same local host, or equal SSH host identity), run one host-local command that pipes the source's export into the destination's import through the engines' `exec -i` wrappers. No byte leaves the host.
 2. **Direct between hosts.**
-   1. Generate an ed25519 keypair on the daemon.
+   1. Generate an ed25519 keypair on the daemon for this transfer. Copy the private key over the daemon's existing SSH connection into the operation's stage directory on the initiating host (the source for a push, the destination for a pull), with mode 0600. Record its path in the move's durable state before writing it, and delete it on every exit path and in startup reconciliation, like the other grants. That host's `ssh` client uses it with `-i` and `IdentitiesOnly=yes`. The key is useful only for one restricted command from one address.
    2. Append its public key to the destination's `~/.ssh/authorized_keys` with `restrict,from="<source address>",command="<worker import command for this operation>"`.
    3. When the destination is a persistent EC2 Podman host whose security group does not admit the source, add an ingress rule for the source's address as a /32 (use the EC2 helpers in `mj-cli/src/ec2.rs`, around lines 878–918, moved into a shared crate if needed).
    4. From the source host, run `ssh` to the destination with that key and stream the archive.
@@ -600,7 +613,11 @@ The archive is not installed on the daemon as the session's checkpoint; the daem
 
    Before installing either resource, persist its ownership in the move's durable state: the host and the key's comment (`mj-move-<operation-id>`), and the EC2 security group, rule and address.
    - **Keys** are per move (each has its own line and comment), so each move removes its own.
-   - **A security-group rule can be shared:** AWS rejects a duplicate rule, so two concurrent moves between the same hosts need the same one. One store transaction serializes the rule's lifetime. A move records itself as a user of the rule, and authorizes the rule only if no other active move records it. On release, the move removes its record, and revokes the rule only if no other active move still records it. The decision is made inside the transaction that reads the other moves' records, so no move can see a rule that another is about to revoke.
+   - **A security-group rule can be shared:** AWS rejects a duplicate rule, so two concurrent moves between the same hosts need the same one. A SQLite transaction cannot roll back an AWS call, so the grant has durable states, and every AWS call happens between two committed state changes.
+     - **Install:** in one transaction, the move records itself as a user of the rule. If the rule has no other users, the move marks it `installing`. Mjolnir then authorizes the rule with a description naming Mjolnir (`mj-move-grant`), and in a second transaction marks it `installed`.
+     - **Pre-existing rules:** if AWS reports a duplicate, the rule already existed. If its description is not Mjolnir's, it belongs to the user: record it as `external`, use it, and never revoke it.
+     - **Release:** in one transaction, the move removes itself as a user. If it was the last user of a Mjolnir-created rule, it marks the rule `removing`. It then revokes the rule and, in a second transaction, deletes the record.
+     - **Startup reconciliation** queries AWS for each recorded rule. An `installing` rule becomes `installed` if a rule with Mjolnir's description exists, and is otherwise dropped. A `removing` rule is revoked again if present and then dropped. Users whose moves are finished, or that resumed through another route, are released as above.
    - **At startup,** the daemon releases the records of moves that are finished, or that resumed through a different route, by the same rule, deleting key lines by comment.
 
    This follows the `AGENTS.md` rule that daemon background work must be resumable from durable state.
@@ -610,14 +627,14 @@ Record which route each move used in the move's durable state, so a daemon resta
 
 **Keep directory on Move.** After the archive, transfer `.mj/keep/` as a tar stream over the same route, leaving out the paths named by `--skip`. Skipped paths are deleted when a managed source is retired; in a raw checkout they stay on disk. `--dry-run`, the CLI confirmation and the Move dialogs say this, listing each skipped path with its size, and passing `--skip` is the consent. Unpack it into the destination checkout's `.mj/keep/` before the agent starts. The keep directory never enters the archive, so it is never stored on the daemon. When the route is the daemon stream it does pass through the daemon's network, and the move's progress shows its size so the user can cancel and rerun with `--skip`.
 
-**Persisted state.** The new `MoveOperation` shape replaces the old one. At startup, an old-format in-flight move is recovered according to its durable phase.
+**Persisted state.** The new `MoveOperation` shape replaces the old one. Older binaries decode `MoveOperation` with `deny_unknown_fields` and treat a decode failure as no intent, so an older daemon opening the store could overlook an active move and the grants it owns. The change is therefore a **breaking** store revision. Advance the migration revision and raise the minimum compatible read and write revision in the same transaction, classified with that reason beside it as `AGENTS.md` requires. Test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. At startup, an old-format in-flight move is recovered according to its durable phase.
 Ownership is decided by the existing recovery classification, not by the phase name alone. Today's recovery already handles the crash window where the destination's session is durably `Running` while the operation still says `ResumingDestination`, and finishes forward there. Keep that classifier and its finish-forward steps as the reader for old records, and delete the rest of the old executor:
 - **The source still owns the session:** roll back to the source with the existing rollback, and send a notice telling the user to run the move again.
 - **The destination owns the session** (including that crash window, `StartingQueue`, and later): finish forward. Retire the source if it is not already gone, complete the exactly-once queue admission, and settle the operation.
 
 Add upgrade regressions for each case, setting the persisted destination owner and the Move phase together.
 
-**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. Resume on the same target checks that directory for the checkpoint's SHA-256 and uses that file when present; otherwise it uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours. It runs at daemon startup and whenever a snapshot is written to that host, and extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also loads the snapshot's pack into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
+**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. Resume on the same target checks that directory for the checkpoint's SHA-256 and uses that file when present; otherwise it uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours, even on a host that receives no further snapshots. Record each cached copy (host and time written) on the session's `session_checkpoints` row: there is one checkpoint per session, so this is one additive, compatible column pair. The daemon then schedules a removal at write time plus 48 hours, rebuilds those timers from the rows at startup, and removes overdue copies immediately. The removal itself extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also loads the snapshot's pack into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
 
 **Tests.**
 
@@ -637,8 +654,8 @@ Add upgrade regressions for each case, setting the persisted destination owner a
 
 **Add `mj purge-untracked [--session <id> | --all] [--dry-run]`.**
 - It is a daemon operation and an HTTP route, run as a supervised background task; the CLI waits for it and prints the result.
-- For each selected session that is suspended, it takes that session's lifecycle admission, so a concurrent Resume, Destroy or suspend cannot race the rewrite. If the session's archive uses an old schema version and holds untracked-file payloads or saved operation state, it streams the archive into a new file without those entries and verifies it with the archive reader.
-- It then installs the new file atomically and updates the `session_checkpoints` SHA-256 in one transaction, and deletes the old file only after that transaction commits.
+- For each selected session that is suspended, it takes that session's lifecycle admission, so a concurrent Resume, Destroy or suspend cannot race the rewrite. If the session's archive uses an old schema version and holds untracked-file payloads, it streams the archive into a new file without them. It leaves saved operation state alone, since restore already ignores it and verifies it with the archive reader.
+- It writes the new archive under a new unique name, then updates both `archive_path` and the SHA-256 of the `session_checkpoints` row in one transaction. It deletes the old file only after that transaction commits.
 - It deletes Move sources retained only for excluded untracked files, through the existing retained-source cleanup. After that, `mj move-sources` has nothing left to manage and is removed in this milestone.
 - It skips sessions that are running or have a new-format archive, saying so.
 - Output is one line per session with the bytes reclaimed, then a total.
@@ -708,15 +725,16 @@ The Git commands at the heart of capture and restore, shown for one managed chec
     git stash list --format=%H%x00%gs             # stash entries to keep
     git ls-remote --tags origin                   # origin tags, when reachable
     printf '%s\n' <feature> <v1> <work> <stash...> --not <origin refs and tags> \
-        | git pack-objects --revs --stdout > snap.pack
+        | git pack-objects --revs snap        # writes snap-<hash>.pack and .idx
 
     git clone <origin> work && cd work && git fetch --tags origin
     git config --add remote.origin.pushurl <push-url>   # per saved push URL
-    git index-pack --stdin < ../snap.pack
+    cp ../snap-<hash>.pack .git/objects/pack/ && git index-pack .git/objects/pack/snap-<hash>.pack
     git update-ref refs/heads/feature <head-commit>
     git stash store -m keepme <stash-entry-commit>
     git symbolic-ref HEAD refs/heads/feature && git reset --hard <head-commit>
     git stash apply --index <work>
+    git rev-list --objects <every saved tip> >/dev/null   # full graph present
 
 
 ## Interfaces and Dependencies
@@ -786,10 +804,11 @@ In `mj-checkpoint/src/snapshot.rs`, define:
 
 In `mj-checkpoint/src/checkpoint.rs`, add `CheckpointRepositoryCapture::OriginDelta { ownership: CheckoutOwnership }` and raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that use it.
 
-The suspend request gains `discard_untracked` (`"any"` or `{"shown": [paths]}`, absent for none), `abort_operations` (`"any"` or `{"shown": [{"path", "kind"}]}`) and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked`, `--abort-operation` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
+The suspend request gains `discard_untracked` (`"any"` or `{"shown": [items]}`, where each item is `{"path": ...}` or `{"stash": <commit>}`; absent for none), `abort_operations` (`"any"` or `{"shown": [{"path", "kind"}]}`) and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked`, `--abort-operation` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
 
     {
       "untracked": [{"path": ..., "bytes": ...}],
+      "untracked_stashes": [{"commit": ..., "message": ...}],   // `git stash -u`/`-a` payloads that will not be kept
       "operations": [...],
       "raw": bool,
       "keep_bytes": ...,
@@ -797,7 +816,7 @@ The suspend request gains `discard_untracked` (`"any"` or `{"shown": [paths]}`, 
       "subagents_not_handed_back": [...]
     }
 
-Workers export `MJ_KEEP_DIR` to the harness, set to the checkout's `.mj/keep/`.
+Workers export `MJ_KEEP_DIR` to the harness, set to the checkout's `.mj/keep/<session-id>/`.
 
 In `mj-controller/src/controller/move_session/transport.rs`, define:
 
@@ -846,3 +865,22 @@ Revision note (2026-11-18, review 3):
 - Restore reapplies push URLs.
 - Old in-flight moves are classified by the existing recovery classifier, including the case where the destination is already running.
 - A shared EC2 security-group rule's lifetime is decided in one store transaction across moves.
+
+Revision note (2026-11-18, review 4):
+- Capture:
+  - writes the pack to disk with `pack-objects <basename>`;
+  - redacts remote credentials;
+  - keeps the dirty-submodule guard;
+  - leaves the inventory working during a conflicted operation.
+- Restore verifies the full object graph.
+- The keep directory is per session (`.mj/keep/<session-id>/`).
+- Consent and preflight carry typed `git stash -u` items, and the terminal dialog can show the full list.
+- Old raw conversions leave untracked files in the untouched raw checkout, with a notice.
+- Export keeps its current range.
+- Old restart intents complete.
+- The compaction loss is accounted for explicitly.
+- EC2 grants have durable install and removal states and recognize pre-existing rules.
+- The `MoveOperation` change is a breaking store revision.
+- Cache expiry runs on idle hosts.
+- Purge updates the archive path with the digest.
+- Declined (override recorded): carrying full history for raw checkouts without origin.
