@@ -1183,7 +1183,8 @@ Readout: `brief/bifrost-oracle-strict/READOUT.md`.
 - **Inconclusive by retention.** Only 1 of 17 diffs yielded a brief that kept the complete decisive
   fact (blind fidelity check) and passed one Opus and one Sol leak judge, both `missed` at high
   confidence, plus a blind cause check. Reviewers and round N were skipped as uninformative.
-- 10 of 17 were excluded at the leak gate after three rounds, and 6 as editor failures (fidelity or
+- 10 of 17 were excluded at the leak gate (no editor candidate in three rounds stated the complete
+  fact without being flagged; other wordings untested), and 6 as editor failures (fidelity or
   lint). On bifrost-dev relation bugs, supplying the complete fact is close to supplying the bug, so
   the earlier OT and ON lifts can't be credited to a non-leaking decisive fact. Five of the 6
   editor failures were also flagged caught or partial in earlier rounds; python-module-mutation got

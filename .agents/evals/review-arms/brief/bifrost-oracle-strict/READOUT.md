@@ -2,7 +2,7 @@
 
 Registration: `brief/PLAN-bifrost-oracle-strict.md`, with two amendments. The first covers codex4 and the reviewer draw. The second voids round 1 and labels exclusions by the gate that failed. Data root: `/mnt/optane/review-arms-bifrost-20261116`. Construction records are in this directory.
 
-## Result: Inconclusive by retention. 10 of 17 complete facts could not be stated without leaking.
+## Result: Inconclusive by retention. For 10 of 17 diffs, no complete-fact candidate in three rounds avoided leaking.
 
 Only 1 of the 17 bifrost-dev relation diffs produced a brief that passed every gate. Each such brief has to state the complete decisive fact with no element dropped or added and no inference needed. Both an Opus and a Sol leak judge must read it as `missed` at high confidence, and a blind cause check on each rationale must clearly answer no. The registered reading needs at least 8 retained diffs, so the outcome is **Inconclusive** whatever any reviewer would score.
 
@@ -13,7 +13,7 @@ Only 1 of the 17 bifrost-dev relation diffs produced a brief that passed every g
 | Gate in the final round | Diffs | What it means |
 |---|---:|---|
 | Retained | 1 | dependency-failure (round 2) |
-| Leak | 10 | the complete fact could not be stated, within three rounds, without the Opus/Sol pair flagging the defect |
+| Leak | 10 | no editor candidate in three rounds stated the complete fact without the Opus/Sol pair flagging the defect. Other wordings were not tested, so this is not an impossibility result |
 | Fidelity (editor failure) | 6 | the editor dropped or added an element, or broke the brief rules. This says nothing about whether the fact can be stated without leaking |
 | Cause | 0 | the one brief that reached the cause check passed |
 
@@ -48,7 +48,7 @@ Each round shows fidelity, then the two leak labels with confidences; "cause no 
 
 ## What this means
 
-On bifrost-dev relation bugs, supplying the complete decisive fact is close to supplying the bug. For 10 of the 17 diffs, no wording within three rounds kept every element of the fact and avoided the Opus/Sol pair flagging the defect. Most were flagged caught or partial in every round they reached the judges. That limits the earlier results:
+On bifrost-dev relation bugs, supplying the complete decisive fact is close to supplying the bug. For 10 of the 17 diffs, none of the editor's candidates within three rounds kept every element of the fact and avoided the Opus/Sol pair flagging the defect. That is evidence about the candidates tested, not proof that no neutral wording exists. Most were flagged caught or partial in every round they reached the judges. That limits the earlier results:
 
 - Round L's OT lift (+27.5 points) came from briefs that 15 of 17 leak judgments flagged.
 - The no-leak arm's ON − AF lift (+37.3 points) came from briefs that passed a weaker leak rule (Opus-only `missed` at any confidence) with edits that often dropped elements of the fact. The ON briefs were never judged under this arm's strict rule, and several would fail it as they stand. For cpp-template, for example, both ON Opus judges described the mechanism and gave `missed` only at low confidence. This arm changed the wording, the judge pair and the confidence and cause rules together. It therefore shows that only one complete-fact candidate passed all of these gates, not that preserving the complete fact alone is what made the others leak.
