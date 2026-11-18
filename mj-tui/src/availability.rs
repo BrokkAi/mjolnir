@@ -58,8 +58,9 @@ impl Default for Availability {
 /// An entry the pickers leave out, and the line that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Missing {
-    /// The picker shows `reason`; blocking notices show `reason` and `fix`.
-    Named { reason: String, fix: Option<String> },
+    /// A runtime that is there but cannot run sessions, named with its
+    /// reason and fix everywhere: it needs the user's action.
+    Named(String),
     /// Its SSH check failed. The list names the machine once, however many
     /// runtimes it hides; only a host that answered nothing is routine.
     Unreachable {
@@ -246,12 +247,9 @@ impl DashboardState {
                 continue;
             }
             match self.target_missing(id) {
-                Some(Missing::Named { reason, fix }) => lines.push(MissingTargetLine {
+                Some(Missing::Named(reason)) => lines.push(MissingTargetLine {
                     text: format!("{id}: {reason}"),
-                    full: format!(
-                        "{id}: {}",
-                        sentence(&reason, fix.as_deref().unwrap_or_default())
-                    ),
+                    full: format!("{id}: {reason}"),
                     routine: false,
                 }),
                 Some(missing @ Missing::Unreachable { .. }) => {
@@ -337,10 +335,7 @@ impl DashboardState {
                 Some(if !engine.installed && self.config.is_default_target(id) {
                     Missing::Silent
                 } else {
-                    Missing::Named {
-                        reason: reason.clone(),
-                        fix: None,
-                    }
+                    Missing::Named(reason.clone())
                 })
             }
             TargetTemplate::SshBare { .. }
@@ -373,10 +368,10 @@ impl DashboardState {
                             return None;
                         }
                         let rejected = rejected.iter().find(|runtime| runtime.kind == kind)?;
-                        Some(Missing::Named {
-                            reason: rejected.detail.clone(),
-                            fix: rejected.remediation.clone(),
-                        })
+                        Some(Missing::Named(sentence(
+                            &rejected.detail,
+                            rejected.remediation.as_deref().unwrap_or_default(),
+                        )))
                     }
                 }
             }
@@ -389,9 +384,7 @@ impl DashboardState {
     pub(crate) fn target_missing_line(&self, id: &str) -> Option<String> {
         self.config.enabled_target(id)?;
         match self.target_missing(id)? {
-            Missing::Named { reason, fix } => {
-                Some(sentence(&reason, fix.as_deref().unwrap_or_default()))
-            }
+            Missing::Named(reason) => Some(reason),
             Missing::Unreachable {
                 machine,
                 detail,
