@@ -190,8 +190,9 @@ def reviewer_runtime(child, carrier):
     version = subprocess.check_output([str(MJX), "--version"]).decode().strip()
     # The installed CLI can change during a run; the container's live processes name the worker and
     # harness binaries actually serving this review.
+    # check=True: a failed probe raises, is logged by record_runtimes and retried at the next poll.
     processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
-                               text=True, timeout=60).stdout.splitlines()
+                               text=True, timeout=60, check=True).stdout.splitlines()
     return {"container": ids[0], "container_source": source, "image": info["Image"],
             "image_digest": image.get("Digest"),
             "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
@@ -219,14 +220,28 @@ def image_pin_mismatch(place):
 
 
 def set_aside_carrier(d, sid, place, pinned):
-    """A carrier on another image never reviews: suspend it and move its launch records aside, so a
+    """A carrier on another image never reviews. The marker records the decision first; finishing it
+    (suspend, move the launch records aside) is idempotent and resumes at the job's next start, so a
     later run starts a fresh carrier once the pinned image is current again."""
-    tag = f"rejected-{time.time_ns()}"
-    save(d / f"{tag}-image.json", {"session_id": sid, "image": place["image"], "pinned": pinned})
-    save(d / f"{tag}-suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    save(d / "rejected-pending.json", {"tag": f"rejected-{time.time_ns()}", "session_id": sid,
+                                       "image": place["image"], "pinned": pinned})
+    finish_set_aside(d)
+
+
+def finish_set_aside(d):
+    marker = d / "rejected-pending.json"
+    rec = json.loads(marker.read_text())
+    tag, sid = rec["tag"], rec["session_id"]
+    if not (d / f"{tag}-suspend.json").exists():
+        if session(sid).get("lifecycle") not in ("suspended", "closed"):
+            save(d / f"{tag}-suspend.json",
+                 mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+        else:
+            save(d / f"{tag}-suspend.json", {"already": session(sid).get("lifecycle")})
     for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
         if (d / name).exists():
             (d / name).rename(d / f"{tag}-{name}")
+    marker.rename(d / f"{tag}-image.json")
 
 
 def record_runtimes(d, children):
@@ -412,6 +427,8 @@ def run_job(job, gate):
     d = ROOT / "runs" / bug["id"] / arm
     if (d / "done.json").exists():
         return "done"
+    if (d / "rejected-pending.json").exists():
+        finish_set_aside(d)  # an interrupted set-aside of a wrong-image carrier
     if (d / "review-start.json").exists():
         # The review was started; finishing it only reads state, so it is safe to resume.
         identity = json.loads((d / "launch-intent.json").read_text())

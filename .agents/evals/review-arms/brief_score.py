@@ -25,6 +25,7 @@ judges are told not to open.
 import argparse
 import collections
 import json
+import pathlib
 import random
 import secrets
 import statistics
@@ -51,6 +52,7 @@ EXACT_BASELINE = False
 ROUND_SETS = None
 READING = None
 REFERENCE_ROUND = None
+IMAGE_CHECK = {}  # the no-leak build's single-image evidence, saved in the round key
 
 
 def scoped_sets():
@@ -155,11 +157,22 @@ def build(arms, per_batch):
     require_complete(rows, arms)
     if READING == "bifrost-oracle-noleak":
         # ON - AF reads a brief effect only if both arms ran on one image (the AF amendment).
-        images = {(r["bug"], r["arm"]): json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json")
-                                                   .read_text())["image"]
+        # Carriers, and every reviewer whose runtime was observed (its own container or the carrier's).
+        images = {json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json").read_text())["image"]
                   for r in rows if r["arm"] in ("ON", "AF")}
-        if len(set(images.values())) != 1:
-            raise SystemExit(f"ON and AF ran on more than one image: {sorted(set(images.values()))}")
+        unobserved = 0
+        for r in rows:
+            if r["arm"] not in ("ON", "AF"):
+                continue
+            runtime = pathlib.Path(r["dir"]) / "runtime.json"
+            image = json.loads(runtime.read_text()).get("image") if runtime.exists() else None
+            if image:
+                images.add(image)
+            else:
+                unobserved += 1
+        if len(images) != 1:
+            raise SystemExit(f"ON and AF ran on more than one image: {sorted(images)}")
+        IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved})
     if REFERENCE_ROUND:
         # Check the reference before freezing the round: score compares the same sessions, and
         # finding a mismatch only then would orphan completed verdicts.
@@ -202,6 +215,7 @@ def build(arms, per_batch):
     save(KEY, {"arms": list(arms), "outputs": key, "sets": scoped_sets(),
                "models": list(SELECTED_MODELS), "exact_baseline": EXACT_BASELINE,
                **({"reading": READING, "reference_round": REFERENCE_ROUND} if READING else {}),
+               **({"image_check": IMAGE_CHECK} if IMAGE_CHECK else {}),
                **({"bugs": sorted(BUGS)} if BUGS is not None else {})})
     print(json.dumps({"dir": str(J), "batches": batches}))
     print(json.dumps({"outputs": len(key), "by_condition_model": collections.Counter(
