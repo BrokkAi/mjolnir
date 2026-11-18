@@ -88,7 +88,9 @@ ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
              # Sonnet writer (brief/PLAN-writer-sonnet.md), same Terra reviewers.
              "TS": ["gpt-6.1-terra:high"] * 3,
              # Non-leaking oracle brief (brief/PLAN-bifrost-oracle-noleak.md), Terra reviewers.
-             "ON": ["gpt-6.1-terra:high"] * 3})
+             "ON": ["gpt-6.1-terra:high"] * 3,
+             # Fresh no-brief control in the same window and image as ON (its 2026-11-18 amendment).
+             "AF": ["gpt-6.1-terra:high"] * 3})
 
 
 def workspace_id():
@@ -169,6 +171,33 @@ def container(sid):
     return {"container": ids[0], "image": image, "cwd": f"/workspace/{sid}/{REPO_DIR}",
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in mounts]}
+
+
+def reviewer_runtime(child):
+    """The reviewer's container image and runtime, read while the reviewer is alive (reviewers are
+    destroyed at role end). Harness binaries come from mj, so the mj version and mounts name them."""
+    ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={child}",
+                                   "--format", "{{.ID}}"]).decode().split()
+    if len(ids) != 1:
+        return None
+    info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]]))[0]
+    image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]]))[0]
+    version = subprocess.check_output([str(MJX), "--version"]).decode().strip()
+    return {"container": ids[0], "image": info["Image"], "image_digest": image.get("Digest"),
+            "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
+            "mj_version": version, "observed_ns": time.time_ns(),
+            "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
+                       for m in info.get("Mounts") or []]}
+
+
+def record_runtimes(d, children):
+    for child in children:
+        path = d / "reviewers" / child[:12] / "runtime.json"
+        if not path.exists():
+            runtime = reviewer_runtime(child)
+            if runtime:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                save(path, runtime)
 
 
 def inventory(place, mode, base):
@@ -469,6 +498,7 @@ def await_review(d, sid):
         if review is None and children:
             return children, None
         observe(children, review or {})
+        record_runtimes(d, children)
         verdict = (review or {}).get("verdict")
         if verdict:
             return children, verdict
@@ -507,7 +537,12 @@ def collect(d, bug, identity, sid, place, before):
             output = message or None
             if output:
                 (cd / "output.md").write_text(output + "\n")
+            runtime_path = cd / "runtime.json"
+            if not runtime_path.exists():
+                # Never observed alive (it finished between polls): say so rather than guess.
+                save(runtime_path, {"container": None, "note": "reviewer container not observed while alive"})
             reviewers.append({"child": child, "slot": info["slot"], "profile": stored["selection"]["profile"],
+                              "image": json.loads(runtime_path.read_text()).get("image"),
                               "model": settings.get("model"), "effort": settings.get("effort"),
                               "has_output": bool(output), "handback": bool(messages)})
         # A review can clear before every reviewer was observed, or with a reviewer

@@ -36,7 +36,9 @@ from driver import ARMS, CORPUS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
 
 # The condition each judged arm stands for: its brief kind, or "site-tool" for the query arms
 # (brief/PLAN-oz.md), which carry no brief but a site_context tool.
-CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS}}
+CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS},
+             # A fresh no-brief cohort is its own condition, never pooled with the stored no-brief arms.
+             "AF": "no-brief-fresh"}
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
@@ -345,12 +347,14 @@ def boot_exact(diff_values, n=10000):
 READINGS = {
     # brief/PLAN-bifrost-oracle.md: OT against A and BT on all 17 relation diffs; reference round is
     # the stored A/BT judging.
-    "bifrost-oracle": {"subject": "OT", "arms": ("OT", "BT"), "others": ("A", "BT"), "diffs": 17,
+    "bifrost-oracle": {"subject": "OT", "arms": ("OT", "BT"), "others": ("A", "BT"), "primary": "A", "diffs": 17,
                        "diffs_rule": "exactly 17", "min_diffs": 0, "report_key": "bifrost_oracle",
                        "reference_arms": ("A", "BT")},
-    # brief/PLAN-bifrost-oracle-noleak.md: ON against A and OT on the retained diffs; fewer than 8
-    # retained reads Inconclusive; the reference is round L's A/OT labels.
-    "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "OT"), "others": ("A", "OT"), "diffs": None,
+    # brief/PLAN-bifrost-oracle-noleak.md and its AF amendment: ON against the same-image fresh
+    # no-brief AF (primary), stored A and OT; AF - A is the image/cohort effect. Fewer than 8
+    # retained diffs reads Inconclusive; the reference is round L's A/OT labels.
+    "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "AF", "OT"), "others": ("AF", "A", "OT"),
+                              "primary": "AF", "extra": (("AF", "A"),), "diffs": None,
                               "diffs_rule": "1 to 17", "min_diffs": 8,
                               "report_key": "bifrost_oracle_noleak", "reference_arms": ("A", "OT")},
 }
@@ -445,21 +449,21 @@ def score():
                 per_diff[bug][arm] = {"sessions": 3, "caught": labels.count("caught"),
                                       "partial": labels.count("partial"), "catch_rate": labels.count("caught") / 3,
                                       "partial_rate": labels.count("partial") / 3}
-        effects = {arm: [Fraction(per_diff[b][subject]["caught"], 3) -
-                         Fraction(per_diff[b][arm]["caught"], 3) for b in bugs]
-                   for arm in others}
+        pairs = [(subject, arm) for arm in others] + list(reading.get("extra", ()))
         contrasts, raw_contrasts = {}, {}
-        for arm, values in effects.items():
+        for x, y in pairs:
+            values = [Fraction(per_diff[b][x]["caught"], 3) - Fraction(per_diff[b][y]["caught"], 3) for b in bugs]
             estimate = sum(values, Fraction()) / len(values)
             low, high = boot_exact(values)
-            raw_contrasts[arm] = (estimate, low, high)
-            contrasts[f"{subject}_minus_{arm}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
-        estimate, low, high = raw_contrasts["A"]
+            raw_contrasts[(x, y)] = (estimate, low, high)
+            contrasts[f"{x}_minus_{y}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
+        estimate, low, high = raw_contrasts[(subject, reading["primary"])]
         outcome = oracle_outcome(estimate, low, high)
         if len(bugs) < reading["min_diffs"]:
             outcome = "Inconclusive"  # registered: too few retained diffs to read
         report["expected_catches_per_reviewer"] = report.pop("expected_catches_of_30")
         report[reading["report_key"]] = {"outcome": outcome, "diffs": len(bugs),
+                                         "primary": f"{subject}_minus_{reading['primary']}",
                                          "bootstrap": {"seed": 1, "draws": 10000, "unit": "paired diff",
                                                        "classification_uses_unrounded_rational_bounds": True},
                                          **contrasts, "per_diff": per_diff}
