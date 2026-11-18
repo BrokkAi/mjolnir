@@ -312,6 +312,10 @@ pub(super) async fn serve_client(
             })
         } else if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
+        } else if matches!(request.action, DaemonAction::CheckpointSession { .. }) {
+            // Decode the legacy action only to explain its removal, including
+            // to clients from before the protocol bump. Authentication still applies.
+            Err(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE.to_owned())
         } else if activity.is_err() {
             // No work was accepted. The client can wait and retry this exact
             // request without risking a duplicate operation.

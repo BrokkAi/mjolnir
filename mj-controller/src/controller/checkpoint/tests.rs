@@ -222,26 +222,6 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     assert!(directory.path().join(imported_name).exists());
     assert!(directory.path().join("notes.hel.zip").exists());
 }
-#[test]
-fn recovery_artifact_final_verification_checks_the_archive_digest() {
-    let directory = tempfile::tempdir().unwrap();
-    let session_id = "1123456789abcdef0123456789abcdef";
-    let metadata = write_checkpoint_gate_archive(directory.path(), session_id, 7);
-    let mut artifact = CheckpointArtifact {
-        metadata,
-        native_session_id: "native-session".into(),
-        event_frontier_digest: "a".repeat(64),
-    };
-
-    verify_checkpoint_artifact(session_id, &artifact).unwrap();
-    artifact.metadata.sha256 = "b".repeat(64);
-    assert!(
-        verify_checkpoint_artifact(session_id, &artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("checkpoint SHA changed")
-    );
-}
 /// A snapshot of a session whose checkpoint barrier is open but not yet
 /// ready, projected exactly at `cursor`.
 fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
@@ -2674,7 +2654,6 @@ fn an_installed_archive_is_reused_when_only_relay_bookkeeping_moved() {
         archived.event_frontier_digest
     );
     // The reused archive is still the gate close destroys through.
-    verify_checkpoint_artifact(session_id, &artifact).unwrap();
     verify_installed_checkpoint_gate(session_id, &artifact.metadata).unwrap();
 }
 #[test]
@@ -3890,7 +3869,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         state: State::default(),
     };
     let admission = crate::controller::test_support::session_admission("session-1");
-    let entry = controller.checkpoint_session(&admission, "session-1");
+    let entry = controller.checkpoint_for_bundle_export(&admission, "session-1");
     let entry_size = std::mem::size_of_val(&entry);
     drop(entry);
     let executor = RefusingExecutor("not used");
@@ -3909,7 +3888,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     drop(latched);
     assert!(
         entry_size < ENTRY_LIMIT_BYTES && latched_size < WRAPPER_LIMIT_BYTES,
-        "checkpoint_session future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
+        "checkpoint_for_bundle_export future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
          latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
          capture future so the wrappers stay small"
     );

@@ -1680,7 +1680,10 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
     };
-    record_recovery_success_to(&database, "session-1", "native-recovered", &recovered).unwrap();
+    let mut saved = stale.clone();
+    saved.native_session_id = Some("native-recovered".into());
+    saved.checkpoint = Some(Box::new(recovered.clone()));
+    save_checkpointed_session_to(&database, &saved).unwrap();
 
     set_session_title_override_to(
         &database,
@@ -1761,7 +1764,10 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
         created_at: "2026-08-14T12:00:00Z".into(),
         event_frontier: 42,
     };
-    record_recovery_success_to(&database, "session-1", "native-recovered", &recovered).unwrap();
+    let mut saved = stale.clone();
+    saved.native_session_id = Some("native-recovered".into());
+    saved.checkpoint = Some(Box::new(recovered.clone()));
+    save_checkpointed_session_to(&database, &saved).unwrap();
     set_session_title_override_to(
         &database,
         "session-1",

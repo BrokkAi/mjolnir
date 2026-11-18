@@ -339,15 +339,13 @@ where
         .await;
     // The daemon's close loads its own controller from the store.
     controller.config.save().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -1172,15 +1170,13 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 
 pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         controller,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -1194,19 +1190,17 @@ pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeStat
 
 fn test_runtime_state_loading_the_store_with_live_recovery() -> (
     Arc<RuntimeState>,
-    crate::recovery::RecoveryCoordinator,
+    Arc<RecoveryGate>,
     crate::worker_upgrade::WorkerUpgradeCoordinator,
 ) {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -1594,18 +1588,16 @@ impl TestRemoteManager {
 }
 
 pub(super) fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = manager.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.control.clone(), &recovery);
     let mut runtime = RuntimeState::new_with_controller_loader(
         manager.control.clone(),
         Controller {
             config: Config::default(),
             state: mj_core::state::State::default(),
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -1919,15 +1911,13 @@ async fn missing_target_retry_completes_a_committed_transition() {
     }
     RELOADS.store(0, Ordering::SeqCst);
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         fail_first_reload,
@@ -4066,8 +4056,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
     ))
     .unwrap();
     parked_child(root.path(), child, parent, &workspace.id);
-    let (state, mut recovery, mut upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, mut upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
 
     let (admitted, started) = tokio::sync::oneshot::channel();
     let (cancel_seen, mut cancelled) = tokio::sync::oneshot::channel();
@@ -4169,7 +4158,7 @@ async fn a_stalled_unpark_stream_releases_admission_and_can_retry() {
         .await
         .unwrap();
     RuntimeState::wait_lifecycle_result(retry).await.unwrap();
-    recovery.shutdown().await.unwrap();
+    recovery.close();
     upgrades.shutdown().await.unwrap();
 }
 
@@ -4421,156 +4410,6 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         connected: true,
         error: None,
     }
-}
-
-#[tokio::test]
-async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    let mut view = ready_startup_view();
-    let snapshot = view.snapshot.as_mut().unwrap();
-    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
-    snapshot.window.latest_turn_start_position = Some(9);
-    state
-        .publish_session("session-1".into(), view)
-        .await
-        .unwrap();
-    let first = observed.try_recv().unwrap().observation;
-    assert_eq!(first.checkpoint_wait, None);
-    assert_eq!(first.latest_completed_turn_ordinal, Some(9));
-    let revision = state.revisions.current();
-
-    // A retry must pick up the current record, not a retained copy from the
-    // original worker event. No new worker event or UI publication is needed.
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().title = "renamed".into();
-    });
-    state.refresh_background_policies();
-    let retry = observed.try_recv().unwrap().observation;
-    assert_eq!(retry.session.title, "renamed");
-    assert_eq!(retry.latest_completed_turn_ordinal, Some(9));
-    assert_eq!(retry.checkpoint_wait, None);
-    assert_eq!(state.revisions.current(), revision);
-
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().state = SessionState::Parked;
-    });
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().state = SessionState::Running;
-    });
-    state.refresh_background_policies();
-    assert!(
-        observed.try_recv().is_none(),
-        "resumed sessions need a fresh worker view"
-    );
-}
-
-/// A recovery copy is due only when checkpoint admission would let it start.
-/// A Claude session whose projection is idle but whose agent left background
-/// shells running is still working as far as the barrier is concerned, so the
-/// observation has to say so too. When it did not, the coordinator started a
-/// copy every second that the barrier then deferred, for hours.
-// Hard-won: 670a5bb7: a live Claude session copied 260 MB every few seconds while shell work blocked recovery for hours.
-#[tokio::test]
-async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    let mut view = ready_startup_view();
-    let snapshot = view.snapshot.as_mut().unwrap();
-    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
-    snapshot.window.latest_turn_start_position = Some(9);
-    snapshot.operational.background_commands = vec![mj_core::relay::BackgroundCommand {
-        id: "shell-1".into(),
-        started_at_ms: 1,
-        command: "cargo test".into(),
-        can_stop: true,
-    }];
-    assert!(snapshot.operational.has_work_in_flight());
-    state
-        .publish_session("session-1".into(), view)
-        .await
-        .unwrap();
-
-    let observation = observed.try_recv().unwrap().observation;
-    assert_eq!(
-        observation.checkpoint_wait,
-        Some(mj_core::activity::CheckpointWait::WorkInFlight),
-        "a session the checkpoint barrier would defer was observed as ready for a copy"
-    );
-    // The retry tick re-sends the same answer rather than recomputing it.
-    state.refresh_background_policies();
-    assert_eq!(
-        observed.try_recv().unwrap().observation.checkpoint_wait,
-        Some(mj_core::activity::CheckpointWait::WorkInFlight)
-    );
-}
-
-#[tokio::test]
-async fn disconnected_and_removed_sessions_stop_background_retries() {
-    let mut state = test_runtime_state();
-    let (observations, mut observed) = mj_controller::recovery_gate::observation_channel();
-    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
-        observations,
-        gate: Arc::new(mj_controller::recovery_gate::RecoveryGate::default()),
-    };
-    let session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
-    state
-        .owner()
-        .install_relay_sessions(["session-1".to_owned()].into());
-    state
-        .publish_session("session-1".into(), ready_startup_view())
-        .await
-        .unwrap();
-    observed.try_recv().unwrap();
-    let mut disconnected = ready_startup_view();
-    disconnected.connected = false;
-    state
-        .publish_session("session-1".into(), disconnected)
-        .await
-        .unwrap();
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-
-    state
-        .publish_session("session-1".into(), ready_startup_view())
-        .await
-        .unwrap();
-    observed.try_recv().unwrap();
-    state.owner().edit_sessions(|sessions| {
-        sessions.remove("session-1");
-    });
-    state.refresh_background_policies();
-    assert!(observed.try_recv().is_none());
-    assert!(state.owner().background_policies.is_empty());
 }
 
 /// Put `session-1` into the daemon's in-memory controller as a session that
@@ -6930,15 +6769,13 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
 /// exercise a daemon operation end to end in an isolated data directory.
 pub(super) fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -7189,7 +7026,7 @@ async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive
     locked_rx.await.unwrap();
     let checkpoint = tokio::spawn({
         let state = state.clone();
-        async move { state.checkpoint_session_now("checkpoint-io").await }
+        async move { state.checkpoint_for_bundle_export("checkpoint-io").await }
     });
     let started = std::time::Instant::now();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -9608,15 +9445,13 @@ async fn serve_live_session(
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -10303,15 +10138,15 @@ async fn discard_intent_recovers_without_checkpointing_and_reconciles_children()
     );
     assert!(interrupted_suspend_session_ids(&durable).contains(&LATCH_RELAY_SESSION.to_owned()));
     assert!(durable.state.sessions.contains_key(WORKING_CHILD));
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(parent.channels.control.clone());
+    let recovery = parent.channels.control.session_gate.clone();
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         parent.channels.control.clone(),
-        &recovery.observer(),
+        &recovery,
     );
     let restarted = Arc::new(RuntimeState::new_with_controller_loader(
         parent.channels.control.clone(),
         durable,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -10441,16 +10276,14 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     )
     .unwrap();
 
-    let (state, mut recovery, _upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
     // A recovery copy in flight holds the child's stop at its start, where
     // the operation is already visible.
     let recovery_attempt = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             WORKING_CHILD,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
     let suspend = tokio::spawn({
@@ -10490,7 +10323,7 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             .sessions
             .contains_key(WORKING_CHILD)
     );
-    recovery.shutdown().await.unwrap();
+    recovery.close();
 }
 
 #[cfg(unix)]
@@ -10532,22 +10365,19 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
         .unwrap();
     }
 
-    let (state, mut recovery, _upgrades) =
-        test_runtime_state_loading_the_store_with_live_recovery();
+    let (state, recovery, _upgrades) = test_runtime_state_loading_the_store_with_live_recovery();
     let attempt_a = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             child_a,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
     let attempt_b = state
-        .recovery_observer
-        .gate
+        .session_gate
         .try_start(
             child_b,
-            mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            mj_controller::recovery_gate::BackgroundWork::WorkerReplacement,
         )
         .unwrap();
 
@@ -10608,7 +10438,7 @@ async fn suspending_a_parent_stops_sub_agents_concurrently_before_finishing_pare
     let stored = mj_controller::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
     assert!(!stored.sessions.contains_key(child_b));
-    recovery.shutdown().await.unwrap();
+    recovery.close();
 }
 
 /// Run the named test alone, with a store and a SessionWiki index of its own
@@ -10892,15 +10722,15 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
                 project_memory: None,
             }])
             .unwrap();
-        let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+        let recovery = channels.control.session_gate.clone();
         let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
             channels.control.clone(),
-            &recovery.observer(),
+            &recovery,
         );
         let state = Arc::new(RuntimeState::new_with_controller_loader(
             channels.control.clone(),
             Controller::load().unwrap(),
-            recovery.observer(),
+            recovery.clone(),
             upgrades.observer(),
             Vec::new(),
             Controller::load,
@@ -11506,15 +11336,13 @@ async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         controller,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -12494,7 +12322,7 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         ),
     ] {
         let state = test_runtime_state();
-        let review = state.recovery_observer.gate.reserve_when_idle(id).await;
+        let review = state.session_gate.reserve_when_idle(id).await;
         let release = Arc::new(tokio::sync::Notify::new());
         let started = Arc::new(tokio::sync::Notify::new());
         let result = state
@@ -12550,11 +12378,10 @@ async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
         assert!(
             state
-                .recovery_observer
-                .gate
+                .session_gate
                 .try_start(
                     id,
-                    mj_controller::recovery_gate::BackgroundWork::RecoveryCopyCapturing
+                    mj_controller::recovery_gate::BackgroundWork::WorkerReplacement
                 )
                 .is_err(),
             "the review continues across foreground work"
@@ -12736,18 +12563,16 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
 
 pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller {
             config: Config::default(),
             state,
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         || {
@@ -14212,15 +14037,13 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
     mj_controller::database::save_session(&parent).unwrap();
 
     let remote = spawn_remote_session_manager().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        remote.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = remote.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(remote.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         failing_controller_loader,
@@ -14392,15 +14215,13 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
         )
         .await;
     controller.config.save().unwrap();
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        channels.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = channels.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(channels.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new_with_controller_loader(
         channels.control.clone(),
         Controller::load().unwrap(),
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
         Controller::load,
@@ -14655,8 +14476,25 @@ async fn daemon_api_exchange() {
             style: mj_core::config::SpinnerStyle::Wave,
         },
     ];
+    let actions = actions
+        .into_iter()
+        .map(|action| (PROTOCOL_VERSION, action))
+        .chain([
+            (
+                PROTOCOL_VERSION,
+                DaemonAction::CheckpointSession {
+                    session_id: "removed".into(),
+                },
+            ),
+            (
+                PROTOCOL_VERSION - 1,
+                DaemonAction::CheckpointSession {
+                    session_id: "removed".into(),
+                },
+            ),
+        ]);
     let mut exchange = Vec::new();
-    for (index, action) in actions.into_iter().enumerate() {
+    for (index, (protocol_version, action)) in actions.enumerate() {
         let server_state = state.clone();
         let server_metadata = metadata.clone();
         let server_listener = &listener;
@@ -14678,7 +14516,7 @@ async fn daemon_api_exchange() {
         write_frame(
             &mut stream,
             &RequestEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version,
                 request_id: index as u64,
                 token: metadata.token.clone(),
                 action,
@@ -15408,18 +15246,16 @@ async fn dismiss_notification_clears_the_served_question_attention() {
     mj_controller::database::save_materialized_session(&applied).unwrap();
 
     let mut manager = TestRemoteManager::new().await;
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = manager.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.control.clone(), &recovery);
     let state = Arc::new(RuntimeState::new(
         manager.control.clone(),
         Controller {
             config: runtime_test_config(),
             state: Default::default(),
         },
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
     ));

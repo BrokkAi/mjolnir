@@ -537,9 +537,9 @@ pub(super) async fn handle_action(
             // revision; a client-supplied detail may already be stale.
             Ok(DaemonReply::OptionalSessionState(None))
         }
-        DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
-            state.checkpoint_session_now(&session_id).await?,
-        )),
+        DaemonAction::CheckpointSession { .. } => {
+            anyhow::bail!(mj_client::daemon::REMOVED_CHECKPOINT_MESSAGE)
+        }
         DaemonAction::ProjectCatalog { refresh, retry } => Ok(DaemonReply::ProjectCatalog(
             state.project_catalog(refresh, retry).await?,
         )),
@@ -643,8 +643,7 @@ pub(super) async fn handle_action(
         } => {
             ensure_no_active_lifecycle(state)?;
             let admission = state
-                .recovery_observer
-                .gate
+                .session_gate
                 .enter_foreground(
                     &session_id,
                     "destroy recovered environment",
@@ -1188,8 +1187,7 @@ pub(super) async fn handle_action(
             let admission = if cleanup_operation_id.is_some() {
                 Some(
                     state
-                        .recovery_observer
-                        .gate
+                        .session_gate
                         .enter_foreground(
                             &session_id,
                             "retained Move source cleanup",

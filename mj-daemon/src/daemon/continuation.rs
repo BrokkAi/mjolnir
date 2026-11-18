@@ -2,6 +2,9 @@
 //! resumes quota recoveries, seeds authorization context, and tells review when
 //! a session settles. User input always wins over automatic work.
 use super::*;
+
+// Preserve the ten-minute ceiling previously shared with automatic checkpoints.
+const QUOTA_RETRY_BACKOFF_CEILING: Duration = Duration::from_secs(10 * 60);
 use mj_controller::session_manager::{
     CoalescedUpdateSender, ManagedSessionView, SessionManagerUpdate, SessionManagerUpdates,
     coalesced_update_channel,
@@ -72,9 +75,9 @@ fn failed_quota_attempt(
         .filter(|r| r.revision == revision)
         .map_or(1, |r| r.failures.saturating_add(1));
     // Retain the existing 30-second retry cadence and recovery policy ceiling.
-    let delay = crate::recovery::backoff_delay(
+    let delay = mj_controller::backoff::backoff_delay(
         Duration::from_secs(30),
-        crate::recovery::AUTO_CHECKPOINT_INTERVAL,
+        QUOTA_RETRY_BACKOFF_CEILING,
         failures,
     );
     retries.insert(
@@ -519,7 +522,7 @@ pub(super) fn spawn(
             }
         },
         control: state.session_manager.clone(),
-        session_gate: state.recovery_observer.gate.clone(),
+        session_gate: state.session_gate.clone(),
         schedules: Default::default(),
         allowed: {
             let state = state.clone();

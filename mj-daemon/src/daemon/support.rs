@@ -3,28 +3,10 @@ use super::*;
 /// Publication is deliberately synchronous: I/O settles in the coordinators.
 pub(super) fn publish_background_results(
     state: &Arc<RuntimeState>,
-    recovery: impl Iterator<Item = crate::recovery::RecoveryResult>,
     upgrades: impl Iterator<Item = crate::worker_upgrade::WorkerUpgradeResult>,
 ) {
-    for result in recovery {
-        report_recovery(&result);
-    }
     for result in upgrades {
         report_worker_upgrade(state, &result);
-    }
-}
-
-/// Records already reach the owner through the committed publication feed.
-/// Reporting a finished copy must never join the configuration I/O owner.
-pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
-    if let Err(error) = &result.outcome {
-        if result.deferred {
-            tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
-        } else if result.cancelled {
-            tracing::info!(session_id = %result.session_id, %error, reason = "cancelled by a session operation (close, suspend, destroy, move or upgrade)", "daemon recovery checkpoint cancelled");
-        } else {
-            tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
-        }
     }
 }
 
@@ -418,33 +400,6 @@ mod publication_tests {
             // finish before this task can accept and answer a connection.
             publish_background_results(
                 &serving,
-                [(false, true), (true, false), (false, false), (false, false)]
-                    .into_iter()
-                    .enumerate()
-                    .map(
-                        |(index, (cancelled, deferred))| crate::recovery::RecoveryResult {
-                            session_id: "finished-copy".into(),
-                            expected_target: mj_core::state::TargetLocator::LocalBare {
-                                worker_root: "unused".into(),
-                            },
-                            outcome: if index == 3 {
-                                Ok(mj_controller::controller::CheckpointArtifact {
-                                    metadata: mj_core::state::CheckpointMetadata {
-                                        archive_path: "unused.zip".into(),
-                                        sha256: "verified".into(),
-                                        created_at: "2026-11-11T15:00:00Z".into(),
-                                        event_frontier: 1,
-                                    },
-                                    native_session_id: "native".into(),
-                                    event_frontier_digest: "verified".into(),
-                                })
-                            } else {
-                                Err("copy completed without an artifact".into())
-                            },
-                            cancelled,
-                            deferred,
-                        },
-                    ),
                 [crate::worker_upgrade::WorkerUpgradeResult {
                     session_id: "finished-upgrade".into(),
                     outcome: Err("harness preparation failed".into()),

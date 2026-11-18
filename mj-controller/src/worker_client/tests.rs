@@ -4866,7 +4866,7 @@ async fn a_new_login_reaches_a_session_while_its_recovery_copy_runs() {
     drop(replacement);
 
     let copy = gate
-        .try_start(SESSION_ID, BackgroundWork::RecoveryCopyCapturing)
+        .try_start(SESSION_ID, BackgroundWork::DelegationDelivery)
         .unwrap();
     let outcomes = sync().await;
     assert_eq!(
@@ -5622,7 +5622,7 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     let copy = gate
         .try_start(
             SESSION_ID,
-            crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+            crate::recovery_gate::BackgroundWork::DelegationDelivery,
         )
         .unwrap();
     let lease = handle.lease_connection(&copy).await.unwrap();
@@ -5657,8 +5657,6 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     assert!(!copy.load(Ordering::Acquire));
     let released = tokio::time::Instant::now();
     lease.release();
-    copy.narrow(crate::recovery_gate::BackgroundWork::RecoveryCopyTransferring)
-        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !received.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;

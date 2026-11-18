@@ -541,7 +541,6 @@ impl Controller {
         // and submitting while the slow phase runs.
         if exclusivity == LatchExclusivity::ReleaseAfterLatch {
             relay.end_latch();
-            admission.narrow_copy()?;
         }
 
         // Reuse before exporting: verifying an installed archive costs far less

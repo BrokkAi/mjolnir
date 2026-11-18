@@ -109,7 +109,7 @@ impl CompletionRetry {
             ),
             None => (COMPLETION_BUSY_CAP, false, last_failure),
         };
-        let delay = crate::recovery::backoff_delay(COMPLETION_RETRY_BASE, cap, failures);
+        let delay = mj_controller::backoff::backoff_delay(COMPLETION_RETRY_BASE, cap, failures);
         (
             Self {
                 ordinal,
@@ -779,8 +779,7 @@ async fn deliver_background(
     stored_result: StoredDelegationResult,
     deferral: &std::sync::atomic::AtomicBool,
 ) -> Result<Delivery> {
-    let Some(admission) = admit_delivery(&runtime.recovery_observer.gate, parent, deferral).await
-    else {
+    let Some(admission) = admit_delivery(&runtime.session_gate, parent, deferral).await else {
         return Ok(Delivery::Stopped);
     };
     let handle = runtime.workspace_session_handle(parent).await?;
@@ -914,10 +913,10 @@ mod tests {
         }
         let _writer = mj_controller::database::install_isolated_test_writer();
         let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
-        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
+        let recovery = manager.control.session_gate.clone();
         let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
             manager.control.clone(),
-            &recovery.observer(),
+            &recovery,
         );
         let source_home = tempfile::tempdir().unwrap();
         let mut initial_config = mj_core::config::Config::default();
@@ -935,7 +934,7 @@ mod tests {
         let state = Arc::new(crate::daemon::RuntimeState::new_with_controller_loader(
             manager.control.clone(),
             initial,
-            recovery.observer(),
+            recovery.clone(),
             upgrades.observer(),
             Vec::new(),
             || {
@@ -2390,10 +2389,10 @@ mod tests {
         use mj_controller::recovery_gate::{BackgroundWork, RecoveryGate};
         let gate = Arc::new(RecoveryGate::default());
         let copy = gate
-            .try_start("parent", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("parent", BackgroundWork::WorkerReplacement)
             .unwrap();
         let other = gate
-            .try_start("other", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("other", BackgroundWork::WorkerReplacement)
             .unwrap();
         let deferral = std::sync::atomic::AtomicBool::new(false);
         let mut waiting = Box::pin(admit_delivery(&gate, "parent", &deferral));

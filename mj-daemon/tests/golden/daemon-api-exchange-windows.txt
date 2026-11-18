@@ -431,5 +431,27 @@
         "reply": "done"
       }
     }
+  },
+  {
+    "request": {
+      "action": "checkpoint_session",
+      "arguments": {
+        "session_id": "removed"
+      }
+    },
+    "reply": {
+      "Err": "The checkpoint action was removed; suspend saves the session."
+    }
+  },
+  {
+    "request": {
+      "action": "checkpoint_session",
+      "arguments": {
+        "session_id": "removed"
+      }
+    },
+    "reply": {
+      "Err": "The checkpoint action was removed; suspend saves the session."
+    }
   }
 ]

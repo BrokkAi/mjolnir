@@ -507,23 +507,6 @@ pub(in crate::controller) fn verify_installed_checkpoint_gate(
     Ok(())
 }
 
-pub(super) fn verify_checkpoint_artifact(
-    session_id: &str,
-    artifact: &CheckpointArtifact,
-) -> Result<()> {
-    let sha256 = checkpoint_sha256(&artifact.metadata.archive_path).with_context(|| {
-        format!(
-            "hash completed checkpoint {}",
-            artifact.metadata.archive_path.display()
-        )
-    })?;
-    ensure!(
-        sha256 == artifact.metadata.sha256,
-        "completed checkpoint SHA changed before persistence for session {session_id}"
-    );
-    Ok(())
-}
-
 /// Release the projection history the new checkpoint covers.
 ///
 /// The checkpoint archive holds the complete transcript up to its frontier, so

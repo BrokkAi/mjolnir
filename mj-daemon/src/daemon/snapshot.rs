@@ -4,25 +4,10 @@ use super::*;
 /// read afresh when retrying work after gate contention or a policy deadline.
 pub(super) struct BackgroundPolicyState {
     quiet: bool,
-    checkpoint_wait: Option<mj_core::activity::CheckpointWait>,
-    latest_completed_turn_ordinal: Option<u64>,
     worker_build: Option<String>,
     /// Why the worker is not replaceable while the session is otherwise idle;
     /// empty otherwise. Kept to log a change once, not on every view.
     idle_replacement_blockers: Vec<&'static str>,
-}
-
-/// Whether the daemon keeps a routine recovery copy of the session. A
-/// reviewer is disposable: its handback is its output, and the review host
-/// destroys it once its role has an outcome, so a copy of it only moves bytes
-/// for a session that is about to be destroyed (#1580).
-fn keeps_recovery_copies(
-    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
-    session_id: &str,
-) -> bool {
-    subagents
-        .get(session_id)
-        .is_none_or(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
 }
 
 impl RuntimeState {
@@ -31,7 +16,6 @@ impl RuntimeState {
         session: &SessionRecord,
         config: &Config,
         policy: &BackgroundPolicyState,
-        recovery_copies: bool,
     ) {
         if policy.quiet {
             self.worker_upgrade_observer
@@ -42,14 +26,6 @@ impl RuntimeState {
                     quiet: true,
                 });
         }
-        if recovery_copies {
-            self.recovery_observer.observe(RecoveryObservation {
-                checkpoint_wait: policy.checkpoint_wait,
-                session: session.clone(),
-                config: config.clone(),
-                latest_completed_turn_ordinal: policy.latest_completed_turn_ordinal,
-            });
-        }
     }
 
     /// Quiet workers need no new view to retry a skipped or delayed operation.
@@ -58,7 +34,6 @@ impl RuntimeState {
         let mut owner = self.owner();
         let records = owner.controller().state.sessions.clone();
         let config = owner.controller().config.clone();
-        let subagents = owner.controller().state.subagents.clone();
         owner.background_policies.retain(|session_id, policy| {
             let Some(session) = records
                 .get(session_id)
@@ -66,12 +41,7 @@ impl RuntimeState {
             else {
                 return false;
             };
-            self.observe_background_policy(
-                session,
-                &config,
-                policy,
-                keeps_recovery_copies(&subagents, session_id),
-            );
+            self.observe_background_policy(session, &config, policy);
             true
         });
     }
@@ -350,18 +320,9 @@ impl RuntimeState {
                 let policy = BackgroundPolicyState {
                     idle_replacement_blockers,
                     quiet: snapshot.operational.safe_to_replace(session.harness_kind),
-                    checkpoint_wait: snapshot
-                        .operational
-                        .routine_checkpoint_wait(session.harness_kind),
-                    latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),
                     worker_build: snapshot.worker_build.clone(),
                 };
-                self.observe_background_policy(
-                    session,
-                    &controller.config,
-                    &policy,
-                    keeps_recovery_copies(&controller.state.subagents, &session_id),
-                );
+                self.observe_background_policy(session, &controller.config, &policy);
                 owner.background_policies.insert(session_id.clone(), policy);
             } else {
                 owner.background_policies.remove(&session_id);
@@ -488,32 +449,5 @@ impl RuntimeState {
                 tracing::warn!(%error, "operator away delivery task failed");
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod recovery_copy_tests {
-    use super::keeps_recovery_copies;
-    use mj_core::subagent::SubagentKind;
-
-    // A reviewer is destroyed by the review host once its role has an
-    // outcome; 209 of 215 reviewers in the #1580 incident had a recovery
-    // copy cancelled by their own close.
-    #[test]
-    fn a_reviewer_is_never_given_a_recovery_copy_but_other_sessions_are() {
-        let mut subagents = mj_core::snapshot_map::SnapshotMap::new();
-        for (id, kind) in [
-            ("reviewer", SubagentKind::Reviewer),
-            ("worker", SubagentKind::Worker),
-            ("oracle", SubagentKind::Oracle),
-        ] {
-            let mut record = crate::daemon::tests::runtime_test_subagent(id, "parent");
-            record.kind = kind;
-            subagents.insert(id.to_owned(), record.into());
-        }
-        assert!(!keeps_recovery_copies(&subagents, "reviewer"));
-        assert!(keeps_recovery_copies(&subagents, "worker"));
-        assert!(keeps_recovery_copies(&subagents, "oracle"));
-        assert!(keeps_recovery_copies(&subagents, "top-level-session"));
     }
 }

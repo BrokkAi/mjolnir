@@ -962,6 +962,7 @@ pub enum DaemonAction {
         detail: String,
         updated_at: String,
     },
+    /// Legacy wire tombstone: rejected with guidance to suspend.
     CheckpointSession {
         session_id: String,
     },
@@ -1425,7 +1426,6 @@ pub enum DaemonReply {
     Ordinal(u64),
     Text(String),
     OptionalSessionState(Option<SessionState>),
-    Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
     ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
@@ -2730,19 +2730,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn checkpoint_session(
-        &mut self,
-        session_id: String,
-    ) -> Result<mj_core::state::CheckpointMetadata> {
-        match self
-            .request(DaemonAction::CheckpointSession { session_id })
-            .await?
-        {
-            DaemonReply::Checkpoint(checkpoint) => Ok(checkpoint),
-            reply => bail!("unexpected checkpoint reply {reply:?}"),
-        }
-    }
-
     /// Search the user's SessionWiki index, newest first when the query is
     /// empty and best match first otherwise. The reply carries the state of
     /// the index as well as the rows, so a caller can say the first build is
@@ -3718,7 +3705,12 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unchunked.
 /// The first protocol with notification cards and completion-bound transcript reads.
 pub const NOTIFICATION_STACK_PROTOCOL: u32 = 106;
-pub const PROTOCOL_VERSION: u32 = NOTIFICATION_STACK_PROTOCOL;
+/// Explicit checkpoint actions were removed; legacy requests get a clear refusal.
+pub const SUSPEND_ONLY_CHECKPOINT_PROTOCOL: u32 = NOTIFICATION_STACK_PROTOCOL + 1;
+pub const PROTOCOL_VERSION: u32 = SUSPEND_ONLY_CHECKPOINT_PROTOCOL;
+/// Guidance for clients sending the removed checkpoint action.
+pub const REMOVED_CHECKPOINT_MESSAGE: &str =
+    "The checkpoint action was removed; suspend saves the session.";
 /// The first protocol with indexed stored transcript item reads.
 pub const STORED_TRANSCRIPT_READ_PROTOCOL: u32 = 105;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;

@@ -105,7 +105,6 @@ impl ControllerRelayLease {
         match lease.take() {
             Some(lease) => drop(lease),
             None => {
-                admission.abandon_copy().await?;
                 drop(handle.lease_connection(admission).await?);
             }
         }

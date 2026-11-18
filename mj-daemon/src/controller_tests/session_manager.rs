@@ -42,18 +42,16 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     manager
         .targets
         .send_replace(vec![leased_relay_target(relay_root.path())]);
-    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
-    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
-        manager.control.clone(),
-        &recovery.observer(),
-    );
+    let recovery = manager.control.session_gate.clone();
+    let upgrades =
+        crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(manager.control.clone(), &recovery);
     let mut controller = mj_controller::controller::Controller::load().unwrap();
     controller.config.phone.enabled = false;
     controller.config.profiles.clear();
     let state = Arc::new(crate::daemon::RuntimeState::new(
         manager.control.clone(),
         controller,
-        recovery.observer(),
+        recovery.clone(),
         upgrades.observer(),
         Vec::new(),
     ));

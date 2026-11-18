@@ -2547,7 +2547,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         let copy = gate
             .try_start(
                 LEASED_RELAY_SESSION,
-                crate::recovery_gate::BackgroundWork::RecoveryCopyCapturing,
+                crate::recovery_gate::BackgroundWork::DelegationDelivery,
             )
             .unwrap();
         std::fs::write(

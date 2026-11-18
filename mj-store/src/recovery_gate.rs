@@ -1,5 +1,4 @@
 //! Per-session coordination between foreground operations and background recovery.
-use mj_core::state::RecoveryObservation;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,31 +29,8 @@ pub async fn wait_until_cancelled(flag: &AtomicBool) {
     }
 }
 
-/// Reports session activity to the recovery coordinator.
-///
-/// Reporting retains only the newest observation per session. Completed-turn
-/// frontiers are merged monotonically, so coalescing does not lose the boundary
-/// that makes a recovery copy due.
-///
-/// A caller that must know no copy can start uses [`RecoveryObserver::reserve`]
-/// rather than the queue: the reservation blocks a copy from starting whether
-/// or not queued observations have been read yet.
-#[derive(Clone)]
-pub struct RecoveryObserver {
-    pub observations: ObservationSender<PendingRecoveryObservation>,
-    pub gate: Arc<RecoveryGate>,
-}
-
-#[derive(Clone)]
-pub struct PendingRecoveryObservation {
-    pub observation: RecoveryObservation,
-    // A busy-to-idle edge releases a deferral even when both observations are
-    // folded into one pending entry before the policy consumes them.
-    pub observed_wait: bool,
-}
-
 /// A per-session reservation held by a foreground lifecycle operation. The
-/// coordinator cannot start another recovery copy until this value is dropped.
+/// gate cannot admit conflicting background work until this value is dropped.
 pub struct RecoveryReservation {
     _admission: ForegroundAdmission,
 }
@@ -92,11 +68,6 @@ pub enum BackgroundWork {
     WorkerReplacement,
     RelayRecovery,
     WorkerObservation,
-    /// Copies the session's state from the running worker. A large remote
-    /// copy takes minutes and the next one is due soon after (#1564).
-    RecoveryCopyCapturing,
-    RecoveryCopyTransferring,
-    RecoveryCopyAbandoning,
     DelegationDelivery,
     QuotaScheduling,
     /// Reconciles the session's logins (harness, AWS, GitHub, skills) with a
@@ -105,21 +76,12 @@ pub enum BackgroundWork {
 }
 
 impl BackgroundWork {
-    /// Whether this work may start while `other` holds the session.
-    ///
-    /// A credential sync runs beside a recovery copy: the worker serves its
-    /// requests on the live relay connection whatever ACP dispatch or a
-    /// checkpoint barrier is doing, and archives leave login files out. If
-    /// it had to wait, back-to-back copies of a large session would keep a
-    /// renewed login, which revokes the old one, from ever reaching it.
+    /// The operation named in admission wait notices.
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkerReplacement => "worker upgrade",
             Self::RelayRecovery => "relay recovery",
             Self::WorkerObservation => "worker readiness observation",
-            Self::RecoveryCopyCapturing => "recovery copy",
-            Self::RecoveryCopyTransferring => "recovery copy transfer",
-            Self::RecoveryCopyAbandoning => "recovery copy cleanup",
             Self::DelegationDelivery => "delegation delivery",
             Self::QuotaScheduling => "quota scheduling",
             Self::CredentialSync => "credential sync",
@@ -129,31 +91,15 @@ impl BackgroundWork {
     /// Needs exclusivity with connection holders. Quota scheduling uses
     /// actor exchanges directly, but must exclude every competing lease.
     pub fn needs_lease(self) -> bool {
-        !matches!(self, Self::CredentialSync | Self::RecoveryCopyTransferring)
+        self != Self::CredentialSync
     }
 
     fn runs_beside(self, other: Self) -> bool {
         use BackgroundWork::*;
         matches!(
             (self, other),
-            (
-                CredentialSync,
-                RecoveryCopyCapturing
-                    | RecoveryCopyTransferring
-                    | RecoveryCopyAbandoning
-                    | DelegationDelivery
-                    | QuotaScheduling
-            ) | (
-                RecoveryCopyCapturing
-                    | RecoveryCopyTransferring
-                    | RecoveryCopyAbandoning
-                    | DelegationDelivery
-                    | QuotaScheduling,
-                CredentialSync
-            ) | (RecoveryCopyTransferring, DelegationDelivery)
-                | (DelegationDelivery, RecoveryCopyTransferring)
-                | (QuotaScheduling, RecoveryCopyTransferring)
-                | (RecoveryCopyTransferring, QuotaScheduling)
+            (CredentialSync, DelegationDelivery | QuotaScheduling)
+                | (DelegationDelivery | QuotaScheduling, CredentialSync)
         )
     }
 }
@@ -855,37 +801,6 @@ impl SessionAdmission {
         Ok(ForegroundDelegationDrain(admission.clone()))
     }
 
-    pub fn narrow_copy(&self) -> anyhow::Result<()> {
-        if let Self::Background(a) = self {
-            a.narrow(BackgroundWork::RecoveryCopyTransferring)?;
-        }
-        Ok(())
-    }
-    pub async fn abandon_copy(&self) -> anyhow::Result<()> {
-        if let Self::Background(a) = self {
-            // A failure before the latch still owns its capture capability.
-            let capturing = {
-                let state =
-                    a.0.gate
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state
-                    .busy
-                    .get(&a.0.session_id)
-                    .into_iter()
-                    .flatten()
-                    .any(|holder| {
-                        Arc::ptr_eq(&holder.cancelled, &a.0.cancelled)
-                            && holder.work == BackgroundWork::RecoveryCopyCapturing
-                    })
-            };
-            if !capturing {
-                a.abandon().await?;
-            }
-        }
-        Ok(())
-    }
     pub async fn lease(&self, session_id: &str) -> anyhow::Result<RelayLeaseAdmission> {
         let (gate, admitted_session) = self.gate_and_session();
         anyhow::ensure!(
@@ -923,8 +838,7 @@ impl SessionAdmission {
                             .find(|h| Arc::ptr_eq(&h.cancelled, &a.0.cancelled))
                             .ok_or_else(|| anyhow::anyhow!("relay lease admission has ended"))?;
                         anyhow::ensure!(
-                            holder.work == BackgroundWork::RecoveryCopyAbandoning
-                                || !holder.cancelled.load(Ordering::Acquire),
+                            !holder.cancelled.load(Ordering::Acquire),
                             "{} was cancelled before taking its relay lease",
                             holder.work.label()
                         );
@@ -1056,76 +970,6 @@ impl RecoveryGate {
         ready
     }
 }
-impl RecoveryAttempt {
-    pub fn narrow(&self, kind: BackgroundWork) -> anyhow::Result<()> {
-        let mut state = self
-            .0
-            .gate
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let holder = state
-            .busy
-            .get_mut(&self.0.session_id)
-            .into_iter()
-            .flatten()
-            .find(|h| Arc::ptr_eq(&h.cancelled, &self.0.cancelled))
-            .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
-        anyhow::ensure!(
-            holder.work == BackgroundWork::RecoveryCopyCapturing
-                && kind == BackgroundWork::RecoveryCopyTransferring,
-            "invalid recovery copy transition"
-        );
-        holder.work = kind;
-        self.0.gate.publish_busy(&state);
-        Ok(())
-    }
-    pub async fn abandon(&self) -> anyhow::Result<()> {
-        let mut changed = self.0.gate.subscribe();
-        loop {
-            {
-                let mut state = self
-                    .0
-                    .gate
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let holders = state
-                    .busy
-                    .get_mut(&self.0.session_id)
-                    .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
-                let own = holders
-                    .iter()
-                    .position(|h| Arc::ptr_eq(&h.cancelled, &self.0.cancelled))
-                    .ok_or_else(|| anyhow::anyhow!("copy admission has ended"))?;
-                anyhow::ensure!(
-                    matches!(
-                        holders[own].work,
-                        BackgroundWork::RecoveryCopyTransferring
-                            | BackgroundWork::RecoveryCopyAbandoning
-                    ),
-                    "only a transferring copy can abandon"
-                );
-                // Publish the stronger kind before waiting, so another delivery
-                // cannot overtake cleanup while the existing delivery stops.
-                holders[own].work = BackgroundWork::RecoveryCopyAbandoning;
-                let mut delivery = false;
-                for h in holders.iter() {
-                    if h.work == BackgroundWork::DelegationDelivery {
-                        h.cancelled.store(true, Ordering::Release);
-                        delivery = true;
-                    }
-                }
-                if !delivery && !state.leases.contains_key(&self.0.session_id) {
-                    self.0.gate.publish_busy(&state);
-                    return Ok(());
-                }
-            }
-            changed.changed().await?;
-        }
-    }
-}
-
 /// Per-session latest-state mailbox shared by the two background policies.
 /// A capacity-one wake channel never queues an observation history.
 #[derive(Clone)]
@@ -1200,48 +1044,6 @@ impl<T> ObservationReceiver<T> {
     }
 }
 
-impl RecoveryObserver {
-    /// Queues one observation for the coordinator. Returns as soon as the
-    /// observation is queued; a stopped coordinator makes this a no-op.
-    pub fn observe(&self, observation: RecoveryObservation) {
-        let pending = PendingRecoveryObservation {
-            observed_wait: observation.checkpoint_wait.is_some(),
-            observation,
-        };
-        self.observations.send(
-            pending.observation.session.id.clone(),
-            pending,
-            |previous, next| {
-                next.observed_wait |= previous.observed_wait;
-                next.observation.latest_completed_turn_ordinal = next
-                    .observation
-                    .latest_completed_turn_ordinal
-                    .max(previous.observation.latest_completed_turn_ordinal);
-            },
-        );
-    }
-
-    pub fn is_busy(&self, session_id: &str) -> bool {
-        self.gate.is_busy(session_id)
-    }
-
-    /// Holds off any recovery copy for this session until the returned
-    /// reservation is dropped. This, not the observation queue, is what a
-    /// lifecycle operation relies on: queued observations may still be
-    /// unread, and the coordinator refuses to start a copy for a reserved
-    /// session whenever it reads them.
-    pub fn reserve(&self, session_id: &str) -> RecoveryReservation {
-        self.gate.reserve(session_id)
-    }
-
-    /// Asks an in-flight recovery copy for this session to stop. A foreground
-    /// lifecycle operation calls this after reserving so it preempts the copy
-    /// instead of waiting behind it.
-    pub fn cancel_busy(&self, session_id: &str) {
-        self.gate.cancel_busy(session_id);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,7 +1100,7 @@ mod tests {
     fn lifecycle_reservation_waits_for_every_holder_it_preempts() {
         let gate = Arc::new(RecoveryGate::default());
         let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let sync = gate
             .try_start("session", BackgroundWork::CredentialSync)
@@ -1351,7 +1153,7 @@ mod tests {
             let gate = Arc::new(RecoveryGate::default());
             let worker_gate = gate.clone();
             let worker = std::thread::spawn(move || {
-                worker_gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+                worker_gate.try_start("session", BackgroundWork::DelegationDelivery)
             });
             gate.close();
             if let Ok(attempt) = worker.join().unwrap() {
@@ -1360,7 +1162,7 @@ mod tests {
                 drop(attempt);
             }
             assert!(
-                gate.try_start("late", BackgroundWork::RecoveryCopyCapturing)
+                gate.try_start("late", BackgroundWork::DelegationDelivery)
                     .is_err()
             );
             assert!(gate.busy_sessions().is_empty());
@@ -1371,12 +1173,12 @@ mod tests {
     fn old_attempt_identity_cannot_release_a_replacement() {
         let gate = Arc::new(RecoveryGate::default());
         let old = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let identity = old.cancellation();
         drop(old);
         let replacement = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         gate.finish("session", &identity);
         assert!(gate.is_busy("session"));
@@ -1396,7 +1198,7 @@ mod tests {
                         drop(
                             gate.try_start(
                                 &session.to_string(),
-                                BackgroundWork::RecoveryCopyCapturing,
+                                BackgroundWork::DelegationDelivery,
                             )
                             .unwrap(),
                         );
@@ -1412,7 +1214,7 @@ mod tests {
     async fn aborting_a_blocking_waiter_keeps_admission_until_executor_settles() {
         let gate = Arc::new(RecoveryGate::default());
         let attempt = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
@@ -1440,19 +1242,19 @@ mod tests {
     async fn panicking_executor_retains_admission_until_failure_is_settled() {
         let gate = Arc::new(RecoveryGate::default());
         let attempt = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let (result, settlement) = attempt
             .run_blocking::<()>(|_| panic!("executor failed"))
             .await;
         assert!(result.unwrap_err().is_panic());
         assert!(
-            gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            gate.try_start("session", BackgroundWork::DelegationDelivery)
                 .is_err()
         );
         drop(settlement);
         assert!(
-            gate.try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            gate.try_start("session", BackgroundWork::DelegationDelivery)
                 .is_ok()
         );
     }
@@ -1473,7 +1275,7 @@ mod tests {
         assert_eq!(receiver.recv().await, None);
     }
 
-    /// A review waits for a recovery copy already running, then holds the
+    /// A review waits for background delivery already running, then holds the
     /// session so no copy or worker upgrade can start until it is done.
     // Hard-won: 352a87453: a review hold blocked foreground work and daemon handoff.
     // Hard-won: 373784672: a waiting review blocked credential sync beside a recovery copy.
@@ -1481,7 +1283,7 @@ mod tests {
     async fn reserving_when_idle_waits_for_running_work_then_blocks_new_work() {
         let gate = Arc::new(RecoveryGate::default());
         let copy = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session-1", BackgroundWork::DelegationDelivery)
             .expect("the slot starts free");
         let mut waiter = Box::pin(gate.reserve_when_idle("session-1"));
         assert!(futures::poll!(&mut waiter).is_pending());
@@ -1502,12 +1304,12 @@ mod tests {
             "an admitted review excludes new background work"
         );
         assert!(
-            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            gate.try_start("session-1", BackgroundWork::WorkerReplacement)
                 .is_err(),
-            "no copy or upgrade starts while the review holds the session"
+            "no worker upgrade starts while the review holds the session"
         );
         assert!(
-            gate.try_start("session-2", BackgroundWork::RecoveryCopyCapturing)
+            gate.try_start("session-2", BackgroundWork::DelegationDelivery)
                 .is_ok(),
             "other sessions are free"
         );
@@ -1536,7 +1338,7 @@ mod tests {
             .unwrap();
         drop(reservation);
         let refusal = gate
-            .try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session-1", BackgroundWork::DelegationDelivery)
             .err()
             .unwrap();
         assert_eq!(
@@ -1546,7 +1348,7 @@ mod tests {
         );
         drop(foreground);
         assert!(
-            gate.try_start("session-1", BackgroundWork::RecoveryCopyCapturing)
+            gate.try_start("session-1", BackgroundWork::DelegationDelivery)
                 .is_ok()
         );
     }
@@ -1589,7 +1391,7 @@ mod tests {
         let gate = Arc::new(RecoveryGate::default());
         let notices = Notices::default();
         let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let sync = gate
             .try_start("session", BackgroundWork::CredentialSync)
@@ -1623,11 +1425,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             notices.0.lock().unwrap().as_slice(),
-            &["Waiting for recovery copy and credential sync to stop"]
+            &["Waiting for delegation delivery and credential sync to stop"]
         );
         assert_eq!(
             refusal.holders,
-            vec!["recovery copy", "credential sync", "Move"]
+            vec!["delegation delivery", "credential sync", "Move"]
         );
         assert!(copy.load(Ordering::Acquire));
         assert!(sync.load(Ordering::Acquire));
@@ -1651,7 +1453,7 @@ mod tests {
         );
         drop(second);
         let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
+            .try_start("session", BackgroundWork::DelegationDelivery)
             .unwrap();
         let mut waiting = Box::pin(gate.enter_foreground(
             "session",
@@ -1667,78 +1469,6 @@ mod tests {
         assert!(
             gate.try_start("session", BackgroundWork::WorkerReplacement)
                 .is_ok()
-        );
-    }
-}
-
-#[cfg(test)]
-mod copy_transition_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_transferring_copy_admits_delegation_and_abandonment_preempts_it() {
-        let gate = Arc::new(RecoveryGate::default());
-        let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
-            .unwrap();
-        assert!(
-            gate.try_start("session", BackgroundWork::DelegationDelivery)
-                .is_err()
-        );
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
-        drop(sync);
-        copy.narrow(BackgroundWork::RecoveryCopyTransferring)
-            .unwrap();
-        assert!(copy.narrow(BackgroundWork::RecoveryCopyCapturing).is_err());
-        let sync = gate
-            .try_start("session", BackgroundWork::CredentialSync)
-            .unwrap();
-        drop(sync);
-        let delivery = gate
-            .try_start("session", BackgroundWork::DelegationDelivery)
-            .unwrap();
-        let delivery_lease = delivery.admission().lease("session").await.unwrap();
-        let mut abandoning = Box::pin(copy.abandon());
-        assert!(futures::poll!(&mut abandoning).is_pending());
-        assert!(delivery.load(Ordering::Acquire));
-        let cancelled = AtomicBool::new(false);
-        let mut foreground = Box::pin(gate.enter_foreground(
-            "session",
-            "Move",
-            crate::recovery_gate::LifecycleOrigin::Person,
-            &cancelled,
-            &mj_core::targets::ProcessExecutor,
-        ));
-        assert!(futures::poll!(&mut foreground).is_pending());
-        drop(delivery);
-        assert!(futures::poll!(&mut abandoning).is_pending());
-        drop(delivery_lease);
-        tokio::time::timeout(std::time::Duration::from_secs(1), abandoning)
-            .await
-            .unwrap()
-            .unwrap();
-        let cleanup = copy.admission().lease("session").await.unwrap();
-        assert!(futures::poll!(&mut foreground).is_pending());
-        drop(cleanup);
-        drop(copy);
-        let foreground = foreground.await.unwrap();
-        drop(foreground);
-        // Without a pending foreground, cleanup still permits credentials.
-        let copy = gate
-            .try_start("session", BackgroundWork::RecoveryCopyCapturing)
-            .unwrap();
-        copy.narrow(BackgroundWork::RecoveryCopyTransferring)
-            .unwrap();
-        copy.abandon().await.unwrap();
-        assert!(
-            gate.try_start("session", BackgroundWork::CredentialSync)
-                .is_ok()
-        );
-        assert!(
-            gate.try_start("session", BackgroundWork::DelegationDelivery)
-                .is_err()
         );
     }
 }

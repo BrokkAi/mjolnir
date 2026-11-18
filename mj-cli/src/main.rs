@@ -128,8 +128,9 @@ enum Command {
     Import(ImportArgs),
     /// Find, adopt, or explicitly destroy managed workers missing from state.
     Recover(RecoverArgs),
-    /// Create a verified recovery copy for an active session.
-    Checkpoint(CheckpointArgs),
+    /// Removed; suspend saves the session.
+    #[command(hide = true)]
+    Checkpoint(RemovedCommandArgs),
     /// Move a session to another configured profile and/or target.
     Move(MoveArgs),
     /// Preview or explicitly queue a storage-preserving container upgrade.
@@ -264,6 +265,9 @@ struct RemovedCommandArgs {
 /// What a removed command was replaced by, for a command that was removed.
 fn replacement_notice(command: Option<&Command>) -> Option<&'static str> {
     match command {
+        Some(Command::Checkpoint(_)) => {
+            Some("`mj checkpoint` was removed; `mj suspend` saves the session")
+        }
         Some(Command::Close(_)) => Some("`mj close` was replaced by `mj suspend` and `mj destroy`"),
         Some(Command::CancelTurn(_)) => {
             Some("`mj cancel-turn` was replaced by `mj interrupt-turn`")
@@ -337,13 +341,6 @@ struct DaemonStopArgs {
     /// pushed.
     #[arg(long, requires = "suspend_sessions")]
     acknowledge_unpublished_work: bool,
-}
-
-#[derive(Debug, Args)]
-struct CheckpointArgs {
-    /// Session id, as `mj sessions` lists it.
-    #[arg(long)]
-    session: String,
 }
 
 #[derive(Debug, Args)]
@@ -1106,17 +1103,6 @@ async fn run_command(
             Ok(DashboardExit::Normal)
         }
         Some(Command::Recover(args)) => recover(args).await.map(|()| DashboardExit::Normal),
-        Some(Command::Checkpoint(args)) => {
-            let checkpoint = daemon::connect_or_start()
-                .await?
-                .checkpoint_session(args.session.clone())
-                .await?;
-            println!(
-                "saved recovery copy for {} at event {}",
-                args.session, checkpoint.event_frontier
-            );
-            Ok(DashboardExit::Normal)
-        }
         Some(Command::UpgradeContainer {
             session,
             acknowledge_writable_layer_loss,
@@ -1295,7 +1281,7 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         // Answered in `main` before anything starts.
-        Some(command @ (Command::Close(_) | Command::CancelTurn(_))) => {
+        Some(command @ (Command::Close(_) | Command::CancelTurn(_) | Command::Checkpoint(_))) => {
             bail!("{}", replacement_notice(Some(&command)).unwrap_or_default())
         }
     }
@@ -3080,6 +3066,10 @@ mod tests {
     fn a_removed_command_names_its_replacement_whatever_it_was_given() {
         for (argv, replacement) in [
             (
+                vec!["mj", "checkpoint", "--session", "s1"],
+                "`mj suspend` saves the session",
+            ),
+            (
                 vec!["mj", "close", "--session", "s1"],
                 "`mj suspend` and `mj destroy`",
             ),
@@ -3097,7 +3087,10 @@ mod tests {
             .render_help()
             .to_string();
         assert!(
-            !help.contains("cancel-turn"),
+            !help.contains("cancel-turn")
+                && !help
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("checkpoint ")),
             "the old names stay out of --help"
         );
     }

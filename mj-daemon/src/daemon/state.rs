@@ -37,20 +37,20 @@ fn session_message_terminal_reason(state: Option<SessionState>) -> Option<String
 
 impl RuntimeState {
     pub(crate) fn worker_background_gate(&self) -> Arc<mj_controller::recovery_gate::RecoveryGate> {
-        self.recovery_observer.gate.clone()
+        self.session_gate.clone()
     }
 
     pub(crate) fn new(
         session_manager: SessionManagerControl,
         controller: Controller,
-        recovery_observer: RecoveryObserver,
+        session_gate: Arc<RecoveryGate>,
         worker_upgrade_observer: WorkerUpgradeObserver,
         workspaces: Vec<WorkspaceRecord>,
     ) -> Self {
         let mut state = Self::new_with_controller_loader(
             session_manager,
             controller,
-            recovery_observer,
+            session_gate,
             worker_upgrade_observer,
             workspaces,
             Controller::load,
@@ -64,7 +64,7 @@ impl RuntimeState {
     pub(super) fn new_with_controller_loader(
         session_manager: SessionManagerControl,
         controller: Controller,
-        recovery_observer: RecoveryObserver,
+        session_gate: Arc<RecoveryGate>,
         worker_upgrade_observer: WorkerUpgradeObserver,
         workspaces: Vec<WorkspaceRecord>,
         controller_loader: fn() -> Result<Controller>,
@@ -108,7 +108,7 @@ impl RuntimeState {
                 })
             },
             revisions.notifier(),
-            Some(recovery_observer.gate.clone()),
+            Some(session_gate.clone()),
             reviewer_runtime.clone(),
         );
         let inactivity = auto_afk::Inactivity::new(controller.config.advanced.auto_afk_minutes);
@@ -146,7 +146,7 @@ impl RuntimeState {
             mbx_install_wake: crate::daemon::mbx_service::InstallWake::default(),
             projects: Arc::new(mj_controller::project_catalog::Catalog::default()),
             profile_catalog,
-            recovery_observer,
+            session_gate,
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),

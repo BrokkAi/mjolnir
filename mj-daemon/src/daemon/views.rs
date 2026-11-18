@@ -27,7 +27,7 @@ pub(super) enum StalledLifecycle {
 
 impl RuntimeState {
     pub(crate) fn session_gate(&self) -> &Arc<mj_controller::recovery_gate::RecoveryGate> {
-        &self.recovery_observer.gate
+        &self.session_gate
     }
 
     fn request_lifecycle_cancel(
@@ -349,8 +349,7 @@ impl RuntimeState {
         self.session_manager.session(session_id.to_owned()).await
     }
 
-    /// Checkpoint a session now and publish the result, the way the daemon's
-    /// own checkpoint action does.
+    /// Capture an archive for the API bundle export.
     ///
     /// The API's bundle export needs a fresh archive for a running session. Only
     /// that session's own lifecycle operation can conflict with its checkpoint,
@@ -358,17 +357,16 @@ impl RuntimeState {
     /// [`SessionLifecycleBusy`] the export path can fall back on. It must not
     /// take the process-wide lifecycle guard: that rejected every export while
     /// any unrelated session anywhere was mid-lifecycle (#1010).
-    pub async fn checkpoint_session_now(
+    pub(crate) async fn checkpoint_for_bundle_export(
         &self,
         session_id: &str,
     ) -> Result<mj_core::state::CheckpointMetadata> {
-        let _upgrade_work = mj_controller::upgrade::activity("requested checkpoint")?;
+        let _upgrade_work = mj_controller::upgrade::activity("bundle export checkpoint")?;
         if let Some(busy) = self.session_lifecycle_busy(session_id) {
             return Err(anyhow::Error::new(busy));
         }
         let session_admission = mj_controller::recovery_gate::SessionAdmission::Foreground(
-            self.recovery_observer
-                .gate
+            self.session_gate
                 .enter_foreground(
                     session_id,
                     "checkpoint",
@@ -385,7 +383,7 @@ impl RuntimeState {
         let checkpoint = blocking(move || {
             let mut controller = Controller::load()?;
             mj_core::runtime::block_on(
-                controller.checkpoint_session(&session_admission, &session_id),
+                controller.checkpoint_for_bundle_export(&session_admission, &session_id),
             )?
         })
         .await?;
