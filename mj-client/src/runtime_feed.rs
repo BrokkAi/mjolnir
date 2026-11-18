@@ -404,6 +404,9 @@ pub struct RuntimeMetadata {
     /// The daemon's Restart verdict; surfaces warn before replacing these containers.
     #[serde(default)]
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
+    /// Sessions whose stored launch request can be retried through Resume.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub failed_launch_retries: std::collections::BTreeSet<String>,
 }
 
 impl RuntimeMetadata {

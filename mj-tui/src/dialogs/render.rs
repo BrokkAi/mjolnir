@@ -72,6 +72,9 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         }
         Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
         Confirmation::RecoverFailed {
+            retry_launch: true, ..
+        } => &["Cancel", "Open transcript", "Retry launch"],
+        Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
         Confirmation::RecoverFailed { .. } => &["Cancel", "Open transcript"],
@@ -1617,6 +1620,7 @@ pub(crate) fn confirmation_body(
             session_id,
             error,
             recoverable,
+            retry_launch,
         } => {
             let mut lines = vec![session_line(session_id, session_name, width), Line::raw("")];
             match error {
@@ -1627,7 +1631,12 @@ pub(crate) fn confirmation_body(
                 None => lines.push(Line::raw("This session failed without a recorded error.")),
             }
             lines.push(Line::raw(""));
-            if *recoverable {
+            if *retry_launch {
+                lines.push(Line::raw("Relaunch this session with its saved settings."));
+                lines.push(Line::raw(
+                    "Prompts that failed with the previous launch are not resent.",
+                ));
+            } else if *recoverable {
                 lines.push(Line::raw(
                     "Recover repairs the existing environment, or restores its recovery copy if absent.",
                 ));

@@ -2,33 +2,26 @@ use mj_core::targets::CommandActivity;
 
 use super::*;
 
-/// What `RuntimeState::cancel_stalled_create` found.
-pub(super) enum CreateProgress {
-    /// No Create is running for the session.
+/// Whether an automatic lifecycle has stopped making progress.
+pub(super) enum LifecycleStallProgress {
     NotRunning,
-    /// A Create is running and is either in a stage or recently was.
-    Running,
-    /// A Create has gone past the bound without progress.
+    /// The next possible stall, if the operation currently has a clock.
+    Running(Option<tokio::time::Instant>),
     Stalled {
         idle: Duration,
         /// The stages it is in; empty between stages.
         stages: Vec<String>,
         /// The stalled stream, when a transfer owns the idle clock.
         stream: Option<String>,
-        /// What the stall check found when it asked the Create to cancel.
-        phase: StalledCreate,
+        phase: StalledLifecycle,
     },
 }
 
-/// The Create's lifecycle phase when the stall check asked it to cancel.
+/// The lifecycle phase when the stall check asked it to cancel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum StalledCreate {
-    /// The cancel was accepted.
+pub(super) enum StalledLifecycle {
     Cancelled,
-    /// A cancel was already under way, so this one added nothing.
     AlreadyCancelling,
-    /// The Create has committed and cannot be cancelled; it stays with its
-    /// caller.
     Committed,
 }
 
@@ -639,7 +632,10 @@ impl RuntimeState {
         let mut owner = self.owner();
         let operation = owner.lifecycle.get_mut(session_id)?;
         if operation.operation_id != operation_id
-            || operation.kind != LifecycleKind::Create
+            || !matches!(
+                operation.kind,
+                LifecycleKind::Create | LifecycleKind::Unpark
+            )
             || !operation.is_running()
         {
             return None;
@@ -685,6 +681,9 @@ impl RuntimeState {
                         last_byte: now,
                     },
                 );
+                if let Some(started) = &progress.stream_started {
+                    started.notify_one();
+                }
             }
             CommandActivity::StdinBytes(bytes) => {
                 if bytes != 0
@@ -702,23 +701,26 @@ impl RuntimeState {
         }
     }
 
-    /// Decide and cancel a stalled Create under the same owner lock that
-    /// records provisioning stage changes and transfer progress.
-    ///
-    /// Cancelling is what ends the stall: failing only the reviewer start
-    /// would leave the Create running with its lifecycle admission held, and
-    /// that admission blocks daemon handoff.
-    pub(super) fn cancel_stalled_create(
+    /// Decide and cancel a stall under the same owner lock that records
+    /// provisioning stages and bytes written. An active stream owns the
+    /// clock, even if another stage is waiting for a slot.
+    pub(super) fn cancel_stalled_lifecycle(
         &self,
         session_id: &str,
+        kind: LifecycleKind,
         bound: Duration,
-    ) -> CreateProgress {
+    ) -> LifecycleStallProgress {
+        let cancel_cause = match kind {
+            LifecycleKind::Create => "create stalled",
+            LifecycleKind::Unpark => "unpark stream stalled",
+            _ => return LifecycleStallProgress::NotRunning,
+        };
         let mut owner = self.owner();
         let Some(operation) = owner.lifecycle.get_mut(session_id) else {
-            return CreateProgress::NotRunning;
+            return LifecycleStallProgress::NotRunning;
         };
-        if operation.kind != LifecycleKind::Create || !operation.is_running() {
-            return CreateProgress::NotRunning;
+        if operation.kind != kind || !operation.is_running() {
+            return LifecycleStallProgress::NotRunning;
         }
         let progress = &operation.progress;
         let (since, stream) = match progress
@@ -727,29 +729,32 @@ impl RuntimeState {
             .min_by_key(|stream| stream.last_byte)
         {
             Some(stream) => (stream.last_byte, Some(stream.purpose.as_str())),
-            None if operation
-                .active_stages
-                .keys()
-                .any(ProvisionStage::pauses_stall_clock) =>
+            // Unpark already bounds its other work. Before stdin starts,
+            // including while queued for SSH, there is no stream to cancel.
+            None if kind == LifecycleKind::Unpark
+                || operation
+                    .active_stages
+                    .keys()
+                    .any(ProvisionStage::pauses_stall_clock) =>
             {
-                return CreateProgress::Running;
+                return LifecycleStallProgress::Running(None);
             }
             None => (progress.last_stage_change, None),
         };
         let idle = since.elapsed();
         if idle < bound {
-            return CreateProgress::Running;
+            return LifecycleStallProgress::Running(Some(since + bound));
         }
         let stream = stream.map(str::to_owned);
         let stages = operation.stage_labels();
-        let phase = if operation.request_cancel(session_id, "create stalled") {
-            StalledCreate::Cancelled
+        let phase = if operation.request_cancel(session_id, cancel_cause) {
+            StalledLifecycle::Cancelled
         } else if matches!(operation.phase, LifecyclePhase::Cancelling) {
-            StalledCreate::AlreadyCancelling
+            StalledLifecycle::AlreadyCancelling
         } else {
-            StalledCreate::Committed
+            StalledLifecycle::Committed
         };
-        CreateProgress::Stalled {
+        LifecycleStallProgress::Stalled {
             idle,
             stages,
             stream,

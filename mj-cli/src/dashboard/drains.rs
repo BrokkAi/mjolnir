@@ -468,6 +468,8 @@ impl DashboardContext {
         self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
             .set_container_upgrade_sessions(update.container_upgrade_sessions);
+        self.dashboard
+            .set_failed_launch_retries(update.failed_launch_retries);
         self.dashboard.set_target_storage(update.storage);
         self.dashboard
             .set_container_capacities(update.container_capacities);

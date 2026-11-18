@@ -372,6 +372,20 @@ without the cache. Nothing is synchronized between hosts, and Mjolnir never
 runs mbx garbage collection: the host's own mbx and the automatic collection
 inside containers are the only collectors.
 
+Containers read the host's mbx configuration as-is. Leave the linker out of
+it: any mbx linker selection, managed (`mold@<version>`) or `path:`, makes rustc
+link through `clang`, so every image on the host would need clang, and a
+`path:` linker would also have to exist at that path inside each image. A
+project that wants a faster linker selects a managed one in its workspace
+`.mbx.toml` and installs clang through its
+[project recipe](/project-environments/):
+
+```toml
+# .mbx.toml at the repository root
+[linker]
+default = "mold@2.42.1"
+```
+
 ### Settings
 
 Caching is enabled by default where supported. Configure it under

@@ -1856,6 +1856,7 @@ fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
             session_id: "session-1".into(),
             error: Some("worker bootstrap failed: upload failed".into()),
             recoverable: true,
+            retry_launch: false,
         }
     );
 
@@ -1902,8 +1903,40 @@ fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
             session_id: "session-1".into(),
             error: Some("worker bootstrap failed".into()),
             recoverable: false,
+            retry_launch: false,
         }
     );
+}
+
+#[test]
+fn retry_launch_from_the_failed_session_dialog_uses_the_saved_destination() {
+    let mut session = stopped_session();
+    session.state = SessionState::Error;
+    session.checkpoint = None;
+    session.target = None;
+    let expected = DashboardAction::ResumeSession {
+        session_id: session.id.clone(),
+        workspace_id: session.workspace_id.clone(),
+        profile_id: session.last_profile.clone(),
+        target_template_id: session.target_template_id.clone(),
+        additional_mounts: session.additional_mounts.clone(),
+        resource_allocation: session.resource_allocation.clone(),
+        discard_queue: false,
+    };
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.set_failed_launch_retries([id].into());
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Retry launch"), "{rendered}");
+
+    assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), expected);
+    assert!(!matches!(dashboard.mode, Mode::Resume(_)));
 }
 
 // Hard-won: 94d7 resume: failed sessions could retain current work without an archive.

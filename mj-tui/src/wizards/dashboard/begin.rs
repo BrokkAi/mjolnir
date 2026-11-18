@@ -152,6 +152,17 @@ impl DashboardState {
         let Some(session) = self.session_record(session_id).cloned() else {
             return DashboardAction::None;
         };
+        if self.failed_launch_retries.contains(session_id) {
+            return DashboardAction::ResumeSession {
+                session_id: session.id,
+                workspace_id: session.workspace_id,
+                profile_id: session.last_profile,
+                target_template_id: session.target_template_id,
+                additional_mounts: session.additional_mounts,
+                resource_allocation: session.resource_allocation,
+                discard_queue: false,
+            };
+        }
         let session = &session;
         if session.state.is_active() && session.state != SessionState::Error {
             self.notices

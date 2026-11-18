@@ -1023,6 +1023,7 @@ pub struct DashboardState {
     pub(crate) recent_launch: Option<mj_core::go::RecentLaunch>,
     /// The daemon's verdict, delivered with its records in the same runtime frame.
     pub(crate) container_upgrade_sessions: BTreeSet<String>,
+    pub(crate) failed_launch_retries: BTreeSet<String>,
     pub(crate) session_operations: Tracked<BTreeMap<String, SessionOperationDisplay>>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
@@ -1359,6 +1360,7 @@ impl DashboardState {
             launch_recency,
             recent_launch: None,
             container_upgrade_sessions: BTreeSet::new(),
+            failed_launch_retries: BTreeSet::new(),
             go: None,
             simple_mode: false,
             launch_project_directory: None,

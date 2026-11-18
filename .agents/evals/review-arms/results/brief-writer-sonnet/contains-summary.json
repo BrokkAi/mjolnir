@@ -1,0 +1,164 @@
+{
+  "judge": {
+    "session_id": "fed401f850962581cac28ac1555fd853",
+    "profile": "codex4",
+    "time_ns": 1794950782439966736,
+    "config": {
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "collaboration_mode": "default",
+      "fast-mode": "off"
+    },
+    "prompted": 1794950879186223840
+  },
+  "definition": "Stage-A contains rule. Diagnostic only.",
+  "counts": {
+    "P": {
+      "blind": {
+        "yes": 6,
+        "partial": 10,
+        "no": 2
+      },
+      "blind-sonnet": {
+        "yes": 2,
+        "partial": 14,
+        "no": 2
+      }
+    },
+    "S": {
+      "blind": {
+        "yes": 1,
+        "partial": 2,
+        "no": 1
+      },
+      "blind-sonnet": {
+        "yes": 2,
+        "partial": 2,
+        "no": 0
+      }
+    }
+  },
+  "paired_full_fact": {
+    "P": {
+      "neither": 11,
+      "Sonnet only": 1,
+      "both": 1,
+      "Sol only": 5
+    },
+    "S": {
+      "Sonnet only": 1,
+      "neither": 2,
+      "both": 1
+    }
+  },
+  "hashes": {
+    "key.json": "bfc7fc7e510585e5536f6de504085ddc3e94a3fef98e221ead54e7ea0a724799",
+    "unit/CONTAINS.md": "d989e66e01df153ac98450c2e5906ccf5e8c37a0721924596cab6ab1c4ea5609",
+    "unit/contains.jsonl": "1d3fc9b219e7d8ea46f78656ab0902338e59f8eee887677e25e54d521c73eeb3"
+  },
+  "usage": {
+    "session_id": "fed401f850962581cac28ac1555fd853",
+    "turns": [
+      {
+        "answered_through": 590,
+        "usage": {
+          "scope": "turn",
+          "total_tokens": 1329391,
+          "input_tokens": 91046,
+          "output_tokens": 11081,
+          "thought_tokens": 2210,
+          "cached_read_tokens": 1227264,
+          "cached_write_tokens": 0
+        },
+        "command_id": "review-arms-writer-contains-sonnet-batch-unit-fed401f85096",
+        "accepted_ordinal": 302,
+        "turn_start_position": 303,
+        "completed_ordinal": 590,
+        "completed_at_ms": 1794951240435,
+        "outcome": {
+          "kind": "completed",
+          "stop_reason": "EndTurn"
+        }
+      }
+    ],
+    "next_after_seq": 590,
+    "latest_seq": 590,
+    "totals": {
+      "cached_read_tokens": {
+        "tokens": 1227264,
+        "reported_turns": 1
+      },
+      "cached_write_tokens": {
+        "tokens": 0,
+        "reported_turns": 1
+      },
+      "input_tokens": {
+        "tokens": 91046,
+        "reported_turns": 1
+      },
+      "output_tokens": {
+        "tokens": 11081,
+        "reported_turns": 1
+      },
+      "thought_tokens": {
+        "tokens": 2210,
+        "reported_turns": 1
+      },
+      "total_tokens": {
+        "tokens": 1329391,
+        "reported_turns": 1
+      }
+    },
+    "coverage": {
+      "recorded_turns": 1,
+      "full_turn_reports": 1,
+      "last_request_reports": 0,
+      "unspecified_reports": 0,
+      "missing_reports": 0,
+      "unfinished_turns": 0,
+      "provider_cost_turns": 0,
+      "estimated_cost_turns": 1,
+      "missing_cost_turns": 0
+    },
+    "turn_cost_usd_ticks": 4156284000,
+    "turn_selections": {
+      "review-arms-writer-contains-sonnet-batch-unit-fed401f85096": {
+        "model": "gpt-6.1-sol",
+        "effort": null
+      }
+    },
+    "by_model": [
+      {
+        "model": "gpt-6.1-sol",
+        "effort": null,
+        "totals": {
+          "cached_read_tokens": {
+            "tokens": 1227264,
+            "reported_turns": 1
+          },
+          "cached_write_tokens": {
+            "tokens": 0,
+            "reported_turns": 1
+          },
+          "input_tokens": {
+            "tokens": 91046,
+            "reported_turns": 1
+          },
+          "output_tokens": {
+            "tokens": 11081,
+            "reported_turns": 1
+          },
+          "thought_tokens": {
+            "tokens": 2210,
+            "reported_turns": 1
+          },
+          "total_tokens": {
+            "tokens": 1329391,
+            "reported_turns": 1
+          }
+        }
+      }
+    ]
+  },
+  "prompt_to_completion_s": 361.249
+}

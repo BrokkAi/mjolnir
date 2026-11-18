@@ -125,6 +125,7 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
+        let memory_relay = targets::project_memory_relay_command(&backend, session_id)?;
         let worker_root = targets::worker_root(&backend, session_id)?;
         let harness_home = target_profile_home(&backend, session_id, profile);
         let harness_home = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
@@ -443,9 +444,11 @@ impl Controller {
         // idle. Ordinary attach and polling deliberately never touch it.
         let memory_sync_cancel = tokio_util::sync::CancellationToken::new();
         {
-            let sync = relay
-                .connection_mut()
-                .sync_project_memory(&self.config, memory_sync_cancel.clone());
+            let sync = relay.connection_mut().sync_project_memory(
+                &memory_relay,
+                &self.config,
+                memory_sync_cancel.clone(),
+            );
             tokio::pin!(sync);
             let cancelled = async {
                 loop {

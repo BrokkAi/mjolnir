@@ -1972,11 +1972,34 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
         Ok(Some(host_capacity_usage())),
         now_epoch_seconds(),
     );
+    let fresh_width = capacity_table_width(&failed);
     failed.apply_deployment_capacity("local", Err("probe timed out".into()), now_epoch_seconds());
+    assert_eq!(
+        capacity_table_width(&failed),
+        fresh_width,
+        "a notice must not widen the Targets table"
+    );
     let rendered = drawn_dashboard(&mut failed, 200);
     assert!(rendered.contains("37%"), "{rendered}");
     assert!(rendered.contains("75%"), "{rendered}");
     assert!(rendered.contains("stale: probe timed out"), "{rendered}");
+
+    // The notice takes its own line inside the target's row, starting under
+    // the Targets column and running on across the columns after it, so the
+    // pane never asks for a wider terminal to show it.
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let readings = lines
+        .iter()
+        .position(|line| line.contains("37%"))
+        .expect("the row of readings");
+    let notice = lines[readings + 1];
+    assert!(notice.contains("stale: probe timed out"), "{rendered}");
+    assert_eq!(
+        notice.find("stale"),
+        lines[readings].find("podman"),
+        "{rendered}"
+    );
+    assert_eq!(capacity_table_lines(&failed), 2, "{rendered}");
 
     let mut aged = DashboardState::new(config(), State::default(), BTreeMap::new());
     aged.set_deployment_capacity_targets(vec![test_capacity_target()]);
@@ -1998,6 +2021,169 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
     let rendered = drawn_dashboard(&mut never_sampled, 200);
     assert!(rendered.contains("unavailable"), "{rendered}");
     assert!(!rendered.contains("stale"), "{rendered}");
+}
+
+/// A notice never costs the readings their place. A table row taller than the
+/// pane makes the table scroll past the selected row, so in a pane with room
+/// for one content line the reading keeps that line and the notice waits for
+/// the room it needs.
+#[test]
+fn a_one_line_targets_viewport_keeps_a_stale_reading_on_screen() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(host_capacity_usage())),
+        now_epoch_seconds(),
+    );
+    dashboard.apply_deployment_capacity(
+        "local",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
+
+    let drawn = |dashboard: &mut DashboardState, height: u16| {
+        let mut terminal = Terminal::new(TestBackend::new(40, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                dashboard.begin_surface_frame();
+                render_capacity(frame, Rect::new(0, 0, 40, height), dashboard, None);
+                dashboard.end_surface_frame();
+            })
+            .expect("draw the Targets pane");
+        buffer_lines(terminal.backend().buffer())
+    };
+
+    // Border, heading, and a single content line.
+    let lines = drawn(&mut dashboard, 4);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("local") && line.contains("37%")),
+        "the selected target keeps its reading: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("stale")),
+        "a notice with no line to itself is not drawn over a reading: {lines:#?}"
+    );
+
+    // One more row of room and the notice is back on its own line.
+    let lines = drawn(&mut dashboard, 5);
+    assert!(lines.iter().any(|line| line.contains("37%")), "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("stale: probe timed out")),
+        "{lines:#?}"
+    );
+
+    // The same holds with a target after the stale one: the selected target
+    // keeps its line rather than the pane settling on the next one.
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(
+        ["host-0", "host-1"]
+            .into_iter()
+            .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                id: host.into(),
+                host: host.into(),
+                target_ids: vec!["podman".into()],
+                kind: mj_core::targets::DeploymentCapacityKind::Host,
+                local: false,
+                probes: Vec::new(),
+                local_storage_paths: Vec::new(),
+                probe_error: None,
+            })
+            .collect(),
+    );
+    dashboard.apply_deployment_capacity("host-0", Ok(Some(host_usage(11))), now_epoch_seconds());
+    dashboard.apply_deployment_capacity("host-1", Ok(Some(host_usage(12))), now_epoch_seconds());
+    dashboard.apply_deployment_capacity(
+        "host-1",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
+    dashboard.capacity_index = 1;
+    let lines = drawn(&mut dashboard, 4);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("host-1") && line.contains("12%")),
+        "the selected target keeps its reading: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("host-0")),
+        "the pane does not settle on the target before it: {lines:#?}"
+    );
+}
+
+/// Each notice line belongs to its own row, wherever the table scrolled to:
+/// it is drawn from the layout the table settled on, not from the row's index.
+#[test]
+fn a_scrolled_targets_table_keeps_each_notice_under_its_own_row() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let targets = (0..4)
+        .map(|index| {
+            let mut target = test_capacity_target();
+            let id = format!("host-{index}");
+            target.id.clone_from(&id);
+            target.host.clone_from(&id);
+            target.target_ids = vec!["podman".into()];
+            target
+        })
+        .collect::<Vec<_>>();
+    dashboard.set_deployment_capacity_targets(targets);
+    for index in 0..4_u8 {
+        dashboard.apply_deployment_capacity(
+            &format!("host-{index}"),
+            Ok(Some(host_usage(10 + index))),
+            now_epoch_seconds(),
+        );
+    }
+    // Two hosts whose probes failed, one above the other, so a notice drawn
+    // from the row index instead of the row's height lands on the wrong line.
+    for host in ["host-1", "host-2"] {
+        dashboard.apply_deployment_capacity(
+            host,
+            Err("probe timed out".into()),
+            now_epoch_seconds(),
+        );
+    }
+    dashboard.capacity_index = 3;
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 8)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            dashboard.begin_surface_frame();
+            render_capacity(frame, Rect::new(0, 0, 50, 8), &mut dashboard, None);
+            dashboard.end_surface_frame();
+        })
+        .expect("draw the Targets pane");
+    let lines = buffer_lines(terminal.backend().buffer());
+    assert!(
+        !lines.iter().any(|line| line.contains("host-0")),
+        "the table scrolled past its first rows: {lines:#?}"
+    );
+    for (index, cpu) in [(1_u8, "11%"), (2, "12%")] {
+        let readings = lines
+            .iter()
+            .position(|line| line.contains(&format!("host-{index}")) && line.contains(cpu))
+            .unwrap_or_else(|| panic!("host-{index} keeps its own row: {lines:#?}"));
+        let notice = &lines[readings + 1];
+        assert!(notice.contains("stale: probe timed out"), "{lines:#?}");
+        assert_eq!(
+            notice.find("stale"),
+            lines[readings].find("podman"),
+            "the notice starts under the Targets column: {lines:#?}"
+        );
+    }
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("probe timed out"))
+            .count(),
+        2,
+        "one notice per failed probe, each on its own line: {lines:#?}"
+    );
 }
 
 // Hard-won: 6dec78fe: An in-flight Resuming row kept showing its source profile and target after the operation had recorded its destination.
@@ -3706,6 +3892,22 @@ fn golden_dashboard_resource_panels() {
         &mut dashboard,
     );
 
+    // Why a reading cannot be trusted takes its own line under the Targets
+    // column and runs on across the columns after it, cut with an ellipsis
+    // rather than widening the table.
+    dashboard.apply_deployment_capacity(
+        "local",
+        Err("probe timed out after twenty seconds".into()),
+        now_epoch_seconds(),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "stale reading notice under the Targets column",
+        100,
+        40,
+        &mut dashboard,
+    );
+
     let mut dashboard = DashboardState::new(
         config(),
         State::default(),
@@ -4039,13 +4241,34 @@ fn golden_dashboard_resource_panels() {
 }
 
 /// Long disk lists stay in the anchored dropdown and can be navigated without
-/// increasing the Targets table's row height.
+/// increasing the Targets table's row height. A notice line above the Disks
+/// cell belongs to its own row and must not shift the cell's hit region.
 // Hard-won: 371d4652: Disks hit regions drifted from the text when table columns shrank.
 #[test]
 fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     use mj_core::targets::storage::{FilesystemSpace, TargetStorageView};
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
+    // The stale target sorts first, so its notice line sits between the
+    // heading and the row whose Disks cell the clicks below land on.
+    dashboard.set_deployment_capacity_targets(vec![
+        mj_core::targets::DeploymentCapacityTarget {
+            id: "a:stale".into(),
+            host: "stale-host".into(),
+            target_ids: vec!["podman".into()],
+            kind: mj_core::targets::DeploymentCapacityKind::Host,
+            local: false,
+            probes: Vec::new(),
+            local_storage_paths: Vec::new(),
+            probe_error: None,
+        },
+        precision_capacity_target(),
+    ]);
+    dashboard.apply_deployment_capacity("a:stale", Ok(Some(host_usage(20))), now_epoch_seconds());
+    dashboard.apply_deployment_capacity(
+        "a:stale",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
     let filesystems = (0..30)
         .map(|index| FilesystemSpace {
             mount: format!("/srv/volume-{index:02}"),
@@ -4096,7 +4319,8 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), disk_cell));
     dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), disk_cell));
     assert!(dashboard.pane_menu.is_some());
-    assert_eq!(capacity_table_lines(&dashboard), 1);
+    // The stale target's reading and notice, plus the row under the dropdown.
+    assert_eq!(capacity_table_lines(&dashboard), 3);
 
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("precision-3260"), "{rendered}");
@@ -4109,7 +4333,7 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     }
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("/srv/volume-29 40.0G free"), "{rendered}");
-    assert_eq!(capacity_table_lines(&dashboard), 1);
+    assert_eq!(capacity_table_lines(&dashboard), 3);
 }
 
 // Hard-won: b54b2449a8: AFK omitted classifier intervention after failed turns.
