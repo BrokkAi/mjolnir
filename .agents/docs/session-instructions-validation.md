@@ -163,4 +163,15 @@ Additional affected checks passed on the dev profile outside the sandbox:
 - `cargo clippy -p brokk-mj-controller -p brokk-mj-store -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review4-clippy.log`).
 - Formatting and `git diff --check`: clean.
 
-A normal dev rebuild and full delegation seed 1171 will follow the source checkpoint. No Milestone 3 live acceptance or default-instance operation was performed.
+A normal dev rebuild and full delegation seed 1171 passed after source checkpoint bf7150bcf; see acceptance below. No Milestone 3 live acceptance or default-instance operation was performed.
+
+
+## Acceptance after fourth-review failure-path corrections
+
+- Source checkpoint: `bf7150bcf` (guard handover, committed-feed cleanup, atomic parent-message failure).
+- `cargo build -p brokk-mjolnir -p brokk-mj-worker --bins`: passed, normal dev profile; source and HEAD stayed unchanged during the build. Log: `memory-instructions-review4-e2e-build.log`.
+- `python3 tests/e2e/delegation.py --mj target/debug/mj --worker target/debug/mj-worker --instance instructions-review4-55d6204e`: full default seed-1171 scenario PASSED. The original model gate, mailbox ordering/idempotency, standing append, first prompt, handoff/recovery and cleanup checks all passed. Held-model send_message: 0.200 s; daemon handoff: 0.453 s. Log: `memory-instructions-review4-delegation-e2e.log`.
+- Artifacts: `target/reliability-artifacts/delegation-seed-1171-3645703`; parent `b6fc4c7691a22fd04b0622ce83a67fa7`, child `18c88dc533795cdd3fd558363afea486`; runtime `/mnt/optane/tmp/hel-r-3645703-7o29z3iz`.
+- An explicit stop with that runtime's private config/data and the same named instance confirmed the daemon was already stopped (`memory-instructions-review4-cleanup.log`).
+
+No still-failing checks, default-instance operations, pushes or Milestone 3 live acceptance. Diagnostic memory-*.log files remain untracked. The schema, relay revision/snapshot and RuntimeEvent shapes are unchanged; Failed uses the existing compatible outbox representation. The corrected checkpoint is submitted for formal re-review.
