@@ -18,9 +18,9 @@ The deliverable is a locally committed readout with mixed-round labels for all t
 - [x] Run 17 Sol/high editors and validate schema, minimal edits, lint and exact fact projection. Freeze raw edits and unpublished candidates.
 - [x] Run and freeze paired leak round 0. Two Sol/high judges completed 34 verdicts over the 17 candidates.
 - [x] Review the one wording pass and paired recheck for the 15 flagged candidates. Parent fact-check every final brief with its exact hash and verbatim carrying item before OT admission.
-- [ ] Freeze final 17 oracle briefs and run 17 OT jobs with three Terra/high reviewers each; freeze 51 original outputs and suspend own carriers.
-- [ ] Round L: mixed stored A/BT and new OT, 153 opaque outputs and 306 paired verdicts. Hand-check all positives/partials/disagreements before arm attribution, then score all arms on round-L labels.
-- [ ] Report the registered four-outcome reading, OT–BT, per-diff rates, stored-label consistency, retained neutral flags and cost; commit locally, validate frozen/index bytes and finish cleanup.
+- [x] Freeze final 17 oracle briefs and run 17 OT jobs with three Terra/high reviewers each; freeze 51 original outputs and suspend own carriers.
+- [x] (2026-11-18, successor session 290e45f2, Opus/high judges per the amendment) Round L: mixed stored A/BT and new OT, 153 opaque outputs and 306 paired verdicts. Hand-check all positives/partials/disagreements before arm attribution, then score all arms on round-L labels.
+- [x] Report the registered four-outcome reading, OT–BT, per-diff rates, stored-label consistency, retained neutral flags and cost; commit locally, validate frozen/index bytes and finish cleanup.
 
 ## Surprises & Discoveries
 
@@ -47,6 +47,8 @@ Editors and paired judges are codex4 GPT-6.1 Sol/high; OT reviewers are three GP
 Registration c0057b53b has four outcomes. Implement the listed precedence: carry, partly, don't carry, inconclusive; the lead confirmed this priority before any brief is built. An interval entirely between zero and +10 is Partly, a proven small lift. This ruling is recorded in the registration notes before model admission. A positive result concerns supplied facts only; query reach remains unmeasured.
 
 ## Outcomes & Retrospective
+
+Round L reads **Facts carry**: OT 45.1%, A 17.6%, BT 7.8%; OT − A +27.5 points (+11.8 to +45.1). Because 15 of the 17 briefs still leak, this is an upper bound. The readout is `.agents/evals/review-arms/brief/bifrost-oracle/READOUT.md`. The original lead session was lost to a Codex classifier bug. A successor merged its work and recorded the Opus/claude7 amendment before any judgment, then judged, hand-checked and scored round L with the existing runners. The registered plan said this would not be pushed, but the successor's assignment from the supervisor was to publish it.
 
 Preparation and registration are recorded, with no new experimental outputs. The prior blind study reads Does not generalize and remains intact. Harness generalization and its validation are the next milestone.
 

@@ -1101,3 +1101,24 @@ judging and control2, while tool-call audits and latency are unavailable.
 No transcript capture is added, and a missing audit is never called clean.
 Existing repository-inventory checks still apply; their coverage and the
 prompt-based access restrictions retain the blinding limits described above.
+
+## Bifrost-dev oracle arm: does the decisive fact lift reviewers?
+
+Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
+(round L judged by Opus/high on claude7). Readout:
+`brief/bifrost-oracle/READOUT.md`.
+
+- **Facts carry, as an upper bound.** On the 17 bifrost-dev relation diffs,
+  Terra/high caught 17.6% with no brief, 7.8% with the blind Sol brief and
+  45.1% with an oracle brief. OT − A is +27.5 points (+11.8 to +45.1), and
+  OT − BT is +37.3 (+17.6 to +58.8).
+- 15 of the 17 oracle briefs still read as caught (8) or partial (7) to the
+  leak judges after the rewrite, so the lift may partly come from the brief
+  naming the defect. The caught-leak diffs gain +37.5 points and the
+  partial-leak diffs +23.8. The two missed-leak diffs don't move.
+- The lift is on 8 diffs; 9 don't move. It shows only that reviewers benefit
+  when the fact is supplied, not that Bifrost queries can find it.
+- Round L's A and BT labels equal the stored Sol labels exactly. With the
+  hand-check assessor's labels instead of the parent's three overrides,
+  OT − A is +25.5 (+9.8 to +43.1), still Facts carry. New spend is about
+  $10.56 at API-equivalent rates.

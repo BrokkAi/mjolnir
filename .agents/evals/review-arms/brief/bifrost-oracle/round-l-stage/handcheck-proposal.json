@@ -1,0 +1,163 @@
+{
+  "04454c963fb41121": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "11b79671cb7e2b6c": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "2f5f1fb566daf8f2": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "37d530f81002a706": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "3868208735f20ea3": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "3dcb091b42c11e5e": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "491b2ba3f35292db": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "59fb6b1997e41710": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "5f0749563831251a": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "657e2f8273c17105": {
+    "label": "partial",
+    "agrees_with_judges": true,
+    "why": "Ties the now-nonsynthetic primary constructor entering the comment-density tree to a wrong class density, but names double-counted constructor span and moved inner comments, not the backward KDoc expansion plus deepest-owner selection that hands the class header comment to the constructor; right code and related symptom, different mechanism."
+  },
+  "682e0e05192c6389": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "6d01ce13d5606c98": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "786cf25ae54fac80": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "7d6a3dc73c8ab9cd": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "83d0b53b0f02d9cb": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "8a1a7b90783a93f1": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "8b21d10241683070": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "8b2fb92452cb5513": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "8eaa74161fbf9bfd": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "a051061261a9f9bd": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "a172241d58d22018": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "ab42e388ae7a1173": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "ad9e7ebc28f39315": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "b7189f11a71df9fe": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "c22cfd2123fba1dc": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "c25e9351311d3ed7": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "c6b2ff3fcdac8076": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "c7fee25c62d29b1a": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "ca3dea5f0ea32a07": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "cadc10368c38c245": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "d1cf853481eb7808": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "d9198c165b3795c6": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "e1a7ab9a9e9601d8": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "e62bbeb6e1849a8f": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "ebda566048be5ebb": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "efd880433d09cc3b": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "f0a966840b299213": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "f623db379e3ec472": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "f62d9f2010b32a87": {
+    "label": "caught",
+    "agrees_with_judges": true
+  },
+  "fcd3c5fc649c64b0": {
+    "label": "caught",
+    "agrees_with_judges": true
+  }
+}

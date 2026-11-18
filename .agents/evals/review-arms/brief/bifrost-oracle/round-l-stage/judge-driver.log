@@ -1,0 +1,6 @@
+{"batch": "2-B", "state": "done"}
+{"batch": "2-A", "state": "done"}
+{"batch": "1-A", "state": "done"}
+{"batch": "1-B", "state": "done"}
+{"batch": "0-A", "state": "done"}
+{"batch": "0-B", "state": "done"}
