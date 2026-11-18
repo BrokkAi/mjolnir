@@ -85,6 +85,14 @@ impl ActiveChat {
         surfaces
     }
 
+    /// The logical text whose row space this form exposes for selection.
+    pub fn elicitation_message_text(&self) -> Option<String> {
+        self.state
+            .elicitation
+            .as_ref()
+            .map(|dialog| dialog.prompt_text())
+    }
+
     pub fn elicitation_selection_text_in(
         &mut self,
         surface: super::super::ElicitationSurface,

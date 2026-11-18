@@ -720,11 +720,11 @@ impl ElicitationDialog {
         } else {
             &self.other_view
         };
-        view.rendered_area.get().is_some()
-            && view
-                .message_area
-                .get()
-                .is_some_and(|area| area.height > 0 && area.width > 0)
+        // One interior row can show the answer control without a message.
+        // Border-only and never-rendered dialogs must still reject input.
+        view.rendered_area
+            .get()
+            .is_some_and(|area| area.width > 2 && area.height > 2)
     }
 
     pub(super) fn component_handles_mouse_in(
@@ -862,7 +862,7 @@ impl ElicitationDialog {
         self.reset_page();
     }
 
-    fn prompt_text(&self) -> String {
+    pub(super) fn prompt_text(&self) -> String {
         if self.confirming_unanswered {
             let mut text = format!(
                 "Submit with {} unanswered questions?\n\n",

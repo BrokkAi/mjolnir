@@ -33,6 +33,7 @@ pub(crate) struct NotificationsPane {
     selection_revision: u64,
     text_generation: u64,
     text_rows: Option<mj_chat::selection::SelectableText>,
+    form_text: Option<(String, u16)>,
 }
 
 impl Default for NotificationsPane {
@@ -54,6 +55,7 @@ impl Default for NotificationsPane {
             selection_revision: 0,
             text_generation: 0,
             text_rows: None,
+            form_text: None,
         }
     }
 }
@@ -560,6 +562,7 @@ impl DashboardState {
         pane.scroll = 0;
         pane.text_generation = pane.text_generation.wrapping_add(1);
         pane.text_rows = None;
+        pane.form_text = None;
         pane.message_read = None;
         pane.selection_revision = pane.selection_revision.wrapping_add(1);
     }
@@ -653,6 +656,18 @@ impl DashboardState {
         self.focus == Focus::Notifications && self.notifications.form_area.is_some()
     }
 
+    /// Pointer capture remains with its owning conversation across sessions.
+    pub fn conversation_form_pointer_session(
+        &self,
+        chats: &std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) -> Option<String> {
+        self.pane_sessions().into_iter().find_map(|(_, session)| {
+            (chats.get(&session)?.elicitation_pointer_surface()
+                == Some(mj_chat::chat::ElicitationSurface::Conversation))
+            .then_some(session)
+        })
+    }
+
     /// Some(false) is message/chrome in this presentation: another
     /// conversation's geometry must not claim text that is drawn here.
     pub fn notification_form_mouse_ownership(
@@ -661,6 +676,9 @@ impl DashboardState {
         mouse: crossterm::event::MouseEvent,
     ) -> Option<bool> {
         if self.modal_open() {
+            return None;
+        }
+        if self.conversation_form_pointer_session(chats).is_some() {
             return None;
         }
         let area = self.notifications.form_area?;
@@ -689,6 +707,11 @@ impl DashboardState {
         event: &crossterm::event::Event,
     ) -> Option<mj_chat::components::EventResult<mj_chat::chat::ChatEventOutcome>> {
         if self.modal_open() {
+            return None;
+        }
+        if matches!(event, crossterm::event::Event::Mouse(_))
+            && self.conversation_form_pointer_session(chats).is_some()
+        {
             return None;
         }
         let session = self.notification_form_session()?;
@@ -1326,7 +1349,17 @@ pub(crate) fn render(
     );
     if inline_form {
         dashboard.notifications.form_area = (body.width > 0 && body.height > 0).then_some(body);
-        dashboard.notifications.text_rows = None;
+        let pane = &mut dashboard.notifications;
+        let form_text = chat
+            .as_ref()
+            .unwrap()
+            .elicitation_message_text()
+            .map(|text| (text, body.width));
+        if pane.form_text != form_text {
+            pane.text_generation = pane.text_generation.wrapping_add(1);
+            pane.form_text = form_text;
+        }
+        pane.text_rows = None;
         let surfaces = chat.as_mut().unwrap().draw_elicitation_in(
             frame,
             body,
@@ -1353,6 +1386,7 @@ pub(crate) fn render(
         }
     } else {
         let pane = &mut dashboard.notifications;
+        pane.form_text = None;
         if pane
             .text_rows
             .as_ref()
@@ -1903,7 +1937,155 @@ pub(crate) mod tests {
             assert!(!result.consumed);
             assert!(chats["session-1"].has_elicitation());
             assert!(next_answers.try_recv().is_err());
+            // Hard-won: 45223194f: a visible one-row answer control rejected every event without a message row.
+            let (chat, mut compact_answers) = form_chat("session-1", question("session-1"));
+            chats.insert("session-1".into(), chat);
+            dashboard.notifications.size = PaneSize::Standard;
+            let mut compact =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20)).unwrap();
+            compact
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let area = dashboard.notifications.form_area.unwrap();
+            assert_eq!(area.height, 3, "one row inside the form border");
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                let mouse = crossterm::event::MouseEvent {
+                    kind,
+                    column: area.x + 4,
+                    row: area.y + 1,
+                    modifiers: KeyModifiers::NONE,
+                };
+                assert!(
+                    dashboard
+                        .handle_notification_form_event(&mut chats, &Event::Mouse(mouse))
+                        .unwrap()
+                        .consumed
+                );
+            }
+            for event in [
+                Event::Key(key(KeyCode::Char('x'))),
+                Event::Paste("compact".into()),
+                Event::Key(key(KeyCode::Enter)),
+            ] {
+                assert!(
+                    dashboard
+                        .handle_notification_form_event(&mut chats, &event)
+                        .unwrap()
+                        .consumed
+                );
+            }
+            let (_, response) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), compact_answers.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                response,
+                ElicitationResponse::Accept {
+                    content: [(
+                        "path".into(),
+                        mj_core::elicitation::ElicitationValue::String("xcompact".into())
+                    )]
+                    .into_iter()
+                    .collect()
+                }
+            );
         }
+
+        // Hard-won: 45223194f: release over another session's notification bypassed the conversation's capture.
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut second = running_session();
+        second.id = "session-2".into();
+        dashboard.state.sessions.insert(second.id.clone(), second);
+        serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
+        let mut request = question("session-1");
+        request.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+            default: Some(false),
+        };
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        dashboard.set_current_session(Some("session-2"));
+        dashboard.notifications.size = PaneSize::Maximized;
+        let (first, _) = form_chat("session-1", request.clone());
+        let (second, _) = form_chat("session-2", request);
+        let mut chats = std::collections::BTreeMap::from([
+            ("session-1".into(), first),
+            ("session-2".into(), second),
+        ]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 44)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        let (x, y) = point(&lines, mj_chat::components::Checkbox::marker(false));
+        assert!(
+            y < dashboard.notifications_area.unwrap().y,
+            "the pressed control belongs to the conversation"
+        );
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        assert_eq!(
+            dashboard
+                .conversation_form_pointer_session(&chats)
+                .as_deref(),
+            Some("session-2")
+        );
+        let area = dashboard.notifications.form_area.unwrap();
+        let release = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: area.x + 2,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.notification_form_mouse_ownership(&chats, release),
+            None
+        );
+        assert!(
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Mouse(release))
+                .is_none()
+        );
+        let owner = dashboard.conversation_form_pointer_session(&chats).unwrap();
+        chats
+            .get_mut(&owner)
+            .unwrap()
+            .handle_event_result(Event::Mouse(release));
+        assert!(
+            dashboard
+                .conversation_form_pointer_session(&chats)
+                .is_none()
+        );
     }
 
     pub(crate) fn dashboard() -> DashboardState {
@@ -2461,8 +2643,8 @@ pub(crate) mod tests {
         assert_eq!(recency.notification_entries()[0].session_id, "q2");
     }
 
-    #[test]
-    fn dragging_notification_text_uses_transcript_selection_and_card_identity() {
+    #[tokio::test]
+    async fn dragging_notification_text_uses_transcript_selection_and_card_identity() {
         use mj_chat::selection::{SelectionAction, SelectionState, SurfaceId};
         let mut dashboard = dashboard();
         dashboard.set_pane_size(SupportPane::Notifications, PaneSize::Maximized);
@@ -2540,6 +2722,73 @@ pub(crate) mod tests {
             .unwrap();
         selection.reconcile_surfaces(dashboard.frame_surfaces());
         assert_eq!(selection.active_surface(), None);
+
+        // Hard-won: 45223194f: loading text and successive form pages shared a selection generation.
+        let mut dashboard = dashboard_with_session(running_session());
+        serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
+        let mut request = question("session-1");
+        let mut next = request.fields[0].clone();
+        next.id = "second".into();
+        next.title = "Second question".into();
+        request.fields.push(next);
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        dashboard.notifications.size = PaneSize::Maximized;
+        dashboard.focus = Focus::Notifications;
+        let mut chats = std::collections::BTreeMap::new();
+        for stage in 0..3 {
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            selection.reconcile_surfaces(dashboard.frame_surfaces());
+            assert!(
+                selection.active_surface().is_none(),
+                "new content invalidates the old row space"
+            );
+            if stage == 2 {
+                break;
+            }
+            let surface = dashboard
+                .frame_surfaces()
+                .surface(SurfaceId::NotificationText(
+                    dashboard.notifications.text_generation,
+                ))
+                .unwrap();
+            selection.on_mouse_down(surface.rect.x, surface.rect.y, dashboard.frame_surfaces());
+            selection.on_mouse_drag(
+                surface.rect.x + 5,
+                surface.rect.y,
+                dashboard.frame_surfaces(),
+            );
+            if stage == 0 {
+                let (chat, _) = form_chat("session-1", request.clone());
+                chats.insert("session-1".into(), chat);
+            } else {
+                dashboard
+                    .handle_notification_form_event(
+                        &mut chats,
+                        &crossterm::event::Event::Paste("first".into()),
+                    )
+                    .unwrap();
+                dashboard
+                    .handle_notification_form_event(
+                        &mut chats,
+                        &crossterm::event::Event::Key(key(KeyCode::Enter)),
+                    )
+                    .unwrap();
+            }
+        }
     }
 
     #[tokio::test]

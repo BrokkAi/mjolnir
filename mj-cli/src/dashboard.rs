@@ -2398,6 +2398,23 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
 ) -> (bool, bool) {
+    if matches!(&event, Event::Mouse(_))
+        && !context.dashboard.modal_open()
+        && let Some(session) = context
+            .dashboard
+            .conversation_form_pointer_session(&context.chats)
+        && let Some(pane) = context.dashboard.pane_for_session(&session)
+        && let Some(chat) = context.pane_chat_mut(pane)
+    {
+        let result = chat.handle_event_result(event);
+        *chat_outcome = result
+            .action
+            .unwrap_or(mj_chat::chat::ChatEventOutcome::None);
+        return (
+            result.consumed,
+            matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None),
+        );
+    }
     if let Some(result) = context
         .dashboard
         .handle_notification_form_event(&mut context.chats, &event)

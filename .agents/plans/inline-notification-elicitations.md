@@ -62,3 +62,14 @@ The remaining shared-chat transitions now consult the attachment owner's pane in
 Extend the existing shared-cancellation regression through completion, actual rendering, and pane closure. Extend the published-card input regression with a native quick reply through the existing dispatcher, and extend the dashboard golden with eight-row loading/failure cards. Verify the daemon native-card projection regression, attachment filters, golden replay, and all-targets clippy on all affected crates (including mj-client and mj-daemon).
 
 Third follow-up validation passed: the extended cancellation and native-reply tests, 28 attachment-filter tests, daemon native projection, compact-status golden replay, all-targets clippy across five affected crates, and formatting/diff checks. This checkpoint is ready for mandatory review, without pushing.
+
+
+## Fourth review follow-up
+
+Decline the minimized-height finding: notification_form_session returns None for Minimized using the same field pane_size reads, so the form minimum override cannot run in that state. The required review override was recorded before editing or committing.
+
+Fix four confirmed transitions. Navigation leaves the composer and its clipboard channel with a chat retained by the visible notification form. Conversation form capture is found across all shown sessions and wins before notification hit-testing, selection, and dispatch, so release reaches its owner even over another session's card. A rendered form with any interior rows accepts input even when the message itself has no row. Inline selection uses the chat-owned message text and width to change the notification generation when loading becomes a form or the form page changes.
+
+Extend the existing interaction regression with a one-row text editor and two-session capture/release. Extend the existing text-selection regression through loading, attachment, and question-page changes. Validate these focused transitions, the unchanged golden, clipboard regressions, and affected-crate clippy.
+
+Fourth follow-up checks pass: extended compact-input and cross-session-capture regression, loading/page selection invalidation, existing clipboard target regression, unchanged dashboard golden, all-targets clippy with the same five-package selection, and formatting. Fixture-only failures (field id spelling and click/search coordinates) were corrected and only the affected tests rerun. The checkpoint awaits mandatory review; no push.

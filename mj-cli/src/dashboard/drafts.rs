@@ -215,16 +215,20 @@ impl DashboardContext {
             .map(str::to_owned);
         if let Some(outgoing) = outgoing {
             self.selection.clear();
-            self.park_chat_composer(&outgoing);
-            // The pane is changing session. Save what the conversation
-            // leaving it holds, then drop it unless another pane shows it —
-            // which it cannot, since a session is in at most one pane.
+            // A visible form keeps its chat and clipboard result channel.
+            // Parking and immediately re-adopting would replace the channel
+            // underneath a read accepted by the retained form.
+            let form_retained =
+                self.dashboard.notification_form_session().as_deref() == Some(outgoing.as_str());
+            if !form_retained {
+                self.park_chat_composer(&outgoing);
+            }
+            // Save the outgoing conversation, then drop it unless the
+            // notification form still owns its live chat.
             self.capture_composer_draft(&outgoing);
             self.save_question_draft(&outgoing);
             self.record_chat_detach(&outgoing);
-            if self.dashboard.pane_for_session(&outgoing) == Some(pane)
-                && self.dashboard.notification_form_session().as_deref() != Some(outgoing.as_str())
-            {
+            if self.dashboard.pane_for_session(&outgoing) == Some(pane) && !form_retained {
                 self.chats.remove(&outgoing);
             }
         }
