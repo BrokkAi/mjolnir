@@ -73,7 +73,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Date/Author: 2026-11-18, user.
 
 - Decision: a merge, rebase, cherry-pick, revert, `am` or bisect that is in progress in a managed checkout is aborted before capture (for example `git merge --abort`). The warning says that any conflict resolution done so far is lost. A raw checkout is never aborted: when it has an operation in progress, the snapshot records HEAD and refs only, without uncommitted changes, and the warning says those changes will not follow the session to another target.
-  The abort needs its own explicit consent (`--abort-operation`, or a dialog that showed the operation). The operation is detected and aborted before HEAD and refs are read, so the snapshot describes the post-abort state.
+  The abort needs its own explicit consent: `--abort-operation`, or a dialog that showed that operation, checked against what capture finds. The operation is detected and aborted before HEAD and refs are read, so the snapshot describes the post-abort state.
   Rationale: this case is rare, and starting from a clean state is simpler than preserving operation state; the existing `mj-checkpoint/src/archive/git/operation.rs` is about 850 lines. A raw checkout belongs to the user, so Mjolnir must not change its state.
   Date/Author: 2026-11-18, user.
 
@@ -306,7 +306,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
 **Git terms used here.**
 
-- **Bundle:** a file produced by `git bundle create` that carries commits and refs. The negative form `--not --remotes=origin` excludes everything reachable from origin's remote-tracking refs, so the bundle carries only what origin lacks.
+- **Pack:** the file format Git uses to ship objects. `git pack-objects --revs` reads tip commits, then `--not` and exclusions, on standard input, and writes every object reachable from the tips but not from the exclusions. A non-thin pack is self-contained, and `git index-pack` loads it into another repository. A **bundle** (`git bundle create`) is a pack plus a list of refs, and needs refs to name its tips, so it is used only for user-facing export.
 - **Remote-tracking refs:** the `refs/remotes/origin/*` refs that record what origin had at the last fetch.
 - **Stash commit:** the commit that `git stash create` builds from the index and the tracked working tree.
 
@@ -317,47 +317,56 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
 **Scope.** Add a new module, `mj-checkpoint/src/snapshot.rs`, whose functions run Git in a checkout and produce or consume a workspace snapshot. They go through the existing `GitCommandRunner` abstraction in `mj-checkpoint/src/archive/git.rs`, so the same code runs locally and on targets. This milestone adds the functions and their tests only; nothing calls them yet. At its end, a test can capture a checkout, restore it into a fresh clone of the same origin, and observe equal branches, tags, stash list, HEAD, index and tracked working files, with no untracked files.
 
-**Capture**, for one checkout:
+**Capture**, for one checkout and the linked worktrees nested inside it (from `git worktree list --porcelain`, recorded by path relative to the checkout; for a raw checkout, only worktrees absent from the launch record count):
 
-1. Check for an in-progress operation: `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`/`rebase-apply`, `BISECT_LOG`. This comes first because an abort moves HEAD and can change branch refs, and during a rebase or bisect HEAD is detached at a temporary commit. Everything recorded below must describe the state after this step.
-   - Managed checkout with the caller's consent (`CaptureConsent { abort_operation: true }`): run the matching abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
-   - Managed checkout without consent: change nothing and fail with `SnapshotRefused::OperationInProgress(kind)`, which suspend turns into a refusal.
-   - Raw checkout: never abort. Set `working_state_skipped: true`, so step 5 is skipped, and use the pre-operation position as HEAD in step 3. For a rebase, that is the branch named in `rebase-merge/head-name` or `rebase-apply/head-name`. For a bisect, it is the branch or commit in `BISECT_START`. For a merge, cherry-pick, revert or am, HEAD is still the branch. Resuming elsewhere then lands where an abort would have returned.
-2. Best-effort `git fetch --prune origin`. On failure, record that the remote-tracking refs may be stale and continue.
-3. Read HEAD: a symbolic branch name, or a detached commit.
-4. Select refs:
-   - Managed checkout: every ref under `refs/heads`, `refs/tags` and `refs/notes`, plus the durable Mjolnir refs under `refs/mj/` that the pre-push hook and review read (reviewed, overridden and push-base refs). Use the predicate today's clone capture already applies for "durable Mjolnir refs" (`RepositoryMetadata::saved_refs`). Also the stash list.
-   - Raw checkout: only the refs whose value differs from the launch record (Milestone 2 writes that record), plus HEAD, plus stash entries absent from the launch record.
+1. **Consent and operations, for every checkout before anything is read or changed.** An abort in a nested worktree can move a shared branch, and during a rebase or bisect HEAD sits on a temporary commit. So all of this happens before any HEAD or ref is read.
+   1. Build the inventory:
+      - the untracked non-ignored paths of every checkout, with nested worktree directories excluded;
+      - the stash entries with a third parent, which `git stash -u` or `-a` creates to hold untracked or ignored files;
+      - the in-progress operation of each checkout: `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`/`rebase-apply`, `BISECT_LOG`.
+   2. Check it against the caller's `CaptureConsent`:
+      - Untracked items are paths and stash untracked payloads. `UntrackedConsent::None` covers none of them, `Any` (the CLI flag) covers all, and `Shown(items)` (a dialog) covers only what the dialog displayed. An item that has since disappeared is fine; a new one is not.
+      - In a managed checkout, each operation, identified by checkout path and kind, must be covered by `OperationConsent::Any` or by a matching `Shown` entry.
+      - If anything is not covered, capture changes nothing and fails with `SnapshotRefused::Untracked(items)` or `SnapshotRefused::OperationInProgress(path, kind)`.
 
-   The stash list is read with `git stash list --format=%H%x00%gs` so the messages can be recreated.
-5. Run `git stash create` (with no message). Empty output means a clean working state. Otherwise the output is the stash commit, whose first parent is HEAD and whose second parent records the index.
-6. For each linked worktree registered with this repository whose directory lies inside this checkout (read from `git worktree list --porcelain`), repeat steps 1, 3 and 5 in that worktree. Record its path relative to the checkout. For a raw checkout, only worktrees absent from the launch record count.
-7. Write one bundle with `git bundle create <file> <selected refs> <detached HEAD commit, if any> <stash commits> <worktree HEADs and stash commits> --not --remotes=origin`. A detached primary HEAD must be included: a clean checkout's only unpushed commit may be reachable from nothing else. The non-ref commits are passed as temporary refs under `refs/mj/snapshot/<n>`, created before the bundle and deleted afterwards, because `git bundle` only names refs. When nothing remains after the exclusion, Git refuses to create an empty bundle; record "no bundle" instead.
-8. Return a `WorkspaceSnapshot` value containing:
-   - the origin URL and push URLs;
-   - HEAD;
-   - the selected refs with their object IDs;
-   - the stash list with messages;
-   - the stash commit, if any;
-   - the nested worktrees;
-   - `working_state_skipped`;
-   - whether the remote-tracking refs were stale;
-   - the bundle path.
+      Capture itself is the single decision point, so nothing can appear between a separate check and the capture.
+   3. Managed checkouts: run each covered abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
+   4. Raw checkouts: never abort. Mark the checkout `working_state_skipped`, and remember its pre-operation position for step 3:
+      - rebase: the branch named in `rebase-merge/head-name` or `rebase-apply/head-name`;
+      - bisect: the branch or commit in `BISECT_START`;
+      - merge, cherry-pick, revert or am: HEAD is still the branch.
+
+      Resuming elsewhere then lands where an abort would have returned.
+2. **Best-effort `git fetch --prune origin`.** On failure, set `remote_refs_stale` and continue.
+3. **Pin the cut.** Read every ref once with `git for-each-ref`, plus each checkout's HEAD: a branch name or a detached commit, or the pre-operation position from step 1. Select the refs to keep:
+   - **Managed checkout:** every ref under `refs/heads`, `refs/tags` and `refs/notes`, plus the durable Mjolnir refs under `refs/mj/` that the pre-push hook and review read (reviewed, overridden and push-base). Use the predicate today's clone capture applies for "durable Mjolnir refs" (`RepositoryMetadata::saved_refs`). Also the stash list.
+   - **Raw checkout:** only the refs whose value differs from the launch record (Milestone 2 writes that record), plus HEAD, plus stash entries absent from the launch record.
+
+   The stash list is read with `git stash list --format=%H%x00%gs`, so the messages can be recreated.
+4. **Working state.** Run `git stash create` in each checkout not marked `working_state_skipped`. Empty output means a clean state; otherwise the result is a commit whose first parent is HEAD and whose second records the index. For each kept stash entry with a third parent, write a replacement without it, `git commit-tree <stash>^{tree} -p <stash>^1 -p <stash>^2 -m <message>`. It keeps the entry's tracked content; its untracked payload was consented to in step 1.
+5. **Verify the cut.** Each working-state commit's first parent must equal its checkout's pinned HEAD, and a second `for-each-ref` must match the pinned set. If anything moved (possible during a barrier-free export), start again from step 3 after a short backoff; the change in state is what ends the loop. If nothing is stable after a few attempts, fail with a clear error. Under the suspend barrier, the first pass succeeds.
+6. **Pack the delta.** Run `git pack-objects --revs --stdout`, feeding it on standard input:
+   - the pinned SHAs: kept refs, every detached HEAD, working-state commits and kept (or replaced) stash commits;
+   - a `--not` line;
+   - the exclusions: every `refs/remotes/origin/*` SHA, plus local tags whose SHA matches a tag that `git ls-remote --tags origin` reports when origin is reachable. A fresh clone fetches those tags, so their history need not travel.
+
+   The result is a non-thin pack containing only what origin lacks; it may be empty. Packing from SHAs writes no ref at all. Two raw sessions sharing a Git common directory, or an export overlapping a suspend, therefore cannot disturb each other, and a crash leaves nothing to clean up.
+7. **Return a `WorkspaceSnapshot`:** the origin URL and push URLs, HEAD, the kept refs with their object IDs, the stash list (commits and messages), the working-state commit, the nested worktrees, `working_state_skipped`, `remote_refs_stale`, and the pack path.
 
 **Restore**, into a target directory:
 
-1. Clone origin. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
-2. Fetch the bundle, if there is one, into temporary refs.
-3. Create every saved ref at its object ID.
-4. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
-5. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
-6. If there is a stash commit, run `git stash apply --index <commit>`.
-7. Recreate nested worktrees with `git worktree add` at their recorded relative paths. Position, reset and apply their stash commits the same way.
-8. Delete the temporary refs.
+1. Clone origin, then run `git fetch --tags origin`, so every tag the exclusions relied on is present. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
+2. Set `remote.origin.pushurl` to each saved push URL, as today's network-workspace restore does, so a workspace that reads from upstream and pushes to a fork keeps doing so.
+3. Load the pack with `git index-pack --stdin`. Then check with `git cat-file -e` that every object the snapshot names exists.
+4. Create every saved ref at its object ID.
+5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
+6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
+7. If there is a working-state commit, run `git stash apply --index <commit>`.
+8. Recreate nested worktrees with `git worktree add` at their recorded relative paths. Position, reset and apply their working state the same way.
 
-When an object the snapshot names is missing, because neither the bundle nor origin has it, fail with a message naming the ref and suggesting that origin may have rewritten history.
+When an object the snapshot names is missing, because neither the pack nor origin has it, fail with a message naming the ref and suggesting that origin may have rewritten history.
 
-**A raw checkout without an `origin` remote** still captures: the snapshot records HEAD, has `origin: None`, and holds no bundle and no working state. Resuming in place needs nothing more. Restore refuses a snapshot without an origin with a clear error, and the resume dialogs offer only the original target for such a session. A managed checkout without an origin is an error at capture.
+**A raw checkout without an `origin` remote** still captures: the snapshot records HEAD, has `origin: None`, and holds no pack and no working state. Resuming in place needs nothing more. Restore refuses a snapshot without an origin with a clear error, and the resume dialogs offer only the original target for such a session. A managed checkout without an origin is an error at capture.
 
 **Inventory**, for warnings:
 
@@ -369,7 +378,7 @@ The suspend warnings in Milestone 3 present this result.
 
 **Tests** are integration tests against real Git; `AGENTS.md` lists Git as a boundary that warrants them. They go in a `#[cfg(test)] mod tests` block in `mj-checkpoint/src/snapshot.rs`. Each test uses a bare repository in a temporary directory as origin. They cover:
 
-- a pushed branch, which yields no bundle while its ref is recorded;
+- a pushed branch, which yields an empty pack while its ref is recorded;
 - an unpushed commit and a new tag;
 - a three-entry stash list whose messages survive;
 - staged and unstaged edits to the same file, restored with the staged part still staged;
@@ -382,21 +391,30 @@ The suspend warnings in Milestone 3 present this result.
 - a saved branch that is origin's default branch, one commit ahead of origin's tip, which must restore with a clean `git status`;
 - a managed checkout mid-rebase without consent, which must refuse and leave the rebase intact;
 - a raw checkout mid-rebase, which must record the original branch as HEAD;
-- a raw checkout without an origin remote, which must capture HEAD only and be refused by restore.
+- a raw checkout without an origin remote, which must capture HEAD only and be refused by restore;
+- a `git stash -u` entry, whose tracked part restores while its untracked file is gone and required consent;
+- a dialog-style `Shown` consent for one file while a second appears, which must be refused naming only the new file, with nothing changed;
+- a nested worktree in the middle of a multi-commit cherry-pick, whose abort moves its branch; the snapshot records the post-abort tip;
+- an origin workspace with a separate push URL, which keeps it after restore;
+- history reachable on origin only through a tag, which is excluded from the pack.
 
 ### Milestone 2: suspend and resume on the new snapshot
 
 **Scope.** Suspend captures the repository half of the archive with Milestone 1's `capture_workspace_snapshot` instead of `CloneFrom`, `DeltaFrom`, `MetadataOnly` and the untracked tar. Resume restores it with `restore_workspace_snapshot`.
 
 The new capture must never become active without its consent checks, so this milestone also lands:
-- the request fields `discard_untracked` and `abort_operation`, and the CLI flags `--discard-untracked` and `--abort-operation`;
+- the request fields `discard_untracked` and `abort_operations` (shapes under Interfaces), and the CLI flags `--discard-untracked` and `--abort-operation`;
 - the inventory recheck at the capture cut described in Milestone 3, which refuses when untracked files, a nonempty `.mj/keep/` on a managed checkout, or an operation is found without the matching consent.
 
 Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal as an ordinary suspend failure. That is safe, because nothing is lost. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
 
-**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the bundle as a payload.
+**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
 
-**Spec version.** Raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that request `OriginDelta`. The controller already learns the worker's version before exporting (see the version repair in `mj-controller/src/controller/checkpoint/staging.rs`, around line 190). A session whose worker predates this change keeps receiving a version-2 spec, and its archive is in the old format. That is acceptable because old formats stay readable, and the next suspend after the worker's automatic idle upgrade writes the new format.
+**Spec version and older workers.** Raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that request `OriginDelta`.
+
+A session whose running worker predates this change must not fall back to the old capture. That capture stores untracked files and full clone history, which is exactly what the user excluded, and can mean gigabytes of upload. Instead, the capture step runs the daemon's own worker binary on the target, staged there the way worker upgrades already stage it (see `mj-worker-staging` and `mj-controller/src/controller/worker_restart.rs`). It is invoked as a separate export process under the existing barrier, while the old worker keeps owning the relay.
+
+Before relying on this, verify that a current worker binary's export command can read an older worker's on-disk state: its journal snapshot and native-state paths under the worker home. Older readers are kept by the compatibility rules, so this is expected. If the verification fails, the design changes to "suspend first upgrades the worker through the existing atomic idle replacement, then captures"; record that in the Decision Log. In neither case does a version-2 spec write a new archive.
 
 **Raw launch record.** For a raw session, record the checkout's refs (`git for-each-ref --format=%(refname)%00%(objectname)`), its stash list and its linked worktrees when the session launches. Store the record as a file in the repository's common Git directory, at `mj/sessions/<session-id>/launch`, written by the worker at launch. Mjolnir already writes under `refs/mj/` in user repositories for review pins, so this adds no new kind of side effect. Suspend reads the file. Destroy deletes it, and suspend keeps it. When the file is missing (a raw session launched before this change), capture treats every ref as unchanged except HEAD's branch and includes all stash entries. Record that in the Decision Log if it proves wrong in practice.
 
@@ -438,7 +456,17 @@ The terminal UI and web UI must call it off their event loops (`AGENTS.md`: no b
 
 **Consent.** Add `discard_untracked: bool` to the suspend request: the HTTP body in `turns.rs`, `SessionLifecycleRequest::Suspend` in `mj-client`, and the older direct daemon action. Remove `acknowledge_unpublished_work` and `ignore_nested_repositories` from suspend.
 
-**Recheck at the capture cut.** After the barrier is held, the controller runs the inventory again. When untracked paths exist, or a managed checkout's `.mj/keep/` is not empty, and `discard_untracked` is false, suspend fails with a refusal listing them. The CLI names the flag in that refusal, as it does today for the publication flag (`mj-cli/src/api_commands.rs`, around line 1357). An in-progress operation in a managed checkout needs its own consent, `abort_operation: bool` in the request (`--abort-operation` on the CLI), because aborting discards conflict resolution. The terminal and web dialogs set it only when the preflight they displayed showed that operation. When capture finds an operation and `abort_operation` is false (Milestone 1's `SnapshotRefused::OperationInProgress`), suspend refuses, names the operation and the flag, and leaves it intact. The UIs then show the dialog again with the operation listed. This recheck is what makes consent safe: neither files created after the preview nor an operation started after it is ever discarded without consent.
+**Consent is checked at the capture cut against what was approved.** The request carries the consent the user actually gave:
+- **CLI flags approve blindly:** `--discard-untracked` sends `UntrackedConsent::Any`, and `--abort-operation` sends `OperationConsent::Any`. The person or agent typing the flag accepts whatever is there.
+- **Dialogs approve exactly what they displayed:** `Shown` with the listed untracked paths, including `.mj/keep/` as one entry when it was shown, and `Shown` with the listed (checkout, operation) pairs.
+
+Milestone 1's capture checks untracked paths and operations against that consent inside the barrier, and refuses with the uncovered items before changing anything. The controller checks a managed checkout's `.mj/keep/` (not Git state, so not part of capture) in the same step, immediately before capture under the barrier: if `.mj/keep/` is nonempty and neither `Any` nor a `Shown` list containing it covers it, suspend refuses.
+
+On refusal:
+- the CLI names the uncovered items and the flag, as it does today for the publication flag (`mj-cli/src/api_commands.rs`, around line 1357);
+- the terminal and web UIs show the dialog again with the new inventory.
+
+Aborting an operation needs its own consent because it discards conflict resolution. This is what makes consent safe: nothing the user did not see is discarded without a blanket flag.
 
 **Surfaces.**
 
@@ -509,7 +537,7 @@ Remove the terminal UI's "Discard changes since checkpoint…" and "Ignore and S
 
 - Automatic recovery copies: `RecoveryCoordinator` and the snapshot observations that feed it (`mj-daemon/src/recovery.rs`, `mj-daemon/src/daemon/snapshot.rs`). `mj-daemon/src/daemon/continuation.rs` borrows `AUTO_CHECKPOINT_INTERVAL` as the ceiling of its quota-retry backoff; give it its own named constant with a comment explaining the value.
 - The explicit checkpoint action: the daemon action, the HTTP route, the terminal UI and web commands, and the views (`actions.rs` around line 540, `views.rs` around line 361, controller `checkpoint/capture.rs`).
-- The checkpoint taken by bundle export. Export of a live session computes Milestone 1's snapshot bundle directly through the worker, without the barrier and without touching the checkpoint row. Export of a stopped session reads its suspend snapshot.
+- The checkpoint taken by bundle export. Export of a live session computes Milestone 1's snapshot directly through the worker, without the barrier and without touching the checkpoint row. Capture's pinned-cut check (step 5) keeps the exported refs and working state consistent while the agent keeps working, and the export converts the pack plus pinned refs into the `git bundle` users expect. Export of a stopped session reads its suspend snapshot.
 - Checkpoint-based agent restart: `mj-daemon/src/daemon/restart.rs` around line 449, `lifecycle.rs` around line 183, and the restart intent's checkpoint fields in `mj-store/src/database/session_restart.rs`. Restart stops the harness and starts it again in the same worker from its native state, as worker upgrades already do (`mj-controller/src/controller/worker_restart.rs`). First read why restart used checkpoint-and-restore: the likely reason is model or harness switches (`/model`). Keep that case working through the harness's own resume; record what you find in Surprises & Discoveries.
 
 **Remove the live-copy machinery.** In `mj-controller/src/controller/checkpoint/`, remove:
@@ -567,10 +595,15 @@ The archive is not installed on the daemon as the session's checkpoint; the daem
    2. Append its public key to the destination's `~/.ssh/authorized_keys` with `restrict,from="<source address>",command="<worker import command for this operation>"`.
    3. When the destination is a persistent EC2 Podman host whose security group does not admit the source, add an ingress rule for the source's address as a /32 (use the EC2 helpers in `mj-cli/src/ec2.rs`, around lines 878–918, moved into a shared crate if needed).
    4. From the source host, run `ssh` to the destination with that key and stream the archive.
-   5. If the source cannot reach the destination, try the reverse direction: install the key on the source and pull.
+   5. If the source cannot reach the destination, try the reverse direction. Install the key on the source host, restricted to the worker *export* command for this operation's archive and to the destination's address. Then run `ssh` from the destination to the source and pull, piping into the destination's import. A pushed transfer's key is restricted to import, and a pulled transfer's key to export.
    6. Remove the key and the security-group rule on every exit path.
 
-   Before installing either resource, persist its ownership in the move's durable state: the host and the key's comment (`mj-move-<operation-id>`), and the EC2 security group, rule and address. The daemon can then reconcile at startup. For every recorded resource whose move is finished, or whose move is resumed through a different route, it deletes the key line by comment and revokes the rule, then clears the record. This follows the `AGENTS.md` rule that daemon background work must be resumable from durable state.
+   Before installing either resource, persist its ownership in the move's durable state: the host and the key's comment (`mj-move-<operation-id>`), and the EC2 security group, rule and address.
+   - **Keys** are per move (each has its own line and comment), so each move removes its own.
+   - **A security-group rule can be shared:** AWS rejects a duplicate rule, so two concurrent moves between the same hosts need the same one. One store transaction serializes the rule's lifetime. A move records itself as a user of the rule, and authorizes the rule only if no other active move records it. On release, the move removes its record, and revokes the rule only if no other active move still records it. The decision is made inside the transaction that reads the other moves' records, so no move can see a rule that another is about to revoke.
+   - **At startup,** the daemon releases the records of moves that are finished, or that resumed through a different route, by the same rule, deleting key lines by comment.
+
+   This follows the `AGENTS.md` rule that daemon background work must be resumable from durable state.
 3. **Daemon stream.** When neither direction connects, run `ssh source export | ssh destination import` from the daemon without writing to its disk. Report the route in the move's progress and in its completion notice.
 
 Record which route each move used in the move's durable state, so a daemon restart resumes the same transfer or restarts it cleanly.
@@ -578,12 +611,13 @@ Record which route each move used in the move's durable state, so a daemon resta
 **Keep directory on Move.** After the archive, transfer `.mj/keep/` as a tar stream over the same route, leaving out the paths named by `--skip`. Skipped paths are deleted when a managed source is retired; in a raw checkout they stay on disk. `--dry-run`, the CLI confirmation and the Move dialogs say this, listing each skipped path with its size, and passing `--skip` is the consent. Unpack it into the destination checkout's `.mj/keep/` before the agent starts. The keep directory never enters the archive, so it is never stored on the daemon. When the route is the daemon stream it does pass through the daemon's network, and the move's progress shows its size so the user can cancel and rerun with `--skip`.
 
 **Persisted state.** The new `MoveOperation` shape replaces the old one. At startup, an old-format in-flight move is recovered according to its durable phase.
-- **The source still owns the session** (any phase before destination readiness): roll back to the source with the existing rollback, and send a notice telling the user to run the move again.
-- **The destination already owns the session** (`StartingQueue` or later; the old executor retires the source in `finish_workspace_transfer` and then completes queue admission): finish forward. Retire the source if it is not already gone, complete the exactly-once queue admission, and settle the operation. These final steps use no old transfer machinery, so keep just that much of the old executor as a reader for old records.
+Ownership is decided by the existing recovery classification, not by the phase name alone. Today's recovery already handles the crash window where the destination's session is durably `Running` while the operation still says `ResumingDestination`, and finishes forward there. Keep that classifier and its finish-forward steps as the reader for old records, and delete the rest of the old executor:
+- **The source still owns the session:** roll back to the source with the existing rollback, and send a notice telling the user to run the move again.
+- **The destination owns the session** (including that crash window, `StartingQueue`, and later): finish forward. Retire the source if it is not already gone, complete the exactly-once queue admission, and settle the operation.
 
-Add an upgrade regression for both cases.
+Add upgrade regressions for each case, setting the persisted destination owner and the Move phase together.
 
-**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. Resume on the same target checks that directory for the checkpoint's SHA-256 and uses that file when present; otherwise it uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours. It runs at daemon startup and whenever a snapshot is written to that host, and extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also fetches the snapshot's bundle into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
+**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. Resume on the same target checks that directory for the checkpoint's SHA-256 and uses that file when present; otherwise it uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours. It runs at daemon startup and whenever a snapshot is written to that host, and extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also loads the snapshot's pack into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
 
 **Tests.**
 
@@ -620,10 +654,10 @@ Run all commands from the repository root, `/home/jonathan/Projects/mjolnir` or 
 
 After Milestone 1:
 
-    cargo test -p mj-checkpoint snapshot::
-    cargo clippy -p mj-checkpoint --all-targets -- -D warnings
+    cargo test -p brokk-mj-checkpoint snapshot::
+    cargo clippy -p brokk-mj-checkpoint --all-targets -- -D warnings
 
-Expected: every `snapshot::tests::*` test passes. The pushed-branch test asserts that no bundle file exists.
+Expected: every `snapshot::tests::*` test passes. The pushed-branch test asserts that the pack holds no objects.
 
 For each later milestone, build the CLI and use an isolated instance. Never use the default instance:
 
@@ -632,7 +666,7 @@ For each later milestone, build the CLI and use an isolated instance. Never use 
     ... scenario below ...
     target/debug/mj --instance snapshot-test daemon stop
 
-Run the affected crates' tests with filters, for example `cargo test -p mj-controller lifecycle::` or `cargo test -p mj-tui dialogs`, plus `cargo clippy -p <crate> --all-targets -- -D warnings` for each edited crate. When a test fails, rerun only that test after fixing it.
+Run the affected crates' tests with filters, for example `cargo test -p brokk-mj-controller lifecycle::` or `cargo test -p brokk-mj-tui dialogs` (Cargo package names carry a `brokk-` prefix), plus `cargo clippy -p <crate> --all-targets -- -D warnings` for each edited crate. When a test fails, rerun only that test after fixing it.
 
 
 ## Validation and Acceptance
@@ -647,7 +681,7 @@ Use a scratch repository whose origin is a bare repository on the same machine, 
 Then:
 
 - `target/debug/mj --instance snapshot-test suspend --session <id>` fails with a message naming `notes.txt` and `--discard-untracked`. The session keeps running.
-- With `--discard-untracked` the command succeeds. `target/debug/mj --instance snapshot-test sessions` shows the session as suspended. Its archive's repository bundle contains only the unpushed commit and the stash commits; inspect it with `git bundle list-heads`.
+- With `--discard-untracked` the command succeeds. `target/debug/mj --instance snapshot-test sessions` shows the session as suspended. Its archive's repository pack contains only the unpushed commit and the stash commits; inspect it with `git verify-pack -v <pack>`.
 - Resume the session on a second local target, for example a Podman target. In the new clone: `git log -1` shows the unpushed commit on `feature`, `git stash list` shows `keepme`, `git diff --cached` and `git diff` show the staged and unstaged edits, and `notes.txt` is absent.
 - Start a merge with a conflict in the session and suspend. The warning says the merge will be aborted. After resume, the merge is gone and the pre-merge state is intact.
 - Suspend a raw session, resume it on another target, and check that the user's own unrelated branches did not travel. Resume it back on its raw target and check that the checkout was not modified by the resume.
@@ -659,7 +693,7 @@ Then:
 
 ## Idempotence and Recovery
 
-Capture changes nothing in a raw checkout except a best-effort `git fetch` and the temporary `refs/mj/snapshot/*` refs, which are deleted afterwards and removed again by the next capture if a crash left them. In a managed checkout, the operation abort is the one destructive step; the warning names it, and it happens only after the user consents.
+Capture changes nothing in a raw checkout except a best-effort `git fetch` and the unreachable objects that `git stash create` and the stash replacements write; Git's garbage collection removes those. It writes no refs, so a crash leaves nothing to clean up. In a managed checkout, the operation abort is the one destructive step; the warning names it, and it happens only after the user consents.
 
 Suspend is resumable from durable intent as today. A retried suspend recaptures, and the new archive replaces the old one only after verified installation. Restore always works in a fresh directory and publishes it only on success, so a retry starts clean. Move transfers use per-operation names and verify the hash at the destination before anything on the source is retired. The temporary key and security-group rule are recorded in the move's durable state before they are installed, and removed on every exit path. After a daemon crash, startup reconciliation removes any that are still recorded. Until then, a leftover key is restricted to one import command and the source's address.
 
@@ -669,19 +703,20 @@ Suspend is resumable from durable intent as today. A retried suspend recaptures,
 The Git commands at the heart of capture and restore, shown for one managed checkout with HEAD on `feature`:
 
     git fetch --prune origin                      # best effort
-    git stash create                              # -> <stash-commit> or empty
-    git update-ref refs/mj/snapshot/0 <stash-commit>
+    git for-each-ref --format='%(refname) %(objectname)'   # pin the cut
+    git stash create                              # -> <work> or empty
     git stash list --format=%H%x00%gs             # stash entries to keep
-    git bundle create snap.bundle refs/heads/feature refs/tags/v1 refs/mj/snapshot/0 \
-        <stash entry refs> --not --remotes=origin
-    git update-ref -d refs/mj/snapshot/0
+    git ls-remote --tags origin                   # origin tags, when reachable
+    printf '%s\n' <feature> <v1> <work> <stash...> --not <origin refs and tags> \
+        | git pack-objects --revs --stdout > snap.pack
 
-    git clone <origin> work && cd work
-    git fetch ../snap.bundle 'refs/*:refs/mj/restore/*'
+    git clone <origin> work && cd work && git fetch --tags origin
+    git config --add remote.origin.pushurl <push-url>   # per saved push URL
+    git index-pack --stdin < ../snap.pack
     git update-ref refs/heads/feature <head-commit>
     git stash store -m keepme <stash-entry-commit>
-    git checkout feature
-    git stash apply --index <stash-commit>
+    git symbolic-ref HEAD refs/heads/feature && git reset --hard <head-commit>
+    git stash apply --index <work>
 
 
 ## Interfaces and Dependencies
@@ -700,7 +735,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         pub working_state_skipped: bool,           // raw checkout with an operation in progress
         pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state
         pub remote_refs_stale: bool,
-        pub bundle: Option<PathBuf>,
+        pub pack: Option<PathBuf>,                  // non-thin pack of what origin lacks
     }
 
     pub enum CheckoutOwnership { Managed, Raw { launch: Option<LaunchRecord> } }
@@ -711,15 +746,18 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         pub fn read(runner: &dyn GitCommandRunner, checkout: &Path, session_id: &str) -> Result<Option<LaunchRecord>>;
     }
 
-    pub struct CaptureConsent { pub abort_operation: bool }
+    pub enum UntrackedItem { Path(PathBuf), Stash { commit: String, message: String } }  // stash = its -u/-a payload
+    pub enum UntrackedConsent { None, Any, Shown(Vec<UntrackedItem>) }
+    pub enum OperationConsent { None, Any, Shown(Vec<(PathBuf, GitOperationKind)>) }  // "" = primary checkout
+    pub struct CaptureConsent { pub untracked: UntrackedConsent, pub operations: OperationConsent }
 
     pub fn capture_workspace_snapshot(
         runner: &dyn GitCommandRunner,
         checkout: &Path,
         ownership: &CheckoutOwnership,
         consent: CaptureConsent,
-        bundle_path: &Path,
-    ) -> Result<WorkspaceSnapshot>;   // SnapshotRefused::OperationInProgress(kind) when consent is missing
+        pack_path: &Path,
+    ) -> Result<WorkspaceSnapshot>;   // SnapshotRefused::{Untracked(Vec<UntrackedItem>), OperationInProgress(PathBuf, GitOperationKind)}
 
     pub fn restore_workspace_snapshot(
         runner: &dyn GitCommandRunner,
@@ -732,6 +770,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
 
     pub struct WorkspaceInventory {
         pub untracked: Vec<UntrackedPath>,
+        pub untracked_stashes: Vec<SnapshotStashEntry>,   // entries whose -u/-a payload will not be kept
         pub operation: Option<GitOperationKind>,   // Merge | Rebase | CherryPick | Revert | Am | Bisect
         pub raw: bool,
         pub worktrees: Vec<(PathBuf, WorkspaceInventory)>,
@@ -747,7 +786,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
 
 In `mj-checkpoint/src/checkpoint.rs`, add `CheckpointRepositoryCapture::OriginDelta { ownership: CheckoutOwnership }` and raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that use it.
 
-The suspend request gains `discard_untracked: bool`, `abort_operation: bool` and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
+The suspend request gains `discard_untracked` (`"any"` or `{"shown": [paths]}`, absent for none), `abort_operations` (`"any"` or `{"shown": [{"path", "kind"}]}`) and `without_checkpoint: bool` and loses `acknowledge_unpublished_work` and `ignore_nested_repositories`. This applies to the HTTP body (`mj-server/src/server/api/turns.rs`), `SessionLifecycleRequest::Suspend` (`mj-client/src/daemon.rs`), and the CLI flags `--discard-untracked`, `--abort-operation` and `--without-checkpoint`. The destroy request loses `delete_branch`. Both suspend and Move accept `dry_run: bool` (CLI `--dry-run`), and Move accepts `skip: Vec<PathBuf>` (CLI `--skip <path>`, repeatable, relative to `.mj/keep/`). The new route `GET /api/v1/sessions/{session_id}/suspend-preflight` returns:
 
     {
       "untracked": [{"path": ..., "bytes": ...}],
@@ -780,7 +819,7 @@ Revision note (2026-11-18, later): added the agent-facing data-loss rules (refus
 
 Revision note (2026-11-18, review): addressed the plan review of b9f97fb41:
 - Capture detects and aborts an in-progress operation before reading HEAD and refs, and the abort needs its own consent (`--abort-operation`).
-- A detached HEAD goes into the bundle, and durable `refs/mj/` review refs are kept.
+- A detached HEAD goes into the delta, and durable `refs/mj/` review refs are kept.
 - Restore resets the index and working tree to the saved commit before applying the stash.
 - The consent recheck lands together with the capture switch in Milestone 2 and also covers `.mj/keep/`.
 - Old raw archives keep converting from the raw checkout at resume, through the new capture.
@@ -790,3 +829,20 @@ Revision note (2026-11-18, review): addressed the plan review of b9f97fb41:
 - The target cache lives in host-owned storage.
 - Temporary transfer grants are recorded before installation and reconciled at startup.
 - The dry-run estimate includes the working state.
+
+Revision note (2026-11-18, review 2):
+- Consent now records exactly what a dialog showed, as `Shown` lists, while CLI flags give blanket `Any` consent. Capture checks it against what it finds, as the single decision point.
+- Sessions with an older worker capture with the daemon's own staged worker binary instead of falling back to the old untracked-including format.
+- A reverse (pull) transfer gets a key restricted to export.
+- Cargo package names in commands corrected to `brokk-mj-*`.
+
+Revision note (2026-11-18, review 3):
+- Capture now:
+  - checks consent and aborts operations in every checkout before reading any ref;
+  - pins a verified cut;
+  - packs objects with `git pack-objects` from SHAs instead of bundling through temporary refs;
+  - excludes history origin offers through tags;
+  - keeps `git stash -u`/`-a` entries without their untracked payload, under consent.
+- Restore reapplies push URLs.
+- Old in-flight moves are classified by the existing recovery classifier, including the case where the destination is already running.
+- A shared EC2 security-group rule's lifetime is decided in one store transaction across moves.
