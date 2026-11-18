@@ -209,7 +209,7 @@ To see it working, use an isolated test instance named `snapshot-test`:
   Date/Author: 2026-11-18, plan author.
 
 - Decision: suspend no longer asks for publication consent; `--acknowledge-unpublished-work` and `acknowledge_unpublished_work` are removed from suspend.
-  Rationale: the snapshot now carries every unpushed commit, so suspend no longer risks unpublished work. The publication marker still gates automatic archival of old sessions. Its assessor (`mj-controller/src/controller/publication.rs`) keeps today's behavior. A restored checkout's remote configuration is the source's own, as written, so the assessor's comparison of recorded and live configured URLs, and its queries through Git, mean the same before and after a restore.
+  Rationale: the snapshot now carries every unpushed commit, so suspend no longer risks unpublished work. The publication marker still gates automatic archival of old sessions. Its assessor (`mj-controller/src/controller/publication.rs`) compares like with like. Recorded configured URLs (`remote.origin.url`, `remote.origin.pushurl`) are compared with the live *configured* values, never with `git remote get-url`, which applies rewrites. Today, when no pushurl exists, it falls back to the effective fetch URL and compares that with the recorded configured origin, so any rewritten origin looks changed; this fixes that. Its network queries must go through Git by remote name (`git fetch origin`, `git ls-remote origin`), never by passing back an already resolved URL: today it fetches from the URL `git remote get-url` returned, which chained rules would rewrite a second time. That way they reach exactly where Git's pushes go. A restored checkout's remote configuration is the source's own, so all of this means the same before and after a restore.
   Date/Author: 2026-11-18, plan author.
 
 - Decision: `mj destroy --delete-branch` and the "Destroy and delete branch" buttons are removed.
@@ -394,7 +394,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    The result is a non-thin pack containing only what origin lacks; it may be empty. Packing from SHAs writes no ref at all. Two raw sessions sharing a Git common directory, or an export overlapping a suspend, therefore cannot disturb each other, and a crash leaves nothing to clean up.
 7. **Return a `WorkspaceSnapshot`.** For remotes it records:
    - the configured `remote.origin.url` values and `remote.origin.pushurl` values, as written;
-   - the source checkout's repository-local rewrite rules (`git config --local --get-regexp '^url\.'`, covering `insteadOf` and `pushInsteadOf`).
+   - the source checkout's repository-local rewrite rules (`git config --local --includes --get-regexp '^url\.'`, covering `insteadOf` and `pushInsteadOf` and rules loaded through repository-local includes), and each initialized submodule's own repository-local rules. Credentials are redacted in both the rule's key, where the base URL lives (`url.<base>.insteadOf`), and its value. Where URL parsing fails, as for a host-less prefix like `https://user:TOKEN@`, any userinfo is stripped textually. A rule base that is a relative local path, such as `../mirrors/`, is made absolute against the source repository's working directory.
 
    A relative local URL that no rewrite rule matches is made absolute against the repository's working directory, because restore runs from a different directory. Capture's own `ls-remote` and fetches query by remote name, never by an already resolved URL, so Git rewrites each query exactly once (real Git with rules A→B and B→C reaches B from A but C from B). Availability checks use Git's resolution on the source. Relative submodule URLs in `.gitmodules` are resolved for those checks by Git's submodule rule: against the superproject's default remote URL (the current branch's upstream remote, or else `origin`), and against its working directory only when it has no remote. Configured submodule URLs that are still relative are made absolute against the superproject's working directory. All of these are both passed through the existing `redact_origin_credentials` so no embedded token enters a snapshot, cache or destination, HEAD, the kept refs with their object IDs, the stash list (commits and messages), the working-state commit, the nested worktrees, `working_state_skipped`, `remote_refs_stale`, and the pack path.
 
@@ -404,7 +404,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    - `Clone { origin, seed }` does not run `git clone`, which checks a relative local path before applying `insteadOf` and so fails on rewritten relative URLs. Instead every restore runs the same steps:
      1. `git init --object-format=<the source's format>` (recorded at capture with `git rev-parse --show-object-format`, because a plain `git init` defaults to SHA-1 and cannot hold a SHA-256 origin's objects);
      2. write the source's repository-local `url.*` rules, then `git remote add origin <first configured url>` (step 2 below);
-     3. write the whole-URL rewrite rules, push URLs and branch upstreams into the local config;
+     3. write the configured push URLs, if any, and branch upstreams into the local config (step 2 below; there are no pins);
      4. `git fetch origin '+refs/heads/*:refs/remotes/origin/*'` and `git fetch --tags origin`;
      5. `git remote set-head origin --auto` when origin is reachable.
 
@@ -413,7 +413,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 
    History-cutoff workspaces (`--no-later-history`, see `HistoryCutoff` in `mj-core/src/targets.rs`) deliberately have no origin remote. Their resume already provisions and verifies the cutoff, so they restore with `Provisioned { allow_origin_fetch: false }`, capture with `origin_override`, and never fetch later history. Their capture uses `ExclusionSource::Commits(<cutoff base>)`: it excludes only what the provisioned base will contain, never origin's refs, so a session commit that was also published on origin is still packed. Keep the existing cutoff resume regression passing. An optional local seed (the clone cache on the target, or a source repository) may be passed for speed with `--reference-if-able`, followed by `git repack -a -d` and removal of the alternates file so the clone is independent. Correctness never depends on the seed.
 2. **Remote configuration follows one principle: a restored checkout carries the source checkout's own configuration, and otherwise behaves like a fresh clone of the same origin on the destination host.**
-   - Restore writes the recorded repository-local `url.*` rules into the new repository's local config.
+   - Restore writes the recorded repository-local `url.*` rules into the new repository's local config, and each initialized submodule's own rules into that submodule's local config before its init and fetch (also passed with `-c` to that fetch). A separate `git clone` never sees the superproject's local config, so this is the only way such a submodule restores on a destination without the rule. A submodule left uninitialized behaves as on the source: a later `git submodule update --init` sees only the host's rules there too.
    - It adds the configured url entries: the first with `git remote add`, any others with `git remote set-url --add`.
    - It writes the `pushurl` entries exactly as configured, if the source had any.
 
@@ -1303,3 +1303,10 @@ Revision note (2026-11-18, review 56):
 - `push_is_default` is defined by behavior: no explicit pushurl, and push equals fetch.
 
 Revision note (2026-11-18, review 57): supersedes the URL pinning and alias scheme. Remotes are restored as configured, with the source checkout's repository-local rewrite rules, and otherwise behave like any clone on the destination host. See the Decision Log.
+
+Revision note (2026-11-18, review 58): rewrite-rule keys are redacted, and initialized submodules carry their own local rules.
+
+Revision note (2026-11-18, review 59):
+- Rule capture includes repository-local includes, redacts host-less prefixes, and absolutizes relative bases.
+- The stale pin step is removed from the restore sequence.
+- The publication assessor queries by remote name.
