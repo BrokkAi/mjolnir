@@ -2718,7 +2718,7 @@ else:
         use std::os::unix::fs::PermissionsExt;
 
         let setup = include_str!("ec2_sshd.sh")
-            .split("# Measured relay-session refusals")
+            .split("# OpenSSH defaults (MaxSessions")
             .next()
             .unwrap();
         for (available, succeeds) in [("ssh.service", true), ("sshd.service", true), ("", false)] {
