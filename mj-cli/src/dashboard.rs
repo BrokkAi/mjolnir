@@ -2398,12 +2398,15 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
 ) -> (bool, bool) {
+    context
+        .dashboard
+        .prepare_component_event(&event, &mut context.chats);
     if matches!(&event, Event::Mouse(_))
         && !context.dashboard.modal_open()
         && !context.dashboard.component_pointer_captured()
         && let Some(session) = context
             .dashboard
-            .conversation_form_pointer_session(&context.chats)
+            .conversation_pointer_session(&context.chats)
         && let Some(pane) = context.dashboard.pane_for_session(&session)
         && let Some(chat) = context.pane_chat_mut(pane)
     {

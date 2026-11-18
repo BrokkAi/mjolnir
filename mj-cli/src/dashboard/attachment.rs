@@ -257,12 +257,20 @@ impl SessionAttachment {
         })
     }
 
+    pub(super) fn has_conversation_interest(
+        &self,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) -> bool {
+        dashboard
+            .pane_sessions()
+            .into_iter()
+            .any(|(pane, held)| held == session && self.pane_can_show(dashboard, pane))
+    }
+
     fn has_surface_interest(&self, dashboard: &mj_tui::DashboardState, session: &str) -> bool {
         dashboard.notification_form_session().as_deref() == Some(session)
-            || dashboard
-                .pane_sessions()
-                .into_iter()
-                .any(|(pane, held)| held == session && self.pane_can_show(dashboard, pane))
+            || self.has_conversation_interest(dashboard, session)
     }
 
     #[cfg(test)]

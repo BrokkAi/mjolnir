@@ -912,6 +912,8 @@ impl DashboardContext {
                     }
                     return;
                 }
+                let conversation_opening = self.attachments[&session_id]
+                    .has_conversation_interest(&self.dashboard, &session_id);
                 self.attachments.get_mut(&session_id).unwrap().finish();
                 self.opening_chat_sessions.retain(|_, session| session != &session_id);
                 if !self.wanted_chat_sessions().contains(&session_id) { return; }
@@ -973,13 +975,12 @@ impl DashboardContext {
                         // was in flight is handed over now.
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
-                        self.dashboard.clear_notice();
+                        self.dashboard.report_chat_attachment_result(&session_id, None, conversation_opening);
                         self.acknowledge_visible_chats();
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        self.dashboard.set_notification_form_error(&session_id, Some(error.clone()));
-                        self.dashboard.report_open_failure(&session_id, &error);
+                        self.dashboard.report_chat_attachment_result(&session_id, Some(&error), conversation_opening);
                     }
                 }
             }

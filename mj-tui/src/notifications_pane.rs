@@ -647,6 +647,24 @@ impl DashboardState {
             .then(|| self.notification_destination(entry))
     }
 
+    /// A notification-only attach reports in its card; a requested
+    /// conversation's open keeps its shared opening/retry feedback.
+    pub fn report_chat_attachment_result(
+        &mut self,
+        session: &str,
+        error: Option<&str>,
+        conversation_opening: bool,
+    ) {
+        self.set_notification_form_error(session, error.map(str::to_owned));
+        if conversation_opening {
+            if let Some(error) = error {
+                self.report_open_failure(session, error);
+            } else {
+                self.clear_notice();
+            }
+        }
+    }
+
     pub fn set_notification_form_error(&mut self, session: &str, error: Option<String>) {
         if let Some(error) = error {
             self.notifications
@@ -672,7 +690,7 @@ impl DashboardState {
     }
 
     /// Pointer capture remains with its owning conversation across sessions.
-    pub fn conversation_form_pointer_session(
+    pub fn conversation_pointer_session(
         &self,
         chats: &std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
     ) -> Option<String> {
@@ -680,9 +698,10 @@ impl DashboardState {
             if !self.chat_input_available(&session) {
                 return None;
             }
-            (chats.get(&session)?.elicitation_pointer_surface()
-                == Some(mj_chat::chat::ElicitationSurface::Conversation))
-            .then_some(session)
+            chats
+                .get(&session)?
+                .conversation_pointer_captured()
+                .then_some(session)
         })
     }
 
@@ -696,7 +715,7 @@ impl DashboardState {
         if self.modal_open() || self.component_pointer_captured() {
             return None;
         }
-        if self.conversation_form_pointer_session(chats).is_some() {
+        if self.conversation_pointer_session(chats).is_some() {
             return None;
         }
         let area = self.notifications.form_area?;
@@ -731,7 +750,7 @@ impl DashboardState {
             return None;
         }
         if matches!(event, crossterm::event::Event::Mouse(_))
-            && self.conversation_form_pointer_session(chats).is_some()
+            && self.conversation_pointer_session(chats).is_some()
         {
             return None;
         }
@@ -2110,6 +2129,9 @@ pub(crate) mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         let mut second = running_session();
         second.id = "session-2".into();
+        dashboard
+            .durable_records
+            .insert(second.id.clone(), second.clone());
         dashboard.state.sessions.insert(second.id.clone(), second);
         serve_attention(&mut dashboard, &["session-1"], SessionAttention::NeedsInput);
         let mut request = question("session-1");
@@ -2158,9 +2180,7 @@ pub(crate) mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
         assert_eq!(
-            dashboard
-                .conversation_form_pointer_session(&chats)
-                .as_deref(),
+            dashboard.conversation_pointer_session(&chats).as_deref(),
             Some("session-2")
         );
         let area = dashboard.notifications.form_area.unwrap();
@@ -2179,16 +2199,12 @@ pub(crate) mod tests {
                 .handle_notification_form_event(&mut chats, &Event::Mouse(release))
                 .is_none()
         );
-        let owner = dashboard.conversation_form_pointer_session(&chats).unwrap();
+        let owner = dashboard.conversation_pointer_session(&chats).unwrap();
         chats
             .get_mut(&owner)
             .unwrap()
             .handle_event_result(Event::Mouse(release));
-        assert!(
-            dashboard
-                .conversation_form_pointer_session(&chats)
-                .is_none()
-        );
+        assert!(dashboard.conversation_pointer_session(&chats).is_none());
         // Hard-won: 9739e9996: global commands left a different session's notification button armed.
         let card = dashboard.notifications_area.unwrap();
         let (x, y) = point(
@@ -2210,6 +2226,22 @@ pub(crate) mod tests {
         );
         dashboard.cancel_all_component_pointers(&mut chats);
         dashboard.focus = Focus::Sessions;
+        assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+        dashboard
+            .handle_notification_form_event(
+                &mut chats,
+                &Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..press
+                }),
+            )
+            .unwrap();
+        assert!(chats["session-1"].has_elicitation());
+        // Hard-won: dc29e81c6: terminal focus loss left a notification-only button armed.
+        dashboard
+            .handle_notification_form_event(&mut chats, &Event::Mouse(press))
+            .unwrap();
+        dashboard.prepare_component_event(&Event::FocusLost, &mut chats);
         assert!(chats["session-1"].elicitation_pointer_surface().is_none());
         dashboard
             .handle_notification_form_event(
@@ -2257,6 +2289,9 @@ pub(crate) mod tests {
                 session_id: "session-1".into()
             }
         );
+        // Go to Session above moved Browse to the notification's session.
+        // Put the competing conversation back before exercising its capture.
+        dashboard.set_current_session(Some("session-2"));
         // Hard-won: e1b4abc81: lifecycle-owned conversation capture blocked an unrelated notification form.
         let (x, y) = point(&lines, mj_chat::components::Checkbox::marker(false));
         chats
@@ -2277,11 +2312,7 @@ pub(crate) mod tests {
             crate::SessionOperationKind::Moving,
             None,
         );
-        assert!(
-            dashboard
-                .conversation_form_pointer_session(&chats)
-                .is_none()
-        );
+        assert!(dashboard.conversation_pointer_session(&chats).is_none());
         terminal
             .draw(|frame| {
                 crate::combined::render_combined_for_test(
@@ -2325,6 +2356,90 @@ pub(crate) mod tests {
                 }),
             )
             .unwrap();
+        // Hard-won: dc29e81c6: a transcript thumb released over another session's form kept dragging.
+        dashboard.finish_session_operation("session-2");
+        assert_eq!(dashboard.current_session_id(), Some("session-2"));
+        let mut projection = mj_core::state::MaterializedSession::empty("session-2");
+        projection.applied_event_ordinal = 40;
+        projection.transcript = (0..40).map(|index| mj_core::state::TranscriptItem {
+            stable_id: format!("scrollbar-history-{index}"), position: index, latest_content_event_ordinal: Some(index + 1), created_at_ms: 0, last_changed_at_ms: 0,
+            body: mj_core::state::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content":{"type":"text", "text": format!("Transcript row {index}")}})],
+                streaming: false,
+            },
+        }.into()).collect();
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .apply_materialized(&projection, &[], &[]);
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        let transcript = chats["session-2"]
+            .frame_surfaces()
+            .surface(mj_chat::selection::SurfaceId::Transcript)
+            .unwrap()
+            .rect;
+        let scrollbar_press = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: transcript.right(),
+            row: transcript.y + transcript.height / 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(scrollbar_press));
+        assert!(chats["session-2"].transcript_scrollbar_dragging());
+        assert_eq!(
+            dashboard.conversation_pointer_session(&chats).as_deref(),
+            Some("session-2")
+        );
+        let form = dashboard.notifications.form_area.unwrap();
+        let release = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: form.x + 3,
+            row: form.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Mouse(release))
+                .is_none()
+        );
+        let owner = dashboard.conversation_pointer_session(&chats).unwrap();
+        chats
+            .get_mut(&owner)
+            .unwrap()
+            .handle_event_result(Event::Mouse(release));
+        assert!(!chats["session-2"].transcript_scrollbar_dragging());
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(scrollbar_press));
+        assert!(chats["session-2"].transcript_scrollbar_dragging());
+        dashboard.prepare_component_event(&Event::FocusLost, &mut chats);
+        assert!(!chats["session-2"].transcript_scrollbar_dragging());
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(scrollbar_press));
+        assert!(
+            chats["session-2"].transcript_scrollbar_dragging(),
+            "focus loss disarms capture without deleting the displayed hitbox"
+        );
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(release));
     }
 
     pub(crate) fn dashboard() -> DashboardState {
@@ -2682,6 +2797,22 @@ pub(crate) mod tests {
                 session_id: "q1".into()
             }
         );
+        // Hard-won: dc29e81c6: a background form attachment cleared or replaced an unrelated failure notice.
+        dashboard.set_failure_notice("Unrelated command failed");
+        let notice = dashboard.notice().unwrap().to_owned();
+        dashboard.report_chat_attachment_result("q2", Some("Worker unavailable"), false);
+        assert_eq!(dashboard.notice().as_deref(), Some(notice.as_str()));
+        assert_eq!(
+            dashboard
+                .notifications
+                .form_errors
+                .get("q2")
+                .map(String::as_str),
+            Some("Worker unavailable")
+        );
+        dashboard.report_chat_attachment_result("q2", None, false);
+        assert_eq!(dashboard.notice().as_deref(), Some(notice.as_str()));
+        assert!(!dashboard.notifications.form_errors.contains_key("q2"));
     }
 
     // Hard-won: 6597a0761: a new card from the same session kept the old scroll offset.

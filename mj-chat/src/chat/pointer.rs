@@ -159,8 +159,27 @@ impl ChatState {
             || self.task_dialog_open
     }
 
+    /// Captured controls and scrollbars keep their conversation as owner even
+    /// when the pointer crosses another session's notification form.
+    pub fn conversation_pointer_captured(&self) -> bool {
+        let scrollbar = self.transcript_scrollbar_dragging();
+        if let Some(dialog) = self.elicitation.as_ref() {
+            return scrollbar
+                || dialog.pointer_surface() == Some(super::ElicitationSurface::Conversation);
+        }
+        if self.turn_control_dialog_open {
+            return scrollbar || self.turn_control_dialog.captures_pointer();
+        }
+        scrollbar
+            || (self.task_dialog_open && self.task_dialog_form.captures_pointer())
+            || self.voice_form.captures_pointer()
+            || self.config_picker_pointer_captured()
+    }
+
     /// Cancels any pointer gesture owned by a chat component.
     pub fn cancel_component_pointer(&mut self) {
+        self.cancel_transcript_scrollbar_pointer();
+        self.turn_control_dialog.cancel_pointer();
         self.task_dialog_form.cancel_pointer();
         self.voice_form.cancel_pointer();
         self.cancel_config_picker_pointer();

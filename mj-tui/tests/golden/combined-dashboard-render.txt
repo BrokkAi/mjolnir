@@ -1724,10 +1724,10 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │› ? ACP pretty name               ◇ ⋯ │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Question  podman  codex-1           ││  Host / fleet  Targets  CPU  RAM                                             │
 │  │ Choose a path                     │╰──────────────────────────────────────────────────────────────────────────────╯
-│  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄   □ ╮
+│  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
@@ -1750,7 +1750,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││? ACP pretty name · hel · <age>                                               │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │

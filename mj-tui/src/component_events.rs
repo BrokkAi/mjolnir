@@ -17,6 +17,18 @@ impl DashboardState {
         }
     }
 
+    /// Focus loss is broadcast to every presentation, including warm cards
+    /// outside the focused conversation.
+    pub fn prepare_component_event(
+        &mut self,
+        event: &Event,
+        chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
+    ) {
+        if matches!(event, Event::FocusLost) {
+            self.cancel_all_component_pointers(chats);
+        }
+    }
+
     pub(crate) fn dialog_layer_key(&self) -> String {
         let detail = self
             .active_modal()

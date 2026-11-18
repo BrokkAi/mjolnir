@@ -233,42 +233,49 @@ fn allocate_combined_heights(
 /// at this frame size. Maximized is exclusive, so the hypothetical maximum
 /// demotes any other maximum before running the same allocator used to draw
 /// the frame.
+/// The live layout and maximize probes use the same form-height reservation.
+fn support_bands(
+    dimensions: [(SupportPane, PaneDimensions); 4],
+    sizes: [(SupportPane, PaneSize); 4],
+    notification_minimum: Option<u16>,
+) -> [PaneBand; 4] {
+    std::array::from_fn(|index| {
+        let (_, dimensions) = dimensions[index];
+        let mut band = sized_band(
+            sizes[index].1,
+            dimensions.minimized,
+            dimensions.full,
+            dimensions.standard_cap,
+        );
+        if sizes[index].0 == SupportPane::Notifications
+            && sizes[index].1 != PaneSize::Minimized
+            && let Some(minimum) = notification_minimum
+        {
+            band.minimum = minimum;
+        }
+        band
+    })
+}
+
 fn maximized_pane_is_effective(
     frame_height: u16,
     dimensions: [(SupportPane, PaneDimensions); 4],
+    sessions: PaneBand,
     desired_prompt: u16,
     sizes: [(SupportPane, PaneSize); 4],
+    notification_minimum: Option<u16>,
 ) -> [(SupportPane, bool); 4] {
     let bands = dimensions;
     std::array::from_fn(|index| {
         let (pane, _) = bands[index];
         let standard_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Standard);
         let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
-        let bands_for = |sizes: [(SupportPane, PaneSize); 4]| {
-            std::array::from_fn(|index| {
-                if index == 0 {
-                    return PaneBand {
-                        minimum: 0,
-                        full: 0,
-                        cap: 0,
-                    };
-                }
-                let (_, size) = sizes[index];
-                let dimensions = bands[index].1;
-                sized_band(
-                    size,
-                    dimensions.minimized,
-                    dimensions.full,
-                    dimensions.standard_cap,
-                )
-            })
-        };
-        let standard_bands: [PaneBand; 4] = bands_for(standard_sizes);
-        let maximum_bands: [PaneBand; 4] = bands_for(maximum_sizes);
+        let standard_bands = support_bands(dimensions, standard_sizes, notification_minimum);
+        let maximum_bands = support_bands(dimensions, maximum_sizes, notification_minimum);
         let effective = match (
             allocate_combined_heights(
                 frame_height,
-                standard_bands[0],
+                sessions,
                 standard_bands[1],
                 standard_bands[2],
                 standard_bands[3],
@@ -277,7 +284,7 @@ fn maximized_pane_is_effective(
             ),
             allocate_combined_heights(
                 frame_height,
-                maximum_bands[0],
+                sessions,
                 maximum_bands[1],
                 maximum_bands[2],
                 maximum_bands[3],
@@ -771,21 +778,7 @@ fn render_combined_themed(
             },
         ),
     ];
-    let bands: [PaneBand; 4] = std::array::from_fn(|index| {
-        let (_, dimensions) = dimensions[index];
-        let mut band = sized_band(
-            sizes[index].1,
-            dimensions.minimized,
-            dimensions.full,
-            dimensions.standard_cap,
-        );
-        if sizes[index].0 == SupportPane::Notifications
-            && let Some(minimum) = notification_minimum
-        {
-            band.minimum = minimum;
-        }
-        band
-    });
+    let bands = support_bands(dimensions, sizes, notification_minimum);
     // Stacked, reserve one workspace content row, then grow its viewport
     // only after the other bands' minimums and the composer have room.
     let sessions = if narrow {
@@ -808,8 +801,14 @@ fn render_combined_themed(
     // Keep the support panes stacked together, using the space left by the
     // current sidebar size to decide whether they fit beside Sessions.
     let supports_adjacent = !narrow && support_panes_fit(content_area.width, dashboard);
-    let mut maximize_enabled =
-        maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
+    let mut maximize_enabled = maximized_pane_is_effective(
+        area.height,
+        dimensions,
+        sessions,
+        desired_prompt,
+        sizes,
+        notification_minimum,
+    );
     maximize_enabled[0].1 = !narrow
         && sessions_sidebar_width(area.width, PaneSize::Maximized)
             > sessions_sidebar_width(area.width, PaneSize::Standard);
@@ -2944,6 +2943,11 @@ mod tests {
                     .iter()
                     .any(|line| line.contains("Which deployment path should be used?"))
             );
+            // Hard-won: dc29e81c6: maximize controls ignored the live form reservation and offered a size that added no rows.
+            if height == 21 {
+                assert!(!inline.pane_maximize_enabled(SupportPane::Quota));
+                assert!(!inline.pane_maximize_enabled(SupportPane::Notifications));
+            }
             // Hard-won: 4c23909e0: attaching a form replaced an otherwise usable short dashboard with the resize screen.
             assert!(lines.iter().any(|line| line.contains("Workspaces")));
             append_combined_golden(
