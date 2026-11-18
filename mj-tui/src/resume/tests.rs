@@ -2296,6 +2296,7 @@ fn sub_agents_are_never_offered_for_resume() {
     };
     dashboard.set_native_agents(vec![mj_core::native_agent::NativeAgentView {
         generation_ordinal: 1,
+        pending_input_times: Default::default(),
         projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
         agent,
     }]);

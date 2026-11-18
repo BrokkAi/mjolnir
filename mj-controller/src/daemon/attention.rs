@@ -1287,19 +1287,24 @@ mod tests {
             stable_id: None,
         };
         let id = agent.view_id();
-        runtime.native_agents.insert(
-            id.clone(),
-            NativeAgentSummary {
-                generation_ordinal: 1,
-                agent,
-                projection_ordinal: 0,
-                projection_digest: String::new(),
-                pending_input: true,
-                pending_input_message: Some("Approve the native action?".into()),
-                pending_input_request_id: Some("first-request".into()),
-                pending_input_raised_at_ms: Some(42),
-            },
-        );
+        let request = |id: &str| mj_core::elicitation::ElicitationRequest {
+            id: id.into(),
+            message: "Approve the native action?".into(),
+            title: None,
+            description: None,
+            fields: vec![],
+            tool_permission: None,
+        };
+        let mut view = NativeAgentView {
+            generation_ordinal: 1,
+            agent,
+            projection: MaterializedSession::empty(&id),
+            pending_input_times: Default::default(),
+        };
+        view.apply_activity(42, Some(vec![request("first-request")]));
+        runtime
+            .native_agents
+            .insert(id.clone(), NativeAgentSummary::of(&view));
         let attention = project(&runtime);
         assert_eq!(attention[&id], SessionAttention::NeedsInput);
         assert_eq!(attention["parent"], SessionAttention::NeedsInput);
@@ -1334,21 +1339,48 @@ mod tests {
         assert_eq!(mixed.since_ms, 42);
 
         assert!(!projection.cards.contains_key(&id));
+        // The persisted view retains the raise time as the relay records
+        // ordinary activity or updates the same outstanding request.
+        let mut view: NativeAgentView =
+            serde_json::from_slice(&serde_json::to_vec(&view).unwrap()).unwrap();
+        view.apply_activity(80, None);
+        view.apply_activity(90, Some(vec![request("first-request")]));
         runtime
             .native_agents
-            .get_mut(&id)
-            .unwrap()
-            .pending_input_request_id = Some("second-request".into());
-        let revised = project_states(&runtime, BTreeSet::from(["parent".into()]));
-        assert_eq!(
-            revised.cards["parent"].form.as_ref().unwrap().request_id,
-            format!("native.{}:{id}.1.second-request", id.len()),
+            .insert(id.clone(), NativeAgentSummary::of(&view));
+        let active = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(active.cards["parent"], *card);
+
+        view.apply_activity(
+            100,
+            Some(vec![request("first-request"), request("second-request")]),
         );
-        let native = runtime.native_agents.get_mut(&id).unwrap();
-        native.agent.state = NativeAgentState::Completed;
-        native.pending_input = false;
-        native.pending_input_message = None;
-        native.pending_input_request_id = None;
+        runtime
+            .native_agents
+            .insert(id.clone(), NativeAgentSummary::of(&view));
+        let revised = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        let card = &revised.cards["parent"];
+        let form = card.form.as_ref().unwrap();
+        assert_eq!(
+            form.request_id,
+            format!("native.{}:{id}.1.second-request", id.len())
+        );
+        assert_eq!(form.raised_at_ms, 100);
+        assert_eq!(card.since_ms, 100);
+
+        view.apply_activity(110, Some(vec![request("first-request")]));
+        runtime
+            .native_agents
+            .insert(id.clone(), NativeAgentSummary::of(&view));
+        let resurfaced = project_states(&runtime, BTreeSet::from(["parent".into()]));
+        assert_eq!(resurfaced.cards["parent"].since_ms, 42);
+
+        view.apply_activity(120, Some(vec![]));
+        assert!(view.pending_input_times.is_empty());
+        view.agent.state = NativeAgentState::Completed;
+        runtime
+            .native_agents
+            .insert(id.clone(), NativeAgentSummary::of(&view));
         assert_eq!(project(&runtime)[&id], SessionAttention::Idle);
         assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
 

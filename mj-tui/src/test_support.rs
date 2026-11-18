@@ -630,6 +630,7 @@ pub(crate) fn dashboard_with_finished_native_child() -> (DashboardState, String,
     ];
     dashboard.set_native_agents(vec![NativeAgentView {
         generation_ordinal: 81,
+        pending_input_times: Default::default(),
         agent,
         projection,
     }]);

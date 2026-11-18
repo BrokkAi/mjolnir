@@ -40,6 +40,7 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
             };
             NativeAgentView {
                 generation_ordinal: 1,
+                pending_input_times: Default::default(),
                 projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                 agent,
             }
@@ -4078,6 +4079,7 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     let projection = mj_core::state::MaterializedSession::empty(&id);
     dashboard.set_native_agents(vec![NativeAgentView {
         generation_ordinal: 1,
+        pending_input_times: Default::default(),
         agent,
         projection,
     }]);
@@ -4177,6 +4179,7 @@ fn native_nested_scope_keys_preserve_filters_and_filter_editing() {
             .into_iter()
             .map(|agent| NativeAgentView {
                 generation_ordinal: 1,
+                pending_input_times: Default::default(),
                 projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                 agent,
             })
@@ -5124,6 +5127,7 @@ fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
                     };
                     NativeAgentView {
                         generation_ordinal: 1,
+                        pending_input_times: Default::default(),
                         projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                         agent,
                     }
