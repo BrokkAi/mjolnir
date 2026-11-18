@@ -746,11 +746,11 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-import",
+ "brokk-mj-sessionwiki",
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",
- "brokk-sessionwiki",
  "chrono",
  "dirs 6.0.0",
  "flate2",
@@ -763,7 +763,6 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
- "ruzstd",
  "semver",
  "serde",
  "serde_json",
@@ -965,6 +964,30 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "brokk-mj-sessionwiki"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-core",
+ "brokk-mj-import",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "brokk-sessionwiki",
+ "chrono",
+ "rusqlite",
+ "ruzstd",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

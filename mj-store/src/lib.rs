@@ -23,6 +23,7 @@ pub(crate) use mj_targets::{test_isolation, test_log};
 
 pub mod database;
 pub mod mailbox_outbox;
+pub mod managed_archive;
 pub mod recovery_gate;
 pub mod upgrade;
 pub mod web_push;

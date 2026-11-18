@@ -141,6 +141,11 @@ it or introduce a dependency between sibling branches.
   the project catalog, transcript compaction with the utility model, and
   handoff. It builds on the targets, store and accounts crates.
   `mj_controller` re-exports its modules under their old names.
+- `brokk-mj-sessionwiki` (`mj-sessionwiki/`, library `mj_sessionwiki`) is the
+  index of session history that searches, the resume picker and workers'
+  history queries read: keeping it in sync and answering queries over it. It
+  builds on the targets, store and import crates. `mj_controller` re-exports
+  its module under its old name.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

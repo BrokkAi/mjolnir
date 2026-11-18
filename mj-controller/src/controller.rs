@@ -25,7 +25,6 @@ pub mod profile_config;
 mod provisioning;
 pub mod publication;
 mod readiness;
-pub(crate) use network_git::workspace_root;
 pub use readiness::HarnessPreparationFailure;
 pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
@@ -642,13 +641,7 @@ fn selected_host_container_size(
 
 impl Controller {
     pub fn load() -> Result<Self> {
-        // A configuration the person has to fix, such as an entry whose secret
-        // is missing, is the reason a request fails, not an internal error.
-        let config = Config::load().map_err(|error| {
-            let refusal = mj_core::refusal::Refusal::precondition(format!("{error:#}"));
-            error.context(refusal)
-        })?;
-        let state = crate::database::load_state()?;
+        let (config, state) = crate::database::load_config_and_state()?;
         Ok(Self { config, state })
     }
 

@@ -93,6 +93,20 @@ fn decode_shared<T: serde::de::DeserializeOwned>(
     Ok(Some(value))
 }
 
+/// The configuration and the committed session records, as every reader that
+/// needs both loads them.
+///
+/// A configuration the person has to fix, such as an entry whose secret is
+/// missing, is the reason a request fails, not an internal error, so that
+/// failure carries a refusal.
+pub fn load_config_and_state() -> Result<(mj_core::config::Config, State)> {
+    let config = mj_core::config::Config::load().map_err(|error| {
+        let refusal = mj_core::refusal::Refusal::precondition(format!("{error:#}"));
+        error.context(refusal)
+    })?;
+    Ok((config, load_state()?))
+}
+
 pub fn load_state() -> Result<State> {
     if let Some(committed) = committed_state()? {
         return Ok(committed.state.clone());

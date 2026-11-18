@@ -146,10 +146,10 @@ pub fn read(
 /// (`super::index_is_writable`). Every test that points it somewhere has to
 /// take the same turn, so the guard lives here and the tests of this module and
 /// of its parent share it.
-#[cfg(test)]
-pub(crate) mod testing {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     /// Held for as long as a test relies on `SESSIONWIKI_DATA`.
-    pub(crate) static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub fn lock() -> std::sync::MutexGuard<'static, ()> {
         INDEX
@@ -160,7 +160,7 @@ pub(crate) mod testing {
     /// A real SessionWiki index in a temporary directory, opened through the
     /// crate's own `open` so the schema under test is the shipped one. Call it
     /// only while holding [`lock`].
-    pub(crate) fn isolated_index() -> (tempfile::TempDir, rusqlite::Connection) {
+    pub fn isolated_index() -> (tempfile::TempDir, rusqlite::Connection) {
         let directory = tempfile::tempdir().expect("a temporary directory");
         // SAFETY: the caller holds `lock`, so no other test in this process is
         // reading or writing this variable at the same time.
@@ -172,7 +172,7 @@ pub(crate) mod testing {
     }
 
     /// One row in the index's cache, which is what a query answers from.
-    pub(crate) fn index_row(connection: &rusqlite::Connection, session_id: &str, tool: &str) {
+    pub fn index_row(connection: &rusqlite::Connection, session_id: &str, tool: &str) {
         connection
             .execute(
                 "INSERT INTO files(path, tool, session_id, project, title, mtime, size, msg_count)

@@ -10,7 +10,7 @@
 //! this adapter to parse the ones whose checkpoint changed.
 
 mod harness_tools;
-pub(crate) mod history;
+pub mod history;
 #[cfg(test)]
 mod native_tests;
 mod provenance;
@@ -37,8 +37,8 @@ use mj_core::state::{SessionRecord, State};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::{Message, Role, Session};
 
-use crate::controller::Controller;
-use crate::controller::checkpoint::managed_checkpoint_archive_name;
+use crate::database::load_config_and_state;
+use mj_store::managed_archive::managed_checkpoint_archive_name;
 
 /// The tool name every Mjolnir instance publishes under. One name means one
 /// search partition; reconciliation is scoped per instance instead (see
@@ -144,12 +144,9 @@ pub fn indexed_project_directory(
                 })?;
             let workspace_root = match record.target.as_ref() {
                 Some(locator) => {
-                    let backend = crate::controller::backend_locator(locator, record, config)
+                    let backend = crate::targets::backend_locator(locator, record, config)
                         .context("resolve the session target for SessionWiki")?;
-                    crate::controller::workspace_root(
-                        &backend,
-                        record.container_workspace.as_deref(),
-                    )
+                    crate::targets::workspace_root(&backend, record.container_workspace.as_deref())
                 }
                 None => mj_core::targets::container_workspace_root(
                     record.container_workspace.as_deref(),
@@ -211,7 +208,7 @@ impl MjolnirAdapter {
 
     /// A fixed view that can resolve bundle-backed session directories from
     /// the configuration snapshot paired with the state.
-    pub(crate) fn from_state_with_config(state: &State, config: &Config) -> Self {
+    pub fn from_state_with_config(state: &State, config: &Config) -> Self {
         Self {
             sessions_dir: mj_core::config::sessions_dir(),
             sessions: std::sync::Mutex::new(Sessions::of(state, Some(config))),
@@ -268,13 +265,13 @@ impl MjolnirAdapter {
         if !self.reload {
             return;
         }
-        match Controller::load() {
-            Ok(controller) => {
+        match load_config_and_state() {
+            Ok((config, state)) => {
                 *self
                     .sessions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Sessions::of(&controller.state, Some(&controller.config))
+                    Sessions::of(&state, Some(&config))
             }
             Err(error) => {
                 tracing::warn!(%error, "could not refresh session records for SessionWiki")
@@ -1021,16 +1018,13 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     }
     // Isolated tests park a pass here to stand for one that takes minutes.
     mj_core::test_hooks::reach_test_hook("sessionwiki_sync_pass")?;
-    let controller =
-        Controller::load().context("load controller state for the SessionWiki sync")?;
+    let (config, state) =
+        load_config_and_state().context("load controller state for the SessionWiki sync")?;
     // Mjolnir's own sessions go first: a cold index walks every other tool's
     // store for many minutes, and a just-closed session should not wait on it.
     // Cleanup and enumeration use one ownership snapshot. Native discovery
     // happens afterwards, so it cannot make this snapshot stale before use.
-    let mjolnir = Arc::new(MjolnirAdapter::from_state_with_config(
-        &controller.state,
-        &controller.config,
-    ));
+    let mjolnir = Arc::new(MjolnirAdapter::from_state_with_config(&state, &config));
     let owned: Vec<Box<dyn Adapter>> = vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
     let ownership = mjolnir
         .sessions
@@ -1050,7 +1044,7 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     top_level::prune(&mut connection, &BTreeSet::new(), &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &owned, since)
         .context("sync Mjolnir sessions into SessionWiki")?;
-    let (native, excluded) = top_level::prepare(native_adapters(&controller.config), cache);
+    let (native, excluded) = top_level::prepare(native_adapters(&config), cache);
     top_level::prune(&mut connection, &excluded, &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &native, since)
         .context("sync native sessions into SessionWiki")?;
@@ -1522,13 +1516,13 @@ where
 
 /// A top-level session whose current conversation the index does not hold.
 fn unindexed_session(root: &str) -> Result<Vec<String>> {
-    let controller =
-        Controller::load().context("load controller state to index a destroyed session")?;
-    if !controller.state.sessions.contains_key(root) {
+    let (config, state) =
+        load_config_and_state().context("load controller state to index a destroyed session")?;
+    if !state.sessions.contains_key(root) {
         return Ok(Vec::new());
     }
     unindexed(
-        &MjolnirAdapter::from_state_with_config(&controller.state, &controller.config),
+        &MjolnirAdapter::from_state_with_config(&state, &config),
         &[root.to_owned()],
     )
 }
@@ -1586,10 +1580,10 @@ struct CapturedSession {
 }
 
 fn capture_sessions(session_ids: &[String]) -> Result<Vec<CapturedSession>> {
-    let controller =
-        Controller::load().context("load controller state to index a destroyed session")?;
+    let (config, state) =
+        load_config_and_state().context("load controller state to index a destroyed session")?;
     capture_sessions_from(
-        &MjolnirAdapter::from_state_with_config(&controller.state, &controller.config),
+        &MjolnirAdapter::from_state_with_config(&state, &config),
         session_ids,
     )
 }
@@ -2396,11 +2390,11 @@ pub use mj_core::state::ArchiveSpacePreview;
 /// Walks the filesystem, so callers on the async runtime must run it in a
 /// blocking task.
 pub fn archive_space_preview(older_than_days: Option<u32>) -> Result<ArchiveSpacePreview> {
-    let controller =
-        Controller::load().context("load the session records to size their storage")?;
+    let (_, state) =
+        load_config_and_state().context("load the session records to size their storage")?;
     Ok(archive_space_over_state(
         &mj_core::config::sessions_dir(),
-        &controller.state,
+        &state,
         Utc::now(),
         older_than_days,
     ))

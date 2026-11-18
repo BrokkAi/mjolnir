@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub use crate::targets::backend_locator;
+pub(super) use crate::targets::recorded_backend_locator;
+
 use anyhow::{Context, Result, bail, ensure};
 
 use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
@@ -1285,49 +1288,6 @@ pub(super) fn locator_after_provision_named(
         },
         TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
     })
-}
-
-/// The execution-plan locator for a session's stored target.
-///
-/// The mapping itself lives in `mj_core::targets`; this only pairs the stored
-/// locator with the target template the session was created against.
-pub fn backend_locator(
-    locator: &TargetLocator,
-    session: &SessionRecord,
-    config: &Config,
-) -> Result<targets::TargetLocator> {
-    recorded_backend_locator(
-        locator,
-        &session.id,
-        &session.target_template_id,
-        session.target_runtime.as_deref(),
-        config,
-    )
-}
-
-pub(super) fn recorded_backend_locator(
-    locator: &TargetLocator,
-    session_id: &str,
-    target_template_id: &str,
-    runtime: Option<&mj_core::state::TargetRuntimeSettings>,
-    config: &Config,
-) -> Result<targets::TargetLocator> {
-    let runtime = if runtime.is_some() || targets::locator_needs_connection(locator) {
-        Some(mj_core::state::target_runtime_settings_for(
-            session_id,
-            target_template_id,
-            Some(locator),
-            runtime,
-            config,
-        )?)
-    } else {
-        None
-    };
-    Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
-        locator,
-        runtime: runtime.as_deref(),
-        session_id,
-    })?)
 }
 
 #[cfg(test)]

@@ -23,7 +23,8 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [x] (2026-11-18) Milestone 4, first two groups: `mj-accounts` (`brokk-mj-accounts`, 17,074 lines: logins, the login terminal, quota and usage readers) and `mj-github-relevance` (`brokk-mj-github-relevance`: the GitHub classifier with its ONNX Runtime and tokenizer dependencies, which only the daemon uses). `mj-controller` is 164,848 lines. Its 1,368 tests are now 158 + 10 + 1,200.
 - [x] (2026-11-18) Milestone 4, import group: `mj-import` (`brokk-mj-import`, 14,486 lines: `import`, `project_catalog`, `compaction`, `utility_llm`, `handoff`, `project_picker`). `mj-controller` is 150,284 lines and its 1,200 tests are 133 + 1,067.
 - [x] (2026-11-18) Milestone 4, above the controller: `setup` and `doctor` are `mj-setup` (`brokk-mj-setup`, 10,600 lines), which depends on `mj-controller`; `mj-daemon` and `mj-cli` name it directly. `mj-controller`'s 1,067 tests are 83 + 984.
-- [ ] Milestone 4, `sessionwiki` (7,400 lines): `session_manager/standalone.rs` calls `sessionwiki::history::execute` to answer workers' history queries, and `sessionwiki.rs` calls `Controller::load` in five places, so the three form a loop. Split it: the read-only query side (`history`, `search_query`, `transcript_grep`, `tags`) below the controller, the sync side that loads controller state above it.
+- [x] (2026-11-18) Milestone 4, `sessionwiki`: `mj-sessionwiki` (`brokk-mj-sessionwiki`, 7,400 lines), below the controller. It did not need splitting: what it took from the controller was four pure helpers (`workspace_root`, `backend_locator` and `recorded_backend_locator`, now in `mj-targets`; the managed archive name parser, now `mj_store::managed_archive`) and `Controller::load`, which only reads the configuration and the records, now `database::load_config_and_state`. `mj-controller`'s 984 tests are 54 + 930.
+- [ ] Milestone 4, build caches: `controller/mbx`, `cache_host`, `tool_cache` and `git_cache` (8,700 lines) depend only on `mj-targets` and each other.
 - [ ] Milestone 4, session runtime: `worker_client`, `session_manager`, `project_memory_merge`, `checkpoint_transfer`, `wait_policy` (about 25,000 lines); they name `controller` 26 times.
 - [ ] Milestone 4, worker staging: `controller/worker_binary` (18,600 lines) and `controller/mbx`; then the remaining lifecycle operations in `controller/` by operation.
 - [x] (2026-11-18) `cargo machete` 0.9.2, the version CI pins, is installed for local use at `~/.cache/mjolnir/build/cargo-machete/bin/cargo-machete`; run it from the repository root after every move.
@@ -60,6 +61,9 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
   Evidence: `grep -rlE "\bort::|tokenizers::"` over the group named only `github_student/`.
 - Observation: after a move, the crate that gave up the code keeps the dependencies only that code used, and nothing local reports it; the `cargo machete` job in CI does. Eleven such dependencies failed that job for eight pushes before it was noticed.
   Evidence: the "Unused dependencies" job on commits `ed3554170` through `f2f99b9f0`.
+
+- Observation: `.gitignore` ignored every directory matching `target*/`, which is meant for Cargo's build directories and also matched a source module named `targets`. A new file under `mj-targets/src/targets/` was silently left out of a commit, every local build passed because the file was in the working tree, and master did not compile for two pushes. The rule now exempts `targets` directories under `src`. Before pushing a commit that adds files, run `git ls-files --others --ignored --exclude-standard` and look for anything outside a build directory.
+  Evidence: `error[E0583]: file not found for module remote_git` in every CI job on `6b70b5191` and `5adc6e3a6`.
 
 ## Decision Log
 - Decision: in a file that moves to a new crate, every `pub(crate)` becomes `pub`.

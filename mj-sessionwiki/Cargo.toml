@@ -1,0 +1,51 @@
+[package]
+name = "brokk-mj-sessionwiki"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Mjolnir's session history index: keeping it in sync and answering searches over it"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+[lib]
+name = "mj_sessionwiki"
+# The crate has no doc tests; looking for them makes rustdoc compile it again.
+doctest = false
+
+[features]
+default = []
+test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-import/test-hooks"]
+# Exposes the shared test fixtures to the tests of the crates above.
+test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-import/test-support"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-transcript = { workspace = true, features = ["github-history"] }
+mj-checkpoint.workspace = true
+mj-client.workspace = true
+mj-targets.workspace = true
+mj-store.workspace = true
+mj-import.workspace = true
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+ruzstd.workspace = true
+sessionwiki.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+
+[dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-targets = { workspace = true, features = ["test-support"] }
+mj-store = { workspace = true, features = ["test-support"] }
+mj-import = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

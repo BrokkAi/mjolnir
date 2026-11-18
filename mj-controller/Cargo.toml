@@ -16,9 +16,9 @@ doctest = false
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks", "mj-import/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-targets/test-hooks", "mj-store/test-hooks", "mj-accounts/test-hooks", "mj-import/test-hooks", "mj-sessionwiki/test-hooks"]
 # Exposes the shared test fixtures to the tests of mj-daemon.
-test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support", "mj-import/test-support"]
+test-support = ["mj-core/test-hooks", "mj-targets/test-support", "mj-store/test-support", "mj-accounts/test-support", "mj-import/test-support", "mj-sessionwiki/test-support"]
 
 [lints]
 workspace = true
@@ -31,6 +31,7 @@ mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-targets.workspace = true
 mj-store.workspace = true
+mj-sessionwiki.workspace = true
 mj-import.workspace = true
 mj-accounts.workspace = true
 agent-client-protocol.workspace = true
@@ -48,8 +49,6 @@ reedline = { version = "0.51", default-features = false }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
 ring.workspace = true
 rusqlite.workspace = true
-ruzstd.workspace = true
-sessionwiki.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
@@ -68,6 +67,7 @@ zip.workspace = true
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-targets = { workspace = true, features = ["test-support"] }
 mj-store = { workspace = true, features = ["test-support"] }
+mj-sessionwiki = { workspace = true, features = ["test-support"] }
 mj-import = { workspace = true, features = ["test-support"] }
 mj-accounts = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.

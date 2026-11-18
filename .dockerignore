@@ -23,6 +23,7 @@
 !mj-store/
 !mj-accounts/
 !mj-import/
+!mj-sessionwiki/
 !mj-github-relevance/
 !mj-controller/
 !mj-setup/
