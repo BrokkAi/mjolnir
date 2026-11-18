@@ -15144,6 +15144,7 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// web and TUI menus call, and the next view the worker publishes once the
 /// command lands. The attention must drop so the card glyph clears.
 // Hard-won: 4c2c5b4f8: failed and drain-deferred cursor writes were forgotten.
+// Hard-won: b654fe1df: a withdrawn coalesced endpoint discarded older pending questions.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
     use mj_core::attention::{
@@ -15419,7 +15420,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
     pending.operational.open_request = None;
     pending.operational.notification_stack = Default::default();
     state
-        .publish_session("session-1".into(), pending_view)
+        .publish_session("session-1".into(), pending_view.clone())
         .await
         .unwrap();
     state.runtime_publication().unwrap();
@@ -15431,6 +15432,82 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .question_advances
             .contains_key("session-1")
     );
+    // A is eligible and pending, B supersedes it, then B alone is withdrawn.
+    // There is no open request to nominate A again after the withdrawal.
+    for (ordinal, questions, request, expected_prefix) in [
+        (30, vec![30], Some(30), 30),
+        (40, vec![30, 40], Some(40), 40),
+        (41, vec![30], None, 30),
+    ] {
+        let pending = pending_view.snapshot.as_mut().unwrap();
+        pending.materialized.applied_event_ordinal = ordinal;
+        pending.materialized.applied_event_digest = format!("{ordinal:064x}");
+        pending.window = mj_core::state::ProjectionWindow::of(&pending.materialized);
+        pending.operational.person_input_through = 21;
+        pending.operational.open_request =
+            request.map(|completed_ordinal| mj_core::assessment::OpenRequest {
+                question: mj_core::assessment::InferredQuestion {
+                    turn_id: format!("question-{completed_ordinal}"),
+                    completed_ordinal,
+                },
+                question_message: None,
+            });
+        pending.operational.notification_stack = NotificationStack {
+            revision: ordinal,
+            entries: questions
+                .into_iter()
+                .map(|completed_ordinal| NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::None,
+                })
+                .collect(),
+        }
+        .into();
+        state
+            .publish_session("session-1".into(), pending_view.clone())
+            .await
+            .unwrap();
+        state.runtime_publication().unwrap();
+        assert_eq!(
+            state.feed.lock().unwrap().question_advances["session-1"],
+            expected_prefix
+        );
+    }
+    let cancellation = CancellationToken::new();
+    let persistence = tokio::spawn(super::attention::prune_read_notifications(
+        state.clone(),
+        cancellation.clone(),
+    ));
+    let mut revisions = state.revisions.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            revisions.borrow_and_update();
+            if state.runtime_publication().unwrap().records["session-1"].questions_shown_through
+                == 30
+            {
+                break;
+            }
+            revisions.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("surviving eligible question commits without an open request");
+    cancellation.cancel();
+    persistence.await.unwrap().unwrap();
+    let shown = state.runtime_publication().unwrap();
+    assert!(
+        shown.sessions["session-1"]
+            .operational
+            .as_ref()
+            .unwrap()
+            .open_request
+            .is_none()
+    );
+    let card = &shown.metadata.notification_cards.as_ref().unwrap()["session-1"];
+    assert_eq!(card.badge, NotificationKind::NeedsInput);
+    assert_eq!(card.entries[0].completed_ordinal, 30);
     // Recorded failures use the same action without a worker: the database
     // writer publishes committed records before replying, and owner() observes
     // that publication before attention is projected.

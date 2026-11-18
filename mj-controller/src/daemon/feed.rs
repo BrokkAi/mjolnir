@@ -347,19 +347,32 @@ impl RuntimeState {
         // background observer must never prune newer decisions using an older
         // projection it retained after releasing this lock.
         history.question_advances.retain(|id, through| {
-            full.records
+            let Some(record) = full.records.get(id) else {
+                return false;
+            };
+            if let Some(live) = full
+                .sessions
                 .get(id)
-                .is_some_and(|record| record.questions_shown_through < *through)
-                && full
-                    .sessions
-                    .get(id)
-                    .and_then(|view| view.operational.as_deref())
-                    .is_none_or(|live| {
-                        live.notification_stack.entries.iter().any(|entry| {
-                            entry.kind == mj_core::attention::NotificationKind::NeedsInput
-                                && entry.completed_ordinal == *through
-                        })
+                .and_then(|view| view.operational.as_deref())
+            {
+                // The accepted advance covers a prefix. Withdrawing its newest
+                // question must not withdraw older eligible questions too.
+                let surviving = live
+                    .notification_stack
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.kind == mj_core::attention::NotificationKind::NeedsInput
+                            && entry.completed_ordinal <= *through
                     })
+                    .map(|entry| entry.completed_ordinal)
+                    .max();
+                let Some(surviving) = surviving else {
+                    return false;
+                };
+                *through = surviving;
+            }
+            record.questions_shown_through < *through
         });
         // Preserve decorated rows as well as the attention tree across polls.
         let mut sessions = history.full.sessions.clone();
