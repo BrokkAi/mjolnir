@@ -564,16 +564,6 @@ impl RuntimeState {
             .collect()
     }
 
-    pub(crate) fn held_login_fingerprint(&self, session_id: &str) -> Option<String> {
-        self.owner()
-            .sessions
-            .get(session_id)?
-            .operational
-            .as_ref()?
-            .held_login_fingerprint
-            .clone()
-    }
-
     pub(crate) fn credential_session_ids(
         &self,
     ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord> {

@@ -1206,3 +1206,55 @@ printf signed-in > "$selected/antigravity-cli/antigravity-oauth-token"
     );
     assert_eq!(std::fs::read(selected.join(marker)).unwrap(), b"signed-in");
 }
+
+// Hard-won: #1581: registration could restore Pending after the worker's matching report.
+#[test]
+fn delivery_registration_consumes_a_matching_held_login_in_either_order() {
+    let target = CredentialSyncTarget {
+        session_id: "child".into(),
+        profile_id: "helper".into(),
+        harness: HarnessKind::Claude,
+        profile_home: "profile".into(),
+        aws_credentials: None,
+        skips_login_file_sync: false,
+        sync_github_token: false,
+        github: Default::default(),
+        skills_scope: crate::skills::SkillsScope::Localhost,
+        spec: crate::targets::CommandSpec::new("unused", Vec::<String>::new()),
+    };
+    let current = "renewed";
+    for report_first in [false, true] {
+        let mut rejected = RejectedLogins::default();
+        let profile = &target.profile_id;
+        let session = &target.session_id;
+        rejected.observe_held_login(profile, session, Some("old"));
+        if report_first {
+            // Reproduce the order in which publication won the old race.
+            // There is no second worker report to undo registration.
+            rejected.observe_held_login(profile, session, Some(current));
+        }
+        rejected.start_delivery(&target, current);
+        if !report_first {
+            assert_eq!(
+                rejected.delivery_state(profile, session),
+                Some(LoginDeliveryState::Pending)
+            );
+            rejected.observe_held_login(profile, session, Some(current));
+        }
+        assert_eq!(
+            rejected.held_login_fingerprint(profile, session),
+            Some(current)
+        );
+        assert!(matches!(
+            rejected.delivery_state(profile, session),
+            Some(LoginDeliveryState::Concluded { .. })
+        ));
+        // A later attempt after the actor retires needs fresh evidence.
+        rejected.retain_held_logins(|_| false);
+        rejected.start_delivery(&target, current);
+        assert_eq!(
+            rejected.delivery_state(profile, session),
+            Some(LoginDeliveryState::Pending)
+        );
+    }
+}

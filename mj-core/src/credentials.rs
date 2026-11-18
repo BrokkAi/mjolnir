@@ -1085,6 +1085,7 @@ pub struct RejectedLogins {
     profiles: std::collections::BTreeMap<String, (HarnessKind, PathBuf, LoginFingerprint)>,
     failures: BTreeMap<String, BTreeMap<u64, LoginFailure>>,
     deliveries: BTreeMap<String, LoginDelivery>,
+    held_logins: BTreeMap<String, HeldLogin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1159,6 +1160,20 @@ pub enum LoginDeliveryState {
     Concluded { reason: String },
 }
 
+impl LoginDeliveryState {
+    fn worker_holds_current_login() -> Self {
+        Self::Concluded {
+            reason: "worker reports holding the current login".into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HeldLogin {
+    profile_id: String,
+    fingerprint: String,
+}
+
 #[derive(Debug)]
 struct LoginDelivery {
     target: CredentialSyncTarget,
@@ -1175,12 +1190,21 @@ impl RejectedLogins {
         (delivery.target.profile_id == profile_id).then(|| delivery.state.clone())
     }
 
-    pub fn start_delivery(
-        &mut self,
-        target: &CredentialSyncTarget,
-        fingerprint: &str,
-        state: LoginDeliveryState,
-    ) {
+    /// The worker's latest acknowledged login, from the same registry that
+    /// decides if delivery is pending.
+    pub fn held_login_fingerprint(&self, profile_id: &str, session_id: &str) -> Option<&str> {
+        let held = self.held_logins.get(session_id)?;
+        (held.profile_id == profile_id).then_some(held.fingerprint.as_str())
+    }
+
+    pub fn start_delivery(&mut self, target: &CredentialSyncTarget, fingerprint: &str) {
+        let state = if self.held_login_fingerprint(&target.profile_id, &target.session_id)
+            == Some(fingerprint)
+        {
+            LoginDeliveryState::worker_holds_current_login()
+        } else {
+            LoginDeliveryState::Pending
+        };
         if self
             .deliveries
             .get(&target.session_id)
@@ -1232,25 +1256,43 @@ impl RejectedLogins {
             })
     }
 
-    pub fn observe_delivered_login(
+    /// Publish and acknowledge under the same registry lock that registers
+    /// deliveries. A report that arrives first is evidence for the next one.
+    pub fn observe_held_login(
         &mut self,
         profile_id: &str,
         session_id: &str,
-        fingerprint: &str,
+        fingerprint: Option<&str>,
     ) {
+        let Some(fingerprint) = fingerprint else {
+            self.held_logins.remove(session_id);
+            return;
+        };
+        if self.held_login_fingerprint(profile_id, session_id) != Some(fingerprint) {
+            self.held_logins.insert(
+                session_id.to_owned(),
+                HeldLogin {
+                    profile_id: profile_id.to_owned(),
+                    fingerprint: fingerprint.to_owned(),
+                },
+            );
+        }
         if let Some(delivery) = self.deliveries.get_mut(session_id)
             && delivery.target.profile_id == profile_id
             && delivery.fingerprint == fingerprint
             && delivery.state == LoginDeliveryState::Pending
         {
-            delivery.state = LoginDeliveryState::Concluded {
-                reason: "worker reports holding the current login".into(),
-            };
+            delivery.state = LoginDeliveryState::worker_holds_current_login();
         }
     }
 
-    pub fn retain_deliveries(&mut self, exists: impl Fn(&str) -> bool) {
+    pub fn retain_held_logins(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.held_logins.retain(|id, _| keep(id));
+    }
+
+    pub fn retain_deliveries(&mut self, mut exists: impl FnMut(&str) -> bool) {
         self.deliveries.retain(|id, _| exists(id));
+        self.retain_held_logins(exists);
     }
 
     pub fn end_delivery(
@@ -1307,7 +1349,7 @@ impl RejectedLogins {
     /// A sync finishing after removal cannot revive a retired decision.
     pub fn retain_failures(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.failures.retain(|id, _| keep(id));
-        self.deliveries.retain(|id, _| keep(id));
+        self.retain_deliveries(keep);
     }
 
     /// Take in one finished sync of a configured profile.

@@ -2289,11 +2289,11 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
     else {
         panic!("expected the fixture to have a renewed login");
     };
-    fixture.rejected.lock().unwrap().start_delivery(
-        &target,
-        &renewed,
-        mj_core::credentials::LoginDeliveryState::Pending,
-    );
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .start_delivery(&target, &renewed);
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
@@ -2305,7 +2305,7 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
         .rejected
         .lock()
         .unwrap()
-        .observe_delivered_login("helper", "child-1", &renewed);
+        .observe_held_login("helper", "child-1", Some(&renewed));
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
