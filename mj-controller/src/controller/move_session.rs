@@ -1469,11 +1469,7 @@ impl Controller {
         // answer for the destination size, so the request is resolved first:
         // a clear request on a container destination means the default size,
         // and the decision must compare that size, not the absence of one.
-        let requested_size = (
-            selection.resource_allocation.clone(),
-            selection.clear_resource_allocation,
-        );
-        let sized_by_destination_default =
+        let resolved_by_default =
             resolve_move_destination_size(source, &mut selection, &self.state, target);
         let in_place = move_in_place_for_record(
             source,
@@ -1482,13 +1478,14 @@ impl Controller {
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
         )?;
-        // A kept environment has nothing to size, so the sealed selection
-        // keeps the request rather than a size the environment does not have.
-        if in_place {
-            selection.resource_allocation = requested_size.0;
-            selection.clear_resource_allocation = requested_size.1;
-        }
-        let sized_by_destination_default = sized_by_destination_default && !in_place;
+        // The resolved selection is what every later reader decides from --
+        // the sealed Move, capacity admission inside execution and the
+        // destination record -- so it is never put back to the unresolved
+        // request. On a destination with a default that request would size
+        // the container differently from the answer this preparation just
+        // gave, and the two decisions would disagree (#1585).
+        let sized_by_destination_default =
+            move_size_is_destination_default(resolved_by_default, previous.as_ref());
         super::backend::validate_resource_allocation(
             target,
             move_requested_allocation(source, &selection),
@@ -1653,8 +1650,21 @@ impl Controller {
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
             let mut checked = {
                 let _timing = MovePhaseTimer::new(&id, "preflight destination checks");
-                self.prepare_move_session_controlled( catalog, prepared.selection.clone(), executor)
-                    .await?
+                let mut checked = self
+                    .prepare_move_session_controlled(
+                        catalog,
+                        prepared.selection.clone(),
+                        executor,
+                    )
+                    .await?;
+                // This re-prepares a selection preparation already resolved,
+                // so it sees an explicit size and cannot tell that clearing
+                // produced it. The confirmed preparation owns that fact; keep
+                // it, or a retry of the same clear request stops matching the
+                // Move this acceptance seals (#1585).
+                checked.sized_by_destination_default =
+                    prepared.sized_by_destination_default;
+                checked
             };
             // Destination checks can outlast a turn. Confirm against the relay
             // immediately before interruption, and hold its connection from
@@ -3285,8 +3295,7 @@ fn move_default_allocation(
 ///
 /// A destination without a default -- a fixed host -- has none to give, so
 /// there the clear request survives: it is what allows a sized session onto
-/// that host at all. The caller resolves before deciding whether the
-/// environment is kept, and puts the request back when it is.
+/// that host at all.
 fn resolve_move_destination_size(
     source: &mj_core::state::SessionRecord,
     selection: &mut MoveSelection,
@@ -3302,6 +3311,24 @@ fn resolve_move_destination_size(
     selection.resource_allocation = Some(default_size);
     selection.clear_resource_allocation = false;
     true
+}
+
+/// Whether the destination's size is the default this Move resolved.
+///
+/// A preparation resolves it for a request that names none. A retry reaches
+/// preparation with the sealed size already in its selection, so it cannot
+/// resolve anything; the sealed Move's own record is what keeps the fact that
+/// this size came from clearing, and with it the match between the repeated
+/// command and the Move it retries (#1585).
+fn move_size_is_destination_default(resolved_now: bool, previous: Option<&MoveOperation>) -> bool {
+    resolved_now
+        || previous.is_some_and(|operation| {
+            operation.holds_source_environment()
+                && operation
+                    .accepted_preparation
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.sized_by_destination_default)
+        })
 }
 
 /// Reconcile a retry's resource selection with the one its Move was sealed

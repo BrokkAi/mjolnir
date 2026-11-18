@@ -6590,6 +6590,41 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
         source.resource_allocation = allocation;
         source
     };
+    // A sealed Move of `sealed`, with the container settings acceptance
+    // records, so the retry path reads exactly what a real Move stores.
+    let prepared_operation = |sealed: &mj_core::state::MoveSelection| {
+        let source = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+        let mut operation = source_recovery_operation(&source);
+        operation.selection = sealed.clone();
+        operation.workspace_transfer = Some(mj_core::move_workspace::WorkspaceTransfer {
+            assessment: Default::default(),
+            source: Box::new(source.clone()),
+            source_stage: "/stage/source".into(),
+            controller_stage: "/stage/controller".into(),
+            phase: mj_core::move_workspace::WorkspaceTransferPhase::Planned,
+        });
+        operation.recovery_session = Some(source);
+        operation
+    };
+    let sealed_preparation = |sealed: mj_core::state::MoveSelection, sized_by_default: bool| {
+        mj_core::state::MovePreparation {
+            destination_checks: Default::default(),
+            workspace: None,
+            in_place: false,
+            stops_subagents: false,
+            source_unavailable: false,
+            conversion: None,
+            selection: sealed,
+            sized_by_destination_default: sized_by_default,
+            source_profile_id: "codex".into(),
+            source_target_template_id: "podman".into(),
+            cross_harness: false,
+            active: false,
+            queued_commands: Vec::new(),
+            fingerprint: "sealed".into(),
+            operation_id: "move-sealed".into(),
+        }
+    };
     let selection = |target: &str, allocation, clear| mj_core::state::MoveSelection {
         oracle: None,
         oracle_choice: None,
@@ -6654,6 +6689,66 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     );
     assert_eq!(remembered.resource_allocation, container_size(12, 24));
 
+    // A container whose applied size is exactly the default it would clear to
+    // keeps its environment. The environment decision and the capacity
+    // admission inside execution both read the resolved selection, so they
+    // must agree; putting the clear request back would make the second call
+    // see no size and refuse the Move as having changed its mind.
+    let mut sized_container = sized_source(container_size(12, 24));
+    sized_container.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: "mj-env-default-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    }));
+    let mut same_size = selection("podman", None, true);
+    assert!(super::resolve_move_destination_size(
+        &sized_container,
+        &mut same_size,
+        &state,
+        &config.targets["podman"],
+    ));
+    assert!(
+        super::move_in_place_for_record(
+            &sized_container,
+            &same_size,
+            &config.targets,
+            false,
+            None,
+        )
+        .unwrap(),
+        "clearing to the size the container already has keeps it"
+    );
+    // The unresolved request is exactly what the admission call would refuse.
+    let mut unresolved = same_size.clone();
+    unresolved.resource_allocation = None;
+    unresolved.clear_resource_allocation = true;
+    assert!(
+        !super::move_in_place_for_record(
+            &sized_container,
+            &unresolved,
+            &config.targets,
+            false,
+            None,
+        )
+        .unwrap(),
+        "the unresolved request would decide the environment changed"
+    );
+
+    // Clearing the allocation of a legacy container record does change the
+    // environment, because the resolved size is not the one it has.
+    let legacy = sized_source(None);
+    let mut legacy_cleared = selection("podman", None, true);
+    super::resolve_move_destination_size(
+        &legacy,
+        &mut legacy_cleared,
+        &state,
+        &config.targets["podman"],
+    );
+    assert!(
+        !super::move_in_place_for_record(&legacy, &legacy_cleared, &config.targets, false, None,)
+            .unwrap()
+    );
+
     // Retrying the same command after a container Move was sealed carries the
     // sealed default, so the retry is accepted rather than refused as a
     // different selection -- and it does not consult the host's remembered
@@ -6682,6 +6777,35 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     super::reconcile_retry_resource_selection(&sealed, false, &mut conflicting);
     assert!(conflicting.clear_resource_allocation);
     assert_ne!(conflicting, sealed);
+
+    // Acceptance prepares the already-resolved selection again, so that pass
+    // cannot resolve anything itself. The provenance comes from the sealed
+    // Move, which is what keeps the repeated clear request recognisable.
+    let mut accepted = prepared_operation(&sealed);
+    accepted.accepted_preparation = Some(Box::new(sealed_preparation(sealed.clone(), true)));
+    assert!(
+        super::move_size_is_destination_default(false, Some(&accepted)),
+        "a re-preparation inherits the decision the Move was sealed with"
+    );
+    let mut retried_after_acceptance = selection("podman", None, true);
+    super::reconcile_retry_resource_selection(&sealed, true, &mut retried_after_acceptance);
+    assert_eq!(retried_after_acceptance, sealed);
+    // Without that record nothing claims the size came from clearing.
+    let mut unproven = prepared_operation(&sealed);
+    unproven.accepted_preparation = Some(Box::new(sealed_preparation(sealed.clone(), false)));
+    assert!(!super::move_size_is_destination_default(
+        false,
+        Some(&unproven)
+    ));
+    // A Move that no longer holds its environment is not a retry at all.
+    let mut released = prepared_operation(&sealed);
+    released.workspace_transfer = None;
+    released.recovery_session = None;
+    released.accepted_preparation = Some(Box::new(sealed_preparation(sealed.clone(), true)));
+    assert!(!super::move_size_is_destination_default(
+        false,
+        Some(&released)
+    ));
 
     // A retry that says nothing keeps what the Move was sealed with, and a
     // fixed destination's sealed clear is the same request.
