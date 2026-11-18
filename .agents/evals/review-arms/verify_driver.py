@@ -74,15 +74,31 @@ V = ROOT / a.verify
 REPO = ROOT / "verify/repo"
 SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
                                   "rev-parse", "--show-toplevel"], text=True).strip()
-if not REPO.exists():
+def ensure_checkout():
+    """Builds the blinded verifier checkout once. Concurrent drivers (for example the A and B judge
+    sides) serialize on a lock, and the checkout is built in a temporary directory and renamed into
+    place only after the blinding check, so no driver can use a partial or unblinded checkout."""
+    import fcntl
+    import shutil
     REPO.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "-q", "--no-local", SOURCE, str(REPO)], check=True)
-    for cmd in (["checkout", "-q", "--detach", a.repo_commit], ["branch", "-f", "master", a.repo_commit],
-                ["checkout", "-q", "master"], ["remote", "remove", "origin"],
-                ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
-        subprocess.run(["git", "-C", str(REPO), *cmd], check=True)
-    assert subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", "HEAD:.agents/evals"],
-                          capture_output=True).returncode != 0, "verifier checkout contains the eval results"
+    with open(REPO.parent / ".repo-setup.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if REPO.exists():
+            return
+        tmp = REPO.with_name(REPO.name + f".building.{os.getpid()}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        subprocess.run(["git", "clone", "-q", "--no-local", SOURCE, str(tmp)], check=True)
+        for cmd in (["checkout", "-q", "--detach", a.repo_commit], ["branch", "-f", "master", a.repo_commit],
+                    ["checkout", "-q", "master"], ["remote", "remove", "origin"],
+                    ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
+            subprocess.run(["git", "-C", str(tmp), *cmd], check=True)
+        if subprocess.run(["git", "-C", str(tmp), "cat-file", "-e", "HEAD:.agents/evals"],
+                          capture_output=True).returncode == 0:
+            raise SystemExit("verifier checkout contains the eval results")
+        tmp.rename(REPO)
+
+
+ensure_checkout()
 for sub in ("out", "sessions", "prompts"):
     (V / sub).mkdir(parents=True, exist_ok=True)
 if a.kind == "verify" and not (V / "SPEC.md").exists():  # verifiers read the spec from the verify dir

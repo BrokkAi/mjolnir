@@ -500,6 +500,11 @@ def annotate(path, run_started):
 NOLEAK_ROUNDS = 3
 
 
+def max_rounds():
+    """Strict mode voided round 1 as a construction defect and runs rounds 2-4 (plan amendment)."""
+    return 4 if STRICT else NOLEAK_ROUNDS
+
+
 def noleak_ids():
     _, jobs = load_task_inputs()
     return [j["bug"] for j in jobs]
@@ -564,7 +569,7 @@ def noleak_state(bug, upto):
                 raise SystemExit(f"{bug}: round {n} gate result does not cover the current leak verdicts")
             if gate["pass"]:
                 return n, source, None
-            previous = {"kind": "strict leak gate", "why": gate["why"],
+            previous = {"kind": "strict leak gate", "gate": gate.get("gate"), "why": gate["why"],
                         "reasons": [{"matching_finding": v.get("matching_finding"), "rationale": v.get("rationale"),
                                      "confidence": v.get("confidence")} for v in leak["verdicts"]]}
             continue
@@ -588,8 +593,8 @@ def ot_leak_reasons(bug, text):
 
 
 def noleak_edit_build(n):
-    if not 1 <= n <= NOLEAK_ROUNDS:
-        raise SystemExit(f"rounds run 1..{NOLEAK_ROUNDS}")
+    if not 1 <= n <= max_rounds():
+        raise SystemExit(f"rounds run 1..{max_rounds()}")
     census_rows, _ = load_task_inputs()
     corpus = driver.CORPUS
     W = task_work()
@@ -817,9 +822,9 @@ def require_strict_judges(n, bug=None, verdicts=None):
             raise SystemExit(f"round {n} judge {judge} verdicts came from {p.get('profile')}/"
                              f"{(p.get('config') or {}).get('model')}, not {profile}/{model}")
         for v in out["verdicts"]:
-            produced[(key[v["output_id"]]["bug"], judge)] = (v.get("label"), v.get("rationale"))
+            produced[(key[v["output_id"]]["bug"], judge)] = (v.get("label"), v.get("rationale"), v.get("confidence"))
     if bug is not None:
-        got = {(bug, v["judge"]): (v.get("label"), v.get("rationale")) for v in verdicts}
+        got = {(bug, v["judge"]): (v.get("label"), v.get("rationale"), v.get("confidence")) for v in verdicts}
         if set(got) != {(bug, "A"), (bug, "B")} or any(produced.get(k) != got[k] for k in got):
             raise SystemExit(f"{bug}: round {n} leak record is not the registered judges' output")
 
@@ -900,9 +905,9 @@ def noleak_gate_collect(n):
             continue
         r = next(x for x in noleak_record(bug)["rounds"] if x["round"] == n)
         if r["label"] != "missed":
-            results[bug] = {"pass": False, "why": f"leak label {r['label']}"}
+            results[bug] = {"pass": False, "gate": "leak", "why": f"leak label {r['label']}"}
         elif any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
-            results[bug] = {"pass": False, "why": "a missed verdict below high confidence: " +
+            results[bug] = {"pass": False, "gate": "leak", "why": "a missed verdict below high confidence: " +
                             ", ".join(f"{v['judge']}={v.get('confidence')}" for v in r["verdicts"])}
         else:
             if any(causes[f"{bug}-{v['judge']}"]["verdicts_sha256"] != verdicts_fingerprint(r) for v in r["verdicts"]):
@@ -910,7 +915,7 @@ def noleak_gate_collect(n):
             # Only a clear "no" passes; "yes", "unclear" or anything else fails the brief.
             flagged = [causes[f"{bug}-{v['judge']}"] for v in r["verdicts"]
                        if causes[f"{bug}-{v['judge']}"].get("answer") != "no"]
-            results[bug] = {"pass": not flagged,
+            results[bug] = {"pass": not flagged, "gate": "cause",
                             "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
         results[bug]["verdicts_sha256"] = verdicts_fingerprint(r)
     record = {"round": n, "results": results}
@@ -924,20 +929,24 @@ def noleak_gate_collect(n):
 def noleak_publish(jobs_out):
     W = task_work()
     noleak_require_scope()
-    done = max((n for n in range(1, NOLEAK_ROUNDS + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
+    done = max((n for n in range(1, max_rounds() + 1) if (W / f"round-{n}" / "check-results.json").exists()), default=0)
     retained, excluded = [], []
     for bug in noleak_ids():
         passed, source, previous = noleak_state(bug, done)
         if passed:
             retained.append({"bug": bug, "round": passed, "brief_sha256": hashlib.sha256(source.encode()).hexdigest()})
-        elif done < NOLEAK_ROUNDS:
+        elif done < max_rounds():
             raise SystemExit(f"{bug}: not passed after round {done}; run the remaining rounds first")
         else:
             # Say why: a diff that never reached a clean leak check failed construction, which is
             # not evidence that its complete fact cannot be stated without leaking.
             kind = (previous or {}).get("kind", "")
-            cause = ("construction: fidelity check" if "fidelity" in kind or "fact check" in kind
-                     else "leak: strict gate or leak judges")
+            if "fidelity" in kind or "fact check" in kind:
+                cause = "fidelity (editor failure)"
+            elif kind == "strict leak gate":
+                cause = previous.get("gate", "leak")
+            else:
+                cause = "leak"
             excluded.append({"bug": bug, "after_round": done, "cause": cause, "last_check": previous})
     for r in retained:
         d = ROOT / "briefs" / ("oracle-strict" if STRICT else "oracle-noleak") / r["bug"]
