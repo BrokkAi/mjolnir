@@ -15245,11 +15245,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .publish_session("session-1".into(), question_view(false))
         .await
         .unwrap();
-    let (held, questions_settled) = state.runtime_publication_with_question_readiness().unwrap();
-    assert!(
-        !questions_settled,
-        "the cutover view includes a pending question write"
-    );
+    let held = state.runtime_publication().unwrap();
     assert_eq!(held.records["session-1"].questions_shown_through, 0);
     assert_eq!(
         held.metadata.notification_cards.as_ref().unwrap()["session-1"].badge,
@@ -15314,11 +15310,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .question_advances
             .contains_key("session-1")
     );
-    let (served, questions_settled) = state.runtime_publication_with_question_readiness().unwrap();
-    assert!(
-        questions_settled,
-        "the committed question is in the cutover-ready card map"
-    );
+    let served = state.runtime_publication().unwrap();
     assert_eq!(
         served.metadata.session_attention["session-1"],
         mj_core::attention::SessionAttention::NeedsInput

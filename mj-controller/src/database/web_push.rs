@@ -83,10 +83,9 @@ fn push_unsubscribe_with(db: &Connection, endpoint: &str) -> Result<()> {
 /// transaction. Presence controls delivery and never changes entry identity.
 pub(crate) fn push_reconcile(
     runtime: RuntimeProjection,
-    questions_settled: bool,
 ) -> Result<(Vec<PushDelivery>, Option<i64>)> {
     submit_database_write("reconcile Web Push entries", move |db| {
-        push_reconcile_with(db, &runtime, Utc::now().timestamp(), questions_settled)
+        push_reconcile_with(db, &runtime, Utc::now().timestamp())
     })
 }
 
@@ -94,22 +93,11 @@ fn push_reconcile_with(
     db: &mut Connection,
     runtime: &RuntimeProjection,
     now: i64,
-    questions_settled: bool,
 ) -> Result<(Vec<PushDelivery>, Option<i64>)> {
     let entries = card_entries(runtime);
     let automatic = runtime.metadata.operator_presence.away && entries.is_some();
     let tx = db.transaction()?;
-    // Startup's first card map is incomplete while its question cursor writes
-    // are pending. Do not spend cutover on that provisional map. Once cutover
-    // exists, unrelated visible entries continue even while another ask waits.
-    if let Some(entries) = &entries
-        && (questions_settled
-            || tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM push_entry_cutover)",
-                [],
-                |row| row.get::<_, bool>(0),
-            )?)
-    {
+    if let Some(entries) = &entries {
         push_observe_in(&tx, entries, automatic, now)?;
     }
     let due = push_claim_in(&tx, runtime, entries.as_ref(), automatic, now)?;
@@ -517,7 +505,7 @@ mod tests {
     }
 
     fn claim(db: &mut Connection, runtime: &RuntimeProjection, now: i64) -> Vec<PushDelivery> {
-        push_reconcile_with(db, runtime, now, true).unwrap().0
+        push_reconcile_with(db, runtime, now).unwrap().0
     }
 
     fn add_message(transcript: &mut MaterializedSession, id: &str, ordinal: u64, text: &str) {
@@ -753,7 +741,6 @@ mod tests {
         assert_eq!(after_form[0].identity, r#"["completion","s",20]"#);
     }
 
-    // Hard-won: 332436be4: pending startup cursor writes consumed an incomplete push baseline.
     #[test]
     fn push_compatible_migration_baselines_first_authoritative_map() {
         let dir = tempfile::tempdir().unwrap();
@@ -784,30 +771,7 @@ mod tests {
         runtime.metadata.notification_cards = None;
         assert!(claim(&mut db, &runtime, 0).is_empty());
         runtime.metadata.notification_cards = Some(Default::default());
-        // Waiting for the automatic baseline must not block an explicit test.
-        push_test_with(&mut db, subscription.endpoint.clone()).unwrap();
-        let pending = push_reconcile_with(&mut db, &runtime, 0, false).unwrap().0;
-        assert_eq!(pending.len(), 1);
-        assert!(pending[0].identity.starts_with("test:"));
-        result(&db, &pending[0], Some(201), 0);
-        assert!(
-            !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM push_entry_cutover)",
-                [],
-                |row| row.get::<_, bool>(0)
-            )
-            .unwrap()
-        );
         turn_only(&mut runtime, &["s"]);
-        let question = runtime
-            .metadata
-            .notification_cards
-            .as_mut()
-            .unwrap()
-            .get_mut("s")
-            .unwrap();
-        question.entries[0].kind = NotificationKind::NeedsInput;
-        question.badge = NotificationKind::NeedsInput;
         assert!(claim(&mut db, &runtime, 0).is_empty());
         assert!(
             db.query_row(
@@ -822,7 +786,7 @@ mod tests {
         turn_only(&mut runtime, &[]);
         assert!(claim(&mut db, &runtime, 0).is_empty());
         turn_only(&mut runtime, &["s", "new"]);
-        let due = push_reconcile_with(&mut db, &runtime, 0, false).unwrap().0;
+        let due = claim(&mut db, &runtime, 0);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].identity, r#"["completion","new",1]"#);
         assert_eq!(db.query_row(

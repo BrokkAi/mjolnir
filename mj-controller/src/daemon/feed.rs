@@ -197,17 +197,13 @@ impl RuntimeState {
     /// Terminal clients receive a scoped projection through
     /// [`Self::runtime_changes_for_subagent_parents`].
     pub(crate) fn runtime_publication(&self) -> Result<RuntimeProjection> {
-        self.runtime_publication_with_question_readiness()
-            .map(|(runtime, _)| runtime)
-    }
-
-    /// Cutover readiness and cards must describe the same serialized capture.
-    pub(crate) fn runtime_publication_with_question_readiness(
-        &self,
-    ) -> Result<(RuntimeProjection, bool)> {
         self.capture_runtime()?;
-        let history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok((history.full.clone(), history.question_advances.is_empty()))
+        Ok(self
+            .feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .full
+            .clone())
     }
 
     fn capture_runtime(&self) -> Result<RuntimeCursor> {

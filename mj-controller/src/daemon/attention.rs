@@ -353,11 +353,21 @@ async fn persist_shown_question(
         })
         .await;
         match result {
-            Ok(Ok(_)) => {
-                // Only feed capture settles the pending map, together with
-                // the publication that observes the committed cursor.
+            Ok(Ok(receipt)) => {
+                let mut history = state
+                    .feed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if history
+                    .question_advances
+                    .get(&id)
+                    .is_some_and(|pending| *pending <= receipt)
+                {
+                    history.question_advances.remove(&id);
+                }
+                drop(history);
                 state.publish_revision();
-                return id;
+                backoff = std::time::Duration::from_secs(1);
             }
             error => {
                 tracing::error!(session_id = %id, ?error, retry_after_ms = backoff.as_millis(), "could not persist shown question");

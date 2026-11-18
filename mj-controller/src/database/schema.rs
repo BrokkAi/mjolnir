@@ -2662,6 +2662,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     }
     // Compatible: supported older writers UPDATE named columns or use INSERT
     // ON CONFLICT DO UPDATE, preserving this daemon-owned cursor on existing rows.
+    // The cursor is SQL-only, so strict session JSON readers remain compatible.
     if version < 139 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
