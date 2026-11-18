@@ -243,6 +243,24 @@ pub fn hold_follow_up_text(kind: crate::subagent::HoldFollowUpKind, running: &[S
 }
 
 impl RelayCommand {
+    /// Effective prompt, including the worker-authored restart note.
+    pub fn prompt_blocks_for_command(
+        &self,
+        command_id: &str,
+    ) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
+        let prompt = self.prompt_blocks()?;
+        if crate::continuation::is_restart_continuation(command_id) {
+            let mut prompt = prompt.into_owned();
+            prompt.insert(
+                0,
+                ContentBlock::from(crate::continuation::RESTART_RECOVERY_NOTE.to_owned()),
+            );
+            Some(std::borrow::Cow::Owned(prompt))
+        } else {
+            Some(prompt)
+        }
+    }
+
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
@@ -1344,6 +1362,9 @@ pub enum RelayObservation {
         message: String,
     },
     CommandInterrupted {
+        /// Atomically transfer the interrupted prompt's payload to recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<crate::event_outcome::OutcomeReason>,
         command_id: String,

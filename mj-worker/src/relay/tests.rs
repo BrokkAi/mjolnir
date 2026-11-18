@@ -107,7 +107,27 @@ fn initial_fifo_completes_a_crashed_prefix_and_keeps_mail_after_the_brief() {
     let mut relay =
         DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex, &commands)
             .unwrap();
-    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(
+        recovery[0].command_id,
+        super::commands::restart_continuation_id("initial-brief")
+    );
+    let blocks = recovery[0]
+        .command
+        .prompt_blocks_for_command(&recovery[0].command_id)
+        .unwrap();
+    assert_eq!(
+        &blocks[1..],
+        commands[3].command.prompt_blocks().unwrap().as_ref()
+    );
+    assert!(
+        matches!(&blocks[0], ContentBlock::Text(note) if note.text.starts_with("[HARNESS NOTE: interrupted turn recovery]"))
+    );
+    assert_eq!(
+        relay.snapshot.handled_commands["initial-brief"].accepted_ordinal,
+        brief_ordinal
+    );
 }
 
 #[test]
@@ -6056,7 +6076,15 @@ fn goal_controls_bypass_work_and_checkpoints_without_consuming_prompts() {
         }
         drop(relay);
         let relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION, "1.0.0").unwrap();
-        assert_eq!(queued_command_ids(&relay), vec!["queued-work"]);
+        let expected = if autonomous {
+            vec!["queued-work".to_owned()]
+        } else {
+            vec![
+                super::commands::restart_continuation_id("active-work"),
+                "queued-work".to_owned(),
+            ]
+        };
+        assert_eq!(queued_command_ids(&relay), expected);
         let replay = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
         assert!(replay.starts_with(&events));
         assert!(!relay.snapshot.dispatches.contains_key("goal-resume"));

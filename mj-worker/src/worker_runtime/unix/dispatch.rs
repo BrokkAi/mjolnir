@@ -1537,7 +1537,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {
             let mut prompt = command
-                .prompt_blocks()
+                .prompt_blocks_for_command(&claimed.command_id)
                 .expect("prompt command")
                 .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {

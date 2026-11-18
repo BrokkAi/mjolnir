@@ -1803,29 +1803,49 @@ fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
     DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 }
 
+// Hard-won: 1c150431b: a never-delivered request vanished from the recovery prompt.
 #[test]
-fn restart_continuation_survives_each_recovery_write_boundary_without_duplicates() {
+fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blocks() {
     use crate::relay::commands::restart_continuation_id;
     use mj_core::event_outcome::OutcomeReason;
 
     for cut in 0..=2 {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        submit_relay(&mut relay, "interrupted-turn", prompt("finish the task"));
+        let original_blocks = vec![
+            ContentBlock::from("finish the task"),
+            ContentBlock::Image(agent_client_protocol::v1::schema::ImageContent::new(
+                "aW1hZ2U=",
+                "image/png",
+            )),
+            ContentBlock::from("Keep the original image and these Unicode instructions: 日本語."),
+        ];
+        submit_relay(
+            &mut relay,
+            "interrupted-turn",
+            RelayCommand::Prompt {
+                prompt: original_blocks.clone(),
+            },
+        );
         relay.claim_pending_commands(true).unwrap();
         submit_relay(&mut relay, "later-user-input", prompt("next task"));
         let recovery_id = restart_continuation_id("interrupted-turn");
-        if cut >= 1 {
+        if cut == 1 {
             relay
-                .queue_restart_continuation("interrupted-turn")
+                .record_command_interrupted(
+                    "interrupted-turn",
+                    OutcomeReason::WorkerRestarted,
+                    "worker restarted",
+                )
                 .unwrap();
         }
-        if cut >= 2 {
-            // Crash after the terminal record, before turn cleanup/promotion.
+        if cut == 2 {
+            // The one durable event exists, but cleanup/promotion did not run.
             relay
                 .append_relay_event(
                     Some("interrupted-turn"),
                     RelayObservation::CommandInterrupted {
+                        continuation_id: Some(recovery_id.clone()),
                         command_id: "interrupted-turn".into(),
                         command: RelayCommandKind::Prompt,
                         reason: Some(OutcomeReason::WorkerRestarted),
@@ -1850,29 +1870,29 @@ fn restart_continuation_survives_each_recovery_write_boundary_without_duplicates
         }
         relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         assert_eq!(
-            retained_events(&relay)
-                .iter()
-                .filter(|event| matches!(
-                    &event.observation,
-                    RelayObservation::CommandQueued { command_id, .. } if command_id == &recovery_id
-                ))
-                .count(),
-            1,
-            "crash boundary {cut}"
+            retained_events(&relay).iter().filter(|event| matches!(
+                &event.observation, RelayObservation::CommandInterrupted { continuation_id: Some(id), .. } if id == &recovery_id
+            )).count(), 1, "recovery mode {cut}"
         );
         let claimed = relay.claim_pending_commands(true).unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].command_id, recovery_id);
-        let text =
-            mj_core::acp::steering_text_context(&claimed[0].command.prompt_blocks().unwrap())
-                .unwrap()
-                .to_owned();
-        assert!(mj_core::continuation::is_control_origin_prompt(&text));
+        let recovery_blocks = claimed[0]
+            .command
+            .prompt_blocks_for_command(&claimed[0].command_id)
+            .unwrap()
+            .into_owned();
+        assert_eq!(&recovery_blocks[1..], original_blocks.as_slice());
+        let ContentBlock::Text(note) = &recovery_blocks[0] else {
+            panic!("missing recovery note");
+        };
+        assert!(mj_core::continuation::is_control_origin_prompt(&note.text));
         assert!(!mj_core::continuation::is_user_authored_message(
             Some(&recovery_id),
-            &text
+            &note.text
         ));
-        assert!(text.contains("rerunning any command whose result you did not see"));
+        assert!(note.text.contains("check whether it already took effect"));
+        assert!(note.text.contains("external side effects"));
 
         // A second restart interrupts recovery itself: it gets its own wake,
         // still ahead of the user's queued work, without a retry budget.
@@ -1881,6 +1901,15 @@ fn restart_continuation_survives_each_recovery_write_boundary_without_duplicates
         let second = relay.claim_pending_commands(true).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].command_id, restart_continuation_id(&recovery_id));
+        assert_eq!(
+            second[0]
+                .command
+                .prompt_blocks_for_command(&second[0].command_id)
+                .unwrap()
+                .as_ref(),
+            recovery_blocks.as_slice(),
+            "a second restart must not nest the note or lose the original request"
+        );
         relay
             .record_command_completed(
                 &second[0].command_id,
@@ -1956,4 +1985,128 @@ fn restart_continuation_leaves_native_goal_recovery_as_the_only_resume_owner() {
     assert!(relay.snapshot.queued_prompts.is_empty());
     assert!(relay.snapshot.active_prompt.is_none());
     assert!(relay.snapshot.goal.active());
+}
+
+// Hard-won: 1c150431b: recovery discarded requests never persisted by the harness.
+#[test]
+fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_full() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let overhead = serde_json::to_vec(&prompt("")).unwrap().len();
+    let original = prompt(&"x".repeat(mj_core::relay::RELAY_COMMAND_BYTE_BUDGET - overhead));
+    assert_eq!(
+        serde_json::to_vec(&original).unwrap().len(),
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET
+    );
+    submit_relay(&mut relay, "maximum-request", original.clone());
+    relay.claim_pending_commands(true).unwrap();
+    // Each queued request is represented in receipt, dispatch, and queue.
+    // Fill until one additional admitted-size payload would exceed the
+    // snapshot's documented budget; moving the current turn must still fit.
+    let mut queued = 0;
+    loop {
+        let id = format!("queued-large-request-{queued}");
+        if relay.submit_command(&id, original.clone()).is_err() {
+            break;
+        }
+        queued += 1;
+    }
+    assert!(queued > 0);
+    let size = serde_json::to_vec(&relay.snapshot).unwrap().len();
+    assert!(
+        size > mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET
+            - 3 * mj_core::relay::RELAY_COMMAND_BYTE_BUDGET
+    );
+    // Claim is durable, but ACP never received this request.
+    for _ in 0..3 {
+        drop(relay);
+        relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let recovered = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(recovered.len(), 1);
+        mj_core::relay::ensure_serialized_budget(
+            &recovered[0].command,
+            mj_core::relay::RELAY_COMMAND_BYTE_BUDGET,
+            "stored recovery command",
+        )
+        .unwrap();
+        let blocks = recovered[0]
+            .command
+            .prompt_blocks_for_command(&recovered[0].command_id)
+            .unwrap();
+        assert_eq!(relay.snapshot.queued_prompts.len(), queued);
+        assert_eq!(&blocks[1..], original.prompt_blocks().unwrap().as_ref());
+        assert_eq!(blocks.len(), 2);
+    }
+}
+
+// Hard-won: 1c150431b: a mailbox wake's task was missing from its restart continuation.
+#[test]
+fn restart_continuation_preserves_mailbox_wake_content_without_redelivering_its_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "deliver-task",
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "restart-task".into(),
+                source: "github".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::PlainText {
+                    text: format!(
+                        "{}Finish <the task> & preserve its instructions.",
+                        "<".repeat(768 * 1024)
+                    ),
+                },
+            },
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert!(matches!(
+        claimed[0].command,
+        RelayCommand::MailboxWake { .. }
+    ));
+    let original_blocks = claimed[0].command.prompt_blocks().unwrap().into_owned();
+    assert!(
+        serde_json::to_vec(&original_blocks).unwrap().len()
+            > mj_core::relay::RELAY_EVENT_BYTE_BUDGET
+    );
+    let original_command = claimed[0].command.clone();
+    let deliveries = relay.snapshot.delivered_mailbox_event_keys.clone();
+    for attempt in 0..2 {
+        drop(relay);
+        relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let recovered = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            &recovered[0]
+                .command
+                .prompt_blocks_for_command(&recovered[0].command_id)
+                .unwrap()[1..],
+            original_blocks.as_slice()
+        );
+        assert_eq!(recovered[0].command, original_command);
+        if attempt == 1 {
+            relay
+                .record_command_completed(
+                    &recovered[0].command_id,
+                    RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                        usage: None,
+                        work_facts: None,
+                        diagnostic: None,
+                    },
+                )
+                .unwrap();
+            assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        }
+        assert_eq!(relay.snapshot.delivered_mailbox_event_keys, deliveries);
+        assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    }
 }

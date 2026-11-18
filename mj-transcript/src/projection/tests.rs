@@ -1490,6 +1490,7 @@ fn an_interrupted_steered_turn_clears_the_running_turn() {
     apply_observation(
         &mut session,
         RelayObservation::CommandInterrupted {
+            continuation_id: None,
             reason: None,
             command_id: "prompt-1".into(),
             command: RelayCommandKind::Prompt,
@@ -2116,6 +2117,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
 
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
+    let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
     let mut session = MaterializedSession::empty("session");
     apply_observation(
         &mut session,
@@ -2137,6 +2139,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     apply_observation(
         &mut session,
         RelayObservation::CommandInterrupted {
+            continuation_id: Some(recovery_id.clone()),
             reason: None,
             command_id: "prompt".into(),
             command: mj_core::relay::RelayCommandKind::Prompt,
@@ -2149,6 +2152,27 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
     apply_observation(&mut session, RelayObservation::SessionRestarted);
     assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: recovery_id.clone(),
+            started_at_ms: 30,
+        },
+    );
+    let item = session
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == format!("user:{recovery_id}"))
+        .unwrap();
+    let TranscriptBody::User { content } = &item.body else {
+        panic!("missing recovery prompt");
+    };
+    assert_eq!(
+        content[0]["text"],
+        mj_core::continuation::RESTART_RECOVERY_NOTE
+    );
+    assert_eq!(content[1]["text"], "go");
+    assert_eq!(content.len(), 2);
 }
 
 /// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
@@ -3629,6 +3653,7 @@ fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
         apply_observation(
             &mut session,
             RelayObservation::CommandInterrupted {
+                continuation_id: None,
                 reason: None,
                 command_id: "worker-upgrade-0123abcd".into(),
                 command,

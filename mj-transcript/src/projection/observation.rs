@@ -310,7 +310,15 @@ pub(super) fn project_observation(
                 .position(|queued| queued.command_id == *command_id)
             {
                 let mut queue = current.queued_prompts.clone();
-                let entry = queue.remove(queue_index);
+                let mut entry = queue.remove(queue_index);
+                if mj_core::continuation::is_restart_continuation(command_id) {
+                    entry.content.insert(
+                        0,
+                        serde_json::to_value(ContentBlock::from(
+                            mj_core::continuation::RESTART_RECOVERY_NOTE.to_owned(),
+                        ))?,
+                    );
+                }
                 let entry_accepted_ordinal = entry.accepted_ordinal;
                 mutation.queued_prompts = Some(queue);
                 // A configuration change applies between turns: it never
@@ -511,6 +519,7 @@ pub(super) fn project_observation(
             command,
             message,
             reason,
+            ..
         } => {
             if *command == RelayCommandKind::ClearContext {
                 mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -531,6 +540,41 @@ pub(super) fn project_observation(
                 .cloned();
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
+            if let RelayObservation::CommandInterrupted {
+                continuation_id: Some(recovery_id),
+                ..
+            } = &event.observation
+            {
+                // Mailbox turns already have their own message rows. Reusing
+                // their payload must not publish or acknowledge those again.
+                let mut content = index
+                    .get(&format!("user:{command_id}"))
+                    .and_then(|item| match &item.body {
+                        TranscriptBody::User { content } => Some(content.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| queued_entry.as_ref().map(|queued| queued.content.clone()))
+                    .unwrap_or_default();
+                if mj_core::continuation::is_restart_continuation(command_id)
+                    && content
+                        .first()
+                        .and_then(|block| block.get("text"))
+                        .and_then(Value::as_str)
+                        == Some(mj_core::continuation::RESTART_RECOVERY_NOTE)
+                {
+                    content.remove(0);
+                }
+                queue.insert(
+                    0,
+                    MaterializedQueuedPrompt {
+                        command_id: recovery_id.clone(),
+                        kind: QueuedCommandKind::Prompt,
+                        content,
+                        queued_at_ms: event.recorded_at_ms,
+                        accepted_ordinal: Some(event.ordinal),
+                    },
+                );
+            }
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }

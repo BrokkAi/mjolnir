@@ -2,6 +2,23 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
+/// Restart prompts retain their original payload; the note is added only when rendered.
+pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. The request for that turn is repeated below. If you had already started on it, continue from where you left off rather than starting over. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
+
+pub fn restart_continuation_id(command_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    GeneratedPrompt::AutoContinue.command_id(format!(
+        "restart-{}",
+        crate::hex::lower_hex(Sha256::digest(command_id.as_bytes()))
+    ))
+}
+
+pub fn is_restart_continuation(command_id: &str) -> bool {
+    GeneratedPrompt::AutoContinue
+        .suffix(command_id)
+        .is_some_and(|suffix| suffix.starts_with("restart-"))
+}
+
 pub const USER_BYTES: usize = 32 * 1024;
 pub const ASSISTANT_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;

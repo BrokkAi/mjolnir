@@ -400,6 +400,20 @@ mod outcome_tests {
                         validate_relay_event_self(&event).is_err(),
                         "classification must be covered by the digest"
                     );
+                    if let RelayObservation::CommandInterrupted {
+                        reason,
+                        continuation_id,
+                        ..
+                    } = &mut event.observation
+                    {
+                        *reason = None;
+                        *continuation_id =
+                            Some(crate::continuation::restart_continuation_id("opaque"));
+                    }
+                    assert!(
+                        validate_relay_event_self(&event).is_err(),
+                        "the recovery transfer must be covered by the digest"
+                    );
                 }
             }
         }

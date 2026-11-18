@@ -93,6 +93,14 @@ impl TurnContext {
             };
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
+        if command_id.is_some_and(mj_core::continuation::is_restart_continuation) {
+            // Recovery continues the same request and partial answer. Advance
+            // generation to reject stale classifier replies without erasing
+            // the latest user correction or the evidence from before restart.
+            state.generation = generation;
+            state.parent_activity = Some(std::time::Instant::now());
+            return;
+        }
         *state = TurnContextState {
             generation,
             parent_activity: Some(std::time::Instant::now()),
@@ -127,11 +135,15 @@ impl TurnContext {
             } => {
                 if let Some(prompt) = prompt {
                     self.reset(delivered_prompt_command_id(observation), prompt);
-                    self.0
-                        .lock()
-                        .expect("turn context lock poisoned")
-                        .summary
-                        .push_user(prompt);
+                    if !delivered_prompt_command_id(observation)
+                        .is_some_and(mj_core::continuation::is_restart_continuation)
+                    {
+                        self.0
+                            .lock()
+                            .expect("turn context lock poisoned")
+                            .summary
+                            .push_user(prompt);
+                    }
                 }
             }
             RelayObservation::SessionUpdate { update } => self.observe(update),

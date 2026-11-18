@@ -1399,6 +1399,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             message,
             ..
         } => {
+            let continuation_id = match &event.observation {
+                RelayObservation::CommandInterrupted {
+                    continuation_id, ..
+                } => continuation_id.as_deref(),
+                _ => None,
+            };
             if snapshot
                 .retry_assessment
                 .as_ref()
@@ -1468,7 +1474,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
-            snapshot.mailbox_prompt_contexts.remove(command_id);
+            let mailbox_context = snapshot.mailbox_prompt_contexts.remove(command_id);
             snapshot.active_user_shells.remove(command_id);
             if let RelayCommand::RunUserShell { command } = &command {
                 let accepted_ordinal = snapshot
@@ -1545,6 +1551,65 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 && snapshot.execution == RelayExecutionState::Closing
             {
                 snapshot.execution = RelayExecutionState::Idle;
+            }
+            if let Some(recovery_id) = continuation_id {
+                if !matches!(
+                    event.observation,
+                    RelayObservation::CommandInterrupted {
+                        reason: Some(crate::event_outcome::OutcomeReason::WorkerRestarted),
+                        ..
+                    }
+                ) || *observed_command != RelayCommandKind::Prompt
+                    || recovery_id != crate::continuation::restart_continuation_id(command_id)
+                    || snapshot.handled_commands.contains_key(recovery_id)
+                {
+                    bail!("invalid interrupted prompt recovery {recovery_id}");
+                }
+                // Release every stored copy of the old execution payload before
+                // installing its replacement. No journal prefix or snapshot can
+                // contain two accepted copies, even at the snapshot byte limit.
+                snapshot.compact_terminal_commands()?;
+                let prompt = command
+                    .prompt_blocks()
+                    .ok_or_else(|| anyhow!("recovery command is not a prompt"))?
+                    .into_owned();
+                snapshot.handled_commands.insert(
+                    recovery_id.to_owned(),
+                    HandledRelayCommand {
+                        command: Some(command.clone()),
+                        terminal_identity: None,
+                        accepted_ordinal: event.ordinal,
+                        terminal_ordinal: None,
+                        outcome: None,
+                        failure: None,
+                    },
+                );
+                snapshot.dispatches.insert(
+                    recovery_id.to_owned(),
+                    RelayDispatchRecord {
+                        command,
+                        state: RelayDispatchState::Queued,
+                    },
+                );
+                snapshot.queued_prompts.insert(
+                    0,
+                    StoredQueuedRelayCommand {
+                        command_id: recovery_id.to_owned(),
+                        payload: StoredQueuedRelayPayload::Prompt { prompt },
+                        created_at_ms: event.recorded_at_ms,
+                    },
+                );
+                if let Some(context) = mailbox_context {
+                    snapshot
+                        .mailbox_prompt_contexts
+                        .insert(recovery_id.to_owned(), context);
+                }
+                // This is the same accepted turn, not a fresh mailbox claim.
+                // A stale retry intent must not also resume it.
+                snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
+                snapshot.capacity_retry = None;
+                snapshot.retry_assessment = None;
+                snapshot.continuation.quota_recovery = None;
             }
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
