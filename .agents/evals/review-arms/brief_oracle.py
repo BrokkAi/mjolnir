@@ -560,6 +560,8 @@ def noleak_state(bug, upto):
         source = text
         if leak["label"] == "missed" and not STRICT:
             return n, source, None
+        if STRICT and n == 1:
+            continue  # round 1 is void in strict mode (plan amendment): it can never retain a diff
         if leak["label"] == "missed":
             gate_path = W / f"round-{n}" / "gate-results.json"
             if not gate_path.exists():
@@ -868,11 +870,11 @@ def noleak_gate_build(n):
         if r is None:
             raise SystemExit(f"{bug}: round {n} leak verdicts are not collected")
         require_strict_judges(n, bug, r["verdicts"])
-        records[bug] = r
-    for bug, r in records.items():
         if r["label"] == "missed" and any(not (v.get("rationale") or "").strip() for v in r["verdicts"]):
             # Malformed, not evidence: the verdict must be rejudged before the gate can run.
             raise SystemExit(f"{bug}: a round {n} missed verdict has no rationale; rejudge it")
+        records[bug] = r
+    for bug, r in records.items():
         if r["label"] != "missed" or any((v.get("confidence") or "").lower() != "high" for v in r["verdicts"]):
             continue
         for v in r["verdicts"]:

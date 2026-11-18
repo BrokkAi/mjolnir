@@ -266,10 +266,13 @@ def run_unit(batch_path, judge=None):
     if out_path.exists():
         # An existing output from another model is not this invocation's result: say so rather than
         # republish it (for example judge B first run on Opus, then rerun with --model gpt-6.1-sol).
-        made_by = ((json.loads(out_path.read_text()).get("producer") or {}).get("config") or {}).get("model")
-        if made_by is not None and made_by != a.model:
-            raise RuntimeError(f"unit {tag} already has output from model {made_by}, not {a.model}; "
-                               f"move {out_path.name} and sessions/batch-{tag}.json aside to rerun it")
+        producer = json.loads(out_path.read_text()).get("producer") or {}
+        made_by = (producer.get("config") or {}).get("model")
+        made_on = producer.get("profile")
+        if (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
+            raise RuntimeError(f"unit {tag} already has output from {made_on}/{made_by}, not "
+                               f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
+                               f"sessions/batch-{tag}.json aside to rerun it")
         return tag, "done"
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
