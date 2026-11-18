@@ -303,6 +303,26 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     attachment.observe_pane(&dashboard, other, "session-1");
     assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
+    // Hard-won: e1b4abc81: departed session records accumulated; retiring them must not revive queued old results.
+    let mut attachments = BTreeMap::from([("session-1".into(), attachment)]);
+    dashboard.set_pane_session(other, Some("session-2"));
+    attachment::retire_unused_attachments(&dashboard, &mut attachments);
+    assert!(attachments.is_empty());
+    dashboard.set_pane_session(other, Some("session-1"));
+    let fresh = attachments.entry("session-1".into()).or_default();
+    fresh.observe_pane(&dashboard, other, "session-1");
+    let (report, received) = tokio::sync::oneshot::channel();
+    fresh.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async { Ok(()) },
+        move |generation, _| {
+            report.send(generation).unwrap();
+        },
+    );
+    let new_generation = received.await.unwrap();
+    assert!(fresh.accepts_surface_result(new_generation, &dashboard, "session-1"));
+    assert!(!fresh.accepts_surface_result(generation, &dashboard, "session-1"));
 }
 
 // Hard-won: a882023b6: Esc on a pane cancelled the notification's shared attachment and left its form loading forever.

@@ -492,6 +492,9 @@ fn render_combined_themed(
     dashboard.reset_component_geometry();
     dashboard.begin_surface_frame();
     for chat in chats.values_mut() {
+        if !dashboard.chat_input_available(chat.session_id()) {
+            chat.cancel_component_pointer();
+        }
         chat.reset_component_geometry();
     }
     dashboard.pane_areas = None;

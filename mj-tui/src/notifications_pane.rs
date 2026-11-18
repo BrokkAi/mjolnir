@@ -633,7 +633,9 @@ impl DashboardState {
             .published
             .as_ref()
             .map_or(entry.target.is_none(), |card| {
-                card.form.as_ref().is_some_and(|form| !form.is_native())
+                card.form
+                    .as_ref()
+                    .is_some_and(|form| form.requires_elicitation())
                     && self.selected_notification_item(entry) == card.entries.len()
             });
         (entry.level == AttentionLevel::Waiting
@@ -666,6 +668,9 @@ impl DashboardState {
         chats: &std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
     ) -> Option<String> {
         self.pane_sessions().into_iter().find_map(|(_, session)| {
+            if !self.chat_input_available(&session) {
+                return None;
+            }
             (chats.get(&session)?.elicitation_pointer_surface()
                 == Some(mj_chat::chat::ElicitationSurface::Conversation))
             .then_some(session)
@@ -2189,6 +2194,74 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert!(chats["session-1"].has_elicitation());
+        // Hard-won: e1b4abc81: lifecycle-owned conversation capture blocked an unrelated notification form.
+        let (x, y) = point(&lines, mj_chat::components::Checkbox::marker(false));
+        chats
+            .get_mut("session-2")
+            .unwrap()
+            .handle_event_result(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        assert_eq!(
+            chats["session-2"].elicitation_pointer_surface(),
+            Some(mj_chat::chat::ElicitationSurface::Conversation)
+        );
+        dashboard.begin_session_operation(
+            "session-2".into(),
+            crate::SessionOperationKind::Moving,
+            None,
+        );
+        assert!(
+            dashboard
+                .conversation_form_pointer_session(&chats)
+                .is_none()
+        );
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        assert!(chats["session-2"].elicitation_pointer_surface().is_none());
+        let lines = buffer_lines(terminal.backend().buffer());
+        let card = dashboard.notifications_area.unwrap();
+        let (x, y) = point(
+            &lines[usize::from(card.y)..usize::from(card.bottom())],
+            mj_chat::components::Checkbox::marker(false),
+        );
+        let press = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: card.y + y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.notification_form_mouse_ownership(&chats, press),
+            Some(true)
+        );
+        assert!(
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Mouse(press))
+                .unwrap()
+                .consumed
+        );
+        dashboard
+            .handle_notification_form_event(
+                &mut chats,
+                &Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..press
+                }),
+            )
+            .unwrap();
     }
 
     pub(crate) fn dashboard() -> DashboardState {
@@ -2502,6 +2575,41 @@ pub(crate) mod tests {
         };
         assert_eq!(session_id, "q1");
         assert_eq!(prompt.payload.text, "y");
+        // Hard-won: e1b4abc81: completed review findings entered the inline loader without any elicitation to serve.
+        dashboard.notification_reply_finished("q1", &prompt.command_id, Ok(()));
+        dashboard.set_notification_cards(Some(
+            [(
+                "q1".into(),
+                NotificationCard {
+                    since_ms: 2,
+                    badge: NotificationKind::NeedsInput,
+                    entries: Vec::new(),
+                    dismissal: None,
+                    holder: Some("q1".into()),
+                    form: Some(CardForm::review_findings(
+                        "reviewer-a",
+                        2,
+                        "Review found issues".into(),
+                    )),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        assert!(dashboard.notification_form_session().is_none());
+        let lines = drawn(&mut dashboard, 120, 44);
+        assert!(lines.iter().any(|line| line.contains("Quick reply:")));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("Waiting for the session's form update"))
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Open {
+                session_id: "q1".into()
+            }
+        );
     }
 
     // Hard-won: 6597a0761: a new card from the same session kept the old scroll offset.

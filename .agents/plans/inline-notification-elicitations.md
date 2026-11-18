@@ -82,3 +82,12 @@ Fix all six findings. The shared lifecycle input decision now gates both convers
 Extend the existing interaction regression through Moving, border-only rendering, and global-command capture cancellation. Extend the layout-restore regression to reject a queued completion both before and after binding a previously unobserved destination pane. Extend existing fieldless/confirmation tests through compact mouse submission and the selection regression through post-redraw generation checks. Targeted input, fieldless, confirmation, layout-restore and selection tests pass; the broader attachment filter (28 tests) and unchanged dashboard golden pass. All-targets clippy and formatting are the final checks for this checkpoint.
 
 Fifth follow-up all-targets clippy across the same five affected packages, formatting and diff checks pass. Ready for required review; no push.
+
+
+## Sixth review follow-up
+
+Fix all three findings. CardForm's shared namespace owner now distinguishes completed review findings, which retain quick reply and Enter-to-open instead of requesting an elicitation. The daemon uses the shared findings constructor without changing its generated ID or serialized fields. Lifecycle-owned conversations no longer compete for mouse capture, and every render disarms their warm chat before drawing the lifecycle view. Reconciliation prunes departed pane assignments and removes session attachment records once neither the layout nor Notifications references them; current cancelled assignments remain as the bounded state needed to preserve Esc semantics. Completion generations are process-unique across replacement records, so record retirement cannot make an old queued reply match a later visit to the same session.
+
+Extend the existing card input regression through a findings verdict, the interaction regression through a captured conversation entering Moving, and the layout-restore regression through record retirement/recreation and rejection of its old completion. Run the existing daemon native/review projection regression, attachment filters, dashboard golden replay, all-targets clippy and formatting before committing.
+
+Sixth follow-up validation passes: extended verdict/input/retirement regressions, 28 attachment tests, daemon native/review projection, unchanged dashboard golden, five-crate all-targets clippy, formatting and diff checks. Ready for mandatory review; no push.

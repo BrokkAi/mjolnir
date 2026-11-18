@@ -142,6 +142,7 @@ impl DashboardContext {
         }
         let notification = self.dashboard.notification_form_session();
         for (session, attachment) in &mut self.attachments {
+            attachment.prune_assignments(&self.dashboard, session);
             attachment.bind_notification(notification.as_deref() == Some(session.as_str()));
         }
         // A transition finishing may make an assigned conversation attachable.
@@ -181,13 +182,7 @@ impl DashboardContext {
                 self.start_chat_attach(&session);
             }
         }
-        let wanted = self.wanted_chat_sessions();
-        for (session, attachment) in &mut self.attachments {
-            attachment.release_unowned_task(&self.dashboard, session);
-            if !wanted.contains(session) {
-                attachment.defer();
-            }
-        }
+        attachment::retire_unused_attachments(&self.dashboard, &mut self.attachments);
         self.opening_chat_sessions = self
             .dashboard
             .pane_sessions()

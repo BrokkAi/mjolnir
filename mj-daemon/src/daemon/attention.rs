@@ -715,8 +715,9 @@ fn project_states(
                 // The frozen registration identifies one review even when
                 // several reviewer roles contributed findings.
                 card.holder = Some(review.session_id.clone());
-                card.form = Some(CardForm {
-                    raised_at_ms: committed.map_or(0, |state| {
+                card.form = Some(CardForm::review_findings(
+                    reviewer,
+                    committed.map_or(0, |state| {
                         review
                             .reviewer_children()
                             .chain(review.child_session_id.as_deref())
@@ -737,9 +738,8 @@ fn project_states(
                             .max()
                             .unwrap_or(0)
                     }),
-                    request_id: format!("review-verdict.{reviewer}.findings"),
-                    message: review.status.clone(),
-                });
+                    review.status.clone(),
+                ));
             }
             if let Some(card) = &mut card {
                 card.since_ms = card
@@ -1411,6 +1411,7 @@ mod tests {
         assert!(card.entries.is_empty());
         let form = card.form.as_ref().unwrap();
         assert_eq!(form.request_id, "review-verdict.reviewer-a.findings");
+        assert!(!form.requires_elicitation());
         assert_eq!(form.message, "Review found issues");
         runtime.metadata.reviews[0].roles.reverse();
         let reordered = project_states(&runtime, BTreeSet::from(["parent".into()]));

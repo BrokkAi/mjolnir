@@ -4,19 +4,35 @@ use mj_chat::chat::{ActiveChat, ChatInstance};
 use mj_tui::tile_layout::PaneId;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
 pub(super) const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Default)]
+// Records are retired with their last surface. Completion identities must
+// remain unique when the same session later receives a fresh record.
+static NEXT_ATTACHMENT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 pub(super) struct SessionAttachment {
     selection: Option<String>,
     assignments: BTreeMap<PaneId, PaneInterest>,
     notification_requested: bool,
     generation: u64,
     task: Option<JoinHandle<()>>,
+}
+
+impl Default for SessionAttachment {
+    fn default() -> Self {
+        Self {
+            selection: None,
+            assignments: BTreeMap::new(),
+            notification_requested: false,
+            generation: NEXT_ATTACHMENT_GENERATION.fetch_add(1, Ordering::Relaxed),
+            task: None,
+        }
+    }
 }
 
 enum PaneInterest {
@@ -112,7 +128,30 @@ pub(super) fn wanted_chat_sessions(
     sessions
 }
 
+/// Retire records as soon as neither the layout nor Notifications references
+/// them. A cancelled current assignment is retained to preserve Esc semantics.
+pub(super) fn retire_unused_attachments(
+    dashboard: &mj_tui::DashboardState,
+    attachments: &mut BTreeMap<String, SessionAttachment>,
+) {
+    let assigned = dashboard.pane_session_ids();
+    let notification = dashboard.notification_form_session();
+    attachments.retain(|session, attachment| {
+        attachment.release_unowned_task(dashboard, session);
+        assigned.contains(session) || notification.as_deref() == Some(session.as_str())
+    });
+}
+
 impl SessionAttachment {
+    /// Forget departed assignments, including closed panes, while retaining
+    /// a current cancelled assignment until an explicit retry or navigation.
+    pub(super) fn prune_assignments(&mut self, dashboard: &mj_tui::DashboardState, session: &str) {
+        self.assignments.retain(|pane, interest| {
+            dashboard.pane_session(*pane) == Some(session)
+                && dashboard.pane_assignment(*pane) == Some(interest.assignment())
+        });
+    }
+
     /// Observe navigation before permitting an old task to join its new
     /// assignment. Work survives reassignment only through another live lease.
     pub(super) fn observe_pane(
@@ -273,7 +312,7 @@ impl SessionAttachment {
     }
 
     pub(super) fn cancel(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = NEXT_ATTACHMENT_GENERATION.fetch_add(1, Ordering::Relaxed);
         if let Some(task) = self.task.take() {
             task.abort();
         }

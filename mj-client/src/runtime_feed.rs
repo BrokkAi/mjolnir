@@ -359,6 +359,21 @@ impl CardForm {
         }
     }
 
+    pub fn review_findings(reviewer: &str, raised_at_ms: i64, message: String) -> Self {
+        Self {
+            raised_at_ms,
+            request_id: format!("review-verdict.{reviewer}.findings"),
+            message,
+        }
+    }
+
+    /// Native input and completed findings are notification projections,
+    /// rather than an elicitation that the content session's chat can answer.
+    #[must_use]
+    pub fn requires_elicitation(&self) -> bool {
+        !self.is_native() && !self.request_id.starts_with("review-verdict.")
+    }
+
     #[must_use]
     pub fn is_native(&self) -> bool {
         self.request_id.starts_with("native.")
