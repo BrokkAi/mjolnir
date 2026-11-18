@@ -86,3 +86,20 @@ Affected checks, outside the sandbox on the dev profile:
 - `cargo fmt --all` and `git diff --check`: clean.
 
 No still-failing tests, live acceptance, default-instance operations or pushes. Diagnostic logs remain untracked; the corrected implementation is submitted for formal re-review after commit.
+
+
+## Startup routing ownership correction
+
+The default seed-1171 delegation scenario passed on base 903cac6 but failed on this implementation before the standing-prompt assertions: send_message chose a turn while the newly addressable child had no managed relay handle, then waited for the held startup model response. A relay attachment about 30 ms later could not change that durable route. The parent approved fixing this race here as a separate commit. Diagnostic chronology and comparison: `session-instructions-delegation-routing-evidence.md`.
+
+Ordinary and automated-review registration now obtain a session-manager Starting acknowledgement before the database commits the relation. The production API requires the manager; unowned registration is test-support-only. The session manager owns the route query and distinguishes a launching child from an unmanaged session. Starting queues a durable mailbox row; published incompatible protocols retain turn delivery. There is no added wait, retry or route re-check.
+
+Affected checks, outside the sandbox on the dev profile:
+
+- `cargo test -p brokk-mj-daemon send_to_registered_child_before_attachment_queues_mailbox_without_a_turn`: 1 passed after the final API constraint; real manager, no target/actor, two sends produce one mailbox row and no turn acceptance. Log: `memory-instructions-routing-final-test.log`.
+- `cargo test -p brokk-mj-daemon send_message_`: 9 passed, including protocol-33 turn compatibility and startup queuing. Log: `memory-instructions-routing-compatibility-tests.log`.
+- `cargo test -p brokk-mj-controller session_adoption_deadline_also_bounds_an_unanswered_manager_request`: 1 passed. Log: `memory-instructions-routing-manager-test.log`.
+- `cargo test -p brokk-mj-controller reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capacity`: 1 passed. Log: `memory-instructions-routing-registration-test.log`.
+- `cargo clippy -p brokk-mj-client -p brokk-mj-controller -p brokk-mj-daemon -p brokk-mj-worker-runtime --all-targets -- -D warnings`: passed. Log: `memory-instructions-routing-clippy.log`.
+
+Full default delegation seed 1171 will run after the source commits and a normal dev CLI/worker rebuild. The initial test-hooks binary build exposed conflicting test/production identity stamps; it was replaced with the normal dev configuration rather than bypassing binary validation. No live/default instance was used.

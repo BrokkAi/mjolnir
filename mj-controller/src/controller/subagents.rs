@@ -264,10 +264,29 @@ impl Controller {
         Ok(())
     }
 
-    /// Register a child without provisioning another target or checkout.
+    /// Store-only fixtures have no launching daemon. Production must register
+    /// with the manager first, or sends can misclassify a starting child.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_subagent(
         &mut self,
         request: RegisterSubagentRequest,
+    ) -> Result<SubagentRecord> {
+        self.register_subagent_inner(request, None)
+    }
+
+    /// Register managed launches before the committed relation becomes addressable.
+    pub fn register_subagent_with_manager(
+        &mut self,
+        request: RegisterSubagentRequest,
+        manager: &crate::session_manager::SessionManagerControl,
+    ) -> Result<SubagentRecord> {
+        self.register_subagent_inner(request, Some(manager))
+    }
+
+    fn register_subagent_inner(
+        &mut self,
+        request: RegisterSubagentRequest,
+        manager: Option<&crate::session_manager::SessionManagerControl>,
     ) -> Result<SubagentRecord> {
         let request_key = request.kind.request_key(&request.request_key);
         let reviewer = request.kind == mj_core::subagent::SubagentKind::Reviewer;
@@ -460,12 +479,20 @@ impl Controller {
             handback_tool,
         };
         let startup = initial_startup_deliveries(&relation, request.fast_mode)?;
-        crate::database::register_subagent_with_startup(
+        if let Some(manager) = manager {
+            manager.register_starting_blocking(&child_id)?;
+        }
+        if let Err(error) = crate::database::register_subagent_with_startup(
             &session,
             &relation,
             startup,
             report_dir.as_deref(),
-        )?;
+        ) {
+            if let Some(manager) = manager {
+                manager.forget_starting_blocking(&child_id)?;
+            }
+            return Err(error);
+        }
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents

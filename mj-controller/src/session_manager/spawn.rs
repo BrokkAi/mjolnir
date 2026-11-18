@@ -17,6 +17,7 @@ pub fn spawn_session_manager_observed(
     let harness_failure = updates_tx.harness_failure.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
         let mut tasks = tokio::task::JoinSet::<String>::new();
         let mut desired_targets = BTreeMap::<String, RelaySessionTarget>::new();
@@ -28,6 +29,7 @@ pub fn spawn_session_manager_observed(
                         break;
                     }
                     desired_targets = target_map(&targets_rx.borrow_and_update());
+                    starting.reconcile(&desired_targets);
                     reconcile_actors(
                         &desired_targets,
                         &mut actors,
@@ -36,9 +38,13 @@ pub fn spawn_session_manager_observed(
                     );
                 }
                 command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else {
-                        break;
+                    let Some(command) = command else { break; };
+                    let view = match &command {
+                        ManagerCommand::ParentMessageRoute { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
+                        _ => None,
                     };
+                    let Some(command) = starting.command(command, view) else { continue; };
+                    let ManagerCommand::Session { session_id, reply } = command else { unreachable!() };
                     let handle = actors
                         .get(&session_id)
                         .filter(|actor| !actor.commands.is_closed())

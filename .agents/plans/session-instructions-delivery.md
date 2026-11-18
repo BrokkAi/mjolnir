@@ -14,6 +14,10 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-18) Parent-approved ownership correction: register new children with the session manager before committing their addressable records; queue a send before attachment. The deterministic regression, nine existing message-routing tests, manager deadline test and controller registration test pass, as does clippy on client/controller/daemon/worker. Commit this correction separately; default delegation seed 1171 rerun remains pending.
+
+- [ ] (2026-11-18) Third-review partial: parent approved extending the unsupported-channel exception to automated reviewers through the same delivery branch. Changes and targeted tests are in progress; wait for the final review before committing or requesting re-review.
+
 - [x] (2026-11-18) Second-review corrections validated: reject nested native markers and special staged files using confined reads/writes, pin OpenCode's replacing config override (including retained launches), and stop unsupported automated brief writers before native open. Instruction, native-file, confined-directory and daemon brief-failure tests pass; edited-crate clippy and final worker clippy pass. Grok freshness finding overridden by parent decision; corrections proceed to formal re-review.
 
 - [x] (2026-11-18) Corrected first-review defects in `621276a78`: read-only task scope, native marker escaping, non-regular indexes, Kimi/Muse fixtures, daemon packet expectation and unsupported-adapter coverage. All affected tests and five-crate clippy passed. Generic hung-filesystem deadline finding overridden per parent ruling; fixes proceed to formal re-review.
@@ -31,6 +35,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Surprises & Discoveries
+
+- Removing pre-harness memory I/O exposed a send_message race: the child was addressable before the session manager owned it, so the route permanently chose a turn about 30 ms before relay attachment. Default delegation seed 1171 passes on base 903cac6 and fails on the implementation before this fix. The parent approved correcting registration ownership here; the fixture's startup gate and ordering checks remain unchanged. Evidence: `.agents/docs/session-instructions-delegation-routing-evidence.md`.
 
 - First review found that read-only oracle/brief-writer behavior was prose, not enforced: `controller/reviewer.rs` inherits the parent target's execution policy and `subagents.rs` borrows its workspace. Their first prompts now retain one shared task-scope sentence, independently of standing-role delivery.
 - `ProjectMemoryStore::startup_index` previously bypassed the existing `ConfinedDir` reader. It now uses that reader, which refuses links and non-regular descriptors and opens Unix files nonblocking before checking their type. FIFO indexes therefore become an unavailable warning rather than waiting for a writer.
@@ -50,12 +56,16 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Decision Log
 
+- Decision: the session manager acknowledges a Starting registration before the daemon commits a new child relation. The parent-message route asks that owner once; Starting queues a mailbox message and a published protocol retains its compatibility decision. The unowned controller registration wrapper is available only to tests/test-support; production callers must supply the manager. Do not delay, retry or reconsider a route after a timeout.
+  Rationale: an addressable child launched by this daemon cannot be classified as unmanaged. This removes the race exposed by the changed launch timing at its ownership boundary.
+  Date/Author: 2026-11-18, parent agent, explicitly approved as a separate commit after base seed 1171 passed.
+
 - Decision: Grok native sessions keep the instructions they started with when reopened, matching the accepted Codex freshness limitation. Do not add re-send machinery, replace native sessions, or warn on every resume.
   Rationale: parent accepts retention of the original snapshot; an every-resume warning provides no actionable remedy. Record this limitation in Outcomes.
   Date/Author: 2026-11-18, parent ruling after second review.
-- Decision: automated brief writers are an exception to warn-and-open. The same delivery function rejects startup before native open when it has no supported composed-instruction channel; its error names the harness and adapter version and reaches the existing `brief_failed` path so review continues without a brief.
-  Rationale: warn-and-open protects a user's session. An automated writer without its brief structure can only return an unstructured report, which is worse than no brief.
-  Date/Author: 2026-11-18, parent ruling after second review.
+- Decision: automated brief writers and reviewers are exceptions to warn-and-open. The same delivery function rejects startup before native open when it has no supported composed-instruction channel; its error names the harness and adapter version. A brief writer reaches the existing `brief_failed` path so review continues without a brief; a reviewer reaches `role_failed`, making the review visibly incomplete without advancing the baseline.
+  Rationale: warn-and-open protects a user's session. An automated writer without its brief structure can only return an unstructured report, which is worse than no brief. An automated reviewer without its rubric produces no reliable verdict.
+  Date/Author: 2026-11-18, parent ruling after second review, extended to reviewers during third review.
 - Decision: pin `OPENCODE_CONFIG_DIR` to the session-owned staged OpenCode home alongside the XDG pin, including retained worker launch configurations. Do not use or copy the user's override directory within Mjolnir sessions.
   Rationale: pinned OpenCode 2.2.7 `util/global.ts:83` replaces Global.Service.config with OPENCODE_CONFIG_DIR, and `config/plugin/instruction.ts:41` reads its AGENTS.md instead of the default XDG global file. The staged profile is authoritative, with the same ownership reasoning as XDG_CONFIG_HOME.
   Date/Author: 2026-11-18, parent ruling after source verification.
@@ -67,12 +77,12 @@ After this change there is one composer that builds a session's standing instruc
   Rationale: parent explicitly chose special-file rejection only. A hung filesystem is its own failure; speculative deadlines contradict the repository rule. The generic-stall portion of the review finding was formally overridden before committing fixes.
   Date/Author: 2026-11-18, parent ruling after first review.
 
-- Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text (except automated brief writers, as decided above) and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
+- Decision: Kimi, OpenCode and Grok always use their verified session-owned native file. The other five harnesses use an advertised append shape; if neither append is advertised, open without the composed text (except automated brief writers and reviewers, as decided above) and emit a visible warning naming the harness and adapter version and explaining that updating the adapter restores delivery. Never write their native file or send a user-message fallback. An advertised append that is rejected still fails visibly.
   Rationale: legacy shared Codex homes remain supported by `subagent_acp_mcp`; a capability-only file fallback could mutate shared files. Missing capabilities in older adapters must not prevent otherwise working sessions from opening.
   Date/Author: 2026-11-18, parent agent after implementation safety check.
 
-- Decision: derive the worker's instruction role from existing `subagent_kind` and `reviewer_launch.role`; retain `ContextCleared.memory` and its historical reader while new workers always produce `None`; serialize `AgentInitialized` without the feature-gated capability to preserve protocol-71 digests.
-  Rationale: these existing launch facts already survive resume/move, and historical wire shapes must remain readable and hash-identical. No persisted field or relay revision changes are needed.
+- Decision: derive the worker's instruction role from `reviewer_launch.role` when present, falling back to existing `subagent_kind`; retain `ContextCleared.memory` and its historical reader while new workers always produce `None`; serialize `AgentInitialized` without the feature-gated capability to preserve protocol-71 digests.
+  Rationale: these existing launch facts already survive resume/move, and historical wire shapes must remain readable and hash-identical. Legacy reviewer launch files can omit subagent_kind while retaining reviewer_launch.role, so the latter is authoritative in the single derivation function (parent ruling during third review). No persisted field or relay revision changes are needed.
   Date/Author: 2026-11-18, implementation following the settled compatibility constraints.
 - Decision: Claude lifecycle fixture is source-derived from the pinned 0.108.0 bridge rather than a live recording. The prepared probe remains at `/tmp/claude-session-instructions-probe.py` for the parent.
   Rationale: automatic approval review rejected the credential-backed probe under the original no-Milestone-3 constraint. Parent explicitly directed source-derived coverage and reserved live Claude checking for Milestone 3.

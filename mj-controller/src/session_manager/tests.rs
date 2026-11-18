@@ -90,7 +90,9 @@ async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
             .wait_for_session("muse", Duration::from_millis(20))
             .await
     });
-    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap();
+    let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap() else {
+        panic!("expected session lookup")
+    };
     // Retain the reply without answering, like an unresponsive manager.
     let error = tokio::time::timeout(Duration::from_secs(1), request)
         .await

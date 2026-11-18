@@ -68,6 +68,7 @@ impl RuntimeState {
         request: mj_controller::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = mj_controller::upgrade::activity("subagent admission")?;
+        let manager = self.session_manager.clone();
         let (relation, needs_provisioning, registered_here) = blocking(move || {
             let mut controller = Controller::load()?;
             if let Some(existing) = mj_controller::database::lookup_subagent_request(
@@ -102,7 +103,7 @@ impl RuntimeState {
                 );
             }
             controller
-                .register_subagent(request)
+                .register_subagent_with_manager(request, &manager)
                 .map(|relation| (relation, true, true))
         })
         .await?;
@@ -176,6 +177,11 @@ impl RuntimeState {
         child_session_id: &str,
         error: &anyhow::Error,
     ) {
+        let manager = self.session_manager.clone();
+        let id = child_session_id.to_owned();
+        if let Err(error) = blocking(move || manager.forget_starting_blocking(&id)).await {
+            tracing::warn!(child_session_id, %error, "could not release failed child launch registration");
+        }
         let cause = format!("sub-agent startup failed: {error:#}");
         let written = blocking({
             let child_session_id = child_session_id.to_owned();

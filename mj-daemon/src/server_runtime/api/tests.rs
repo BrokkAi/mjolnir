@@ -3668,6 +3668,70 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(rendered.contains("Please check the retry path."));
 }
 
+// Hard-won: cdb6971bc: a registered child without an attached relay was misrouted as unmanaged.
+#[tokio::test]
+async fn send_to_registered_child_before_attachment_queues_mailbox_without_a_turn() {
+    if !isolated_parked_test(
+        "send_to_registered_child_before_attachment_queues_mailbox_without_a_turn",
+    ) {
+        return;
+    }
+    let _writer = mj_controller::database::install_isolated_test_writer();
+    let manager = mj_controller::session_manager::spawn_session_manager().unwrap();
+    let registration = manager.control.clone();
+    tokio::task::spawn_blocking(move || registration.register_starting_blocking("child-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    // Publish the child only after the manager owns its launch. No target or
+    // actor is ever attached: this makes the startup window deterministic.
+    store_parent_and_child("child-1");
+    assert!(
+        manager
+            .control
+            .find_session("child-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let backend = ApiBackend::new(
+        manager.control.client(),
+        running_states(),
+        ParkingExports::with_modern_worker(SessionState::Running, None, true),
+    );
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "before-attachment".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "queued during startup".into(),
+        },
+    };
+    for _ in 0..2 {
+        let result = backend
+            .deliver_subagent_input("child-1", "queued during startup", &request)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            super::subagent_input::SubagentInputDelivery::Mailbox
+        ));
+    }
+    let pending = mj_controller::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].event_json.contains("queued during startup"));
+    assert!(
+        mj_controller::database::load_prompt_acceptance(
+            "child-1",
+            &mj_core::continuation::GeneratedPrompt::subagent_input_id(&request.request_id)
+        )
+        .unwrap()
+        .is_none()
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
+
 /// A message to a session that is still starting is accepted once and held
 /// with the startup work. It is not mailed or submitted until that work ends,
 /// and a retry keeps the first copy (#1553).

@@ -149,6 +149,21 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
 pub(super) struct ClientSessionControl(pub(super) SessionManagerControl);
 
 impl mj_client::session::SessionControlBackend for ClientSessionControl {
+    fn parent_message_route(
+        &self,
+        session_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::ParentMessageRoute>> {
+        Box::pin(async move {
+            let (reply, response) = oneshot::channel();
+            self.0
+                .commands
+                .send(ManagerCommand::ParentMessageRoute { session_id, reply })
+                .await
+                .context("session manager stopped")?;
+            response.await.context("session manager stopped")
+        })
+    }
+
     fn snapshot(
         &self,
         session_id: String,
@@ -179,6 +194,29 @@ impl mj_client::session::SessionControlBackend for ClientSessionControl {
 }
 
 impl SessionManagerControl {
+    /// Called off the runtime before committing a newly addressable child.
+    pub fn register_starting_blocking(&self, session_id: &str) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .blocking_send(ManagerCommand::RegisterStarting {
+                session_id: session_id.into(),
+                reply,
+            })
+            .context("session manager stopped")?;
+        response.blocking_recv().context("session manager stopped")
+    }
+
+    pub fn forget_starting_blocking(&self, session_id: &str) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .blocking_send(ManagerCommand::ForgetStarting {
+                session_id: session_id.into(),
+                reply,
+            })
+            .context("session manager stopped")?;
+        response.blocking_recv().context("session manager stopped")
+    }
+
     /// Narrow this controller-owned manager to session lookup for a control surface.
     pub fn client(&self) -> mj_client::session::SessionControl {
         mj_client::session::SessionControl::new(ClientSessionControl(self.clone()))

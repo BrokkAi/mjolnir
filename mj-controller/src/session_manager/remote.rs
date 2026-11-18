@@ -256,6 +256,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     let (requests_tx, requests_rx) = mpsc::channel(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut starting = StartingSessions::default();
         let mut actors = BTreeMap::<String, RemoteActorRegistration>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut desired = BTreeMap::<String, RelaySessionTarget>::new();
@@ -267,6 +268,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         break;
                     }
                     desired = target_map(&targets_rx.borrow_and_update());
+                    starting.reconcile(&desired);
                     actors.retain(|session_id, actor| {
                         if desired.contains_key(session_id) {
                             true
@@ -296,9 +298,13 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                     }
                 }
                 command = commands_rx.recv() => {
-                    let Some(ManagerCommand::Session { session_id, reply }) = command else {
-                        break;
+                    let Some(command) = command else { break; };
+                    let view = match &command {
+                        ManagerCommand::ParentMessageRoute { session_id, .. } => actors.get(session_id).map(|actor| actor.view.borrow().clone()),
+                        _ => None,
                     };
+                    let Some(command) = starting.command(command, view) else { continue; };
+                    let ManagerCommand::Session { session_id, reply } = command else { unreachable!() };
                     let handle = actors.get(&session_id).map(|actor| ManagedSessionHandle {
                         session_id: session_id.clone(),
                         commands: actor.commands.clone(),
