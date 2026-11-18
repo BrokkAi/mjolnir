@@ -125,6 +125,11 @@ jobs:
     - name: Check mj-controller layer boundaries
       run: python3 scripts/check-controller-layers.py
 
+    # Cargo compiles a crate as one mostly serial unit, so crate size sets the
+    # floor for every build (.agents/plans/fan-out-crates-under-size-budget.md).
+    - name: Check crate sizes against the budget
+      run: python3 scripts/check-crate-size.py
+
     - name: Check crate package contents and build
       run: |
         set -euo pipefail
