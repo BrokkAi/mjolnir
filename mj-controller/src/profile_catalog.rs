@@ -1746,17 +1746,20 @@ impl ProfileCatalog {
             return None;
         }
         let identity = profile.capabilities_key(id);
-        // The default entry is refreshed on its own, so for the default model
-        // it is newer than that model's separate copy.
-        if let Some(Entry::Ready(choices)) = inner.entries.get(&(identity.clone(), None))
-            && choices.model.as_deref() == Some(model)
-        {
-            return Some(choices.efforts.clone());
-        }
-        match inner.entries.get(&(identity, Some(model.to_owned()))) {
-            Some(Entry::Ready(choices)) => Some(choices.efforts.clone()),
+        // The default entry and the default model's own entry refresh
+        // independently; the newer observation answers.
+        let ready = |key: CacheKey| match inner.entries.get(&key) {
+            Some(Entry::Ready(choices)) => Some(choices),
             _ => None,
-        }
+        };
+        let default = ready((identity.clone(), None))
+            .filter(|choices| choices.model.as_deref() == Some(model));
+        let specific = ready((identity, Some(model.to_owned())));
+        [default, specific]
+            .into_iter()
+            .flatten()
+            .max_by_key(|choices| choices.observed_at)
+            .map(|choices| choices.efforts.clone())
     }
 
     pub fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
