@@ -333,7 +333,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
       - In a managed checkout, each operation, identified by checkout path and kind, must be covered by `OperationConsent::Any` or by a matching `Shown` entry.
       - If anything is not covered, capture changes nothing and fails with `SnapshotRefused::Untracked(items)` or `SnapshotRefused::OperationInProgress(path, kind)`.
       - Hidden tracked edits keep Move's existing guard (`mj-worker/src/move_workspace.rs`, around line 98). If any index entry has `assume-unchanged` or `skip-worktree` set, `git stash create` could miss its edits, so capture refuses with `SnapshotRefused::HiddenTrackedEdits(paths)`. There is no consent override; the message says to clear those flags first.
-      - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has any status entry, untracked files included as today's guard checks, or its checked-out commit differs from the gitlink without being reachable from the submodule's remote-tracking refs, capture refuses with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
+      - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has any status entry (untracked files included, as today's guard checks), or if any submodule commit the snapshot needs is not reachable from that submodule's remote-tracking refs, capture refuses. The commits it needs are the gitlink in HEAD, the gitlink in the index and the checked-out commit. A staged gitlink to an unpushed submodule commit is therefore caught even when the submodule looks clean. with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
 
       Capture itself is the single decision point, so nothing can appear between a separate check and the capture.
    3. Managed checkouts: run each covered abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
@@ -376,7 +376,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 4. Create every saved ref at its object ID.
 5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
 6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
-7. Run `git submodule update --init --recursive -- <paths>` for the submodules that were initialized at capture; the snapshot records them per checkout. The capture guard already ensured each gitlink commit is reachable from the submodule's own remote. Then, if there is a working-state commit, run `git stash apply --index <commit>`.
+7. If there is a working-state commit, run `git stash apply --index <commit>`. Then run `git submodule update --init --recursive -- <paths>` for the submodules that were initialized at capture, and check out each one's recorded commit detached (`git -C <path> checkout --detach <commit>`), fetching it from the submodule's remote first if needed. Capture records each initialized submodule's actual checked-out commit, which can differ from both the committed and the staged gitlink, and the guard already ensured it is reachable from the submodule's remote. Initializing only after the index is applied keeps a staged submodule update from being undone.
 8. Recreate nested worktrees with `git worktree add` at their recorded relative paths. Position, reset and apply their working state the same way.
 
 When an object the snapshot names is missing, because neither the pack nor origin has it, fail with a message naming the ref and suggesting that origin may have rewritten history.
@@ -430,13 +430,14 @@ The new capture must never become active without its consent checks, so this mil
 Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal as an ordinary suspend failure. That is safe, because nothing is lost.
 
 **Freeze workspace writers before the final capture.** The relay barrier stops command dispatch, but a process the agent started earlier, such as a background command, a build or a dev server, can keep writing to the checkout. A file it creates after the consent check would then be deleted with the checkout, unseen.
-1. Under the barrier, after the early consent check, the worker writes the IDs of every process group it owns for the session (the harness and the background commands it tracks) to its durable state as a freeze record. It then sends `SIGSTOP` to each group.
-2. The worker confirms that every member of those groups has actually stopped before capture begins. Sending the signal only queues it, and a process running on another CPU can still write. On Linux, poll `/proc/<pid>/stat` until each member's state is `T`; on macOS, poll `ps -o stat=`. Only then does the final inventory and capture run, so the consent check and the saved cut see the same workspace.
+1. Under the barrier, after the early consent check, the worker writes a freeze record to its durable state: every process group it owns for the session (the harness and the background commands it tracks), each with the birth identity of its leader. It then sends `SIGSTOP` to each group. Before any later signal, including after a worker crash or a host reboot, the worker checks the recorded birth identity, as `mj-worker/src/worker_stop.rs` already does for worker teardown, and skips any group whose leader is gone or was replaced. A reused process-group ID can therefore never redirect a resume or kill onto an unrelated process.
+2. The worker confirms that every member of those groups has actually stopped before capture begins. Sending the signal only queues it, and a process running on another CPU can still write. On Linux, poll `/proc/<pid>/stat` until each live member's state is `T`; on macOS, poll `ps -o stat=`. A member that exited (state `Z`, a zombie whose frozen parent cannot reap it) or has disappeared counts as quiescent, because it can no longer write. The poll waits only for live writers, so it always ends. Only then does the final inventory and capture run, so the consent check and the saved cut see the same workspace.
 3. Capture runs, as the single consent decision point.
 4. **The daemon alone decides whether the frozen groups resume or are retired,** and it decides from its durable suspend intent. The worker never resumes or kills them on its own judgment, so a lost acknowledgement can never split the decision.
    - **Any failure before the daemon has verified and installed the archive** is reported to the daemon, which records the failed suspend and tells the worker to resume (`SIGCONT`). Failures include a consent refusal, a Git or I/O error, a transfer or verification error, and cancellation. The session then continues untouched.
    - **Once the daemon has verified and installed the archive,** it records the teardown decision in the same transaction that already gates target deletion, and tells the worker to terminate the groups, process groups first and files second.
    - **If the connection drops or the worker restarts while groups are frozen,** the worker keeps them frozen and, on reconnect, asks the daemon for the decision. The daemon's pending suspend intent, which already resumes after a daemon restart, answers resume or retire. The freeze record is cleared only when that answer has been carried out.
+   - **The consent the user gave** (the `Shown` lists or the `Any` flags, and `without_checkpoint`) is persisted with the accepted suspend intent, in the same write that records the session as closing before the HTTP acceptance. A daemon restart before the final capture rechecks against exactly that consent, never a default. This changes a persisted record; classify the migration as compatibility requires.
    - **A user waiting on a stalled suspend** sees it as "suspending". They can retry, or run `suspend --without-checkpoint`, whose decision is retire. The processes are never left frozen without an owner.
 
 Processes that left the worker's process groups (daemonized with `setsid`) are outside this guarantee, exactly as they are outside today's teardown; say so in the code comment. Add tricky-condition tests: a background command creates a file after the preflight, and suspend without consent for it must refuse and then resume the command; a capture that fails with an injected Git error must also resume the frozen groups. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
@@ -708,7 +709,7 @@ Expected: every `snapshot::tests::*` test passes. The pushed-branch test asserts
 
 For each later milestone, build the CLI and use an isolated instance. Never use the default instance:
 
-    cargo build -p mj-cli
+    cargo build -p brokk-mjolnir        # the mj binary; mj-cli is the directory, brokk-mjolnir the package
     target/debug/mj --instance snapshot-test daemon start
     ... scenario below ...
     target/debug/mj --instance snapshot-test daemon stop
@@ -782,7 +783,7 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         pub working_state: Option<String>,         // `git stash create` commit
         pub working_state_skipped: bool,           // raw checkout with an operation in progress
         pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state, initialized submodules
-        pub submodules: Vec<PathBuf>,              // initialized submodules of the primary checkout
+        pub submodules: Vec<(PathBuf, String)>,    // initialized submodules of the primary checkout, with their checked-out commits
         pub remote_refs_stale: bool,
         pub pack: Option<PathBuf>,                  // non-thin pack of what origin lacks
     }
@@ -949,3 +950,11 @@ Revision note (2026-11-18, review 7):
 - Offline captures report the stale-refs risk to the user.
 - The host cache publishes atomically and verifies the hash before use.
 - Initialized submodules are restored.
+
+Revision note (2026-11-18, review 8):
+- The submodule guard verifies every needed gitlink commit, including staged ones.
+- Freeze records carry birth identities, which are verified before any signal.
+- The quiescence poll ignores exited and zombie members.
+- The exact consent is persisted with the suspend intent.
+- Submodules are initialized after the saved index is applied.
+- The CLI build command uses the `brokk-mjolnir` package.
