@@ -21,7 +21,7 @@ pub struct SessionCreateIntent {
 /// The states a session's create intent can exist in: the storage rule that
 /// registration and every session write keep. It says nothing about whether a
 /// given session's creation is unfinished; the intent row is the owner of that.
-pub(crate) fn holds_create_intent(state: SessionState) -> bool {
+pub fn holds_create_intent(state: SessionState) -> bool {
     matches!(
         state,
         SessionState::Provisioning | SessionState::Disconnected
@@ -229,7 +229,7 @@ pub fn begin_failed_launch_retry(expected: SessionRecord) -> Result<Option<Strin
 /// Reset a session to its registered form so its create can run again: the
 /// failed attempt's environment is retired by the caller first, so nothing
 /// the worker restart intent describes exists any more.
-pub(crate) fn reset_session_for_create_retry(session: &SessionRecord) -> Result<()> {
+pub fn reset_session_for_create_retry(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("reset_session_for_create_retry", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

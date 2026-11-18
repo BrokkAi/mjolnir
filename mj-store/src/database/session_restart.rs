@@ -520,7 +520,7 @@ pub fn try_commit_container_upgrade(
 
 /// The retained-container intent is the sole authority over its environment,
 /// including after an engine failure or daemon replacement.
-pub(crate) fn container_upgrade_owns_target(session_id: &str) -> Result<bool> {
+pub fn container_upgrade_owns_target(session_id: &str) -> Result<bool> {
     let reader = open_reader(&database_path())?;
     container_upgrade_owns_target_with(&reader, session_id)
 }
@@ -534,7 +534,7 @@ pub(super) fn container_upgrade_owns_target_with(
 
 /// The Restart owns its handoff before the relay can be sealed. Its digest and
 /// archive reference change in one database-writer decision.
-pub(crate) fn record_session_restart_handoff(
+pub fn record_session_restart_handoff(
     session_id: &str,
     operation_id: &str,
     handoff: &CheckpointMetadata,

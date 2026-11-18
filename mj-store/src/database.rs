@@ -33,7 +33,7 @@ use mj_core::workspace::{
 
 const SCHEMA_VERSION: i64 = 138;
 
-pub(crate) mod web_push;
+pub mod web_push;
 pub use web_push::*;
 
 mod environments;

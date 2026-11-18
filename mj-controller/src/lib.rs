@@ -48,9 +48,9 @@ pub use mj_targets::streamed_child;
 pub use mj_targets::tailscale;
 pub mod utility_llm;
 pub mod worker_client;
-pub mod worker_lifecycle;
+pub use mj_store::worker_lifecycle;
 
-pub mod database;
+pub use mj_store::database;
 
 pub use mj_targets::target_storage;
 pub use mj_targets::targets;
@@ -61,20 +61,20 @@ pub(crate) mod project_memory_merge;
 
 pub mod checkpoint_transfer;
 
+pub use mj_store::recovery_gate;
 pub use mj_targets::image_pull_gate;
-pub mod recovery_gate;
 
 pub mod github_item_verdict;
 pub mod github_rate_limit;
 pub mod github_relevance;
 mod jev_transport;
-pub mod mailbox_outbox;
+pub use mj_store::mailbox_outbox;
+pub use mj_store::upgrade;
+pub use mj_store::web_push;
 #[cfg(any(test, feature = "test-support"))]
 pub use mj_targets::test_isolation;
 #[cfg(any(test, feature = "test-support"))]
 pub use mj_targets::test_log;
-pub mod upgrade;
-pub mod web_push;
 
 pub mod wait_policy;
 

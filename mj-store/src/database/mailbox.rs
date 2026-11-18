@@ -2,10 +2,10 @@
 
 use super::*;
 
-pub(crate) const MAILBOX_CLEARED_REASON: &str = "Discarded by /clear";
+pub const MAILBOX_CLEARED_REASON: &str = "Discarded by /clear";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MailboxDeliveryState {
+pub enum MailboxDeliveryState {
     Pending,
     Accepted(u64),
     Discarded,
@@ -13,10 +13,7 @@ pub(crate) enum MailboxDeliveryState {
 }
 
 /// Durable status is authoritative even for delivery batches fetched earlier.
-pub(crate) fn mailbox_delivery_state(
-    session_id: &str,
-    event_key: &str,
-) -> Result<MailboxDeliveryState> {
+pub fn mailbox_delivery_state(session_id: &str, event_key: &str) -> Result<MailboxDeliveryState> {
     let connection = open_reader(&database_path())?;
     mailbox_delivery_state_with(&connection, session_id, event_key)
 }
@@ -131,7 +128,7 @@ pub fn enqueue_mailbox_event(
     Ok(inserted)
 }
 
-pub(crate) fn enqueue_mailbox_event_with(
+pub fn enqueue_mailbox_event_with(
     connection: &Connection,
     event_key: &str,
     target_session_id: &str,

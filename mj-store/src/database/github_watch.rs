@@ -69,7 +69,7 @@ pub struct RecordedLifecycle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GithubSessionTurnWindow {
+pub struct GithubSessionTurnWindow {
     pub started_at_ms: i64,
     pub completed_at_ms: Option<i64>,
 }

@@ -78,7 +78,7 @@ pub fn load_delegation(
 /// Whether a parent has an accepted child mutation that the daemon has not
 /// completed yet. The worker queue alone is insufficient: delivery removes a
 /// request before its durable effect is acknowledged.
-pub(crate) fn has_pending_mutating_delegations(parent: &str) -> Result<bool> {
+pub fn has_pending_mutating_delegations(parent: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
     has_pending_mutating_delegations_with(&connection, parent)
 }

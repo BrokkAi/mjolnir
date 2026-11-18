@@ -5,7 +5,7 @@ use mj_core::project_catalog::{ProjectCatalogView, ProjectLocation, SavedProject
 use mj_core::repository::ProjectBundleSnapshot;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectDiscoveryChange {
+pub struct ProjectDiscoveryChange {
     pub sequence: i64,
     pub session_id: String,
     pub directory: PathBuf,
@@ -59,7 +59,7 @@ pub(super) fn read_project_catalog_from(connection: &Connection) -> Result<Proje
     Ok(view)
 }
 
-pub(crate) fn store_project_location(location: &ProjectLocation) -> Result<()> {
+pub fn store_project_location(location: &ProjectLocation) -> Result<()> {
     ensure!(
         !location.host.trim().is_empty()
             && [
@@ -222,7 +222,7 @@ fn retire_changed_project(tx: &Transaction<'_>, id: &str, new_key: &str) -> Resu
     Ok(())
 }
 
-pub(crate) fn pending_project_aliases() -> Result<Vec<(String, String, ProjectBundleSnapshot)>> {
+pub fn pending_project_aliases() -> Result<Vec<(String, String, ProjectBundleSnapshot)>> {
     let connection = open_reader(&database_path())?;
     let mut statement=connection.prepare("SELECT bundle_id,canonical_id,snapshot_json FROM project_aliases WHERE config_pending=1 ORDER BY bundle_id")?;
     statement
@@ -240,7 +240,7 @@ pub(crate) fn pending_project_aliases() -> Result<Vec<(String, String, ProjectBu
         .collect()
 }
 
-pub(crate) fn finish_project_alias(bundle_id: &str) -> Result<()> {
+pub fn finish_project_alias(bundle_id: &str) -> Result<()> {
     let bundle_id = bundle_id.to_owned();
     submit_database_write("finish_project_alias", move |_| {
         let _commit = crate::upgrade::activity_unless_draining("project alias completion")?;
@@ -275,7 +275,7 @@ pub(super) fn canonical_project_id(connection: &Connection, bundle_id: &str) -> 
         .unwrap_or_else(|| bundle_id.to_owned()))
 }
 
-pub(crate) fn project_seeded(harness: &str, home: &Path) -> Result<bool> {
+pub fn project_seeded(harness: &str, home: &Path) -> Result<bool> {
     Ok(open_reader(&database_path())?.query_row(
         "SELECT EXISTS(SELECT 1 FROM project_seed_homes WHERE harness=?1 AND home=?2)",
         params![harness, path_to_blob(home)],
@@ -283,7 +283,7 @@ pub(crate) fn project_seeded(harness: &str, home: &Path) -> Result<bool> {
     )?)
 }
 
-pub(crate) fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
+pub fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
     let harness = harness.to_owned();
     let home = home.to_owned();
     submit_database_write("finish_project_seed", move |_| {
@@ -296,7 +296,7 @@ pub(crate) fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
     })
 }
 
-pub(crate) fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChange>> {
+pub fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChange>> {
     let connection = open_reader(&database_path())?;
     let mut statement=connection.prepare("SELECT sequence,session_id,directory,target_template_id
         FROM project_discovery_changes WHERE sequence>(SELECT sequence FROM project_discovery_progress WHERE singleton=1)
@@ -322,7 +322,7 @@ pub(crate) fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscov
         .collect()
 }
 
-pub(crate) fn finish_project_discovery(sequence: i64, error: Option<String>) -> Result<()> {
+pub fn finish_project_discovery(sequence: i64, error: Option<String>) -> Result<()> {
     submit_database_write("finish_project_discovery", move |_| {
         let _commit = crate::upgrade::activity_unless_draining("project discovery progress")?;
         let mut connection = open(&database_path())?;
@@ -345,7 +345,7 @@ pub(crate) fn finish_project_discovery(sequence: i64, error: Option<String>) -> 
 }
 
 /// Allocate a catalog ID and decide reuse inside the serialized writer.
-pub(crate) fn store_directory_project(project: &ProjectBundleSnapshot) -> Result<String> {
+pub fn store_directory_project(project: &ProjectBundleSnapshot) -> Result<String> {
     let project = project.clone();
     submit_database_write("store_directory_project", move |_| {
         let _commit = crate::upgrade::activity_unless_draining("directory project catalog")?;
@@ -379,7 +379,7 @@ pub(crate) fn store_directory_project(project: &ProjectBundleSnapshot) -> Result
     })
 }
 
-pub(crate) fn bind_session_project(
+pub fn bind_session_project(
     session_id: &str,
     bundle_id: &str,
     project: &ProjectBundleSnapshot,
@@ -408,7 +408,7 @@ pub(crate) fn bind_session_project(
     })
 }
 
-pub(crate) fn seed_failure(
+pub fn seed_failure(
     harness: &str,
     home: &Path,
     directory: &Path,
@@ -433,7 +433,7 @@ pub(crate) fn seed_failure(
     })
 }
 
-pub(crate) fn seed_failures() -> Result<Vec<(String, PathBuf, PathBuf, bool)>> {
+pub fn seed_failures() -> Result<Vec<(String, PathBuf, PathBuf, bool)>> {
     let connection = open_reader(&database_path())?;
     let mut statement=connection.prepare("SELECT harness,home,directory,source_file FROM project_seed_failures ORDER BY harness,home,directory")?;
     statement
@@ -449,7 +449,7 @@ pub(crate) fn seed_failures() -> Result<Vec<(String, PathBuf, PathBuf, bool)>> {
         .map_err(Into::into)
 }
 
-pub(crate) fn discovery_errors() -> Result<Vec<String>> {
+pub fn discovery_errors() -> Result<Vec<String>> {
     let connection = open_reader(&database_path())?;
     let mut statement=connection.prepare("SELECT error FROM project_discovery_failures UNION SELECT error FROM project_seed_failures ORDER BY error")?;
     statement
@@ -458,7 +458,7 @@ pub(crate) fn discovery_errors() -> Result<Vec<String>> {
         .map_err(Into::into)
 }
 
-pub(crate) fn saved_project(bundle_id: &str) -> Result<Option<(String, ProjectBundleSnapshot)>> {
+pub fn saved_project(bundle_id: &str) -> Result<Option<(String, ProjectBundleSnapshot)>> {
     let connection = open_reader(&database_path())?;
     let canonical = canonical_project_id(&connection, bundle_id)?;
     let json:Option<String>=connection.query_row("SELECT snapshot_json FROM project_aliases WHERE bundle_id=?1 UNION ALL SELECT snapshot_json FROM project_catalog WHERE bundle_id=?1 LIMIT 1",[bundle_id],|row|row.get(0)).optional()?;
@@ -466,7 +466,7 @@ pub(crate) fn saved_project(bundle_id: &str) -> Result<Option<(String, ProjectBu
         .transpose()
 }
 
-pub(crate) fn hide_catalog_project(bundle_id: &str) -> Result<()> {
+pub fn hide_catalog_project(bundle_id: &str) -> Result<()> {
     let bundle_id = bundle_id.to_owned();
     submit_database_write("hide_catalog_project", move |_| {
         let _commit = crate::upgrade::activity("remove project catalog entry")?;

@@ -819,7 +819,7 @@ impl HoldsSession for SessionAdmission {
     }
 }
 impl SessionAdmission {
-    pub(crate) fn gate_and_session(&self) -> (&Arc<RecoveryGate>, &str) {
+    pub fn gate_and_session(&self) -> (&Arc<RecoveryGate>, &str) {
         match self {
             Self::Foreground(a) => (&a.0.gate, &a.0.session_id),
             Self::Background(a) => (&a.0.gate, &a.0.session_id),
@@ -829,7 +829,7 @@ impl SessionAdmission {
         self.gate_and_session().1
     }
 
-    pub(crate) fn drain_delegation(&self) -> anyhow::Result<ForegroundDelegationDrain> {
+    pub fn drain_delegation(&self) -> anyhow::Result<ForegroundDelegationDrain> {
         let Self::Foreground(admission) = self else {
             anyhow::bail!("delegation drain requires foreground ownership");
         };
@@ -886,7 +886,7 @@ impl SessionAdmission {
         }
         Ok(())
     }
-    pub(crate) async fn lease(&self, session_id: &str) -> anyhow::Result<RelayLeaseAdmission> {
+    pub async fn lease(&self, session_id: &str) -> anyhow::Result<RelayLeaseAdmission> {
         let (gate, admitted_session) = self.gate_and_session();
         anyhow::ensure!(
             session_id == admitted_session,
@@ -955,7 +955,7 @@ impl SessionAdmission {
 /// A temporary phase of the same foreground identity. Closing it refuses new
 /// delivery and preempts admitted delivery; source reacquisition waits for its
 /// holders and leases to return. Drop also closes it on cancellation or unwind.
-pub(crate) struct ForegroundDelegationDrain(ForegroundAdmission);
+pub struct ForegroundDelegationDrain(ForegroundAdmission);
 impl Drop for ForegroundDelegationDrain {
     fn drop(&mut self) {
         let admission = &self.0.0;
@@ -984,10 +984,10 @@ impl Drop for ForegroundDelegationDrain {
 /// cannot end or wake deferred credential work before the relay is available.
 pub struct RelayLeaseAdmission {
     admission: SessionAdmission,
-    pub(crate) label: &'static str,
+    pub label: &'static str,
 }
 impl RelayLeaseAdmission {
-    pub(crate) fn defer_credentials(&self) {
+    pub fn defer_credentials(&self) {
         let (gate, session) = self.admission.gate_and_session();
         gate.state
             .lock()
@@ -1015,7 +1015,7 @@ impl Drop for RelayLeaseAdmission {
 impl RecoveryGate {
     // Its one caller is a Unix-only test.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
+    pub fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1042,12 +1042,12 @@ impl RecoveryGate {
             .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
     }
 
-    pub(crate) fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
+    pub fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
         let mut wakes = self.credential_wakes.subscribe();
         wakes.mark_changed();
         wakes
     }
-    pub(crate) fn take_credential_wakes(&self) -> BTreeSet<String> {
+    pub fn take_credential_wakes(&self) -> BTreeSet<String> {
         let mut ready = BTreeSet::new();
         self.credential_wakes.send_if_modified(|sessions| {
             ready = std::mem::take(sessions);

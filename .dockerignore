@@ -18,6 +18,7 @@
 !mj-worker/
 !mj-client/
 !mj-targets/
+!mj-store/
 !mj-controller/
 !mj-server/
 !mj-daemon/

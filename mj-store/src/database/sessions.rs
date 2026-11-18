@@ -679,7 +679,7 @@ pub fn save_resumed_session(
 }
 
 /// Commit explicit dialog choices together with the first provisioning publication.
-pub(crate) fn accept_resumed_session(
+pub fn accept_resumed_session(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
     requests: &SessionResumeOptions,
@@ -709,7 +709,7 @@ pub(super) fn save_resumed_session_to(
     save_resumed_session_in_environment_to(path, session, container_size, None, None, None)
 }
 
-pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
+pub fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
     let session = session.clone();
     let environment_id = environment_id.to_owned();
     submit_database_write("restore resumed environment", move |_| {
@@ -878,7 +878,7 @@ pub fn save_suspension_intent(
     })
 }
 
-pub(crate) fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
+pub fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
     let mut session = session.clone();
     submit_database_write("save failed close", move |connection| {
         validate_session_record(&session)?;
@@ -929,7 +929,7 @@ pub(crate) fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord
 
 /// A verified close of a restored destination also ends its cancelled Move.
 /// Check the old placement before publishing the terminal lifecycle state.
-pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
+pub fn save_closed_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save closed session", move |connection| {
         validate_session_record(&session)?;
@@ -975,7 +975,7 @@ pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
 
 /// Clear exactly the failure observed at turn start. The writer owns the
 /// comparison and update together so a concurrent lifecycle result survives.
-pub(crate) fn clear_recorded_lifecycle_failure(
+pub fn clear_recorded_lifecycle_failure(
     previous: &SessionRecord,
     updated_at: &str,
 ) -> Result<bool> {
@@ -1643,7 +1643,7 @@ pub(super) fn save_lifecycle_session_to(path: &Path, session: &SessionRecord) ->
 }
 
 /// Settle teardown and archive failed children in the same owner transaction.
-pub(crate) fn save_startup_cleanup_outcome(session: &SessionRecord, archive: bool) -> Result<()> {
+pub fn save_startup_cleanup_outcome(session: &SessionRecord, archive: bool) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_startup_cleanup_outcome", move |_| {
         validate_session_record(&session)?;

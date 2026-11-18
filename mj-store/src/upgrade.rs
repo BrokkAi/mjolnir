@@ -30,7 +30,7 @@ const NAMED_HOLDS: usize = 3;
 const STARTUP_RECOVERY_LABEL: &str = "daemon startup recovery";
 
 /// The label a session destroy holds admission under.
-pub(crate) const DESTROY_LABEL: &str = "session destroy";
+pub const DESTROY_LABEL: &str = "session destroy";
 
 /// A refused control admission has made no mutation and may wait for handoff.
 pub const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
@@ -38,7 +38,7 @@ pub const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 /// How long a stop or handoff waits for destroys in flight before it goes
 /// ahead and abandons them. The client waits longer than this for the daemon
 /// to exit (`STOP_DRAIN_TIMEOUT`).
-pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
+pub const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
@@ -193,8 +193,8 @@ impl RefusedHandoff {
 #[derive(Clone)]
 pub struct Blocker {
     pub label: &'static str,
-    pub(crate) count: usize,
-    pub(crate) age: Duration,
+    pub count: usize,
+    pub age: Duration,
     named: Vec<NamedHold>,
 }
 
@@ -408,7 +408,7 @@ impl Gate {
     }
 
     /// [`Self::enter`] for work that can name itself in the wait notice.
-    pub(crate) fn enter_described(
+    pub fn enter_described(
         self: &Arc<Self>,
         label: &'static str,
         describer: Option<Arc<dyn Describe>>,
@@ -429,7 +429,7 @@ impl Gate {
     }
 
     /// [`Self::enter_unless_draining`] for work that can name itself.
-    pub(crate) fn enter_unless_draining_described(
+    pub fn enter_unless_draining_described(
         self: &Arc<Self>,
         label: &'static str,
         describer: Option<Arc<dyn Describe>>,
@@ -450,11 +450,11 @@ impl Gate {
 
     /// Admit the destroy of `session_id`. The handoff and the graceful stop
     /// wait for it, but only up to [`DESTROY_WAIT_BOUND`].
-    pub(crate) fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
+    pub fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
         self.enter_destroy_mode(session_id, false)
     }
 
-    pub(crate) fn enter_destroy_unless_draining(
+    pub fn enter_destroy_unless_draining(
         self: &Arc<Self>,
         session_id: &str,
     ) -> anyhow::Result<Work> {
@@ -503,7 +503,7 @@ impl Gate {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
+    pub fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
         let gate = Arc::new(Self::default());
         gate.lock().destroy_wait_bound = Some(bound);
         gate
@@ -539,7 +539,7 @@ impl Gate {
 
     /// The work holding admission open, sorted by label, with how long each
     /// label's oldest hold has run. A waiting handoff names these.
-    pub(crate) fn blockers(&self) -> Vec<Blocker> {
+    pub fn blockers(&self) -> Vec<Blocker> {
         self.lock().blockers()
     }
 

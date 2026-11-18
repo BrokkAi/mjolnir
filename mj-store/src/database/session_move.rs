@@ -77,7 +77,7 @@ pub fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
 }
 
 /// An unchanged Move still accepts the person's explicit next-creation choices.
-pub(crate) fn accept_unchanged_move(selection: &MoveSelection) -> Result<()> {
+pub fn accept_unchanged_move(selection: &MoveSelection) -> Result<()> {
     let selection = selection.clone();
     submit_database_write("accept unchanged Move", move |connection| {
         let tx = connection.transaction()?;
@@ -486,7 +486,7 @@ pub fn move_source_environment(operation_id: &str) -> Result<Option<EnvironmentR
         .map(Option::flatten)
 }
 
-pub(crate) fn retained_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+pub fn retained_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
     let connection = open_reader(&database_path())?;
     let id: Option<String> = connection
         .query_row(

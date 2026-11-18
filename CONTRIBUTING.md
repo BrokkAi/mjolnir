@@ -116,6 +116,11 @@ it or introduce a dependency between sibling branches.
   the foundation and client branches and knows nothing of the store or of
   session lifecycle. `mj_controller` re-exports its modules under their old
   names.
+- `brokk-mj-store` (`mj-store/`, library `mj_store`) is the daemon's
+  database: the SQLite schema and migrations, the session, environment and
+  event records, the single writer, and the gates that order recovery and
+  worker lifecycle against it. It builds on the targets crate.
+  `mj_controller` re-exports its modules under their old names.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client

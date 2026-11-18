@@ -65,7 +65,7 @@ fn begin_worker_restart_for(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerRestartPhase {
+pub enum WorkerRestartPhase {
     Prepared,
     Swapping,
     AwaitingReadiness,
@@ -81,7 +81,7 @@ impl WorkerRestartPhase {
     }
 }
 
-pub(crate) fn worker_restart_phase(session_id: &str) -> Result<Option<WorkerRestartPhase>> {
+pub fn worker_restart_phase(session_id: &str) -> Result<Option<WorkerRestartPhase>> {
     let connection = open_reader(&database_path())?;
     let phase: Option<String> = connection
         .query_row(
@@ -100,7 +100,7 @@ pub(crate) fn worker_restart_phase(session_id: &str) -> Result<Option<WorkerRest
         .transpose()
 }
 
-pub(crate) fn advance_worker_restart(
+pub fn advance_worker_restart(
     session_id: &str,
     operation_id: &str,
     phase: WorkerRestartPhase,
@@ -163,7 +163,7 @@ fn finish_worker_restart_with(
 }
 
 /// A proved dead wake releases its boot and becomes retryable atomically.
-pub(crate) fn fail_subagent_unpark(
+pub fn fail_subagent_unpark(
     session_id: &str,
     operation_id: &str,
     detail: &str,

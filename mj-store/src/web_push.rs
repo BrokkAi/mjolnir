@@ -62,7 +62,7 @@ impl Subscription {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Notice {
+pub struct Notice {
     pub title: String,
     pub body: String,
     pub session_id: Option<String>,
@@ -219,7 +219,7 @@ fn phone_line(text: &str, fallback: &str) -> String {
     }
 }
 
-pub(crate) struct PushEntry<'a> {
+pub struct PushEntry<'a> {
     pub session: &'a str,
     pub completed_ordinal: Option<u64>,
     pub paused: bool,
@@ -229,7 +229,7 @@ pub(crate) struct PushEntry<'a> {
     pub message_id: Option<&'a str>,
 }
 
-pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<'_>>> {
+pub fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<'_>>> {
     let cards = runtime.metadata.notification_cards.as_ref()?;
     // Attention supplies only worker availability. Card publication owns
     // notification eligibility, including ignored sessions and managed children.

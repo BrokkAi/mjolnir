@@ -510,7 +510,7 @@ pub fn load_materialized_agent_item_through(
 /// The newest agent message of the turn that completed at `through`, bounded
 /// to that turn: a turn that left no text has none, never an earlier turn's.
 /// Every reader of a notification entry without a message id asks this.
-pub(crate) fn materialized_agent_item_through(
+pub fn materialized_agent_item_through(
     connection: &Connection,
     session_id: &str,
     through: u64,

@@ -67,7 +67,7 @@ pub(super) mod tests {
     use mj_core::event_outcome::{OutcomeReason, TurnResultKind};
     use mj_core::state::TurnOutcomeKind;
 
-    pub(crate) fn legacy_turns() -> Vec<MaterializedTurnOutcome> {
+    pub fn legacy_turns() -> Vec<MaterializedTurnOutcome> {
         let mut outcomes = [
             "EndTurn",
             "Cancelled",

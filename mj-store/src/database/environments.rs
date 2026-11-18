@@ -49,7 +49,7 @@ pub struct EnvironmentPreparedDestination {
 }
 
 impl EnvironmentPlacement {
-    pub(crate) fn from_session(session: &SessionRecord) -> Self {
+    pub fn from_session(session: &SessionRecord) -> Self {
         Self {
             target: session.target.clone().map(|v| *v),
             target_template_id: session.target_template_id.clone(),
@@ -832,7 +832,7 @@ pub(super) fn backfill_move_environments(transaction: &Transaction<'_>) -> Resul
 /// A stopped owned checkout is reserved before Resume materializes or mutates
 /// it. Its old reclaimed environment stays a tombstone; the new reservation
 /// owns construction and can be reclaimed even if no worker ever starts.
-pub(crate) fn reserve_owned_checkout(session: &SessionRecord) -> Result<EnvironmentRecord> {
+pub fn reserve_owned_checkout(session: &SessionRecord) -> Result<EnvironmentRecord> {
     let session = session.clone();
     submit_database_write("reserve resumed checkout", move |connection| {
         let transaction = connection.transaction()?;
@@ -884,7 +884,7 @@ fn project_repositories(value: &serde_json::Value) -> Option<Vec<PathBuf>> {
         .collect()
 }
 
-pub(crate) fn prepared_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+pub fn prepared_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
     let connection = open_reader(&database_path())?;
     let id: Option<String> = connection.query_row("SELECT environment_id FROM environments WHERE json_extract(placement_json,'$.prepared_destination.operation_id')=?1",[operation_id],|row|row.get(0)).optional()?;
     id.map(|id| read_environment(&connection, &id))
@@ -951,10 +951,7 @@ pub(super) fn record_prepared_move_environment(
     Ok(())
 }
 
-pub(crate) fn record_prepared_environment_instance(
-    environment_id: &str,
-    instance_id: &str,
-) -> Result<()> {
+pub fn record_prepared_environment_instance(environment_id: &str, instance_id: &str) -> Result<()> {
     let environment_id = environment_id.to_owned();
     let instance_id = instance_id.to_owned();
     submit_database_write("record prepared environment instance", move |connection| {

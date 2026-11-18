@@ -47,14 +47,14 @@ pub fn current(session_id: &str) -> Option<WorkerPermit> {
         })
 }
 
-pub(crate) fn require(session_id: &str) -> Result<WorkerPermit> {
+pub fn require(session_id: &str) -> Result<WorkerPermit> {
     current(session_id)
         .with_context(|| format!("worker mutation for {session_id} has no lifecycle owner"))
 }
 
 /// Observe a completed boot while holding ownership through the snapshot read.
 /// A live swap retains its owner; an abandoned failed boot can be retried.
-pub(crate) fn observe_worker_restart_outcome(
+pub fn observe_worker_restart_outcome(
     owner: &WorkerPermit,
     target: &mj_core::state::TargetLocator,
     snapshot: &mj_core::state::ManagedSessionSnapshot,
@@ -96,7 +96,7 @@ pub(crate) fn observe_worker_restart_outcome(
 }
 
 impl WorkerPermit {
-    pub(crate) fn verify_cached_target(&self, state: &mj_core::state::State) -> Result<()> {
+    pub fn verify_cached_target(&self, state: &mj_core::state::State) -> Result<()> {
         let Some(expected) = state.sessions.get(self.session_id()) else {
             return Ok(());
         };
@@ -108,7 +108,7 @@ impl WorkerPermit {
         Ok(())
     }
 
-    pub(crate) fn verify_target(&self, expected: &mj_core::state::TargetLocator) -> Result<()> {
+    pub fn verify_target(&self, expected: &mj_core::state::TargetLocator) -> Result<()> {
         let current = crate::database::read_durable_session_record(self.session_id())?;
         ensure!(
             current.is_some_and(|session| session.target.as_deref() == Some(expected)),
@@ -117,7 +117,7 @@ impl WorkerPermit {
         Ok(())
     }
 
-    pub(crate) fn begin_restart(
+    pub fn begin_restart(
         &self,
         target: &mj_core::state::TargetLocator,
         desired_build: String,
@@ -134,7 +134,7 @@ impl WorkerPermit {
     }
 
     /// Only a death proved on the selected target releases a pending boot.
-    pub(crate) fn settle_dead_restart(&self, target: &mj_core::state::TargetLocator) -> Result<()> {
+    pub fn settle_dead_restart(&self, target: &mj_core::state::TargetLocator) -> Result<()> {
         self.verify_target(target)?;
         if let Some(intent) = crate::database::load_worker_restart(self.session_id())? {
             ensure!(
@@ -173,7 +173,7 @@ impl WorkerPermit {
         })))
     }
 
-    pub(crate) fn admission(&self) -> &SessionAdmission {
+    pub fn admission(&self) -> &SessionAdmission {
         &self.0.admission
     }
 
@@ -212,7 +212,7 @@ pub fn run<'a, T: 'a>(
 
 /// A lease returned by an earlier call carries its own admission capability.
 /// Borrow it before acquiring again, even outside the original task scope.
-pub(crate) fn run_with_owner<'a, T: 'a>(
+pub fn run_with_owner<'a, T: 'a>(
     admission: &'a impl HoldsSession,
     session_id: &'a str,
     reason: &'static str,
@@ -239,7 +239,7 @@ pub(crate) fn run_with_owner<'a, T: 'a>(
     }
 }
 
-pub(crate) fn run_blocking<T>(
+pub fn run_blocking<T>(
     session_id: &str,
     reason: &'static str,
     _executor: &impl CommandExecutor,
@@ -253,7 +253,7 @@ pub(crate) fn run_blocking<T>(
 }
 
 /// Entry point for work whose caller already holds the session owner.
-pub(crate) fn run_admitted<'a, T: 'a>(
+pub fn run_admitted<'a, T: 'a>(
     admission: &'a impl HoldsSession,
     session_id: &'a str,
     work: impl Future<Output = Result<T>> + 'a,
