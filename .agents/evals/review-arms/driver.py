@@ -193,7 +193,11 @@ def reviewer_runtime(child, carrier):
     # check=True: a failed probe raises, is logged by record_runtimes and retried at the next poll.
     processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
                                text=True, timeout=60, check=True).stdout.splitlines()
+    # The image is the container the reviewer runs in; the process list is evidence of its worker and
+    # harness only while the reviewer's own session is live, so record that state beside it.
+    child_state = {k: session(child).get(k) for k in ("lifecycle", "is_idle", "activity_state")}
     return {"container": ids[0], "container_source": source, "image": info["Image"],
+            "reviewer_state_at_probe": child_state,
             "image_digest": image.get("Digest"),
             "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
             "mj_cli_version_at_observation": version, "processes": processes, "observed_ns": time.time_ns(),
@@ -238,6 +242,11 @@ def finish_set_aside(d):
                  mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
         else:
             save(d / f"{tag}-suspend.json", {"already": session(sid).get("lifecycle")})
+    # Suspend is accepted asynchronously; retire the launch records only once it has taken effect,
+    # otherwise leave the marker so the next start retries the cleanup.
+    state = session(sid).get("lifecycle")
+    if state not in ("suspended", "closed"):
+        raise RuntimeError(f"rejected carrier {sid} is {state}, not suspended yet; set-aside will be retried")
     for name in ("launch-intent.json", "launch.json", "placement.json", "pre-inventory.json"):
         if (d / name).exists():
             (d / name).rename(d / f"{tag}-{name}")
