@@ -41,3 +41,5 @@ A positive result shows that reviewers benefit when the decisive fact is supplie
 Editor, fact checker, leak judges and round M judges are Claude Opus/high on claude7. Reviewers are Terra/high on whichever Codex profile mj review selects. Every profile keeps the 25% weekly floor, checked before each launch.
 
 Clarification, 2026-11-18, before any edit: wording-only edits may touch any item the leak judges cite as the source of the leak, not only the carrying items. No item is deleted, no relation or anchor changes, and the carrying items must still carry the decisive fact by the blind fact check.
+
+Amendment, 2026-11-18, before any ON reviewer: round L's OT carriers ran on a newer Podman image than the stored A/BT carriers. To keep the comparison within one image, this arm adds AF, a fresh no-brief arm with 3 Terra/high reviewers per retained diff, run in the same window and on the same image as ON, interleaved with ON jobs. The primary reading is ON − AF on the retained diffs. ON − A (stored) and AF − A (stored), the image or cohort effect, are reported as secondary. Round M judges ON, AF, stored A and stored OT together.
