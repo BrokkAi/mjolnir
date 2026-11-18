@@ -156,10 +156,12 @@ def changed_sites(repo, h):
             raise RuntimeError("diff file: " + se.strip()[-200:])
         path = old_path
         if status.startswith("A"):
-            rc, old = 1, ""
+            old_lines = []
         else:
-            rc, old, _ = git(repo, "show", "--no-textconv", f"{h}^:{old_path}")
-        old_lines = old.splitlines() if rc == 0 else []
+            rc, old, se = git(repo, "show", "--no-textconv", f"{h}^:{old_path}")
+            if rc:  # an unreadable old blob would misplace every hunk: fail the draw visibly
+                raise RuntimeError(f"old blob {old_path}: " + se.strip()[-200:])
+            old_lines = old.splitlines()
         for line in diff.splitlines():
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)
             if not m:
