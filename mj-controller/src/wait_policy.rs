@@ -94,10 +94,7 @@ impl WaitObservation {
     /// Read turn resolution from one worker publication. Delegation and the
     /// wait API must not announce an ending before this worker finishes its
     /// assessment or retries the request.
-    pub(crate) fn observe_worker_turn(
-        &mut self,
-        snapshot: &mj_core::state::ManagedSessionSnapshot,
-    ) {
+    pub fn observe_worker_turn(&mut self, snapshot: &mj_core::state::ManagedSessionSnapshot) {
         self.execution = snapshot.materialized.execution;
         self.active_turn = snapshot.materialized.active_turn.clone();
         self.last_turn_outcome = snapshot.materialized.last_turn_outcome.clone();
@@ -118,7 +115,7 @@ impl WaitObservation {
             .filter(|recovery| !recovery.submitted);
     }
 
-    pub(crate) fn worker_turn_pending(snapshot: &mj_core::state::ManagedSessionSnapshot) -> bool {
+    pub fn worker_turn_pending(snapshot: &mj_core::state::ManagedSessionSnapshot) -> bool {
         let mut observation = Self::default();
         observation.observe_worker_turn(snapshot);
         observation
@@ -308,7 +305,7 @@ pub struct WaitDecision {
 }
 
 impl WaitDecision {
-    pub(super) fn simple(outcome: WaitOutcome, message: Option<String>) -> Self {
+    pub fn simple(outcome: WaitOutcome, message: Option<String>) -> Self {
         Self {
             outcome,
             stop_reason: None,
@@ -318,7 +315,7 @@ impl WaitDecision {
         }
     }
 
-    pub(super) fn from_outcome(outcome: &MaterializedTurnOutcome) -> Self {
+    pub fn from_outcome(outcome: &MaterializedTurnOutcome) -> Self {
         use mj_core::event_outcome::{OutcomeReason, TurnResultKind};
         let result = outcome.result();
         let kind = match result.kind {

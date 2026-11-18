@@ -12,7 +12,7 @@ impl Controller {
     /// Persist the child's final relay events before removing its private
     /// worker state. No repository or native-session archive is needed: a
     /// closed child is not resumed independently of its parent.
-    pub(crate) async fn suspend_subagent_controlled(
+    pub async fn suspend_subagent_controlled(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,

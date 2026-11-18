@@ -4,7 +4,7 @@ pub fn spawn_session_manager() -> Result<SessionManagerChannels> {
     spawn_session_manager_observed(None)
 }
 
-pub(crate) fn spawn_session_manager_observed(
+pub fn spawn_session_manager_observed(
     delegation: Option<DelegationSender>,
 ) -> Result<SessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());

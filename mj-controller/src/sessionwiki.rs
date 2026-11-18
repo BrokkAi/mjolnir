@@ -114,7 +114,7 @@ fn project_directories_of(
 
 /// The project path SessionWiki should search for this session: the attached
 /// or managed raw checkout, or the primary repository in a managed workspace.
-pub(crate) fn indexed_project_directory(
+pub fn indexed_project_directory(
     state: &State,
     config: Option<&Config>,
     session_id: &str,
@@ -413,7 +413,7 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
 /// The newest full checkpoint for one session, if Mjolnir still has one.
 /// Observe uses this after SessionWiki discovers a session whose operational
 /// record has been removed but whose canonical archive has not.
-pub(crate) fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
+pub fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
     let directory = mj_core::config::sessions_dir();
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -848,16 +848,16 @@ impl WikiIndexer {
 
     /// An indexer with no worker, so a test can see a request that nothing
     /// takes and no test runs a sync against the real index.
-    #[cfg(test)]
-    pub(crate) fn inert() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inert() -> Self {
         Self {
             inner: Arc::new(Indexer::default()),
         }
     }
 
     /// Whether a sync has been requested and not yet taken by the worker.
-    #[cfg(test)]
-    pub(crate) fn sync_requested(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sync_requested(&self) -> bool {
         self.inner.requested.load(Ordering::Acquire)
     }
 
@@ -1835,7 +1835,7 @@ pub fn query_rows(
 /// discovery supplement: the daemon's durable session table remains the
 /// authority, while the index can reveal a checkpointed session that has not
 /// been materialized into controller state in this daemon run.
-pub(crate) fn mjolnir_session_ids() -> Result<BTreeSet<String>> {
+pub fn mjolnir_session_ids() -> Result<BTreeSet<String>> {
     let Some(connection) = readable_index()? else {
         return Ok(BTreeSet::new());
     };
@@ -2292,7 +2292,7 @@ pub fn sessions_ready_to_archive(
     sessions_ready_to_archive_from_state(&state, now, older_than_days)
 }
 
-pub(crate) fn sessions_ready_to_archive_from_state(
+pub fn sessions_ready_to_archive_from_state(
     state: &mj_core::state::State,
     now: DateTime<Utc>,
     older_than_days: u32,
@@ -2439,7 +2439,7 @@ fn archive_space_over_state(
 }
 
 /// The sizing itself, over given records and a sessions directory.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn archive_space_over(
     sessions_root: &Path,
     sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,

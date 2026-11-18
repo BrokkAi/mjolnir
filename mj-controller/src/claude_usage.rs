@@ -127,14 +127,14 @@ fn claude_program() -> &'static str {
 
 /// Where a host renewal gets its `claude`.
 #[derive(Debug, Clone)]
-pub(crate) enum ClaudeLauncher {
+pub enum ClaudeLauncher {
     /// The pinned Claude Code Mjolnir installs and sessions run, from the same
     /// resolver `mj login` uses. Mjolnir installs no Claude Code on Windows,
     /// where the person's own `claude.cmd` on the profile's `PATH` is the only
     /// one there is.
     Managed,
     /// A program chosen by the caller (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Program(PathBuf),
 }
 
@@ -170,7 +170,7 @@ impl ClaudeLauncher {
     /// `auto` falls back to a container exactly when this is false.
     pub(crate) fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
         match self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Program(_) => true,
             #[cfg(unix)]
             Self::Managed => {
@@ -190,7 +190,7 @@ impl ClaudeLauncher {
         environment: &HashMap<String, String>,
     ) -> Result<ClaudeProgram, ClaudeUsageError> {
         match self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Program(command) => Ok(ClaudeProgram {
                 command: command.clone(),
                 environment: HashMap::new(),
@@ -296,7 +296,7 @@ async fn query_cli_with(
     Err(ClaudeUsageError::Parse)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn query_with(
     home: PathBuf,
     environment: HashMap<String, String>,
@@ -555,7 +555,7 @@ async fn refresh_and_retry(
 /// plus 8 h). The daemon refreshes when less than half of that remains, which
 /// leaves every session copy, none of which can refresh, 4 hours of valid token
 /// while no daemon runs (#1490).
-pub(crate) const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
+pub const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// When a login expiring at `expires_at_ms` is due for renewal.
 pub(crate) fn grant_due_at(expires_at_ms: i64) -> i64 {

@@ -2,19 +2,19 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkerRestartIntent {
+pub struct WorkerRestartIntent {
     pub operation_id: String,
     pub target: TargetLocator,
     pub desired_build: String,
 }
 
-pub(crate) fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
+pub fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
     begin_worker_restart_for(session_id, intent, false)
 }
 
 /// The wake and its boot owner become visible together. Recovery must never
 /// see a still-parked child whose worker has already accepted launch.
-pub(crate) fn begin_subagent_unpark(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
+pub fn begin_subagent_unpark(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
     begin_worker_restart_for(session_id, intent, true)
 }
 
@@ -118,7 +118,7 @@ pub(crate) fn advance_worker_restart(
     })
 }
 
-pub(crate) fn load_worker_restart(session_id: &str) -> Result<Option<WorkerRestartIntent>> {
+pub fn load_worker_restart(session_id: &str) -> Result<Option<WorkerRestartIntent>> {
     let connection = open_reader(&database_path())?;
     load_worker_restart_with(&connection, session_id)
 }
@@ -141,7 +141,7 @@ fn load_worker_restart_with(
     .transpose()
 }
 
-pub(crate) fn finish_worker_restart(session_id: &str, operation_id: &str) -> Result<()> {
+pub fn finish_worker_restart(session_id: &str, operation_id: &str) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();

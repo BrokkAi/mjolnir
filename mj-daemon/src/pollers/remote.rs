@@ -1,0 +1,762 @@
+use super::*;
+
+pub fn spawn_remote_dashboard_worker_poller(
+    workspace_id: String,
+    bootstrap: mj_client::runtime_feed::RuntimeReplica,
+) -> Result<RemoteDashboardWorkerPoller> {
+    let channels = spawn_remote_session_manager()?;
+    let mj_controller::session_manager::RemoteSessionManagerChannels {
+        targets,
+        control,
+        updates,
+        shutdown,
+        publisher,
+        mut requests,
+    } = channels;
+    let metadata = &bootstrap.projection.metadata;
+    let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(metadata.reviews.clone());
+    let (notices_tx, notices_rx) = tokio::sync::watch::channel(metadata.notices.clone());
+    let (ui_requests_tx, ui_requests_rx) =
+        tokio::sync::watch::channel(metadata.ui_requests.clone());
+    let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(metadata.quotas.clone().into_inner());
+    let (capabilities_tx, capabilities_rx) =
+        tokio::sync::watch::channel(metadata.profile_capabilities.clone().into_inner());
+    let (config_tx, config_rx) = tokio::sync::watch::channel(metadata.installed_config());
+    let initial_native_agents = bootstrap.projection.native_agents.clone();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(runtime_state_update(
+        bootstrap.projection.clone(),
+        Default::default(),
+    ));
+    let (health_tx, health_rx) = tokio::sync::watch::channel(RuntimeFeedHealth::default());
+    let initial_scope = bootstrap
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.subagent_parents.clone())
+        .unwrap_or_default();
+    let (subagent_parents, scopes) = tokio::sync::watch::channel(initial_scope);
+    tokio::spawn(async move {
+        let replica = Arc::new(tokio::sync::Mutex::new(bootstrap));
+        let tails = Arc::clone(&replica);
+        let mut feed = spawn_runtime_feed_with(
+            workspace_id,
+            move |_, revision| {
+                let replica = replica.clone();
+                let scopes = scopes.clone();
+                async move { poll_daemon_runtime(replica, revision, scopes).await }
+            },
+            move |session_id| load_session_tail(Arc::clone(&tails), session_id),
+        );
+        let mut native = super::native_agents::NativeAgentLoader::default();
+        native.update_snapshot(initial_native_agents);
+        let mut request_order = mj_controller::session_manager::SessionRequestOrder::new();
+        loop {
+            tokio::select! {
+                _ = state_tx.closed() => return,
+                () = native.next(), if native.has_work() => {
+                    let views = native.views_snapshot();
+                    state_tx.send_if_modified(|state| {
+                        if state.native_agents == views { return false; }
+                        state.native_agents = views;
+                        true
+                    });
+                    health_tx.send_if_modified(|health| {
+                        let error = native.error();
+                        if health.native_error == error { false } else { health.native_error = error; true }
+                    });
+                },
+                request = requests.recv() => {
+                    let Some(request) = request else { return; };
+                    request_order.dispatch(request, forward_remote_session_request);
+                }
+                update = feed.updates.recv() => {
+                    match update {
+                        Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
+                            let metadata = &snapshot.metadata;
+                            send_if_changed(&config_tx, metadata.installed_config());
+                            native.update_snapshot(snapshot.native_agents.clone());
+                            health_tx.send_if_modified(|health| {
+                                let recovered = health.refresh_error.take().is_some();
+                                let native_error = native.error();
+                                let changed = health.native_error != native_error;
+                                health.native_error = native_error;
+                                recovered || changed
+                            });
+                            let next = runtime_state_update((*snapshot).clone(), native.views_snapshot());
+                            publish_runtime_state(&state_tx, next);
+                            send_if_changed(&reviews_tx, metadata.reviews.clone());
+                            send_if_changed(&capabilities_tx, metadata.profile_capabilities.clone().into_inner());
+                            send_if_changed(&notices_tx, metadata.notices.clone());
+                            send_if_changed(&ui_requests_tx, metadata.ui_requests.clone());
+                            send_if_changed(&quotas_tx, metadata.quotas.clone().into_inner());
+                        }
+                        Some(RuntimeFeedUpdate::Session { session_id, view }) => {
+                            if mirror_daemon_view(&targets, &publisher, session_id, *view).await.is_err() { return; }
+                        }
+                        Some(RuntimeFeedUpdate::SessionRemoved(session_id)) => {
+                            mirror_daemon_removal(&targets, &session_id);
+                        }
+                        Some(RuntimeFeedUpdate::Error(error)) => {
+                            health_tx.send_if_modified(|health| {
+                                if health.refresh_error.as_ref() == Some(&error) { return false; }
+                                tracing::warn!(%error, "could not refresh sessions from controller daemon");
+                                health.refresh_error = Some(error);
+                                true
+                            });
+                        }
+                        None => {
+                            health_tx.send_modify(|health| health.refresh_error = Some("Session updates stopped; reconnect to the controller.".into()));
+                            return;
+                        },
+                    }
+                }
+            }
+        }
+    });
+    Ok(RemoteDashboardWorkerPoller {
+        updates,
+        control,
+        shutdown,
+        state: state_rx,
+        subagent_parents,
+        reviews: reviews_rx,
+        notices: notices_rx,
+        ui_requests: ui_requests_rx,
+        quotas: quotas_rx,
+        profile_capabilities: capabilities_rx,
+        config: config_rx,
+        health: health_rx,
+    })
+}
+
+/// Every send on these watches wakes the dashboard loop, and the daemon
+/// republishes the whole snapshot whenever any session moves. Sending only
+/// what changed keeps a streaming session from waking the surface for
+/// reviews, notices, or quotas it already has.
+pub(super) fn send_if_changed<T: PartialEq>(tx: &tokio::sync::watch::Sender<T>, value: T) -> bool {
+    tx.send_if_modified(|current| {
+        if *current == value {
+            return false;
+        }
+        *current = value;
+        true
+    })
+}
+
+fn runtime_state_update(
+    snapshot: mj_client::runtime_feed::RuntimeProjection,
+    native_agents: mj_core::snapshot_map::SnapshotMap<
+        String,
+        mj_core::native_agent::NativeAgentView,
+    >,
+) -> RuntimeStateUpdate {
+    let metadata = snapshot.metadata;
+    RuntimeStateUpdate {
+        subagent_parents: snapshot.subagent_parents,
+        last_subagent_policies: metadata.last_subagent_policies,
+        operator_presence: metadata.operator_presence,
+        native_agents,
+        session_cpu: snapshot.session_cpu,
+        workspace_names: metadata.workspace_names,
+        revision: snapshot.revision,
+        records: snapshot.records,
+        sessions: snapshot.sessions,
+        lifecycles: metadata.lifecycles,
+        moves: snapshot.moves,
+        subagents: snapshot.subagents,
+        launch_recency: metadata.launch_recency.into_inner(),
+        form_holders: metadata.form_holders,
+        session_attention: metadata.session_attention,
+        notification_cards: metadata.notification_cards,
+        unread_frontiers: metadata.unread_frontiers,
+        notification_dismissals: metadata.notification_dismissals,
+        recent_launch: metadata.recent_launch,
+        container_upgrade_sessions: metadata.container_upgrade_sessions,
+        failed_launch_retries: metadata.failed_launch_retries,
+        storage: metadata.storage.into_inner(),
+        container_capacities: metadata.container_capacities.into_inner(),
+    }
+}
+
+/// The same for the records snapshot, whose revision moves with every
+/// daemon publication even when nothing the surface shows did. The revision
+/// is still kept current for the next reader, without a wakeup.
+pub(super) fn publish_runtime_state(
+    tx: &tokio::sync::watch::Sender<RuntimeStateUpdate>,
+    next: RuntimeStateUpdate,
+) -> bool {
+    tx.send_if_modified(|current| {
+        current.revision = next.revision;
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
+    })
+}
+
+/// A handle for a session exists exactly while the daemon publishes a view for
+/// it, which is while the daemon runs its relay actor. The daemon decides; this
+/// surface only mirrors it, so no local record or lifecycle can strand a handle.
+pub(super) async fn mirror_daemon_view(
+    targets: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    publisher: &mj_controller::session_manager::RemoteSessionPublisher,
+    session_id: String,
+    view: ManagedSessionView,
+) -> Result<()> {
+    targets.send_if_modified(|targets| {
+        if targets.iter().any(|target| target.session_id == session_id) {
+            return false;
+        }
+        targets.push(WorkerPollTarget {
+            session_id: session_id.clone(),
+            spec: mj_controller::targets::CommandSpec::new("daemon-owned", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        });
+        true
+    });
+    publisher.publish(session_id, view).await
+}
+
+pub(super) fn mirror_daemon_removal(
+    targets: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    session_id: &str,
+) {
+    targets.send_if_modified(|targets| {
+        let before = targets.len();
+        targets.retain(|target| target.session_id != session_id);
+        targets.len() != before
+    });
+}
+
+/// A live session's projection, from the transcript tail the replica holds.
+///
+/// Deltas keep a held tail at the replica's cursor, so it is current. A tail
+/// not held yet is fetched from the daemon as it was at that same cursor, so
+/// the deltas that follow apply to it. Nothing here reads the store.
+pub(super) async fn load_session_tail(
+    replica: Arc<tokio::sync::Mutex<mj_client::runtime_feed::RuntimeReplica>>,
+    session_id: String,
+) -> Result<StoredProjection> {
+    let cursor = {
+        let replica = replica.lock().await;
+        if let Some(tail) = replica.projection.transcripts.get(&session_id) {
+            return Ok(Some((tail.materialized(), tail.window.clone())));
+        }
+        replica
+            .cursor
+            .clone()
+            .context("the runtime feed has no cursor to fetch a tail at")?
+    };
+    let reply = mj_client::daemon::connect_existing()
+        .await?
+        .session_tail(session_id.clone(), cursor.clone())
+        .await?;
+    let mut replica = replica.lock().await;
+    match reply {
+        mj_client::runtime_feed::SessionTailReply::Tail {
+            header,
+            window,
+            items,
+        } => {
+            let tail = mj_client::runtime_feed::SessionTail::from_parts(*header, window, items);
+            let projection = (tail.materialized(), tail.window.clone());
+            // Only a tail for the cursor the replica still holds can follow
+            // its deltas.
+            if replica.cursor.as_ref() == Some(&cursor) {
+                replica.projection.transcripts.insert(session_id, tail);
+            }
+            Ok(Some(projection))
+        }
+        mj_client::runtime_feed::SessionTailReply::NoTail => Ok(None),
+        mj_client::runtime_feed::SessionTailReply::ResetRequired => {
+            if replica.cursor.as_ref() == Some(&cursor) {
+                replica.cursor = None;
+            }
+            Err(anyhow::Error::new(super::runtime_feed::TailCursorExpired))
+        }
+    }
+}
+
+pub(super) async fn poll_daemon_runtime(
+    replica: Arc<tokio::sync::Mutex<mj_client::runtime_feed::RuntimeReplica>>,
+    after_revision: u64,
+    mut scopes: tokio::sync::watch::Receiver<std::collections::BTreeSet<String>>,
+) -> Result<mj_client::runtime_feed::RuntimeProjection> {
+    loop {
+        let parents = scopes.borrow_and_update().clone();
+        let (cursor, revision) = {
+            let mut replica = replica.lock().await;
+            if replica
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.subagent_parents != parents)
+            {
+                replica.cursor = None;
+            }
+            (replica.cursor.clone(), replica.projection.revision)
+        };
+        let mut daemon = mj_client::daemon::connect_existing().await?;
+        let wait = cursor.is_some() && after_revision != 0 && after_revision == revision;
+        // A pending read never owns the replica: transcript-tail requests must
+        // be able to use its current cursor while the daemon waits for changes.
+        let frame = tokio::select! {
+            changed = scopes.changed() => {
+                changed.context("dashboard family subscription stopped")?;
+                continue;
+            }
+            frame = daemon.runtime_changes_for_subagent_parents(cursor.clone(), wait, parents.clone()) => frame?,
+        };
+        if *scopes.borrow() != parents {
+            continue;
+        }
+        let mut replica = replica.lock().await;
+        // An expired tail can invalidate a cursor while this request waits.
+        if replica.cursor != cursor {
+            continue;
+        }
+        if let Err(error) = replica.apply(frame) {
+            replica.cursor = None;
+            return Err(error);
+        }
+        if replica.cursor.is_none() {
+            continue;
+        }
+        return Ok(replica.projection.clone());
+    }
+}
+
+#[cfg(test)]
+mod expired_tail_cursor_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope() {
+        const CHILD: &str = "MJ_TEST_RUNTIME_BOOTSTRAP_SCOPE";
+        const TEST: &str = "bootstrap_poll_keeps_tails_available_and_cancels_the_old_family_scope";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "bootstrap-family-scope")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
+        };
+        use mj_client::runtime_feed::{
+            RuntimeBootstrap, RuntimeCursor, RuntimeFrame, RuntimeProjection, SessionTailReply,
+        };
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "bootstrap-scope".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
+        };
+        let path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let cursor = RuntimeCursor {
+            incarnation: "bootstrap-daemon".into(),
+            sequence: 42,
+            subagent_parents: Default::default(),
+        };
+        let replica = Arc::new(tokio::sync::Mutex::new(
+            RuntimeBootstrap {
+                cursor: cursor.clone(),
+                projection: RuntimeProjection {
+                    revision: 7,
+                    ..Default::default()
+                },
+            }
+            .into_replica(),
+        ));
+        let (scopes, scope_rx) = tokio::sync::watch::channel(BTreeSet::new());
+        let held = Arc::new(tokio::sync::Notify::new());
+        let server_held = held.clone();
+        let server = tokio::spawn(async move {
+            let (mut old_poll, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope =
+                mj_client::daemon::read_frame(&mut old_poll).await.unwrap();
+            assert!(
+                matches!(request.action, DaemonAction::RuntimeChanges { cursor: Some(ref requested), wait: true, ref subagent_parents } if requested == &cursor && subagent_parents.is_empty()),
+                "startup must follow its bootstrap cursor instead of downloading another snapshot"
+            );
+            server_held.notify_one();
+            let (mut tail, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut tail).await.unwrap();
+            assert!(
+                matches!(request.action, DaemonAction::SessionTail { cursor: ref requested, .. } if requested == &cursor)
+            );
+            mj_client::daemon::write_frame(
+                &mut tail,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::SessionTail(Box::new(SessionTailReply::NoTail))),
+                },
+            )
+            .await
+            .unwrap();
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut fresh).await.unwrap();
+            let DaemonAction::RuntimeChanges {
+                cursor: None,
+                wait: false,
+                subagent_parents,
+            } = request.action
+            else {
+                panic!("scope changes need a fresh snapshot");
+            };
+            assert_eq!(subagent_parents, BTreeSet::from(["parent".to_owned()]));
+            mj_client::daemon::write_frame(
+                &mut fresh,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::RuntimeChanges(Box::new(
+                        RuntimeFrame::Snapshot {
+                            cursor: RuntimeCursor {
+                                incarnation: "replacement-daemon".into(),
+                                sequence: 1,
+                                subagent_parents: subagent_parents.clone(),
+                            },
+                            projection: Box::new(RuntimeProjection {
+                                revision: 1,
+                                subagent_parents,
+                                ..Default::default()
+                            }),
+                        },
+                    ))),
+                },
+            )
+            .await
+            .unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), old_poll.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "the old long poll must be disconnected"
+            );
+        });
+        let poll = tokio::spawn(poll_daemon_runtime(replica.clone(), 7, scope_rx));
+        tokio::time::timeout(Duration::from_secs(2), held.notified())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                load_session_tail(replica.clone(), "session".into())
+            )
+            .await
+            .expect("a long poll must not hold the replica lock")
+            .unwrap()
+            .is_none()
+        );
+        scopes.send(BTreeSet::from(["parent".to_owned()])).unwrap();
+        let projection = tokio::time::timeout(Duration::from_secs(2), poll)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            projection.subagent_parents,
+            BTreeSet::from(["parent".to_owned()])
+        );
+        assert_eq!(
+            replica.lock().await.cursor.as_ref().unwrap().incarnation,
+            "replacement-daemon"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_session_tail_cursor_clears_the_replica_cursor_before_retry() {
+        const CHILD: &str = "MJ_TEST_EXPIRED_SESSION_TAIL_CURSOR";
+        const TEST: &str = "expired_session_tail_cursor_clears_the_replica_cursor_before_retry";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().expect("isolated data root");
+            mj_controller::controller::test_support::IsolatedTest::new(
+                mj_controller::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "expired-tail-cursor")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
+        };
+        use mj_client::runtime_feed::{RuntimeCursor, RuntimeReplica, SessionTailReply};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind fake daemon protocol endpoint");
+        let address = listener.local_addr().unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "tail-cursor-test-token".into(),
+            started_at: "2026-10-05T00:00:00Z".into(),
+            build_version: "test".into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
+        };
+        let metadata_path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).expect("create isolated data dir");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).expect("serialize daemon metadata"),
+        )
+        .expect("publish fake daemon metadata");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept tail request");
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut stream)
+                .await
+                .expect("read tail request");
+            let DaemonAction::SessionTail { session_id, cursor } = request.action else {
+                panic!("expected SessionTail request");
+            };
+            let response = ResponseEnvelope {
+                protocol_version: request.protocol_version,
+                request_id: request.request_id,
+                result: Ok(DaemonReply::SessionTail(Box::new(
+                    SessionTailReply::ResetRequired,
+                ))),
+            };
+            mj_client::daemon::write_frame(&mut stream, &response)
+                .await
+                .expect("write expired cursor response");
+            (session_id, cursor)
+        });
+
+        let cursor = RuntimeCursor {
+            incarnation: "previous-daemon".into(),
+            sequence: 42,
+            subagent_parents: Default::default(),
+        };
+        let replica = Arc::new(tokio::sync::Mutex::new(RuntimeReplica {
+            cursor: Some(cursor.clone()),
+            ..RuntimeReplica::default()
+        }));
+        let error = load_session_tail(Arc::clone(&replica), "session-7".into())
+            .await
+            .expect_err("an expired cursor requires a fresh runtime snapshot");
+        assert_eq!(
+            error.to_string(),
+            "the daemon no longer holds this runtime cursor"
+        );
+        assert!(replica.lock().await.cursor.is_none());
+        assert_eq!(
+            server.await.expect("fake daemon task"),
+            ("session-7".to_owned(), cursor)
+        );
+    }
+}
+
+/// A submit the daemon answered with an error was refused, not lost, unless
+/// the daemon itself says delivery is unconfirmed. Only a failed exchange with
+/// the daemon leaves delivery unknown (I1-12).
+fn remote_submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+    let unconfirmed = error
+        .downcast_ref::<mj_client::daemon::DaemonRefusal>()
+        .is_none_or(mj_client::daemon::DaemonRefusal::delivery_unconfirmed);
+    // The daemon's refusal text does not say whether the worker itself
+    // rejected the command, so never claim it did.
+    mj_client::session::SubmitFailure {
+        unconfirmed,
+        refused: false,
+        message: format!("{error:#}"),
+    }
+}
+
+pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest) {
+    match request {
+        RemoteSessionRequest::Submit {
+            session_id,
+            command_id,
+            command,
+            reply,
+        } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .submit_session_command(session_id, command_id, command, None)
+                    .await
+            }
+            .await
+            .map_err(|error| remote_submit_failure(&error));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::Sync { session_id, reply } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .sync_session(session_id)
+                    .await
+            }
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::RespondElicitation {
+            session_id,
+            elicitation_id,
+            response,
+            reply,
+        } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .respond_elicitation(session_id, elicitation_id, response)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::StopBackgroundTask {
+            session_id,
+            background_task_id,
+            reply,
+        } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .stop_background_task(session_id, background_task_id)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::Reviewer { reply, .. } => {
+            let _ = reply.send(Err(anyhow::anyhow!(
+                "review capture is owned by the daemon"
+            )));
+        }
+    }
+}
+
+pub fn queued_prompt_projection(
+    session: &MaterializedSession,
+) -> Vec<mj_core::relay::QueuedPrompt> {
+    queued_prompt_entries(&session.queued_prompts)
+}
+
+pub(super) fn queued_prompt_entries(
+    prompts: &[mj_core::state::MaterializedQueuedPrompt],
+) -> Vec<mj_core::relay::QueuedPrompt> {
+    prompts
+        .iter()
+        .map(|prompt| mj_core::relay::QueuedPrompt {
+            id: prompt.command_id.clone(),
+            kind: prompt.kind.clone(),
+            text: mj_core::transcript::materialized_content_text(&prompt.content),
+            attachments: Vec::new(),
+            created_at_ms: prompt.queued_at_ms,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{publish_runtime_state, remote_submit_failure, send_if_changed};
+    use crate::pollers::{Feed, RuntimeStateUpdate};
+    use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
+
+    /// A republished revision with equal content must not wake the surface,
+    /// while changed content must still wake it.
+    #[test]
+    fn a_republished_snapshot_wakes_the_surface_only_for_what_changed() {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
+        let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::<RuntimeNotice>::new());
+        let mut state = Feed::new(state_rx);
+        let mut notices = Feed::new(notices_rx);
+        let first = RuntimeStateUpdate {
+            revision: 1,
+            workspace_names: [("w".to_owned(), "work".to_owned())].into(),
+            ..Default::default()
+        };
+        let notice = RuntimeNotice {
+            id: 1,
+            session_id: "s".into(),
+            text: "checkpoint saved".into(),
+        };
+        publish_runtime_state(&state_tx, first.clone());
+        send_if_changed(&notices_tx, vec![notice.clone()]);
+        assert_eq!(state.next_ready().map(|state| state.revision), Some(1));
+        assert_eq!(notices.next_ready(), Some(vec![notice.clone()]));
+
+        publish_runtime_state(
+            &state_tx,
+            RuntimeStateUpdate {
+                revision: 2,
+                ..first.clone()
+            },
+        );
+        send_if_changed(&notices_tx, vec![notice.clone()]);
+        assert!(
+            state.next_ready().is_none(),
+            "an equal snapshot woke the surface"
+        );
+        assert!(
+            notices.next_ready().is_none(),
+            "equal notices woke the surface"
+        );
+        assert_eq!(
+            state_tx.borrow().revision,
+            2,
+            "the revision is still current"
+        );
+
+        let mut renamed = first;
+        renamed.revision = 3;
+        renamed
+            .workspace_names
+            .insert("w".to_owned(), "renamed".to_owned());
+        publish_runtime_state(&state_tx, renamed.clone());
+        assert_eq!(state.next_ready(), Some(renamed));
+    }
+
+    /// I1-12: the daemon's refusal of `/clear` reached the chat as
+    /// "Delivery unconfirmed" and stayed pinned as an unconfirmed row.
+    // Hard-won: 8bf21ad0: a final daemon relay refusal was incorrectly rendered as delivery unconfirmed and left the row stuck.
+    #[test]
+    fn a_daemon_refusal_is_a_rejection_and_a_lost_exchange_is_unconfirmed() {
+        let refused = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(
+            "/clear requires an idle session".into(),
+        )));
+        assert!(!refused.unconfirmed);
+        assert_eq!(refused.message, "/clear requires an idle session");
+
+        let unconfirmed = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(
+            "delivery unconfirmed: channel closed".into(),
+        )));
+        assert!(unconfirmed.unconfirmed);
+
+        let lost = remote_submit_failure(&anyhow::anyhow!("daemon connection reset"));
+        assert!(lost.unconfirmed);
+    }
+}

@@ -49,7 +49,7 @@ jobs:
     # The controller-side crates whose suites pass on Windows, including the
     # daemon startup tests that run `mj` against isolated instances and the
     # ConPTY smoke that renders the dashboard. The worker and checkpoint
-    # crates run only on Linux and macOS hosts. mj-controller tests that still
+    # crates run only on Linux and macOS hosts. mj-controller and mj-daemon tests that still
     # fail on Windows are ignored there with
     # `cfg_attr(windows, ignore = "#<issue>: ...")`; the sub-issues of #1261
     # remove those attributes as they are fixed. `--no-fail-fast` reports
@@ -58,7 +58,7 @@ jobs:
       run: >-
         cargo test --no-fail-fast -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui
         -p brokk-mj-client -p brokk-mj-review -p brokk-mj-transcript
-        -p brokk-mjolnir -p brokk-mj-controller
+        -p brokk-mjolnir -p brokk-mj-controller -p brokk-mj-daemon
 
     - name: Test the Windows installer
       run: node --test scripts/install-ps1.test.mjs

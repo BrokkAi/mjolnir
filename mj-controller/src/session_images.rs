@@ -39,13 +39,13 @@ impl Operation {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ImageBuilds {
+pub struct ImageBuilds {
     operations: Arc<Mutex<BTreeMap<String, Arc<Operation>>>>,
     tasks: TaskTracker,
 }
 
 impl ImageBuilds {
-    pub(crate) fn start(
+    pub fn start(
         &self,
         request: ImageRequest,
         status: bool,
@@ -81,7 +81,7 @@ impl ImageBuilds {
         Ok(ImageStarted { operation_id })
     }
 
-    pub(crate) async fn follow(&self, id: &str, offset: usize) -> Result<Option<ImageFollow>> {
+    pub async fn follow(&self, id: &str, offset: usize) -> Result<Option<ImageFollow>> {
         let Some(operation) = self
             .operations
             .lock()
@@ -130,7 +130,7 @@ impl ImageBuilds {
         }
     }
 
-    pub(crate) fn cancel(&self, id: &str) -> bool {
+    pub fn cancel(&self, id: &str) -> bool {
         let operations = self
             .operations
             .lock()
@@ -142,7 +142,7 @@ impl ImageBuilds {
         true
     }
 
-    pub(crate) async fn finish(&self) {
+    pub async fn finish(&self) {
         for operation in self
             .operations
             .lock()

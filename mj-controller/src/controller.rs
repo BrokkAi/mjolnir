@@ -1,20 +1,20 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
-pub(crate) mod backend;
+pub mod backend;
 mod cache_host;
-pub(crate) use cache_host::CacheHost;
-pub(crate) mod checkpoint;
+pub use cache_host::CacheHost;
+pub mod checkpoint;
 mod container_upgrade;
-pub(crate) mod environment;
+pub mod environment;
 pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
-mod lifecycle;
-pub(crate) use lifecycle::LifecycleFailureReason;
+pub mod lifecycle;
+pub use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;
-pub(crate) mod mbx;
+pub mod mbx;
 pub mod move_session;
 mod network_git;
 mod new_session_preflight;
@@ -23,21 +23,23 @@ pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
 pub mod profile_config;
 mod provisioning;
-pub(crate) mod publication;
+pub mod publication;
 mod readiness;
 pub(crate) use network_git::workspace_root;
-pub(crate) use readiness::HarnessPreparationFailure;
-pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
+pub use readiness::HarnessPreparationFailure;
+pub use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
-mod resume;
+pub mod resume;
 mod reviewer;
 mod subagent_park;
 pub use subagent_park::ParkOutcome;
-pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
+pub use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
-pub(crate) use subagents::recover_registered_subagent_startup;
-#[cfg(test)]
-pub(crate) mod test_support;
+pub use subagents::recover_registered_subagent_startup;
+// Shared fixtures; the `test-support` feature lends them to mj-daemon's tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
 pub mod update;
 mod worker_binary;
 mod worker_restart;
@@ -84,14 +86,14 @@ use crate::targets::{
     self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
 };
 
-pub(crate) use backend::backend_locator;
+pub use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
-pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub use backend::validate_resource_allocation;
+pub use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
-pub(crate) use github_app::{
+pub use github_app::{
     GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
     renew_session_github_app_token,
 };
@@ -104,12 +106,12 @@ pub use mbx::{MBX_VERSION, preview_build_cache};
 pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
 };
-pub(crate) use worker_binary::{
+pub use worker_binary::{
     image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
-pub(crate) use worktree::path_exists_on_managed_target;
+pub use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
@@ -120,13 +122,13 @@ pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
-pub(crate) use resume::InPlaceRestartError;
+pub use resume::InPlaceRestartError;
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
-pub(crate) use worker_binary::ensure_microvm_engine;
+pub use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     ssh_worker_binary_prerequisite, warm_worker_binary_sources,
@@ -660,7 +662,7 @@ impl Controller {
 
     /// Startup-only traversal for legacy metadata and configuration diagnostics.
     /// Ordinary readers consume the writer's committed snapshot directly.
-    pub(crate) fn prepare_persisted_sessions(&mut self) -> Result<()> {
+    pub fn prepare_persisted_sessions(&mut self) -> Result<()> {
         // Missing session dependencies must not lock users out of the tools
         // needed to repair them. Operations validate the session they act on.
         self.state.validate()?;
@@ -1588,7 +1590,7 @@ fn finish_config_map_rename<T>(
 /// the profile home itself. A harness with a nested home keeps its state in a
 /// subdirectory of the root named after it, the leaf its XDG configuration
 /// directory must have.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn target_profile_home_for_test(
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -1776,5 +1778,5 @@ pub fn config_only_controller(config: Config) -> Controller {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use mbx::install::MBX_TEST_RELEASE_URL;
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub use mbx::install::MBX_TEST_RELEASE_URL;

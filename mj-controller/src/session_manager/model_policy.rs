@@ -56,7 +56,7 @@ impl SessionModelPolicy {
         }
     }
 
-    pub(super) fn refusal(
+    pub fn refusal(
         &self,
         command: &RelayCommand,
         state: Option<&RelayOperationalState>,
@@ -88,7 +88,7 @@ impl SessionModelPolicy {
 }
 
 impl SessionManagerControl {
-    pub(crate) fn update_model_policies(&self, controller: &crate::controller::Controller) {
+    pub fn update_model_policies(&self, controller: &crate::controller::Controller) {
         let policies = controller
             .state
             .sessions

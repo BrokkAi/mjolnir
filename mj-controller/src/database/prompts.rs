@@ -108,7 +108,7 @@ pub(super) fn record_prompt_text_to(
 
 /// A delivered prompt keyed by its event ordinal, for fixtures that need
 /// several rows of the same text.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn record_prompt_to(
     path: &Path,
     session_id: &str,
@@ -378,7 +378,7 @@ pub(super) fn search_prompt_page_from(
 
 /// Every match in one page, for tests that check what a search finds rather
 /// than how it pages.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn search_prompts_from(
     path: &Path,
     session_id: &str,

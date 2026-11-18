@@ -631,7 +631,7 @@ pub fn load_materialized_finished_turn_message(session_id: &str) -> Result<Optio
 
 /// Read report text within the turn bounds that decided completion,
 /// even if the child has started another turn since that observation.
-pub(crate) fn load_child_answer_messages(
+pub fn load_child_answer_messages(
     children: &[(String, Option<(u64, u64)>)],
 ) -> Result<BTreeMap<String, Option<String>>> {
     let mut reader = open_reader(&database_path())?;
@@ -2055,7 +2055,7 @@ impl ProjectionPage<'_> {
     /// Persist the coalesced final state of this page. Intermediate event
     /// frontiers are useful only for chain validation: a page commits or rolls
     /// back as a unit, so writing them individually adds no recovery value.
-    pub(super) fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         if !self.dirty {
             return Ok(());
         }
@@ -2193,7 +2193,7 @@ where
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn apply_projection_page_to<T>(
     path: &Path,
     session_id: &str,
@@ -2292,7 +2292,7 @@ pub fn apply_projection_event(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn apply_projection_event_to(
     path: &Path,
     session_id: &str,
@@ -2369,7 +2369,7 @@ fn decode_transcript_body(body_json: &str, session_id: &str) -> Result<Transcrip
 
 /// Read complete authorization and recent replies in one consistent snapshot.
 /// Runs on the continuation service's blocking pool, never a render/event loop.
-pub(crate) fn load_continuation_evidence(
+pub fn load_continuation_evidence(
     session_id: &str,
     ordinal: u64,
     digest: &str,

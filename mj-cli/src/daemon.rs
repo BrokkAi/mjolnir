@@ -11,7 +11,7 @@ use mj_client::build_identity::{
 };
 pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
-pub(crate) use mj_controller::daemon::run_daemon_process;
+pub(crate) use mj_daemon::daemon::run_daemon_process;
 
 /// Forward machine-owned commands before touching client stores or credentials.
 pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -> Result<bool> {

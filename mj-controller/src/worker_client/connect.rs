@@ -11,7 +11,7 @@ impl RelayClient {
         .await
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(super) async fn connect_with_timeout(
         spec: &CommandSpec,
         expected_session_id: &str,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::quota::ProfileQuota;
 
-pub(crate) fn load_quota_cache(identity: &str) -> Result<Option<ProfileQuota>> {
+pub fn load_quota_cache(identity: &str) -> Result<Option<ProfileQuota>> {
     load(&*open_reader(&database_path())?, identity)
 }
 
@@ -19,7 +19,7 @@ fn load(connection: &Connection, identity: &str) -> Result<Option<ProfileQuota>>
 
 /// Save a fresh probe and, on success, its reset cache in one transaction.
 /// Called on a blocking task through the only database writer.
-pub(crate) fn save_quota_report(identity: &str, report: &ProfileQuota) -> Result<()> {
+pub fn save_quota_report(identity: &str, report: &ProfileQuota) -> Result<()> {
     let identity = identity.to_owned();
     let report = report.clone();
     submit_database_write("save_quota_report", move |connection| {

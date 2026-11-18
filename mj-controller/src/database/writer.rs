@@ -54,7 +54,7 @@ impl DatabaseWriter {
         self.committed.subscribe()
     }
 
-    pub(super) fn execute<T, F>(&self, label: &'static str, operation: F) -> Result<T>
+    pub fn execute<T, F>(&self, label: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
@@ -170,7 +170,7 @@ pub(super) fn database_writer_slot() -> &'static Mutex<Option<DatabaseWriter>> {
 /// Whether this process holds the database writer. Only the daemon does, so
 /// work that merely keeps a daemon-owned record current, and that other
 /// processes also run, asks this instead of failing the write there.
-pub(crate) fn database_writer_installed() -> bool {
+pub fn database_writer_installed() -> bool {
     database_writer_slot()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

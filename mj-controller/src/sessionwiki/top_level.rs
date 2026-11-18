@@ -74,7 +74,7 @@ impl Snapshot {
         self.child_session_ids.contains(session_id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn for_test(child_session_ids: BTreeSet<String>) -> Self {
         Self {
             child_session_ids,

@@ -14,9 +14,10 @@ const allowed = {
   'brokk-mj-client': ['brokk-mj-transcript', 'brokk-mj-core'],
   'brokk-mj-worker': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core'],
   'brokk-mj-controller': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client'],
+  'brokk-mj-daemon': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],
-  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-chat', 'brokk-mj-tui'],
+  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-daemon', 'brokk-mj-chat', 'brokk-mj-tui'],
   'brokk-mj-voice-worker': [],
 };
 const packages = new Set(metadata.packages.map(p => p.name));

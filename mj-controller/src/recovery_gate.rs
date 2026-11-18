@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc, watch};
 /// Validate a queued placement after admission. A lifecycle may have finished
 /// between the observation and this attempt, so the old target cannot be used.
-pub(crate) fn current_background_session(
+pub fn current_background_session(
     observed: &mj_core::state::SessionRecord,
 ) -> anyhow::Result<Option<mj_core::state::SessionRecord>> {
     if crate::database::container_upgrade_owns_target(&observed.id)? {
@@ -24,7 +24,7 @@ pub(crate) fn current_background_session(
 
 /// Resolves once an admission's cancellation flag is set. Admitted work that
 /// cannot be cancelled by being dropped polls this instead.
-pub(crate) async fn wait_until_cancelled(flag: &AtomicBool) {
+pub async fn wait_until_cancelled(flag: &AtomicBool) {
     while !flag.load(Ordering::Acquire) {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
@@ -41,12 +41,12 @@ pub(crate) async fn wait_until_cancelled(flag: &AtomicBool) {
 /// or not queued observations have been read yet.
 #[derive(Clone)]
 pub struct RecoveryObserver {
-    pub(crate) observations: ObservationSender<PendingRecoveryObservation>,
+    pub observations: ObservationSender<PendingRecoveryObservation>,
     pub gate: Arc<RecoveryGate>,
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingRecoveryObservation {
+pub struct PendingRecoveryObservation {
     pub observation: RecoveryObservation,
     // A busy-to-idle edge releases a deferral even when both observations are
     // folded into one pending entry before the policy consumes them.
@@ -651,7 +651,7 @@ impl RecoveryGate {
 
     /// Observe the same admission decision without claiming resources. A
     /// global publication can wake this; only this session's release returns.
-    pub(crate) async fn wait_for_background_release(
+    pub async fn wait_for_background_release(
         &self,
         session_id: &str,
         kind: BackgroundWork,
@@ -680,7 +680,7 @@ impl RecoveryGate {
 
     /// Reviews coexist with foreground lifecycles, so their exchanges wait
     /// for the owner's physical lease return before trying the worker again.
-    pub(crate) async fn wait_for_lease_return(
+    pub async fn wait_for_lease_return(
         &self,
         session_id: &str,
         changed: &mut watch::Receiver<BTreeSet<String>>,
@@ -770,7 +770,7 @@ impl RecoveryAttempt {
     /// Both the waiter and blocking executor own admission. Aborting the waiter
     /// cannot release a running executor; a panicking executor cannot release
     /// its slot before the supervisor applies the failure outcome.
-    pub(crate) async fn run_blocking<T: Send + 'static>(
+    pub async fn run_blocking<T: Send + 'static>(
         self,
         work: impl FnOnce(RecoveryAttempt) -> T + Send + 'static,
     ) -> (Result<T, tokio::task::JoinError>, Self) {
@@ -825,7 +825,7 @@ impl SessionAdmission {
             Self::Background(a) => (&a.0.gate, &a.0.session_id),
         }
     }
-    pub(crate) fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> &str {
         self.gate_and_session().1
     }
 
@@ -1014,7 +1014,7 @@ impl Drop for RelayLeaseAdmission {
 }
 impl RecoveryGate {
     // Its one caller is a Unix-only test.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn credentials_deferred_for_test(&self, session_id: &str) -> bool {
         self.state
             .lock()
@@ -1023,12 +1023,12 @@ impl RecoveryGate {
             .contains(session_id)
     }
 
-    pub(crate) fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
+    pub fn foreground_releases(&self) -> watch::Receiver<BTreeMap<String, LifecycleOrigin>> {
         let mut releases = self.foreground_releases.subscribe();
         releases.mark_changed();
         releases
     }
-    pub(crate) fn take_foreground_releases(&self) -> BTreeMap<String, LifecycleOrigin> {
+    pub fn take_foreground_releases(&self) -> BTreeMap<String, LifecycleOrigin> {
         let mut ready = BTreeMap::new();
         self.foreground_releases.send_if_modified(|releases| {
             ready = std::mem::take(releases);
@@ -1037,7 +1037,7 @@ impl RecoveryGate {
         ready
     }
 
-    pub(crate) fn wake_credentials(&self, session_id: &str) {
+    pub fn wake_credentials(&self, session_id: &str) {
         self.credential_wakes
             .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
     }
@@ -1129,12 +1129,12 @@ impl RecoveryAttempt {
 /// Per-session latest-state mailbox shared by the two background policies.
 /// A capacity-one wake channel never queues an observation history.
 #[derive(Clone)]
-pub(crate) struct ObservationSender<T> {
+pub struct ObservationSender<T> {
     pending: Arc<Mutex<PendingObservations<T>>>,
     wake: mpsc::Sender<()>,
 }
 
-pub(crate) struct ObservationReceiver<T> {
+pub struct ObservationReceiver<T> {
     pending: Arc<Mutex<PendingObservations<T>>>,
     wake: mpsc::Receiver<()>,
 }
@@ -1144,7 +1144,7 @@ struct PendingObservations<T> {
     ready: VecDeque<String>,
 }
 
-pub(crate) fn observation_channel<T>() -> (ObservationSender<T>, ObservationReceiver<T>) {
+pub fn observation_channel<T>() -> (ObservationSender<T>, ObservationReceiver<T>) {
     let pending = Arc::new(Mutex::new(PendingObservations {
         values: BTreeMap::new(),
         ready: VecDeque::new(),
@@ -1160,12 +1160,7 @@ pub(crate) fn observation_channel<T>() -> (ObservationSender<T>, ObservationRece
 }
 
 impl<T> ObservationSender<T> {
-    pub(crate) fn send(
-        &self,
-        session_id: String,
-        mut observation: T,
-        merge: impl FnOnce(&T, &mut T),
-    ) {
+    pub fn send(&self, session_id: String, mut observation: T, merge: impl FnOnce(&T, &mut T)) {
         if self.wake.is_closed() {
             return;
         }
@@ -1185,7 +1180,7 @@ impl<T> ObservationSender<T> {
 }
 
 impl<T> ObservationReceiver<T> {
-    pub(crate) fn try_recv(&mut self) -> Option<T> {
+    pub fn try_recv(&mut self) -> Option<T> {
         let mut pending = self
             .pending
             .lock()
@@ -1194,7 +1189,7 @@ impl<T> ObservationReceiver<T> {
         pending.values.remove(&session)
     }
 
-    pub(crate) async fn recv(&mut self) -> Option<T> {
+    pub async fn recv(&mut self) -> Option<T> {
         tokio::task::yield_now().await;
         loop {
             if let Some(observation) = self.try_recv() {

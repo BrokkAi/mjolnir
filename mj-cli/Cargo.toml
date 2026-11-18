@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
+test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-daemon/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
 tempfile.workspace = true
@@ -25,6 +25,7 @@ mj-core.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-controller.workspace = true
+mj-daemon.workspace = true
 mj-chat.workspace = true
 mj-tui.workspace = true
 # `mj acp` serves the protocol on its own standard input and output.

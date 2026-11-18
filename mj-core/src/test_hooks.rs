@@ -141,6 +141,72 @@ fn install_fake_with_dispatcher(
         .unwrap_or_else(|error| panic!("link the {program} stand-in: {error}"));
 }
 
+/// Environment shared by the controller and daemon tests that run a stand-in
+/// relay: the parent test sets it on the command that runs the relay, and
+/// `mj_worker::stand_in_relay::serve_latch_relay` reads it. The relay runs as
+/// [`latch_relay::CHILD_TEST`] in a second process of the same test binary.
+#[cfg(feature = "test-hooks")]
+pub mod latch_relay {
+    /// The `--exact` test that serves the relay; every test binary that starts
+    /// one defines it.
+    pub const CHILD_TEST: &str = "stand_in_relay::latch_relay_child_serves_stdio";
+    pub const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
+    pub const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+    pub const LATCH_REJECT_PROJECT_MEMORY: &str = "MJ_TEST_LATCH_REJECT_PROJECT_MEMORY";
+    pub const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
+    pub const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str = "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
+    pub const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
+    pub const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
+    pub const LATCH_RELAY_RUNNING: &str = "MJ_TEST_LATCH_RELAY_RUNNING";
+    pub const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
+    /// Open a new native session with this id instead of reloading one, as a
+    /// restored worker does when the harness has no record of the session it was
+    /// asked to reload.
+    pub const LATCH_RELAY_FRESH_NATIVE: &str = "MJ_TEST_LATCH_FRESH_NATIVE";
+    /// With [`LATCH_RELAY_FRESH_NATIVE`]: the native session the new one replaced
+    /// because this session never used it. Unset, the relay gives no reason.
+    pub const LATCH_RELAY_REPLACED_UNUSED: &str = "MJ_TEST_LATCH_REPLACED_UNUSED";
+    /// Answer every dispatched prompt with one agent message, like a harness.
+    pub const LATCH_RELAY_ANSWER_PROMPTS: &str = "MJ_TEST_LATCH_ANSWER_PROMPTS";
+    /// The text of the answer [`LATCH_RELAY_ANSWER_PROMPTS`] gives.
+    pub const LATCH_RELAY_ANSWER: &str = "answered by the stand-in harness";
+    pub const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
+    /// Have the worker write something of its own just before it reads a Close,
+    /// and complete the Close once the barrier it seals has ended, the way a live
+    /// worker does. The value names the write: [`LATE_HARNESS_NOTIFICATION`] or
+    /// [`LATE_HARNESS_QUESTION`].
+    pub const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
+    /// A harness notification that changes no work, which waits behind the cut.
+    pub const LATE_HARNESS_NOTIFICATION: &str = "notification";
+    /// Hold the first request that submits this relay command (`begin_checkpoint`
+    /// or `close`) until the parent test lets it go: the worker creates
+    /// `<LATCH_RELAY_HOLD_PATH>.reached` and waits for
+    /// `<LATCH_RELAY_HOLD_PATH>.release`. A test uses it to act at an exact point
+    /// of a close.
+    pub const LATCH_RELAY_HOLD_COMMAND: &str = "MJ_TEST_LATCH_HOLD_COMMAND";
+    pub const LATCH_RELAY_HOLD_PATH: &str = "MJ_TEST_LATCH_HOLD_PATH";
+    /// A question for a person, which cannot wait and spoils the cut.
+    pub const LATE_HARNESS_QUESTION: &str = "question";
+    pub const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
+}
+
+/// Environment of the stand-in relay that the leased-submission tests run;
+/// `mj_worker::stand_in_relay::serve_leased_relay` reads it.
+#[cfg(feature = "test-hooks")]
+pub mod leased_relay {
+    /// The `--exact` test that serves the relay; every test binary that starts
+    /// one defines it.
+    pub const CHILD_TEST: &str = "stand_in_relay::leased_relay_child_serves_stdio";
+    pub const LEASED_RELAY_ROOT: &str = "MJ_TEST_LEASED_RELAY_ROOT";
+    pub const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+    /// File in the relay root where the stdio relay child logs each request.
+    pub const RELAY_REQUEST_LOG: &str = "requests.log";
+    /// Makes the stdio relay child report an open harness session.
+    pub const RELAY_SESSION_CONFIGURED: &str = "MJ_TEST_RELAY_SESSION_CONFIGURED";
+    pub const CLEAR_MAILBOX_CONTROL: &str = "MJ_TEST_CLEAR_MAILBOX_CONTROL";
+    pub const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+}
+
 #[cfg(all(test, unix, feature = "test-hooks"))]
 mod tests {
     use super::*;

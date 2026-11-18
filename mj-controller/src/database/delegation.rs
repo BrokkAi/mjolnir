@@ -3,7 +3,7 @@ use super::*;
 use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct StoredDelegationResult {
+pub struct StoredDelegationResult {
     pub result: SubagentToolResult,
     // Decode result rows persisted by wait-based builds; new results never collect reports.
     #[serde(default, skip_serializing)]
@@ -26,7 +26,7 @@ fn decode_stored_result(body: &str) -> Result<StoredDelegationResult> {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PreparedDelegation {
+pub struct PreparedDelegation {
     pub request: SubagentToolRequest,
     // None is a persisted decision that there was no running turn to target.
     pub turn_target: Option<String>,
@@ -35,7 +35,7 @@ pub(crate) struct PreparedDelegation {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PreparedSpawn {
+pub struct PreparedSpawn {
     pub profile_id: String,
     pub model: String,
     pub effort: Option<String>,
@@ -43,7 +43,7 @@ pub(crate) struct PreparedSpawn {
     pub prompt: String,
 }
 
-pub(crate) fn prepare_delegation_spawn(
+pub fn prepare_delegation_spawn(
     parent: String,
     request: String,
     spawn: PreparedSpawn,
@@ -60,7 +60,7 @@ pub(crate) fn prepare_delegation_spawn(
     })
 }
 
-pub(crate) fn load_delegation(
+pub fn load_delegation(
     parent: &str,
     request: &str,
 ) -> Result<Option<(PreparedDelegation, Option<StoredDelegationResult>)>> {
@@ -101,7 +101,7 @@ pub(super) fn has_pending_mutating_delegations_with(
     Ok(false)
 }
 
-pub(crate) fn prepare_delegation(
+pub fn prepare_delegation(
     parent: String,
     prepared: PreparedDelegation,
 ) -> Result<PreparedDelegation> {
@@ -117,15 +117,15 @@ pub(crate) fn prepare_delegation(
     })
 }
 
-pub(crate) fn delegation_delivering(parent: String, request: String) -> Result<()> {
+pub fn delegation_delivering(parent: String, request: String) -> Result<()> {
     submit_database_write("deliver delegation effect", move |connection| {
         connection.execute("UPDATE delegation_effects SET phase='delivering' WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NULL", params![parent, request])?;
         Ok(())
     })
 }
 
-#[cfg(test)]
-pub(crate) fn record_delegation_result(parent: String, result: SubagentToolResult) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_delegation_result(parent: String, result: SubagentToolResult) -> Result<()> {
     record_stored_delegation_result(
         parent,
         StoredDelegationResult {
@@ -136,7 +136,7 @@ pub(crate) fn record_delegation_result(parent: String, result: SubagentToolResul
 }
 
 /// Persist the result before returning it to the worker.
-pub(crate) fn record_stored_delegation_result(
+pub fn record_stored_delegation_result(
     parent: String,
     stored_result: StoredDelegationResult,
 ) -> Result<()> {
@@ -160,7 +160,7 @@ pub(crate) fn record_stored_delegation_result(
 
 /// A notice that one message a parent sent its child was not delivered. The
 /// notice is not a finish: it never moves the child's `reported_finish`.
-pub(crate) struct FailedDeliveryNotice {
+pub struct FailedDeliveryNotice {
     pub request_id: String,
     pub report: mj_core::mailbox::SubagentFinishedReport,
 }
@@ -168,7 +168,7 @@ pub(crate) struct FailedDeliveryNotice {
 /// The notices among `notices` whose failure the parent has not been told of.
 /// This read only spares the writer a transaction when nothing is new;
 /// [`enqueue_subagent_reports`] asks the same question again where it decides.
-pub(crate) fn untold_failed_deliveries(
+pub fn untold_failed_deliveries(
     parent: &str,
     notices: Vec<FailedDeliveryNotice>,
 ) -> Result<Vec<FailedDeliveryNotice>> {
@@ -265,7 +265,7 @@ fn failures_listed_in_reports(
 /// finish now) whose finish a report before #1459 already told. This read only
 /// spares the writer a transaction; [`enqueue_subagent_reports`] asks the same
 /// question again where it decides.
-pub(crate) fn finishes_told_by_folded_markers(
+pub fn finishes_told_by_folded_markers(
     parent: &str,
     candidates: Vec<(
         String,
@@ -346,7 +346,7 @@ fn told_by_folded_marker(
 /// a later delivery cannot hide it and a stale or concurrent reconcile cannot
 /// tell it twice. Notices go first: a finish enqueued here lists the same
 /// failures, and the notice's key, not that listing, is what records them.
-pub(crate) fn enqueue_subagent_reports(
+pub fn enqueue_subagent_reports(
     parent: String,
     reports: Vec<(
         mj_core::subagent::SubagentFinishIdentity,
@@ -446,12 +446,12 @@ pub(crate) fn enqueue_subagent_reports(
 /// outbox: the event key and the journal ordinal at which the parent's worker
 /// accepted it, once it has. `None` when no report was enqueued for the
 /// child's latest finish.
-pub(crate) struct ReportMail {
+pub struct ReportMail {
     pub key: String,
     pub accepted_ordinal: Option<u64>,
 }
 
-pub(crate) fn load_report_mail(parent: &str, child: &str) -> Result<Option<ReportMail>> {
+pub fn load_report_mail(parent: &str, child: &str) -> Result<Option<ReportMail>> {
     let Some(identity) = load_subagent(child)?.and_then(|relation| relation.reported_finish) else {
         return Ok(None);
     };
@@ -473,7 +473,7 @@ pub(crate) fn load_report_mail(parent: &str, child: &str) -> Result<Option<Repor
 /// Whether the parent has put a message (`subagent-message-<request>`) into
 /// the child's mailbox that the child's worker has not accepted yet. A park that stopped the worker under
 /// it would drop the child's next task.
-pub(crate) fn child_has_undelivered_mail(child: &str) -> Result<bool> {
+pub fn child_has_undelivered_mail(child: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM mailbox_outbox
@@ -512,7 +512,7 @@ fn failed_delivery_key(parent: &str, child: &str, request_id: &str) -> Result<St
 
 /// Move old wait-owned reports to the mailbox and durably replace its answer.
 /// The compatibility result remains replayable until worker acknowledgement.
-pub(crate) fn retire_legacy_wait(
+pub fn retire_legacy_wait(
     parent: String,
     request: String,
 ) -> Result<Option<StoredDelegationResult>> {
@@ -639,7 +639,7 @@ pub(crate) fn retire_legacy_wait(
 
 /// The parent has its result, so the record has done its one job: making a
 /// replayed request return the same outcome instead of running again.
-pub(crate) fn acknowledge_delegation(parent: String, request: String) -> Result<()> {
+pub fn acknowledge_delegation(parent: String, request: String) -> Result<()> {
     submit_database_write("acknowledge delegation", move |connection| {
         connection.execute("DELETE FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NOT NULL", params![parent, request])?;
         Ok(())
@@ -648,7 +648,7 @@ pub(crate) fn acknowledge_delegation(parent: String, request: String) -> Result<
 
 /// Acknowledged records from builds that kept them after the parent had
 /// its result. Nothing reads them; run once at daemon start.
-pub(crate) fn prune_acknowledged_delegations() -> Result<()> {
+pub fn prune_acknowledged_delegations() -> Result<()> {
     submit_database_write("prune acknowledged delegations", move |connection| {
         connection.execute(
             "DELETE FROM delegation_effects WHERE phase='acknowledged'",

@@ -30,13 +30,13 @@ pub(crate) struct StoppedWorker<'a> {
     root: String,
 }
 impl StoppedWorker<'_> {
-    pub(crate) fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> &str {
         self.session_id
     }
-    pub(crate) fn target(&self) -> &targets::TargetLocator {
+    pub fn target(&self) -> &targets::TargetLocator {
         self.target
     }
-    pub(crate) fn root(&self) -> &str {
+    pub fn root(&self) -> &str {
         &self.root
     }
 }
@@ -72,7 +72,7 @@ fn backend(worker: &EnvironmentWorker, config: &Config) -> Result<targets::Targe
 }
 
 impl Reclamation {
-    pub(super) fn acquire(
+    pub fn acquire(
         admission: &crate::recovery_gate::SessionAdmission,
         environment: EnvironmentRecord,
         config: &Config,
@@ -257,7 +257,7 @@ impl Reclamation {
         database::record_prepared_environment_instance(&self.environment.id, instance_id)
     }
 
-    pub(super) fn finish(self) -> Result<()> {
+    pub fn finish(self) -> Result<()> {
         if self.environment.phase != EnvironmentPhase::Reclaimed {
             database::finish_environment_retirement(&self.environment.id)?;
         }
@@ -490,7 +490,7 @@ pub(super) struct CheckoutRemoval<'a> {
     _retirement: Option<&'a Reclamation>,
 }
 impl CheckoutRemoval<'_> {
-    pub(super) fn covers(&self, checkout: &ManagedWorktree) -> Result<()> {
+    pub fn covers(&self, checkout: &ManagedWorktree) -> Result<()> {
         ensure!(
             self.checkout == checkout,
             "checkout deletion capability does not cover this checkout"
@@ -518,7 +518,7 @@ impl Reclamation {
 
 /// Roll back a checkout created during preparation, before any worker could
 /// receive it. This explicit authority is only for that construction path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn cleanup_unstarted_checkout(
     executor: &impl CommandExecutor,
     checkout: &ManagedWorktree,
@@ -968,13 +968,13 @@ mod tests {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TargetAvailability {
+pub enum TargetAvailability {
     Reachable,
     Missing,
     Unreachable,
 }
 
-pub(crate) fn target_availability(
+pub fn target_availability(
     controller: &Controller,
     session_id: &str,
     executor: &impl CommandExecutor,

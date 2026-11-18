@@ -564,7 +564,7 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     // First, before any thread or child: every child inherits the limit.
     mj_core::subprocess::raise_open_file_limit();
-    mj_controller::server::install_rustls_crypto_provider();
+    mj_daemon::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     if let Some(notice) = replacement_notice(cli.command.as_ref()) {
         // Exit 2, the status clap uses for a usage error, which this is.
@@ -705,7 +705,7 @@ fn mj_command(arguments: &str) -> String {
 /// A session as a stop or detach message names it.
 struct ListedSession {
     title: String,
-    lifecycle: mj_controller::server::ViewerLifecycleCategory,
+    lifecycle: mj_daemon::server::ViewerLifecycleCategory,
 }
 
 /// Every session that suspending stands for itself, in every workspace,
@@ -732,7 +732,7 @@ fn session_roots_from_projection(
     records: &mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>,
     subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentMetadata>,
 ) -> BTreeMap<String, ListedSession> {
-    use mj_controller::server::ViewerLifecycleCategory;
+    use mj_daemon::server::ViewerLifecycleCategory;
     let active = |id: &str| {
         records
             .get(id)
@@ -771,7 +771,7 @@ async fn active_sessions(
 /// leave the dashboard, and say how it ended. The daemon owns that operation
 /// and decides when it ends; this only reads its outcome.
 async fn await_stopping_session(session_id: &str) -> Result<&'static str> {
-    use mj_controller::server::ViewerLifecycleCategory;
+    use mj_daemon::server::ViewerLifecycleCategory;
     let mut client = daemon::connect_existing().await?;
     loop {
         let lifecycle = session_roots(&mut client)
@@ -820,7 +820,7 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
         // recovery copy, so each one has its own connection.
         jobs.spawn(async move {
             let result = if session.lifecycle
-                == mj_controller::server::ViewerLifecycleCategory::Suspending
+                == mj_daemon::server::ViewerLifecycleCategory::Suspending
             {
                 await_stopping_session(&id).await
             } else {

@@ -42,7 +42,7 @@ enum InPlaceRestoreMode {
     LegacyRecovery { restore_repositories: bool },
 }
 
-pub(crate) enum InPlaceRestartError {
+pub enum InPlaceRestartError {
     /// The target was only read or probed; fallback can still destroy it.
     Preflight(anyhow::Error),
     /// A requested cancellation or daemon handoff stopped the operation.
@@ -119,7 +119,7 @@ impl Controller {
         }
     }
 
-    pub(crate) async fn restore_session_in_place_for_restart(
+    pub async fn restore_session_in_place_for_restart(
         &mut self,
         session_id: &str,
         profile_id: &str,

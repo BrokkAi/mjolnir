@@ -101,7 +101,7 @@ impl QuotaRuntime {
     /// check runs on this host, by design, and reports the missing harness.
     /// A named engine that is missing is an error the check reports; a named
     /// engine is used whether or not the host has the harness.
-    pub(crate) fn resolve(
+    pub fn resolve(
         config: &QuotaRuntimeConfig,
         path: Option<&OsStr>,
         host_has_harness: bool,
@@ -157,7 +157,7 @@ impl QuotaRuntime {
     }
 
     /// Resolve against this process's `PATH`.
-    pub(crate) fn current(config: &QuotaRuntimeConfig, host_has_harness: bool) -> Result<Self> {
+    pub fn current(config: &QuotaRuntimeConfig, host_has_harness: bool) -> Result<Self> {
         Self::resolve(
             config,
             std::env::var_os("PATH").as_deref(),
@@ -362,7 +362,7 @@ impl QuotaContainer {
     }
 
     /// Remove the container now, off the async runtime.
-    pub(crate) async fn remove(mut self) {
+    pub async fn remove(mut self) {
         self.removed = true;
         let command = self.remove_command();
         let name = self.name.clone();
@@ -481,7 +481,7 @@ fn owner_is_gone(label: &str, running: impl Fn(u32, &str) -> bool) -> bool {
 /// Containers whose owning process is still running stay. The instance
 /// identity comes from the data directory, so any other process on the same
 /// host that sweeps does so with the live daemon's identity.
-pub(crate) fn sweep_quota_containers(executor: &impl CommandExecutor, path: Option<&OsStr>) {
+pub fn sweep_quota_containers(executor: &impl CommandExecutor, path: Option<&OsStr>) {
     sweep_quota_containers_with(executor, path, &owner_is_running)
 }
 
@@ -560,7 +560,7 @@ fn sweep_quota_containers_with(
 /// One profile's check in a container: the image to run and the profile home
 /// to mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContainerCheck {
+pub struct ContainerCheck {
     pub(crate) runtime: ContainerRuntime,
     pub(crate) home: std::path::PathBuf,
 }
@@ -581,7 +581,7 @@ impl ContainerCheck {
 /// runtime already downloads it from the same engine, as it does whenever
 /// `auto` chose that runtime. The image is wanted whenever a check could fall
 /// back to it, so this assumes the host lacks the harness.
-pub(crate) fn add_quota_image(
+pub fn add_quota_image(
     plan: &mut Vec<mj_core::targets::ImageRefresh>,
     config: &QuotaRuntimeConfig,
     path: Option<&OsStr>,

@@ -33,7 +33,7 @@ const STARTUP_RECOVERY_LABEL: &str = "daemon startup recovery";
 pub(crate) const DESTROY_LABEL: &str = "session destroy";
 
 /// A refused control admission has made no mutation and may wait for handoff.
-pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
+pub const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 
 /// How long a stop or handoff waits for destroys in flight before it goes
 /// ahead and abandons them. The client waits longer than this for the daemon
@@ -41,7 +41,7 @@ pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
 pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
-pub(crate) struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
+pub struct Gate(Mutex<State>, tokio::sync::Notify, Condvar);
 
 #[derive(Default)]
 struct State {
@@ -61,7 +61,7 @@ struct State {
     active: BTreeMap<&'static str, BTreeMap<u64, Hold>>,
     next_hold: u64,
     // Test synchronization only; never part of admission policy.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     resumable_waiters: usize,
 }
 
@@ -71,17 +71,17 @@ struct Hold {
 }
 
 /// What a hold is doing, as its owner reports it when a notice renders.
-pub(crate) struct HoldDetail {
+pub struct HoldDetail {
     /// Which work this is, such as `create e5dfbd99`.
-    pub(crate) subject: String,
+    pub subject: String,
     /// What the work is doing now, if its owner knows.
-    pub(crate) stage: Option<String>,
+    pub stage: Option<String>,
 }
 
 /// Held by an admission so a waiting handoff can name the work. The
 /// implementation reads the live fact from its owner on every call; the gate
 /// never copies it.
-pub(crate) trait Describe: Send + Sync {
+pub trait Describe: Send + Sync {
     fn describe(&self) -> HoldDetail;
 }
 
@@ -191,8 +191,8 @@ impl RefusedHandoff {
 /// One label of work holding admission open: how many holds, how long the
 /// oldest has run, and the oldest few holds that can describe themselves.
 #[derive(Clone)]
-pub(crate) struct Blocker {
-    pub(crate) label: &'static str,
+pub struct Blocker {
+    pub label: &'static str,
     pub(crate) count: usize,
     pub(crate) age: Duration,
     named: Vec<NamedHold>,
@@ -212,7 +212,7 @@ fn format_age(age: Duration) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Blocker {
     /// The label, with the count appended when it is held more than once.
     fn counted_label(&self) -> String {
@@ -267,7 +267,7 @@ fn describe(blockers: &[Blocker]) -> String {
 /// One admitted operation. Clones share it: the operation is counted once
 /// however many tasks hold a clone, and it ends when the last clone drops.
 #[derive(Clone)]
-pub(crate) struct Work {
+pub struct Work {
     _registration: Arc<Registration>,
 }
 
@@ -286,10 +286,7 @@ impl Gate {
 
     /// Resumable work owns no admission while handoff drains. The same lock
     /// decides whether to resume control or yield to a closed daemon.
-    pub(crate) fn enter_after_draining(
-        self: &Arc<Self>,
-        label: &'static str,
-    ) -> anyhow::Result<Work> {
+    pub fn enter_after_draining(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
         let mut state = self.lock();
         loop {
             anyhow::ensure!(
@@ -303,7 +300,7 @@ impl Gate {
             // This is the owner's existing lapse deadline, not a polling
             // interval or a bound on the resumable operation.
             let deadline = state.drain_requested.expect("draining has a request") + DRAIN_LAPSE;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 state.resumable_waiters += 1;
                 self.1.notify_waiters();
@@ -312,7 +309,7 @@ impl Gate {
                 .2
                 .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 state.resumable_waiters -= 1;
             }
@@ -321,7 +318,7 @@ impl Gate {
 
     /// Resumable background observers wait on this owner's exact drain
     /// deadline and publication, without holding daemon admission.
-    pub(crate) async fn wait_after_draining(&self) -> bool {
+    pub async fn wait_after_draining(&self) -> bool {
         loop {
             let changed = self.1.notified();
             tokio::pin!(changed);
@@ -355,8 +352,8 @@ impl Gate {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn wait_for_resumable_waiter_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_for_resumable_waiter_for_test(&self) {
         loop {
             let notified = self.1.notified();
             tokio::pin!(notified);
@@ -368,31 +365,31 @@ impl Gate {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn expire_drain_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expire_drain_for_test(&self) {
         self.lock().drain_requested = Some(Instant::now() - DRAIN_LAPSE);
         self.publish();
     }
 
-    pub(crate) fn is_open(&self) -> bool {
+    pub fn is_open(&self) -> bool {
         !self.lock().closed
     }
 
     /// Whether a handoff is waiting, or has already happened. Deferrable work
     /// that has not started yet should not start.
-    pub(crate) fn is_draining(&self) -> bool {
+    pub fn is_draining(&self) -> bool {
         let state = self.lock();
         state.closed || state.draining()
     }
 
     /// Publish a drain from the same owner that decides admission. Queued,
     /// unaccepted requests release their outer client hold when this wakes.
-    pub(crate) fn begin_draining(&self) {
+    pub fn begin_draining(&self) {
         self.lock().drain_requested = Some(Instant::now());
         self.publish();
     }
 
-    pub(crate) async fn wait_until_draining(&self) {
+    pub async fn wait_until_draining(&self) {
         loop {
             let notified = self.1.notified();
             tokio::pin!(notified);
@@ -406,7 +403,7 @@ impl Gate {
 
     /// Admit a short control operation. The handoff waits for it. Refused
     /// only once the handoff has happened.
-    pub(crate) fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
+    pub fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
         self.enter_described(label, None)
     }
 
@@ -427,10 +424,7 @@ impl Gate {
 
     /// Admit work the handoff waits for but that can be put off. Refused while
     /// a handoff is waiting, so this work cannot keep extending the wait.
-    pub(crate) fn enter_unless_draining(
-        self: &Arc<Self>,
-        label: &'static str,
-    ) -> anyhow::Result<Work> {
+    pub fn enter_unless_draining(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
         self.enter_unless_draining_described(label, None)
     }
 
@@ -508,7 +502,7 @@ impl Gate {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
         let gate = Arc::new(Self::default());
         gate.lock().destroy_wait_bound = Some(bound);
@@ -518,7 +512,7 @@ impl Gate {
     /// Whether a stop should still wait for destroys. Starts the wait on the
     /// first call that finds one. Once the bound has passed it logs the
     /// destroys it abandons and answers no.
-    pub(crate) fn destroys_hold_the_stop(&self) -> bool {
+    pub fn destroys_hold_the_stop(&self) -> bool {
         let mut state = self.lock();
         if state.destroying.is_empty() {
             return false;
@@ -538,8 +532,8 @@ impl Gate {
 
     /// The work holding admission open, sorted by label, with a count
     /// appended when a label is held more than once.
-    #[cfg(test)]
-    pub(crate) fn active_labels(&self) -> Vec<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_labels(&self) -> Vec<String> {
         self.blockers().iter().map(Blocker::counted_label).collect()
     }
 
@@ -551,7 +545,7 @@ impl Gate {
 
     /// Called only for automatic replacement, never explicit Stop. A refusal
     /// starts or extends draining.
-    pub(crate) fn try_close(&self) -> bool {
+    pub fn try_close(&self) -> bool {
         let mut state = self.lock();
         if state.closed {
             return true;
@@ -610,62 +604,62 @@ impl Drop for Registration {
     }
 }
 
-pub(crate) fn gate() -> &'static Arc<Gate> {
+pub fn gate() -> &'static Arc<Gate> {
     static GATE: OnceLock<Arc<Gate>> = OnceLock::new();
     GATE.get_or_init(Default::default)
 }
 
-pub(crate) fn activity(label: &'static str) -> anyhow::Result<Work> {
+pub fn activity(label: &'static str) -> anyhow::Result<Work> {
     gate().enter(label)
 }
 
-pub(crate) fn startup_recovery() -> anyhow::Result<Work> {
+pub fn startup_recovery() -> anyhow::Result<Work> {
     activity(STARTUP_RECOVERY_LABEL)
 }
 
 /// Observe the startup hold used by handoff without taking admission.
-pub(crate) async fn wait_for_startup_recovery() {
+pub async fn wait_for_startup_recovery() {
     gate().wait_for_startup_recovery().await;
 }
 
-pub(crate) fn activity_unless_draining(label: &'static str) -> anyhow::Result<Work> {
+pub fn activity_unless_draining(label: &'static str) -> anyhow::Result<Work> {
     gate().enter_unless_draining(label)
 }
 
-pub(crate) fn activity_described(
+pub fn activity_described(
     label: &'static str,
     describer: Arc<dyn Describe>,
 ) -> anyhow::Result<Work> {
     gate().enter_described(label, Some(describer))
 }
 
-pub(crate) fn activity_unless_draining_described(
+pub fn activity_unless_draining_described(
     label: &'static str,
     describer: Arc<dyn Describe>,
 ) -> anyhow::Result<Work> {
     gate().enter_unless_draining_described(label, Some(describer))
 }
 
-pub(crate) fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
+pub fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
     gate().enter_destroy(session_id)
 }
 
-pub(crate) fn destroy_activity_unless_draining(session_id: &str) -> anyhow::Result<Work> {
+pub fn destroy_activity_unless_draining(session_id: &str) -> anyhow::Result<Work> {
     gate().enter_destroy_unless_draining(session_id)
 }
 
-pub(crate) fn is_draining() -> bool {
+pub fn is_draining() -> bool {
     gate().is_draining()
 }
 
-#[cfg(test)]
-pub(crate) fn active_labels() -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn active_labels() -> Vec<String> {
     gate().active_labels()
 }
 
 /// What a waiting handoff names: each blocking label with its count and age,
 /// and the oldest few holds that can describe themselves.
-pub(crate) fn blockers() -> Vec<Blocker> {
+pub fn blockers() -> Vec<Blocker> {
     gate().blockers()
 }
 

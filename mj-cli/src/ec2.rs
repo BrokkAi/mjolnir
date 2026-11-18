@@ -1159,7 +1159,7 @@ fn create_attempt(
     )
     .context("prepare EC2 dev image preload")
     .and_then(|refresh| {
-        mj_controller::pollers::refresh_host_image(
+        mj_daemon::pollers::refresh_host_image(
             &refresh,
             &mj_controller::targets::ProcessExecutor,
             &|_| {},

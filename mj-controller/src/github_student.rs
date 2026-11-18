@@ -130,7 +130,7 @@ struct Machine {
     use_gpu: bool,
 }
 struct Inner {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     probe_control_failures: std::sync::atomic::AtomicUsize,
     machine: Mutex<Machine>,
     changed: Notify,
@@ -187,7 +187,7 @@ impl Inner {
 struct PreparationOptions {
     model_base: String,
     model_manifest: assets::Manifest,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     load_failures: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl Default for PreparationOptions {
@@ -195,7 +195,7 @@ impl Default for PreparationOptions {
         Self {
             model_base: "https://huggingface.co".into(),
             model_manifest: assets::Manifest::pinned().clone(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             load_failures: None,
         }
     }
@@ -224,7 +224,7 @@ impl Student {
         options: PreparationOptions,
     ) -> Self {
         let inner = Arc::new(Inner {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             probe_control_failures: Default::default(),
             machine: Mutex::new(Machine {
                 state: State::Dormant,
@@ -544,7 +544,7 @@ fn probe_pair(
         return (ProbeOutcome::ControlFailed, Err(error));
     }
     let start = std::time::Instant::now();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if inner
         .probe_control_failures
         .try_update(
@@ -741,10 +741,10 @@ async fn supervise(
                             PreparationFailure::error(StudentFailureKind::Download, e, None)
                         }
                     })?;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     let load_failures = options.load_failures.clone();
                     tokio::task::spawn_blocking(move || -> Result<Ready> {
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         if let Some(failures) = load_failures
                             && failures
                                 .try_update(

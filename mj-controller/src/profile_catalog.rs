@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, bail};
 use futures::future::{FutureExt, Shared, join_all};
 use mj_client::session::BoxFuture;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use mj_core::config::HarnessProfile;
 use mj_core::config::{Config, HarnessKind};
 use mj_core::profile_capabilities::{
@@ -26,9 +26,9 @@ use crate::quota::{ProfileQuota, QuotaReportMap};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
-pub(crate) type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+pub type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
+#[cfg(any(test, feature = "test-support"))]
 type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
@@ -259,7 +259,7 @@ impl Inner {
     }
 }
 
-pub(crate) struct ProfileCatalog {
+pub struct ProfileCatalog {
     cancellation: CancellationToken,
     inner: Mutex<Inner>,
     publisher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -270,15 +270,15 @@ pub(crate) struct ProfileCatalog {
     /// The daemon's latest quota report per profile. Without it every
     /// profile counts as a subscription when the legacy upgrade picks models.
     quota_reports: Mutex<Option<QuotaReports>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     probe: Option<(Arc<Probe>, Arc<ModelProbe>)>,
     /// How long the home watch waits before re-probing an identity whose
     /// edit re-probe failed. Tests shorten this to observe the retry.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     home_edit_retry_wait: Duration,
 }
 impl ProfileCatalog {
-    pub(crate) fn new(cancellation: CancellationToken) -> Arc<Self> {
+    pub fn new(cancellation: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             cancellation,
             inner: Mutex::new(Inner::default()),
@@ -288,14 +288,14 @@ impl ProfileCatalog {
             legacy_review_upgrade_started: AtomicBool::new(false),
             config_path: None,
             quota_reports: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             probe: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             home_edit_retry_wait: HOME_EDIT_RETRY_WAIT,
         })
     }
 
-    pub(crate) fn new_with_config_path(
+    pub fn new_with_config_path(
         cancellation: CancellationToken,
         config_path: PathBuf,
     ) -> Arc<Self> {
@@ -304,14 +304,14 @@ impl ProfileCatalog {
         catalog
     }
 
-    pub(crate) fn set_publisher(&self, publisher: Arc<dyn Fn() + Send + Sync>) {
+    pub fn set_publisher(&self, publisher: Arc<dyn Fn() + Send + Sync>) {
         *self
             .publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
     }
 
-    pub(crate) fn set_quota_reports(&self, reports: QuotaReports) {
+    pub fn set_quota_reports(&self, reports: QuotaReports) {
         *self
             .quota_reports
             .lock()
@@ -358,7 +358,7 @@ impl ProfileCatalog {
         (priced, unknown)
     }
 
-    pub(crate) fn set_notice(&self, notice: NoticeCallback) {
+    pub fn set_notice(&self, notice: NoticeCallback) {
         *self.notice.lock().unwrap_or_else(PoisonError::into_inner) = Some(notice);
     }
 
@@ -375,9 +375,7 @@ impl ProfileCatalog {
         }
     }
 
-    pub(crate) fn snapshot(
-        &self,
-    ) -> mj_core::snapshot_map::SharedSnapshot<ProfileCapabilitiesSnapshot> {
+    pub fn snapshot(&self) -> mj_core::snapshot_map::SharedSnapshot<ProfileCapabilitiesSnapshot> {
         let mut inner = self.lock();
         if let Some(snapshot) = &inner.publication {
             return snapshot.clone();
@@ -433,7 +431,7 @@ impl ProfileCatalog {
     /// changed, or whose profile was enabled or disabled, is retired: its
     /// supervisors stop, and the next claim builds a fresh owner that reuses
     /// ready entries and retries failed ones.
-    pub(crate) fn sync(self: &Arc<Self>, config: &Config) {
+    pub fn sync(self: &Arc<Self>, config: &Config) {
         let (changed, first) = {
             let mut inner = self.lock();
             let first = inner.live.is_none();
@@ -697,7 +695,7 @@ impl ProfileCatalog {
     /// Claim new definitions, default probes and the efforts of the models
     /// `config` selects under one lock. A Settings draft uses this same path
     /// without becoming the live configuration.
-    pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
+    pub fn ensure(self: &Arc<Self>, config: &Config) {
         self.ensure_profiles(config, true, None);
     }
 
@@ -814,7 +812,7 @@ impl ProfileCatalog {
     /// Read a live profile's failed entries again, after a session's worker
     /// put choices in the profile cache that discovery reads first. A
     /// replaced entry ends its old supervisor, which no longer owns it.
-    pub(crate) fn reread_failed(self: &Arc<Self>, profile_id: &str) {
+    pub fn reread_failed(self: &Arc<Self>, profile_id: &str) {
         let mut started = Vec::new();
         {
             let mut inner = self.edit();
@@ -1112,11 +1110,11 @@ impl ProfileCatalog {
 
     /// How long after a failed edit re-probe the home watch tries again.
     fn home_edit_retry_wait(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.home_edit_retry_wait
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             HOME_EDIT_RETRY_WAIT
         }
@@ -1303,7 +1301,7 @@ impl ProfileCatalog {
         refresh: bool,
     ) -> Attempt {
         let probe: BoxFuture<'static, Result<crate::controller::profile_config::Discovery>> = {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some((probe, model_probe)) = &self.probe {
                 let future = match model {
                     None => probe(definition.id.clone()),
@@ -1327,7 +1325,7 @@ impl ProfileCatalog {
                 )
                 .boxed()
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             {
                 crate::controller::profile_config::discover_for(
                     (*definition.config).clone(),
@@ -1714,7 +1712,7 @@ impl ProfileCatalog {
             .map(|outcome| outcome.choices)
     }
 
-    pub(crate) fn live(&self) -> Result<Config> {
+    pub fn live(&self) -> Result<Config> {
         self.lock()
             .live
             .clone()
@@ -1722,7 +1720,7 @@ impl ProfileCatalog {
     }
 
     /// The live `models` allow-list of profile `id`; empty offers everything.
-    pub(crate) fn allowed_models(&self, id: &str) -> Vec<String> {
+    pub fn allowed_models(&self, id: &str) -> Vec<String> {
         self.lock()
             .live
             .as_ref()
@@ -1731,7 +1729,7 @@ impl ProfileCatalog {
             .unwrap_or_default()
     }
 
-    pub(crate) fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
+    pub fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
             .enabled_profiles()
@@ -1739,7 +1737,7 @@ impl ProfileCatalog {
             .collect())
     }
 
-    pub(crate) fn ready_candidates(&self, model: &str) -> Result<Vec<(String, HarnessKind)>> {
+    pub fn ready_candidates(&self, model: &str) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         let snapshot = self.snapshot();
         let identity = snapshot.model_id(&config, model);
@@ -1758,7 +1756,7 @@ impl ProfileCatalog {
             .collect())
     }
 
-    pub(crate) fn configured_candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
+    pub fn configured_candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         Ok(self
             .live()?
             .enabled_profiles()
@@ -1766,7 +1764,7 @@ impl ProfileCatalog {
             .collect())
     }
 
-    pub(crate) async fn model_capabilities(
+    pub async fn model_capabilities(
         self: &Arc<Self>,
         profile: String,
         model: String,
@@ -1776,10 +1774,7 @@ impl ProfileCatalog {
 
     /// The catalogue `id`'s harness advertises, ignoring its `models`
     /// allow-list. See [`Self::fetch_unrestricted`].
-    pub(crate) async fn unrestricted_capabilities(
-        self: &Arc<Self>,
-        id: &str,
-    ) -> Result<ProfileConfig> {
+    pub async fn unrestricted_capabilities(self: &Arc<Self>, id: &str) -> Result<ProfileConfig> {
         self.read_live(id, None, true).await
     }
 
@@ -1820,10 +1815,7 @@ impl ProfileCatalog {
         }
     }
 
-    pub(crate) async fn capabilities(
-        self: &Arc<Self>,
-        profiles: &[String],
-    ) -> Result<Vec<ProfileConfig>> {
+    pub async fn capabilities(self: &Arc<Self>, profiles: &[String]) -> Result<Vec<ProfileConfig>> {
         self.live()?;
         join_all(profiles.iter().map(|id| self.live_capabilities(id, None)))
             .await
@@ -1869,7 +1861,7 @@ impl ProfileCatalog {
         results.into_iter().collect()
     }
 
-    pub(crate) async fn options_for(
+    pub async fn options_for(
         self: &Arc<Self>,
         config: &Config,
         parent: &str,
@@ -1894,8 +1886,8 @@ impl ProfileCatalog {
         inner
     }
 
-    #[cfg(test)]
-    fn build(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn build(
         cancellation: CancellationToken,
         probe: Arc<Probe>,
         model_probe: Arc<ModelProbe>,
@@ -1904,8 +1896,8 @@ impl ProfileCatalog {
         Arc::get_mut(&mut catalog).unwrap().probe = Some((probe, model_probe));
         catalog
     }
-    #[cfg(test)]
-    pub(crate) fn with_probe(probe: Arc<Probe>) -> Arc<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_probe(probe: Arc<Probe>) -> Arc<Self> {
         let model_probe = probe.clone();
         Self::build(
             CancellationToken::new(),
@@ -1913,8 +1905,8 @@ impl ProfileCatalog {
             Arc::new(move |profile, _| model_probe(profile)),
         )
     }
-    #[cfg(test)]
-    pub(crate) async fn sync_now(self: &Arc<Self>, config: &Config) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn sync_now(self: &Arc<Self>, config: &Config) {
         self.sync(config);
         let discoveries = config.enabled_profiles().map(|(id, _)| async move {
             if let Ok(choices) = self.fetch(config, id, None).await {
@@ -2060,8 +2052,8 @@ fn home_digest(inputs: &[WatchedInput; 3]) -> [u8; 32] {
 }
 
 /// A configuration with the named profiles enabled.
-#[cfg(test)]
-pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
     Config {
         profiles: profiles
             .iter()
@@ -2083,8 +2075,8 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
 
 /// A probe that answers with the profile's own id and counts its calls, so a
 /// test can prove that a warm answer runs none.
-#[cfg(test)]
-pub(crate) fn counting_probe(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<Probe> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn counting_probe(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<Probe> {
     Arc::new(move |profile| {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move { Ok(test_choices(&profile)) })
@@ -2092,8 +2084,8 @@ pub(crate) fn counting_probe(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<
 }
 
 /// The capabilities a fixture probe reports for a profile.
-#[cfg(test)]
-fn test_choices(profile: &str) -> ProfileConfig {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_choices(profile: &str) -> ProfileConfig {
     ProfileConfig {
         model: Some(format!("{profile}-model")),
         models: vec![mj_core::acp::SessionConfigChoice {
@@ -2109,7 +2101,7 @@ fn test_choices(profile: &str) -> ProfileConfig {
 /// A probe that fails while the flag is set and counts its calls, so a test
 /// can drive the background pass, the call that retries after it, and the
 /// cache in between.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn flag_probe(
     fails: Arc<std::sync::atomic::AtomicBool>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2131,7 +2123,7 @@ fn flag_probe(
 /// to release it, so a test can hold a discovery in flight and see who shares
 /// it. The release is a `watch` channel rather than a `Notify` so that a
 /// release arriving before a waiter does is still observed.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn gated_probe(
     calls: Arc<std::sync::atomic::AtomicUsize>,
     started: tokio::sync::mpsc::UnboundedSender<String>,
@@ -4502,49 +4494,6 @@ mod tests {
             .fetch(&config, "p", Some("p-model".into()))
             .await
             .unwrap();
-    }
-
-    // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.
-    #[tokio::test]
-    async fn a_model_probe_cannot_exempt_a_hidden_requested_model() {
-        let probe: Arc<Probe> = Arc::new(|id| {
-            Box::pin(async move {
-                let mut choices = test_choices(&id);
-                choices.models.push(mj_core::acp::SessionConfigChoice {
-                    value: "hidden".into(),
-                    name: "hidden".into(),
-                    description: None,
-                });
-                Ok(choices)
-            })
-        });
-        let default_probe = probe.clone();
-        let catalog = ProfileCatalog::build(
-            CancellationToken::new(),
-            default_probe,
-            Arc::new(move |id, model| {
-                let probe = probe.clone();
-                Box::pin(async move {
-                    let mut choices = probe(id).await?;
-                    choices.model = Some(model);
-                    Ok(choices)
-                })
-            }),
-        );
-        let mut config = test_config(&[("p", HarnessKind::Codex)]);
-        config.profiles.get_mut("p").unwrap().models = vec!["allowed".into()];
-        catalog.sync_now(&config).await;
-        let choices = catalog
-            .model_capabilities("p".into(), "hidden".into())
-            .await
-            .unwrap();
-        assert!(crate::server::api::validate_selectors(&choices, Some("hidden"), None).is_err());
-        assert!(
-            choices
-                .models
-                .iter()
-                .any(|choice| choice.value == "p-model")
-        );
     }
 
     // Hard-won: a2afafcb3: a pending read applied its starting allowlist.

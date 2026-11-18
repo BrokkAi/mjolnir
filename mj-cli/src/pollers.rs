@@ -1,7 +1,7 @@
 //! Terminal-specific adapters for controller background feeds.
 use crate::dashboard::io::{DashboardIoUpdate, report};
 use mj_controller::controller::Controller;
-pub(crate) use mj_controller::pollers::*;
+pub(crate) use mj_daemon::pollers::*;
 use mj_controller::session_manager::ViewError;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::DashboardState;

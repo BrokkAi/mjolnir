@@ -24,7 +24,7 @@ mod subagent;
 /// Trusted public guidance attached at the failing lifecycle boundary. Never
 /// derive it from an error chain, which can contain credentials and host paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LifecycleFailureReason {
+pub enum LifecycleFailureReason {
     WorkerContact,
     Checkpoint,
     Cleanup,
@@ -180,7 +180,7 @@ impl Controller {
     /// An `automatic` Restart, which nobody asked for, never interrupts work:
     /// a session that is working makes it fail with a deferral instead (see
     /// [`super::checkpoint::checkpoint_was_deferred`]) and stays running.
-    pub(crate) async fn suspend_session_for_restart(
+    pub async fn suspend_session_for_restart(
         &mut self,
         admission: &crate::recovery_gate::SessionAdmission,
         session_id: &str,
@@ -995,7 +995,7 @@ impl Controller {
         )
     }
 
-    fn destroy_after_verified_checkpoint_with(
+    pub fn destroy_after_verified_checkpoint_with(
         &mut self,
         session_id: &str,
         verified: &CheckpointMetadata,
@@ -1164,7 +1164,7 @@ impl Controller {
     }
 
     /// Commit the verified recovery copy before discarding the current target.
-    pub(crate) fn prepare_discard(
+    pub fn prepare_discard(
         &mut self,
         session_id: &str,
         confirmed: &CheckpointMetadata,
@@ -1344,7 +1344,7 @@ impl Controller {
     ///
     /// Answers with the checkout path that was kept, so the caller can name it
     /// where the person will see it.
-    pub(crate) fn destroy_session_controlled_with_checkout(
+    pub fn destroy_session_controlled_with_checkout(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -1448,7 +1448,7 @@ impl Controller {
     }
 
     /// Automatic child stopping must prove teardown before forgetting its worker.
-    pub(crate) fn stop_subagent(
+    pub fn stop_subagent(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -1742,3 +1742,7 @@ fn apply_interrupted_close_error(
 
 #[cfg(test)]
 mod tests;
+// Shared with mj-daemon's tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_fixtures;

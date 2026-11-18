@@ -3,7 +3,7 @@ use super::*;
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
-pub(crate) fn save_imported_session(
+pub fn save_imported_session(
     session: &SessionRecord,
     materialized: &MaterializedSession,
 ) -> Result<()> {
@@ -114,7 +114,7 @@ pub fn set_publication_assessment_if_current(
 
 /// A primary may have one live oracle; registration refused another.
 #[derive(Debug)]
-pub(crate) struct OracleAlreadyLive;
+pub struct OracleAlreadyLive;
 
 impl std::fmt::Display for OracleAlreadyLive {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -134,7 +134,7 @@ pub fn save_subagent_session(
 
 /// Publish the child and its complete initial input in the same transaction.
 /// Recovery must never find a newly registered worker without its first brief.
-pub(crate) fn register_subagent_with_startup(
+pub fn register_subagent_with_startup(
     session: &SessionRecord,
     subagent: &mj_core::subagent::SubagentRecord,
     startup: Vec<super::startup::StartupDelivery>,
@@ -726,7 +726,7 @@ pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &
 
 /// Restore the source and release Move's restore authority in one commit.
 /// Read the latest intent here: destination retirement may have updated it.
-pub(crate) fn settle_superseded_move_source(
+pub fn settle_superseded_move_source(
     session: &SessionRecord,
     environment_id: Option<&str>,
     operation_id: &str,
@@ -840,7 +840,7 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
 }
 
 /// Acceptance of Suspend owns its intent, readiness and Closing publication.
-pub(crate) fn save_suspension_intent(
+pub fn save_suspension_intent(
     session: &SessionRecord,
     ready_move: Option<&mj_core::state::MoveOperation>,
 ) -> Result<()> {

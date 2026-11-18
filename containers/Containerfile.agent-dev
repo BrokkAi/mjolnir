@@ -35,6 +35,7 @@ COPY mj-transcript/ mj-transcript/
 COPY mj-worker/ mj-worker/
 COPY mj-client/ mj-client/
 COPY mj-controller/ mj-controller/
+COPY mj-daemon/ mj-daemon/
 COPY mj-chat/ mj-chat/
 COPY mj-tui/ mj-tui/
 COPY mj-cli/ mj-cli/

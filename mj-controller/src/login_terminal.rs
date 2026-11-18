@@ -171,7 +171,7 @@ fn size(cols: u16, rows: u16) -> PtySize {
 
 /// Serve a prepared command. Tests pass a real fixture command through this
 /// same connection executor; production passes this daemon's login entrypoint.
-pub(crate) async fn serve(
+pub async fn serve(
     mut stream: TcpStream,
     command: CommandBuilder,
     cols: u16,

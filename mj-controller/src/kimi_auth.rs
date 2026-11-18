@@ -33,7 +33,7 @@ pub(crate) struct KimiRuntimeAuth {
 }
 
 impl KimiRuntimeAuth {
-    pub(crate) fn resolve(home: &Path, environment: &BTreeMap<String, String>) -> Result<Self> {
+    pub fn resolve(home: &Path, environment: &BTreeMap<String, String>) -> Result<Self> {
         let configured = read_managed_provider(&home.join("config.toml"))?;
         let env_base_url = nonempty(environment.get("KIMI_CODE_BASE_URL"));
         let env_oauth_host = nonempty(environment.get("KIMI_CODE_OAUTH_HOST"))

@@ -124,5 +124,9 @@ use validate::*;
 mod staging;
 pub(super) use staging::*;
 
+// The stand-in relay; the `test-support` feature lends it to mj-daemon's tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod stand_in;
 #[cfg(test)]
 pub(crate) mod tests;

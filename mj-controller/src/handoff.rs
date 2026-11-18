@@ -55,7 +55,7 @@ pub(crate) async fn native_prior_from_archive(
 /// or [`crate::compaction::DEFAULT_CONTEXT_BYTES`] when it names none. This is
 /// the target harness's budget for its first message, not the summarizer's page
 /// size.
-pub(crate) fn profile_handoff_bytes(profile: Option<&HarnessProfile>) -> usize {
+pub fn profile_handoff_bytes(profile: Option<&HarnessProfile>) -> usize {
     profile
         .and_then(|profile| profile.context_window_bytes)
         .unwrap_or(crate::compaction::DEFAULT_CONTEXT_BYTES)
@@ -68,7 +68,7 @@ pub(crate) fn profile_handoff_bytes(profile: Option<&HarnessProfile>) -> usize {
 /// Any other resolve failure means no utility model is configured,
 /// credentialed, or in quota; the handoff still has to happen, so it is logged
 /// and answered with the bounded recent handoff (an `Ok`).
-pub(crate) async fn build_handoff_context(
+pub async fn build_handoff_context(
     session_id: &str,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,

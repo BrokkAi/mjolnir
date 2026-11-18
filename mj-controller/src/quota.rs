@@ -28,7 +28,7 @@ pub use mj_client::quota::{
 /// Clone a daemon report for a user-facing quota surface, retaining only
 /// unscoped windows, Claude's Fable allowance and Antigravity's two pools.
 /// Internal selection and health keep the complete report.
-pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
+pub fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
     if report.harness == HarnessKind::Antigravity {
         return report.clone();
     }
@@ -182,7 +182,7 @@ pub struct ProviderCredential {
 }
 
 impl QuotaRefreshRequest {
-    pub(crate) fn cache_identity(&self) -> String {
+    pub fn cache_identity(&self) -> String {
         use sha2::{Digest, Sha256};
         // Hash configuration, never write credentials into the cache key.
         let mut hash = Sha256::new();
@@ -316,7 +316,7 @@ pub const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// For a check refused at `attempt`: when the provider's hold ends, and when
 /// the next check runs. A refused check does not shorten the regular cadence:
 /// the next one is an interval after this attempt, or the hold's end if later.
-pub(crate) fn refused_check_schedule(attempt: u64, retry_after: Option<Duration>) -> (u64, u64) {
+pub fn refused_check_schedule(attempt: u64, retry_after: Option<Duration>) -> (u64, u64) {
     let until = attempt + rate_limit_hold(retry_after).as_secs();
     let next_check = until.max(attempt + QUOTA_REFRESH_INTERVAL.as_secs());
     (until, next_check)
@@ -325,7 +325,7 @@ pub(crate) fn refused_check_schedule(attempt: u64, retry_after: Option<Duration>
 /// What to publish after a probe was rate limited: the last good reading with
 /// the hold attached, so its numbers and age stay visible. With no good
 /// reading to keep, the rate-limit report itself.
-pub(crate) fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota) -> ProfileQuota {
+pub fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota) -> ProfileQuota {
     match previous.filter(|previous| previous.error.is_none()) {
         Some(good) => ProfileQuota {
             rate_limited_until_epoch_seconds: limited.rate_limited_until_epoch_seconds,
@@ -347,7 +347,7 @@ pub struct QuotaRefreshOutcome {
 /// One profile's authoritative quota publication. `None` means that its
 /// current identity has not completed a check yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct QuotaReportPublication {
+pub struct QuotaReportPublication {
     /// Renewal failure, independent of the usage API result.
     pub login_error: Option<String>,
     pub cache_identity: String,
@@ -355,7 +355,7 @@ pub(crate) struct QuotaReportPublication {
 }
 
 impl QuotaReportPublication {
-    pub(crate) fn observe_claude_grant(
+    pub fn observe_claude_grant(
         &mut self,
         profile_id: &str,
         check: ClaudeGrantCheck,
@@ -374,7 +374,7 @@ impl QuotaReportPublication {
         true
     }
 
-    pub(crate) fn effective_report(&self, profile_id: &str) -> Option<ProfileQuota> {
+    pub fn effective_report(&self, profile_id: &str) -> Option<ProfileQuota> {
         let Some(error) = &self.login_error else {
             return self.report.clone();
         };
@@ -396,13 +396,13 @@ impl QuotaReportPublication {
     }
 }
 
-pub(crate) type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
+pub type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
 
 #[derive(Default)]
 pub struct QuotaManager {
     codex_clients: HashMap<String, CodexUsageClient>,
     reports: BTreeMap<String, ProfileQuota>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     cache_root: Option<PathBuf>,
 }
 
@@ -468,9 +468,9 @@ impl QuotaManager {
         F: FnMut(QuotaRefreshOutcome) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let cache_root = self.cache_root.clone();
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let cache_root = None;
 
         let mut tasks = tokio::task::JoinSet::new();
@@ -625,7 +625,7 @@ pub enum ClaudeGrantCheck {
 /// the only refresher: session copies carry no refresh token. This is the
 /// decision's one owner and runs apart from the usage probe, so a 429 hold on
 /// the usage API never postpones it.
-pub(crate) async fn refresh_claude_grant(
+pub async fn refresh_claude_grant(
     request: &QuotaRefreshRequest,
     now_ms: i64,
     launcher: &claude_usage::ClaudeLauncher,
@@ -1751,7 +1751,7 @@ pub(crate) fn normalize_reset_epoch_seconds(value: &str) -> Option<i64> {
     normalize_reset_at(value, Local::now().fixed_offset()).map(|reset| reset.timestamp())
 }
 
-pub(crate) fn normalize_reset_at(
+pub fn normalize_reset_at(
     value: &str,
     now: DateTime<FixedOffset>,
 ) -> Option<DateTime<FixedOffset>> {
@@ -1871,8 +1871,8 @@ fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
 mod tests;
 
 mod recovery;
-pub(crate) use recovery::{
+pub use recovery::{
     StatedReset, exhausted, long_window_stop, merge_reset_windows, message_reset, recovery_reset,
     retry_deadline,
 };
-pub(crate) use recovery::{quota_score, window_applies};
+pub use recovery::{quota_score, window_applies};

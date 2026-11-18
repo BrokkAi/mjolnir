@@ -3962,7 +3962,7 @@ fn review_residue_repositories_for_state(
     repositories
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn review_residue_repositories(
     configured: impl IntoIterator<Item = PathBuf>,
     sessions: &[&mj_core::state::SessionRecord],

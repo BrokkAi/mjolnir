@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""List `crate::` paths in mj-controller that point from a lower layer up into
-a higher one. .agents/plans/split-mj-controller-by-layer.md turns the layers
-into crates, and a crate cannot depend on one above it.
+"""List `crate::` paths in mj-controller that point from the storage layer up
+into the rest of the crate. .agents/plans/split-mj-controller-by-layer.md
+turns the storage layer into a crate, and a crate cannot depend on one above
+it. (The daemon layer above mj-controller is already the crate mj-daemon, so
+the compiler enforces that boundary.)
 
-A layer is a set of top-level modules of mj-controller/src. Modules not named
-below belong to the middle layer. An enforced boundary fails the check when
-production code crosses it. A test that crosses it is listed and does not
-fail: it moves to the higher crate, with the fixtures it needs, when that
-crate is created. Pass --all to print every site, not the summary.
+The storage layer is a set of top-level modules of mj-controller/src. An
+enforced boundary fails the check when production code crosses it. A test
+that crosses it is listed and does not fail: it moves to the higher crate,
+with the fixtures it needs, when that crate is created. Pass --all to print
+every site, not the summary.
 
 The check reads paths, not names: a file that imports a name through one
 `crate::` path and then uses it counts once.
@@ -18,12 +20,10 @@ import re
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mj-controller', 'src')
-TOP = {'daemon', 'server', 'server_runtime', 'pollers', 'web_viewer', 'recovery', 'worker_upgrade',
-       'review_host', 'github_watch', 'observe'}
 STORE = {'database', 'targets', 'upgrade', 'recovery_gate', 'worker_lifecycle', 'target_storage',
          'image_pull_gate', 'streamed_child', 'termination', 'launch_timing', 'test_log'}
 # Boundaries that production code no longer crosses and must not cross again.
-ENFORCED = {'top'}
+ENFORCED = set()
 
 PATH = re.compile(r'\bcrate::([a-z_0-9]+)((?:::[A-Za-z_0-9]+)*)')
 GROUP = re.compile(r'\bcrate::\{')
@@ -35,7 +35,7 @@ TEST_ITEM = re.compile(r'#\[cfg\(test\)\]\n[^\n]*(?:\n[^\n]*)?')
 
 
 def layer(module):
-    return 2 if module in TOP else 0 if module in STORE else 1
+    return 0 if module in STORE else 1
 
 
 def group_items(text, start):
@@ -89,12 +89,12 @@ def main():
             tests = test_ranges(rel, text)
             for target, full, at in references(text):
                 if target in modules and layer(target) > layer(source):
-                    boundary = 'top' if layer(target) == 2 else 'store'
+                    boundary = 'store'
                     kind = 'test' if any(a <= at < b for a, b in tests) else 'code'
                     line = text.count('\n', 0, at) + 1
                     sites[boundary, kind].append((source, full, f'mj-controller/src/{rel}:{line}'))
     failed = False
-    for boundary in ('top', 'store'):
+    for boundary in ('store',):
         enforced = boundary in ENFORCED
         for kind in ('code', 'test'):
             found = sorted(sites[boundary, kind])

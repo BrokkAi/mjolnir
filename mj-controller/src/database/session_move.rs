@@ -65,7 +65,7 @@ pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
 }
 
 /// Record the person's requests atomically with acceptance of the Move intent.
-pub(crate) fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
+pub fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
     submit_database_write("accept Move", move |connection| {
         let tx = connection.transaction()?;
@@ -287,12 +287,12 @@ pub(super) fn exact_move_close_intent(
 
 /// The durable owner of an interrupted Move, shared by startup and intent GC.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MoveRecoveryOwner {
+pub enum MoveRecoveryOwner {
     Move,
     Close,
 }
 
-pub(crate) fn move_recovery_owner(
+pub fn move_recovery_owner(
     state: Option<SessionState>,
     exact_close_intent: bool,
 ) -> Option<MoveRecoveryOwner> {
@@ -308,7 +308,7 @@ pub(crate) fn move_recovery_owner(
     }
 }
 
-pub(crate) fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<String>)> {
+pub fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<String>)> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare("SELECT session_id, operation_id, operation_json, close_requested_operation_id FROM session_moves ORDER BY session_id")?;
     let rows = statement.query_map([], |row| {
@@ -471,7 +471,7 @@ pub fn move_pending_work(session_id: &str) -> Result<(bool, Vec<MaterializedQueu
 }
 
 /// Cleanup uses the accepted source owner, independent of the current binding.
-pub(crate) fn move_source_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+pub fn move_source_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
     let connection = open_reader(&database_path())?;
     let id: Option<String> = connection
         .query_row(

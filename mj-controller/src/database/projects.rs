@@ -12,7 +12,7 @@ pub(crate) struct ProjectDiscoveryChange {
     pub target_id: String,
 }
 
-pub(crate) fn read_project_catalog() -> Result<ProjectCatalogView> {
+pub fn read_project_catalog() -> Result<ProjectCatalogView> {
     read_project_catalog_from(&*open_reader(&database_path())?)
 }
 
@@ -87,7 +87,7 @@ pub(crate) fn store_project_location(location: &ProjectLocation) -> Result<()> {
 
 /// Existing choices win after first reconciliation. Callers order new entries
 /// by reference count then ID so a fresh catalog chooses the least disruptive ID.
-pub(crate) fn store_catalog_project(
+pub fn store_catalog_project(
     bundle_id: &str,
     project: &ProjectBundleSnapshot,
     configured: bool,

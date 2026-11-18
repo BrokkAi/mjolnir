@@ -15,7 +15,7 @@ pub fn install_rustls_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-pub(crate) const COOKIE_KEY_BYTES: usize = 32;
+pub const COOKIE_KEY_BYTES: usize = 32;
 const COOKIE_KEY_FILE: &str = "phone-cookie-key";
 
 pub fn cookie_key_path() -> PathBuf {
@@ -90,7 +90,7 @@ fn lock_cookie_key(path: &std::path::Path) -> Result<mj_core::file_lock::FileLoc
     Ok(mj_core::file_lock::FileLock::new(file))
 }
 
-pub(crate) fn generate_cookie_key() -> Result<[u8; COOKIE_KEY_BYTES]> {
+pub fn generate_cookie_key() -> Result<[u8; COOKIE_KEY_BYTES]> {
     let mut key = [0_u8; COOKIE_KEY_BYTES];
     getrandom::fill(&mut key)
         .map_err(|error| anyhow::anyhow!("generate Mjolnir cookie key: {error}"))?;
