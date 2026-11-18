@@ -3669,7 +3669,7 @@ mod profile_homes {
     /// `removable_profile_root` names, would leave them there.
     #[test]
     fn a_session_never_runs_from_the_profile_home_itself() {
-        use crate::controller::target_profile_home_for_test;
+        use crate::targets::target_profile_home;
         use mj_core::config::{HarnessKind, HarnessProfile};
 
         let profile = |kind: HarnessKind, home: &str| HarnessProfile {
@@ -3704,7 +3704,7 @@ mod profile_homes {
                 (HarnessKind::Muse, "/home/dev/.config/muse"),
                 (HarnessKind::OpenCode, "/home/dev/.config/opencode"),
             ] {
-                let target = target_profile_home_for_test(locator, SESSION, &profile(kind, home));
+                let target = target_profile_home(locator, SESSION, &profile(kind, home));
                 assert_ne!(target, home, "{kind:?} on {}", locator.kind_name());
             }
         }

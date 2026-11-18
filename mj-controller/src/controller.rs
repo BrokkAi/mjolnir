@@ -48,6 +48,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
+pub(crate) use crate::targets::{removable_profile_root, target_profile_home};
+pub(crate) use mj_targets::command_checks::{check_output, command_error_detail, execute_checked};
+
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 
@@ -80,9 +83,7 @@ use mj_core::state::{
     new_session_id, normalize_session_title,
 };
 
-use crate::targets::{
-    self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
-};
+use crate::targets::{self, AdditionalMount, CommandExecutor, CommandSpec, SshTarget};
 
 pub use crate::targets::image_refresh_plan;
 pub use backend::backend_locator;
@@ -1568,74 +1569,6 @@ fn finish_config_map_rename<T>(
     Ok(())
 }
 
-/// Where this session's harness reads and writes its profile inside the target.
-///
-/// This is the per-session root [`removable_profile_root`] names, on every
-/// target: a session always runs from a staged copy of its profile, never from
-/// the profile home itself. A harness with a nested home keeps its state in a
-/// subdirectory of the root named after it, the leaf its XDG configuration
-/// directory must have.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn target_profile_home_for_test(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    target_profile_home(locator, session_id, profile)
-}
-
-fn target_profile_home(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    let root = removable_profile_root(locator, session_id, profile);
-    if profile.kind.nested_home() {
-        mj_core::target_path::text(&mj_core::target_path::join(
-            Path::new(&root),
-            Path::new(profile.kind.id()),
-        ))
-    } else {
-        root
-    }
-}
-
-/// The per-session profile directory a session's harness home lives in, which
-/// the session owns and an in-place harness replacement or teardown may delete.
-///
-/// This is the root that [`target_profile_home`] derives its answer from, not
-/// that answer itself: a harness with an XDG-nested home keeps its home in a
-/// subdirectory of a per-session root under the data directory, and the whole
-/// root is what belongs to the session.
-pub(super) fn removable_profile_root(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> String {
-    match locator {
-        targets::TargetLocator::LocalBare { .. } if profile.kind.nested_home() => {
-            targets::local_nested_profile_root(session_id)
-                .to_string_lossy()
-                .into_owned()
-        }
-        targets::TargetLocator::LocalBare { worker_root } => mj_core::target_path::text(
-            &mj_core::target_path::join(Path::new(worker_root), Path::new("profile")),
-        ),
-        targets::TargetLocator::LocalPodman { .. }
-        | targets::TargetLocator::LocalDocker { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. } => {
-            format!("/var/lib/hel/profiles/{session_id}")
-        }
-        targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            format!(".local/share/hel/profiles/{session_id}")
-        }
-    }
-}
-
 /// Resolve the login home on the machine that owns an editable path.
 pub fn resolve_target_input_path(
     target: &TargetTemplate,
@@ -1663,43 +1596,6 @@ pub fn resolve_machine_input_path(
     // this screen can resolve is this machine's.
     let host = cache_host::CacheHost::for_path_machine(machine)?;
     mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
-}
-
-fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {
-    let output = executor.execute(&command)?;
-    check_output(&command, output)
-}
-
-/// `output` of `command` when it succeeded, otherwise the error its stderr
-/// describes.
-fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
-    if let Some(error) = targets::step_script_error(&output) {
-        bail!("{error}");
-    }
-    if output.status != 0 {
-        let detail = command_error_detail(&output.stderr);
-        if detail.is_empty() {
-            bail!("{} failed with status {}", command.purpose, output.status);
-        }
-        bail!("{detail}");
-    }
-    Ok(output)
-}
-
-fn command_error_detail(stderr: &[u8]) -> String {
-    let reported = String::from_utf8_lossy(stderr);
-    let reported = reported.trim();
-    let detail = reported
-        .rsplit_once("\nCaused by:\n")
-        .map_or(reported, |(_, causes)| causes);
-    let detail = detail.strip_prefix("Error: ").unwrap_or(detail);
-    detail
-        .lines()
-        .map(|line| line.strip_prefix("    ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
 }
 
 fn now() -> String {

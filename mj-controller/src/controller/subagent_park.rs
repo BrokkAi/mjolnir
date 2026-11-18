@@ -801,7 +801,7 @@ mod tests {
         let controller = waking_controller(root.path(), 0);
         let profile = controller.config.profiles["codex"].clone();
         let (backend, _) = controller.worker_placement(LATCH_RELAY_SESSION).unwrap();
-        let staged = std::path::PathBuf::from(crate::controller::target_profile_home_for_test(
+        let staged = std::path::PathBuf::from(crate::targets::target_profile_home(
             &backend,
             LATCH_RELAY_SESSION,
             &profile,

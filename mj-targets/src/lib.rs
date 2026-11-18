@@ -9,6 +9,7 @@
 
 pub mod aws_assume_role;
 pub mod aws_credentials;
+pub mod command_checks;
 pub mod image_pull_gate;
 pub mod signing_key;
 pub mod streamed_child;
