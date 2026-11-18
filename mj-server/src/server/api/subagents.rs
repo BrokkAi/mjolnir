@@ -329,14 +329,31 @@ pub async fn resolve_reviewer_model_profile_selection(
     })?
 }
 
-/// A pinned reviewer's profile, model and effort are all configured, so there
-/// is nothing to discover: the harness reports a value it rejects.
+/// A pinned reviewer still runs only a model its profile offers, as the
+/// profile's allow-list filters it. Its configured effort needs no discovery:
+/// the harness reports a value it rejects.
 pub async fn resolve_pinned_reviewer_model_profile_selection(
-    _backend: &Arc<dyn SubagentBackend>,
+    backend: &Arc<dyn SubagentBackend>,
     profile: &str,
     model: &str,
     effort: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
+    let choices = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        backend.profile_config(profile.to_owned(), None, false),
+    )
+    .await
+    .map_err(|_| {
+        ApiFailure::unavailable(format!(
+            "review profile {profile:?} model discovery timed out"
+        ))
+    })?
+    .map_err(|error| {
+        ApiFailure::unavailable(format!(
+            "review profile {profile:?} is unavailable: {error:#}"
+        ))
+    })?;
+    validate_selectors(&choices, Some(model), None)?;
     Ok(selection(
         profile.to_owned(),
         model,
