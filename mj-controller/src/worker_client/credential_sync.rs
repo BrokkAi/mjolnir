@@ -444,7 +444,10 @@ impl CredentialSyncCoordinator {
                         if changed.is_err() { break; }
                         // Compare the publication we consume, not its order.
                         // Removed sessions have nothing left to reconcile.
-                        let targets = targets_rx.borrow_and_update();
+                        // Copy out of the borrow: the loop below takes the
+                        // runtime owner lock, and the owner publishes to this
+                        // channel while holding it, so a held borrow deadlocks.
+                        let targets = targets_rx.borrow_and_update().clone();
                         renewals.sync(&targets, &renewals_env);
                         let next: BTreeMap<_, _> = targets.iter()
                             .map(|target| (target.session_id.clone(), target.clone()))
