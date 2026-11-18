@@ -318,10 +318,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             .operational_state()
             .goal,
         request: config.goal_resume_request.clone(),
-        admission: Some(crate::acp::relay_goal_admission(
-            relay.clone(),
-            events_tx.clone(),
-        )),
         journal: Some(mj_core::goal::GoalJournal({
             let relay = relay.clone();
             Arc::new(move |update| {

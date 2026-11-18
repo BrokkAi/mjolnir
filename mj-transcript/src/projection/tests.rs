@@ -348,7 +348,7 @@ fn golden_plan_proposal_transcript() {
         &mut conversation,
         RelayObservation::ElicitationResolved {
             elicitation_id: question.id,
-            action: "cancel".into(),
+            action: "closed".into(),
             reply: None,
         },
     );

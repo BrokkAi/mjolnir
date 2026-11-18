@@ -254,7 +254,6 @@ def trim_middle(text):
 # `GeneratedPrompt::ALL`, in the same order.
 GENERATED_PROMPT_PREFIXES = (
     "auto-continue-",
-    "auto-goal-resume-",
     "quota-retry-",
     "auth-retry-",
     "review-forward-",

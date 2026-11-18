@@ -854,26 +854,15 @@ pub(super) async fn serve_session(
         }
     }
 
-    let mut goal_recovery = Some(Box::pin(goal::recover(
+    let mut goal_question = goal::recover(
         goal_recovery_supported,
         connection,
         &session_id,
         spec,
         events,
         config_recovery.is_some(),
-    )));
-    let mut goal_question = None;
-    // Standalone ACP users have no relay queue to admit through. Preserve
-    // their existing serialized startup; workers always install admission.
-    let relay_admission = spec
-        .goal_recovery
-        .lock()
-        .expect("goal lock poisoned")
-        .admission
-        .is_some();
-    if !relay_admission {
-        goal_question = goal_recovery.take().expect("startup goal recovery").await?;
-    }
+    )
+    .await?;
     let mut goal_controls = goal::PendingControls::default();
     // An idle OpenCode session reloads to import changed logins. Only here,
     // between commands, and only with nothing waiting on an answer, the same
@@ -886,17 +875,8 @@ pub(super) async fn serve_session(
         let may_reload = spec.imported_logins.is_some()
             && goal_controls.is_empty()
             && config_recovery.is_none()
-            && goal_question.is_none()
-            && goal_recovery.is_none();
+            && goal_question.is_none();
         let request = tokio::select! {
-            // Capture recovery intent before the first queued request can
-            // make the native session report that ordinary prompt as running.
-            biased;
-            result = async { goal_recovery.as_mut().expect("guarded goal recovery").await }, if goal_recovery.is_some() => {
-                goal_recovery = None;
-                goal_question = result?;
-                continue;
-            }
             event = goal_controls.next(), if !goal_controls.is_empty() => {
                 emit_runtime_event(events, event).await?;
                 continue;
@@ -1506,7 +1486,7 @@ pub(super) async fn serve_session(
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
                                     let outcome = cancel_prompt_turn(connection, &session_id, terminals, pending_elicitations)
                                         .map_err(|error| format!("cancel ACP prompt: {error}"));
-                                    drop(permission);
+                                    permission.cancel();
                                     if outcome.is_ok() && cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }

@@ -788,8 +788,10 @@ where
                         }
                         if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                             elicitation_id: id,
-                            action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
-                            reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
+                            action: response.as_ref().map_or("closed", PendingAnswer::action_name).into(),
+                            reply: response.as_ref().and_then(PendingAnswer::human)
+                                .filter(|response| **response != ElicitationResponse::Cancel)
+                                .map(|response| form.reply_text(response)),
                         }).await {
                             tracing::debug!(%error, "harness permission result receiver closed");
                         }
@@ -1352,7 +1354,7 @@ pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
 }
 
 /// The id prefix of a permission request shown as a form.
-pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+pub(super) use mj_core::elicitation::TOOL_PERMISSION_ID_PREFIX;
 
 /// Describe a failed ACP connection. The hint about stray bridge output only
 /// helps when the connection itself broke or could not parse what the bridge

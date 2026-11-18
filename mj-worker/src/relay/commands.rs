@@ -304,6 +304,14 @@ impl DurableRelay {
         command_id: &str,
         command: RelayCommand,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
+        if mj_core::continuation::is_restart_continuation(command_id) {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "command ID prefix auto-continue-restart- is reserved for worker restart recovery",
+                false,
+                None,
+            )));
+        }
         if let Err(error) =
             ensure_serialized_budget(&command, RELAY_COMMAND_BYTE_BUDGET, "relay command")
         {
@@ -1955,15 +1963,9 @@ impl DurableRelay {
         }
         self.require_dispatch(command_id)?;
         let command = self.snapshot.dispatches[command_id].command.kind();
-        let (continuation_id, recovery_warning) =
-            if reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted {
-                match self.restart_continuation_for(command_id) {
-                    Ok(id) => (id, None),
-                    Err(warning) => (None, Some(warning)),
-                }
-            } else {
-                (None, None)
-            };
+        let continuation_id = (reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted)
+            .then(|| self.restart_continuation_for(command_id))
+            .flatten();
         let observation = RelayObservation::CommandInterrupted {
             continuation_id,
             reason: Some(reason),
@@ -2018,11 +2020,6 @@ impl DurableRelay {
             }
             Err(error) => return Err(error),
         };
-        if let Some(message) = recovery_warning {
-            self.record_observation(RelayObservation::Warning {
-                message: message.into(),
-            })?;
-        }
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
@@ -2037,26 +2034,15 @@ impl DurableRelay {
     }
 
     /// The interruption event transfers this payload to recovery atomically.
-    fn restart_continuation_for(
-        &self,
-        command_id: &str,
-    ) -> std::result::Result<Option<String>, &'static str> {
+    fn restart_continuation_for(&self, command_id: &str) -> Option<String> {
         let dispatch = &self.snapshot.dispatches[command_id];
         if dispatch.command.kind() != RelayCommandKind::Prompt
             || dispatch.state != RelayDispatchState::InFlight
             || self.snapshot.cancelling_prompt_id.as_deref() == Some(command_id)
         {
-            return Ok(None);
+            return None;
         }
-        // Native goals resume through controls, not generated relay prompts.
-        // They do not replace an ordinary request interrupted alongside them.
-        let id = restart_continuation_id(command_id);
-        if self.snapshot.handled_commands.contains_key(&id) {
-            return Err(
-                "The turn could not be resumed automatically because its recovery command ID is already occupied. Continue the task manually.",
-            );
-        }
-        Ok(Some(id))
+        Some(restart_continuation_id(command_id))
     }
 
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {
@@ -2191,88 +2177,6 @@ impl DurableRelay {
         })
     }
 
-    #[cfg(unix)]
-    pub(crate) fn existing_automatic_goal_resume(
-        &self,
-        goal: &mj_core::goal::GoalSnapshot,
-    ) -> Option<String> {
-        self.snapshot
-            .dispatches
-            .keys()
-            .find(|id| goal.matches_resume_command(id))
-            .cloned()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn automatic_goal_resume_needed(&self, goal: &mj_core::goal::GoalSnapshot) -> bool {
-        let state = &self.snapshot.goal;
-        state.snapshot.as_ref().is_some_and(|current| {
-            current.same_goal(goal)
-                && (current.active()
-                    || (matches!(current.status.as_str(), "active" | "paused")
-                        && state.decision.as_ref().is_some_and(|decision| {
-                            decision.resume && current.same_goal(&decision.goal)
-                        })))
-        })
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn can_admit_automatic_goal_resume(&self) -> bool {
-        self.is_acp_ready()
-            && !self.checkpoint_only
-            && !self.turn_in_progress()
-            && !self.unfinished_dispatch()
-            && self.snapshot.queued_prompts.is_empty()
-            && !self.mailbox_wake_is_allowed()
-            && !matches!(
-                self.snapshot.execution,
-                RelayExecutionState::Closing | RelayExecutionState::Closed
-            )
-    }
-
-    /// The accepted control is the busy fact before the owner lock is released.
-    #[cfg(unix)]
-    pub(crate) fn admit_automatic_goal_resume(
-        &mut self,
-        goal: &mj_core::goal::GoalSnapshot,
-    ) -> Result<Option<String>> {
-        if !self.can_admit_automatic_goal_resume() || !self.automatic_goal_resume_needed(goal) {
-            return Ok(None);
-        }
-        let id = goal.resume_command_id(self.latest_ordinal())?;
-        self.submit_command(
-            &id,
-            RelayCommand::GoalControl {
-                action: mj_core::goal::GoalControlAction::Resume,
-            },
-        )?
-        .map_err(|error| anyhow!("admit automatic goal resume: {error:?}"))?;
-        Ok(Some(id))
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn automatic_goal_resume_result(&self, id: &str) -> Option<Result<()>> {
-        let receipt = self.snapshot.handled_commands.get(id)?;
-        receipt.terminal_ordinal?;
-        Some(if let Some(failure) = &receipt.failure {
-            Err(anyhow!("{failure}"))
-        } else if receipt.outcome == Some(RelayCommandOutcome::GoalControlled) {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "automatic goal resume ended without a control acknowledgement"
-            ))
-        })
-    }
-
-    fn automatic_goal_resume_outstanding(&self) -> bool {
-        self.snapshot.dispatches.iter().any(|(id, _)| {
-            mj_core::continuation::GeneratedPrompt::GoalResume
-                .suffix(id)
-                .is_some()
-        })
-    }
-
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
@@ -2288,7 +2192,6 @@ impl DurableRelay {
         // configuration changes while its prompt loop is running.
         if self.checkpoint_only
             || (recovery.is_some() && !self.is_acp_ready())
-            || self.automatic_goal_resume_outstanding()
             || self.turn_in_progress()
             // A cancel can outlive its prompt result. Drain it before a
             // replacement turn starts, so it cannot reach the newer turn.

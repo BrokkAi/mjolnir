@@ -36,8 +36,6 @@ use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
 mod claude_usage;
 mod goal;
-#[cfg(unix)]
-pub(crate) use goal::relay_goal_admission;
 mod grok_usage;
 #[cfg(test)]
 mod grok_usage_tests;
@@ -471,17 +469,7 @@ async fn run_inner(
                 spec.native_session_may_have_history || restart.native_session_used,
                 spec.goal_recovery.clone(),
             ));
-            // Clear conversation state, retaining the worker's journal and
-            // admission wiring across this and subsequent bridge replacements.
-            let cleared_goal = {
-                let current = spec.goal_recovery.lock().expect("goal lock poisoned");
-                mj_core::goal::GoalRecoveryContext {
-                    journal: current.journal.clone(),
-                    admission: current.admission.clone(),
-                    ..Default::default()
-                }
-            };
-            spec.goal_recovery = Arc::new(Mutex::new(cleared_goal));
+            spec.goal_recovery = Arc::new(Mutex::new(Default::default()));
             spec.clear_context_request = Some(request_id);
             spec.resume_session = None;
             spec.native_session_may_have_history = false;

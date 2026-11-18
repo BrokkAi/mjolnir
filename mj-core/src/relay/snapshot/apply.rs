@@ -734,11 +734,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::ClearContext
                 | RelayCommand::GoalControl { .. }
                 | RelayCommand::RestoreExecutionMode
-                | RelayCommand::SetSessionMode { .. }
-                    if crate::continuation::GeneratedPrompt::GoalResume
-                        .suffix(command_id)
-                        .is_none() =>
-                {
+                | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
                     snapshot.continuation.quota_suppressed = true;
                     snapshot.continuation.withdrawn_ordinal = Some(event.ordinal);
@@ -746,10 +742,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 _ => {}
             }
             // A quota goal resume is automatic work, not the user taking over.
-            let user_control = !crate::continuation::is_quota_goal_resume(command_id)
-                && crate::continuation::GeneratedPrompt::GoalResume
-                    .suffix(command_id)
-                    .is_none();
+            let user_control = !crate::continuation::is_quota_goal_resume(command_id);
             // A checkpoint barrier is Mjolnir's own housekeeping (a routine
             // copy, a worker replacement, a file write), not the user taking
             // over, so it leaves a scheduled recovery alone (F18).
@@ -2227,7 +2220,20 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     use crate::assessment::{Status, TurnAssessment};
     let mut delivered = None;
     match &event.observation {
-        RelayObservation::CommandStarted { command_id, .. } => delivered = Some(command_id),
+        RelayObservation::CommandStarted { command_id, .. } => {
+            if snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| dispatch.command.kind() == RelayCommandKind::Prompt)
+            {
+                // A withdrawn old permission may resolve after the next turn
+                // starts. It must never mark that newer prompt cancelled.
+                snapshot
+                    .assessment_questions
+                    .retain(|id| !id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX));
+            }
+            delivered = Some(command_id);
+        }
         RelayObservation::CommandCompleted {
             outcome: RelayCommandOutcome::Steered { queued_command_id },
             ..
@@ -2280,10 +2286,21 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         RelayObservation::ElicitationResolved {
             elicitation_id,
+            action,
             reply,
-            ..
         } => {
-            snapshot.assessment_questions.remove(elicitation_id);
+            let pending = snapshot.assessment_questions.remove(elicitation_id);
+            if pending
+                && action == "cancel"
+                && elicitation_id.starts_with(crate::elicitation::TOOL_PERMISSION_ID_PREFIX)
+            {
+                // Permission Cancel and relay Cancel stop the same accepted
+                // prompt. Restart recovery reads this single durable fact.
+                snapshot.cancelling_prompt_id = snapshot
+                    .active_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.command_id.clone());
+            }
             if reply.is_some() {
                 clear_notifications(snapshot, event.ordinal);
                 if let Some(context) = &mut snapshot.assessment_context {

@@ -13,6 +13,9 @@ use serde_json::{Map, Value};
 /// Resolution action for a request refused while the operator is away.
 pub const OPERATOR_AWAY_ACTION: &str = "away";
 
+/// Worker-owned permission forms use this namespace in durable resolution records.
+pub const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+
 pub const MAX_ELICITATION_BYTES: usize = 64 * 1024;
 const MAX_FIELDS: usize = 32;
 const MAX_OPTIONS: usize = 100;

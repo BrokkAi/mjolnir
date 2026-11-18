@@ -206,14 +206,11 @@ generated_prompts! {
     ///
     /// A prompt that carries the person's own text (plan-review feedback, image
     /// pastes, startup prompts, `prompt-`, `web-prompt-`) is not generated, and
-    /// neither is an ordinary control command (`auto-steer-`, a user goal resume).
-    /// GoalResume also identifies the worker's automatic non-prompt control.
+    /// neither is a command that is not a prompt (`auto-steer-`, a goal resume).
     /// The id strings are stored in journals and transcripts; do not change them.
     pub enum GeneratedPrompt {
         /// Automatic continuation of unfinished work.
         AutoContinue => "auto-continue-",
-        /// Native goal resumption admitted by the worker after queued input.
-        GoalResume => "auto-goal-resume-",
         /// The retry a quota recovery submits.
         QuotaRetry => "quota-retry-",
         /// Resume a turn whose rejected Claude access token was replaced.

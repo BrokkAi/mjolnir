@@ -1772,6 +1772,7 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
 /// no one-time rejection offers no Skip. Cancel stops the turn, so the agent
 /// receives `session/cancel` before its request is answered `cancelled`.
 // Hard-won: #1313: Skip and Cancel on a permission form both told the agent its turn was cancelled.
+// Hard-won: 00050db89: user permission Cancel and bridge withdrawal need distinct durable actions.
 #[tokio::test]
 async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let mut probe = PlanProbe::with_harness(
@@ -1866,6 +1867,26 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     assert_eq!(answer["id"], "network-ask");
     assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
 
+    // A harness withdrawal is not a user stop and must not poison restart recovery.
+    let withdrawn = ask(&mut probe, "withdraw-ask", &codex_options).await;
+    probe.send(json!({"jsonrpc":"2.0", "method":"$/cancel_request", "params":{"requestId":"withdraw-ask"}})).await;
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "withdraw-ask");
+    assert_eq!(answer["result"]["outcome"], json!({"outcome":"cancelled"}));
+    loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            ..
+        } = probe.event().await
+            && elicitation_id == withdrawn.id
+        {
+            assert_eq!(action, "closed");
+            break;
+        }
+    }
+    probe.no_finish().await;
+
     let form = ask(&mut probe, "cancel-ask", &codex_options).await;
     probe
         .answer_with(&form.id, ElicitationResponse::Cancel)
@@ -1876,6 +1897,19 @@ async fn skip_rejects_only_the_tool_call_and_cancel_cancels_the_turn() {
     let answer = probe.message().await;
     assert_eq!(answer["id"], "cancel-ask");
     assert_eq!(answer["result"]["outcome"], json!({"outcome": "cancelled"}));
+    loop {
+        if let RuntimeEvent::ElicitationResolved {
+            elicitation_id,
+            action,
+            reply,
+        } = probe.event().await
+            && elicitation_id == form.id
+        {
+            assert_eq!(action, "cancel");
+            assert!(reply.is_none());
+            break;
+        }
+    }
     probe
         .result(&prompt, json!({"stopReason": "cancelled"}))
         .await;
