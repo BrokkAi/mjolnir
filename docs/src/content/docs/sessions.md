@@ -615,11 +615,16 @@ carries the text the search matched. That includes text that appears only inside
 a transcript, and a title or project the index knows, so a session you remember
 only by something said inside it is findable.
 
-The box is closed while the index cannot answer. It reads **Indexing…** during
-the first build and while Mjolnir rebuilds an index an older SessionWiki wrote.
-It names a version mismatch when a newer SessionWiki wrote the index file on
-disk (see [Match the `sessionwiki` version](#match-the-sessionwiki-version)).
-Either way the tabs and row navigation keep working.
+Opening the dialog starts an index sync. Its results title shows the tool being
+scanned, then a progress bar and session counts. You can search while it runs;
+the current query runs again when that sync finishes, so recent messages appear
+without retyping. The Sessions filter works the same way: its first text starts
+a sync, with progress below the create/open/filter row. Clearing the filter
+ends that search episode. A failed sync shows its error in the same place.
+
+Only an index written by a newer SessionWiki closes the history search box
+(see [Match the `sessionwiki` version](#match-the-sessionwiki-version)). The
+tabs and row navigation keep working while the index builds.
 
 ### The Archived tab
 
@@ -667,17 +672,17 @@ sessions survive a rebuild, but re-indexing takes tens of minutes on a large
 corpus.
 
 When an older SessionWiki wrote the index, Mjolnir rebuilds it at its own
-version and the box reads **Indexing…** until that finishes. A `sessionwiki`
+version and shows sync progress while that finishes. A `sessionwiki`
 command older than 0.34.1 rebuilds it back the next time it runs, so the two
 take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `brokk-sessionwiki` crate, version 0.34.25. Install the
+This build links the `brokk-sessionwiki` crate, version 0.34.27. Install the
 matching tool with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.34.25
+cargo install --locked brokk-sessionwiki@0.34.27
 ```
 
 If you installed the `sessionwiki` package for an earlier Mjolnir build, remove
