@@ -13,8 +13,8 @@ After this work the same code lives in three crates stacked by dependency: a sto
 - [x] (2026-11-18 05:45Z) Measured the current build and the references that cross each proposed boundary (see Context and Surprises).
 - [x] (2026-11-18 06:05Z) Added `scripts/check-controller-layers.py`, which lists the upward reference sites.
 - [x] (2026-11-18 07:10Z) Milestone 1: no production code below the top layer names it (125 sites at the start). The check enforces this in the `licenses` job of `.github/workflows/ci.yml`. 23 test-only references remain and are Milestone 2 work: each such test moves to `mj-daemon` with the fixtures it needs.
-- [ ] Owner publishes placeholder `brokk-mj-daemon` and `brokk-mj-store` crates and configures their trusted publishers (blocks Milestones 2 and 4 from landing on master; see Decision Log).
-- [ ] Milestone 2: move the top layer into `mj-daemon` (`brokk-mj-daemon`).
+- [x] (2026-11-18) Owner published `0.0.0` placeholders of `brokk-mj-daemon` and `brokk-mj-store` and configured their trusted publishers.
+- [x] (2026-11-18) Milestone 2: the top layer is `mj-daemon` (`brokk-mj-daemon`). The CI `tests` matrix tests it on its own runner (part of Milestone 5), and `scripts/check-controller-layers.py` now checks only the storage boundary, since the compiler enforces the daemon one.
 - [ ] Milestone 3: cut every reference from the storage modules up into the rest, inside `mj-controller`.
 - [ ] Milestone 4: move the storage layer into `mj-store` (`brokk-mj-store`).
 - [ ] Milestone 5: one CI test shard per crate; measure and record the result.
@@ -35,6 +35,12 @@ After this work the same code lives in three crates stacked by dependency: a sto
 
 - Observation: three kinds of cut were needed in Milestone 1, and only the first was foreseen. Pure helpers and plain types moved down (`ProfileCatalog`, the startup-step types, the wait policy with the five types it reads, the signing key, the retry delay). Files that were daemon services filed under lower modules moved up whole or in part (`review_host`, `github_watch`, `observe`, the mbx reconcile loop, and the delivery loops of `web_push` and `mailbox_outbox`). Credential sync could do neither: its tests are interleaved with the rest of `worker_client`'s, so it now reads the daemon's six facts through the `CredentialSyncRuntime` trait, which `RuntimeState` implements.
   Evidence: commits `b5539b1bf` through `2bfd3b2ac` on master.
+
+- Observation: making a `pub(crate)` method invisible can silently change which method a call resolves to. `mj_daemon::github_watch::service` implements a local trait for `Classifier` whose `classify` calls `self.classify(...)`; with the inherent `pub(crate) fn classify` out of reach, the call resolved to the trait method itself, and only the `unconditional_recursion` lint caught it. Every crate-private inherent method whose name a daemon call could also match on a trait was made public (55) so resolution is unchanged.
+  Evidence: the warning "function cannot return without recursing" at `mj-daemon/src/github_watch/service.rs` before the fix.
+- Observation: mj-controller's `cfg(test)` code changes production behaviour, not only adds helpers: `controller::mbx::release::enabled` is false in tests so teardown never runs this machine's mbx, `image_pull_gate` writes no lock file into the developer's data directory, `database::schema::open_reader` and `session_manager::recovery` differ too. The daemon tests ran against that behaviour when they were in the same crate. Every such gate in mj-controller's production files now reads `any(test, feature = "test-support")`, except the gates on test modules themselves, and mj-daemon's tests enable the feature.
+- Observation: tests that need a worker relay without a worker run their own test binary again as the relay, by exact test name (`controller::checkpoint::tests::latch_relay_child_serves_stdio`, `session_manager::tests::leased_relay_child_serves_stdio`). A name that exists in one test binary does not exist in another. The relay servers moved to `mj_worker::stand_in_relay` (mj-worker's existing `test-hooks` feature), their environment to `mj_core::test_hooks::{latch_relay, leased_relay}`, and both test binaries define the same two wrapper tests under `stand_in_relay::`.
+- Observation: fixtures shared by tests that stay and tests that move are the hard part, because a fixture that names both mj-controller's private types and mj-worker can live in neither library. Twelve tests in mj-controller called into the top layer; nine moved to `mj-daemon/src/controller_tests/`. Their shared helpers moved to `test_fixtures` modules behind `test-support` (`controller::move_session`, `controller::lifecycle`, `worker_client`); `seed_source_relay` moved to `mj_worker::stand_in_relay`; the move fixtures' executor takes mj-worker's two checkpoint functions as function pointers from each test binary. Helpers that read `module_path!()` (`test_name`, `in_isolated_store`, `exact_test_name`) stay as three-line wrappers in each file. Ryan Svihla expects to revisit this test-fixture structure.
 
 ## Decision Log
 
@@ -58,9 +64,16 @@ After this work the same code lives in three crates stacked by dependency: a sto
   Rationale: moving `worker_client/credential_sync.rs` up would have meant separating its tests from a 6,100-line shared test file by hand. The daemon still owns every fact and sync still asks at the moment it acts, so no state is copied; `server_runtime::api::ExportRuntime` is an existing trait of the same kind in this crate.
   Date/Author: 2026-11-18, Claude.
 
+- Decision: move `ViewerMoveRecovery` and `from_operation` from `server::viewer_types` down to `controller::move_session`, re-exported from the server.
+  Rationale: it is a pure projection of the `MoveOperation` the controller owns, and four move tests that otherwise had to leave mj-controller with their fixtures only reached the server for it; three of them now stay. The alternatives were sharing test sources across crates with `#[path]` or rewriting the tests' final checks.
+  Date/Author: 2026-11-18, Claude proposed; Ryan Svihla agreed.
+- Decision: mj-controller gains a `test-support` feature (enables `mj-core/test-hooks`) that compiles its test-only items into the library for mj-daemon's tests, and allows `dead_code`/`unused_imports` only in that feature-on, non-test build.
+  Rationale: tests in one crate cannot see `#[cfg(test)]` items of another, and the daemon tests must run against the same test-time behaviour as before (see Surprises).
+  Date/Author: 2026-11-18, Claude.
+
 ## Outcomes & Retrospective
 
-Nothing shipped yet.
+Milestone 2 (2026-11-18): `mj-daemon` holds `daemon`, `server`, `server_runtime`, `pollers`, `web_viewer`, `recovery`, `worker_upgrade`, `review_host`, `github_watch`, `observe`, the viewer assets and their goldens. Before the move `cargo test -p brokk-mj-controller` ran 2807 tests: 2774 passed, 5 failed, 28 ignored. After it, mj-controller runs 1845 (1814 passed, the same 5 failed, 26 ignored) and mj-daemon runs 964 (962 passed, 2 ignored); the two extra are the `stand_in_relay` wrapper tests that mj-daemon's binary now defines too. Every test name from before is present after. The 5 failures are `controller::worker_binary` install tests that fail on master as well.
 
 ## Context and Orientation
 

@@ -1,0 +1,271 @@
+use super::*;
+use tower_http::compression::{CompressionLayer, CompressionLevel};
+
+#[derive(Clone)]
+pub(super) struct ServerState {
+    pub(super) snapshot_rx: watch::Receiver<ViewerSnapshot>,
+    pub(super) viewer_history: viewer_feed::ViewerHistoryHandle,
+    pub(super) conversation_rx:
+        watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
+    pub(super) action_tx: mpsc::Sender<ControllerRequest>,
+    pub(super) bundle_tx: mpsc::Sender<BundleRequest>,
+    pub(super) receipt_tx: mpsc::Sender<ReadReceiptRequest>,
+    pub(super) preflight_tx: mpsc::Sender<PreflightRequest>,
+    pub(super) move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
+    pub(super) client_state_tx: mpsc::Sender<ClientStateRequest>,
+    pub(super) background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
+    pub(super) shutdown: CancellationToken,
+    pub(super) image_builds: mj_controller::session_images::ImageBuilds,
+    pub(super) viewer_code: Arc<str>,
+    pub(super) login_token: Arc<str>,
+    pub(super) cookie_key: Arc<[u8]>,
+    pub(super) viewer_revocations: Arc<ViewerRevocations>,
+    pub(super) session_ttl: Duration,
+    pub(super) secure_cookie: bool,
+    pub(super) code_guard: Arc<Mutex<CodeGuard>>,
+    pub(super) api_token: Arc<str>,
+    pub(super) subagent: Option<Arc<dyn api::SubagentBackend>>,
+    /// Where the remembered fast-start preferences live, so a handler can
+    /// report the saved default without reading the process environment.
+    pub(super) preferences_path: PathBuf,
+    /// Local container engine checks for the launch options route.
+    pub(super) engine_checks: Arc<api::LocalEngineChecks>,
+    /// Why a target has no installable worker binary, if it has none.
+    pub(super) worker_source_check: Option<WorkerSourceCheck>,
+    /// Prompts held until startup or lifecycle work lets their session take them.
+    pub(super) held_prompts: Arc<api::HeldPrompts>,
+    pub(super) upgrade_gate: Arc<mj_controller::upgrade::Gate>,
+}
+
+impl ServerState {
+    /// Whether the shutdown now under way is an automatic upgrade handoff: the
+    /// gate closes only for one, never for an explicit stop. A long request the
+    /// shutdown ends answers so that its client follows the next daemon.
+    pub(super) fn handing_off(&self) -> bool {
+        !self.upgrade_gate.is_open()
+    }
+}
+
+/// Online-guessing defence for the deliberately small viewer code.
+///
+/// Five wrong codes lock the endpoint, and each further lockout lasts twice as
+/// long as the one before it, up to an hour. The escalation count survives an
+/// expired lockout, so a script cannot recover its full allowance by waiting;
+/// a correct code clears the whole history, so one mistyped digit still costs
+/// at most a single short wait.
+#[derive(Debug, Default)]
+pub(super) struct CodeGuard {
+    pub(super) failures: u32,
+    pub(super) lockouts: u32,
+    pub(super) locked_until: Option<Instant>,
+}
+
+impl CodeGuard {
+    pub(super) fn locked_at(&mut self, now: Instant) -> bool {
+        match self.locked_until {
+            Some(until) if now < until => true,
+            Some(_) => {
+                // The wait is served: allow a fresh run of attempts, but keep
+                // the escalation history that makes the next wait longer.
+                self.locked_until = None;
+                self.failures = 0;
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn record_failure_at(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures < MAX_CODE_FAILURES {
+            return;
+        }
+        self.failures = 0;
+        self.lockouts = self.lockouts.saturating_add(1);
+        self.locked_until = Some(now + code_lockout(self.lockouts));
+    }
+}
+
+/// Doubling backoff, capped so the owner of a locked-out server is never shut
+/// out for longer than it takes to notice.
+pub(super) fn code_lockout(lockouts: u32) -> Duration {
+    let multiplier = 1_u32
+        .checked_shl(lockouts.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    CODE_LOCKOUT_BASE
+        .saturating_mul(multiplier)
+        .min(CODE_LOCKOUT_CAP)
+}
+
+pub(super) fn router(options: ServerOptions) -> Router {
+    let state = ServerState {
+        snapshot_rx: options.snapshot_rx,
+        viewer_history: options.viewer_history,
+        conversation_rx: options.conversation_rx,
+        action_tx: options.action_tx,
+        bundle_tx: options.bundle_tx,
+        receipt_tx: options.receipt_tx,
+        preflight_tx: options.preflight_tx,
+        move_preparation_tx: options.move_preparation_tx,
+        client_state_tx: options.client_state_tx,
+        background_task_stop_tx: options.background_task_stop_tx,
+        shutdown: options.shutdown,
+        image_builds: options.image_builds,
+        viewer_code: options.viewer_code.into(),
+        login_token: options.login_token.into(),
+        cookie_key: options.cookie_key.into(),
+        viewer_revocations: options.viewer_revocations,
+        session_ttl: options.session_ttl,
+        secure_cookie: options.secure_cookie,
+        code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+        api_token: options.api_token.into(),
+        subagent: options.subagent,
+        preferences_path: options.preferences_path,
+        engine_checks: options.engine_checks,
+        worker_source_check: options.worker_source_check,
+        held_prompts: Arc::new(api::HeldPrompts::default()),
+        upgrade_gate: options.upgrade_gate,
+    };
+    let upgrade_gate = state.upgrade_gate.clone();
+    let protected = Router::new()
+        .route("/api/push/key", get(push_key))
+        .route("/api/push/status", get(push_device_status))
+        .route("/api/snapshot", get(snapshot))
+        .route("/api/sessions/{session_id}/row", get(session_row))
+        .route(
+            "/api/sessions/{session_id}/notification-message",
+            get(notification_message),
+        )
+        .route("/api/conversations/{session_id}", get(conversation))
+        .route(
+            "/api/conversations/{session_id}/read",
+            post(mark_conversation_read),
+        )
+        .route("/api/events", get(events))
+        .route("/api/bundles", post(create_bundle))
+        .route("/api/preflight/new", post(preflight_new))
+        .route("/api/preflight/resume", post(preflight_resume))
+        .route("/api/paths/complete", post(complete_path))
+        .route("/api/projects/discover", post(discover_projects))
+        .route("/api/projects", get(read_projects).post(refresh_projects))
+        .route(
+            "/api/git-identity",
+            get(read_git_identity).post(save_git_identity),
+        )
+        .route("/api/moves/prepare", post(prepare_move))
+        .route(
+            "/api/sessions/{session_id}/container-upgrade",
+            get(preview_container_upgrade),
+        )
+        .route("/api/sessions/{session_id}/client-state", get(client_state))
+        .route(
+            "/api/sessions/{session_id}/background-tasks/stop",
+            post(stop_background_task),
+        )
+        .route(
+            "/api/sessions/{session_id}/attachments",
+            post(upload_attachment).layer(named_body_limit(MAX_ATTACHMENT_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/sessions/{session_id}/draft",
+            put(save_draft).layer(named_body_limit(MAX_PROMPT_TEXT_BODY_BYTES)),
+        )
+        .route("/api/sessions/{session_id}/history", get(prompt_history))
+        .route(
+            "/api/workspaces/{workspace_id}/read",
+            post(mark_workspace_read),
+        )
+        .route(
+            "/api/actions",
+            post(action).layer(named_body_limit(MAX_PROMPT_BODY_BYTES)),
+        )
+        // Configuration is edited here, on the cookie-only surface, and never
+        // through `/api/actions` or `/api/v1`; see `settings.rs`.
+        .route("/api/settings", get(read_settings))
+        .route(
+            "/api/settings/page",
+            post(render_settings_page).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/api/settings/edit",
+            post(edit_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route(
+            "/api/settings/save",
+            post(save_settings).layer(named_body_limit(MAX_SETTINGS_BODY_BYTES)),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+    Router::new()
+        .route("/", get(viewer))
+        .route("/login", get(viewer))
+        .route("/viewer.css", get(viewer_css))
+        .route("/viewer.js", get(viewer_js))
+        .route("/push-sync.js", get(push_sync_js))
+        .route("/markdown.js", get(markdown_js))
+        .route("/tool-output.js", get(tool_output_js))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/service-worker.js", get(service_worker))
+        .route("/icon.svg", get(icon))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
+        .route("/maskable-512.png", get(maskable_512))
+        .route("/apple-touch-icon.png", get(apple_touch_icon))
+        .route("/fonts/jetbrains-mono.woff2", get(mono_font))
+        .route(
+            "/auth/session",
+            get(session_status)
+                .post(create_session)
+                .delete(clear_session),
+        )
+        .route("/auth/login", get(create_session_from_query))
+        .merge(protected)
+        .nest("/api/v1", api::router(state.clone()))
+        .layer(named_body_limit(MAX_BODY_BYTES))
+        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
+        .layer(axum::middleware::from_fn(finalize_static_etag))
+        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            upgrade_gate,
+            upgrade_admission,
+        ))
+        .with_state(state)
+}
+
+/// Reject new HTTP work after handoff admission closes. An open request or
+/// unread response does not own the daemon; accepted operations hold their
+/// own upgrade permits in the server runtime.
+pub(super) async fn upgrade_admission(
+    State(gate): State<Arc<mj_controller::upgrade::Gate>>,
+    request: Request,
+    next: Next,
+) -> Response<Body> {
+    if !gate.is_open() {
+        return upgrade_pending_response();
+    }
+    next.run(request).await
+}
+
+/// The refusal a viewer request gets when handoff admission is closed. The
+/// browser keeps the request and sends it again to the next daemon.
+pub(super) fn upgrade_pending_response() -> Response<Body> {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "1"), (UPGRADE_HEADER, "pending")],
+        "Mjolnir is completing an upgrade",
+    )
+        .into_response()
+}
+
+pub(super) async fn require_session(
+    State(state): State<ServerState>,
+    request: Request,
+    next: Next,
+) -> Result<Response<Body>, ApiError> {
+    let cookie = authenticated_viewer(&state, request.headers())?;
+    let mut response = next.run(request).await;
+    renew_viewer_response(&state, &cookie, &mut response)?;
+    Ok(response)
+}

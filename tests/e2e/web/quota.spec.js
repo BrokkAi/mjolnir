@@ -4,7 +4,7 @@ const path = require('node:path');
 
 test.use({ timezoneId: 'UTC' });
 
-const root = path.resolve(__dirname, '../../../mj-controller/src/web');
+const root = path.resolve(__dirname, '../../../mj-server/src/web');
 const source = fs.readFileSync(path.join(root, 'viewer.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'viewer.css'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'viewer.html'), 'utf8');

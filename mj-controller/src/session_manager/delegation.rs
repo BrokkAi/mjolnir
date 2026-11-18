@@ -4,7 +4,7 @@ use mj_core::state::MaterializedTurnOutcome;
 use mj_core::subagent::SubagentToolRequest;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DelegationObservation {
+pub struct DelegationObservation {
     pub requests: mj_core::snapshot_map::SharedSnapshot<Vec<SubagentToolRequest>>,
     pub completed: Vec<String>,
     /// Present only once the worker has resolved this ending, including its
@@ -24,7 +24,7 @@ pub(crate) struct DelegationObservation {
 impl DelegationObservation {
     /// The handback requests this session's worker queue holds that the worker
     /// has not completed. The queue owns a request until the daemon executes it.
-    pub(crate) fn queued_handbacks(&self) -> Vec<String> {
+    pub fn queued_handbacks(&self) -> Vec<String> {
         self.requests
             .iter()
             .filter(|request| {
@@ -37,7 +37,7 @@ impl DelegationObservation {
             .collect()
     }
 
-    pub(crate) fn from_view(view: &ManagedSessionView) -> Option<Self> {
+    pub fn from_view(view: &ManagedSessionView) -> Option<Self> {
         let snapshot = view.snapshot.as_ref()?;
         Some(Self {
             requests: snapshot.subagent_requests.clone(),
@@ -93,21 +93,21 @@ impl Mailbox {
 }
 
 #[derive(Clone)]
-pub(crate) struct DelegationSender {
+pub struct DelegationSender {
     mailbox: Arc<Mutex<Mailbox>>,
     wake: mpsc::Sender<()>,
 }
-pub(crate) struct DelegationUpdates {
+pub struct DelegationUpdates {
     mailbox: Arc<Mutex<Mailbox>>,
     wake: mpsc::Receiver<()>,
 }
-pub(crate) struct DelegationPublisher {
+pub struct DelegationPublisher {
     sender: DelegationSender,
     session: String,
     generation: u64,
 }
 impl DelegationSender {
-    pub(crate) fn register(&self, session: &str) -> Arc<DelegationPublisher> {
+    pub fn register(&self, session: &str) -> Arc<DelegationPublisher> {
         let mut mailbox = self.mailbox.lock().expect("delegation mailbox poisoned");
         mailbox.next_generation += 1;
         let generation = mailbox.next_generation;
@@ -126,7 +126,7 @@ impl DelegationSender {
     }
 }
 impl DelegationPublisher {
-    pub(crate) fn publish(&self, view: &ManagedSessionView) {
+    pub fn publish(&self, view: &ManagedSessionView) {
         // A disconnected view is not evidence that durable requests disappeared.
         let Some(value) = DelegationObservation::from_view(view) else {
             return;
@@ -166,7 +166,7 @@ impl Drop for DelegationPublisher {
     }
 }
 impl DelegationUpdates {
-    pub(crate) async fn recv(&mut self) -> Option<(String, Option<DelegationObservation>)> {
+    pub async fn recv(&mut self) -> Option<(String, Option<DelegationObservation>)> {
         loop {
             {
                 let mut mailbox = self.mailbox.lock().expect("delegation mailbox poisoned");
@@ -182,7 +182,7 @@ impl DelegationUpdates {
         }
     }
 }
-pub(crate) fn delegation_channel() -> (DelegationSender, DelegationUpdates) {
+pub fn delegation_channel() -> (DelegationSender, DelegationUpdates) {
     let mailbox = Arc::new(Mutex::new(Mailbox::default()));
     let (tx, rx) = mpsc::channel(1);
     (

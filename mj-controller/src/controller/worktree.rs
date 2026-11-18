@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use mj_core::config::ProjectRepository;
 use mj_core::config::{Config, TargetTemplate};
 use mj_core::local_git::canonical_repository;
@@ -30,7 +30,7 @@ pub(super) struct PreparedManagedCheckout {
 }
 
 impl PreparedManagedCheckout {
-    pub(super) fn execute(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<()> {
         create_managed_worktree(
             executor,
             &self.worktree,
@@ -313,7 +313,7 @@ impl Controller {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn prepare_managed_raw_worktree(
         &mut self,
         session_id: &str,
@@ -1105,7 +1105,7 @@ fn accepted_project_snapshot(
 
 /// Resolve where a raw session's checkout lives and which accepted bundle
 /// repository it represents. Reads Git; changes nothing.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn plan_raw_to_workspace(
     session: &SessionRecord,
     executor: &impl CommandExecutor,
@@ -1385,7 +1385,7 @@ fn git_runner_stdout(
 
 /// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
 /// and asks the remote for its default branch; changes nothing.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn raw_conversion_preview(
     session: &SessionRecord,
     conversion: &RawToWorkspaceConversion,
@@ -1813,7 +1813,7 @@ pub(super) fn managed_worktree_base_commit(
 
 /// Read where a raw session's checkout stands right now, on whichever host
 /// owns it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn raw_checkout_position(
     session: &SessionRecord,
     config: &Config,
@@ -2067,7 +2067,7 @@ fn ensure_managed_worktree_excluded(
     Ok(())
 }
 
-pub(crate) fn path_exists_on_managed_target(
+pub fn path_exists_on_managed_target(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     path: &Path,

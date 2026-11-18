@@ -13,7 +13,7 @@ use crate::targets::CommandExecutor;
 /// A worker mutation capability derived from the session owner's admission.
 /// Blocking work retains it even when its async waiter disappears.
 #[derive(Clone)]
-pub(crate) struct WorkerPermit(Arc<Admission>);
+pub struct WorkerPermit(Arc<Admission>);
 
 struct Admission {
     admission: SessionAdmission,
@@ -28,14 +28,14 @@ thread_local! {
     static BLOCKING_OWNER: RefCell<Option<WorkerPermit>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn capture() -> Option<WorkerPermit> {
+pub fn capture() -> Option<WorkerPermit> {
     ASYNC_OWNER
         .try_with(Clone::clone)
         .ok()
         .or_else(|| BLOCKING_OWNER.with(|owner| owner.borrow().clone()))
 }
 
-pub(crate) fn current(session_id: &str) -> Option<WorkerPermit> {
+pub fn current(session_id: &str) -> Option<WorkerPermit> {
     ASYNC_OWNER
         .try_with(Clone::clone)
         .ok()
@@ -148,16 +148,16 @@ impl WorkerPermit {
 }
 
 impl WorkerPermit {
-    pub(crate) fn session_id(&self) -> &str {
+    pub fn session_id(&self) -> &str {
         &self.0.session_id
     }
-    pub(crate) fn operation_id(&self) -> &str {
+    pub fn operation_id(&self) -> &str {
         &self.0.operation_id
     }
 
     /// Admission is decided only by RecoveryGate. Nested mutations retain
     /// their operation identity; a fresh capability retains the caller's hold.
-    pub(crate) fn acquire(session_id: &str, admission: &impl HoldsSession) -> Result<Self> {
+    pub fn acquire(session_id: &str, admission: &impl HoldsSession) -> Result<Self> {
         let admission = admission.admission();
         ensure!(
             admission.session_id() == session_id,
@@ -177,11 +177,11 @@ impl WorkerPermit {
         &self.0.admission
     }
 
-    pub(crate) async fn scope<T>(&self, work: impl Future<Output = T>) -> T {
+    pub async fn scope<T>(&self, work: impl Future<Output = T>) -> T {
         ASYNC_OWNER.scope(self.clone(), work).await
     }
 
-    pub(crate) fn scope_blocking<T>(&self, work: impl FnOnce() -> T) -> T {
+    pub fn scope_blocking<T>(&self, work: impl FnOnce() -> T) -> T {
         struct Restore(Option<WorkerPermit>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -193,7 +193,7 @@ impl WorkerPermit {
     }
 }
 
-pub(crate) fn run<'a, T: 'a>(
+pub fn run<'a, T: 'a>(
     session_id: &'a str,
     reason: &'static str,
     _executor: &'a impl CommandExecutor,

@@ -142,7 +142,7 @@ impl ScopedAwsCredentials {
     /// request mints new ones: for a session whose credentials may have been
     /// refused, or lost from the worker. Blocking, like `credentials_for`: it
     /// waits for a mint in progress for the key.
-    pub(crate) fn forget(&self, session_id: &str, source: &AwsCredentialSource) {
+    pub fn forget(&self, session_id: &str, source: &AwsCredentialSource) {
         let Some(role) = source.role.as_ref() else {
             return;
         };
@@ -164,7 +164,7 @@ impl ScopedAwsCredentials {
     }
 
     /// Whether the cache holds credentials for the session.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn holds(&self, session_id: &str) -> bool {
         self.entries
             .lock()
@@ -314,7 +314,7 @@ static SCOPE_KEY: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Blocking: reads (or creates) the signing key on first use.
 fn scope_key() -> Result<&'static [u8]> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     anyhow::ensure!(
         !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
         "the signing key is unreadable (test)"
@@ -322,9 +322,9 @@ fn scope_key() -> Result<&'static [u8]> {
     if let Some(key) = SCOPE_KEY.get() {
         return Ok(key);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let root = b"test signing key, not a secret".to_vec();
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let root =
         crate::signing_key::load_or_create_cookie_key(&crate::signing_key::cookie_key_path())
             .context("read the controller's signing key")?;
@@ -339,7 +339,7 @@ fn scope_key() -> Result<&'static [u8]> {
 /// blocking pool, every later one is a read of the kept key.
 async fn scope_key_without_blocking() -> Result<&'static [u8]> {
     // The blocking pool's threads do not see a test's flag.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     anyhow::ensure!(
         !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
         "the signing key is unreadable (test)"
@@ -353,7 +353,7 @@ async fn scope_key_without_blocking() -> Result<&'static [u8]> {
 }
 
 // Lets a test make the signing key unreadable on the thread that sets this.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(crate) static SIGNING_KEY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

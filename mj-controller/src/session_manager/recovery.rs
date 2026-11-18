@@ -15,7 +15,7 @@ pub(super) fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkerRecoveryOutcome {
+pub enum WorkerRecoveryOutcome {
     Alive,
     Starting,
     TargetMissing,
@@ -126,7 +126,7 @@ pub(super) fn refresh_worker_launch_if_stale(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
@@ -186,9 +186,9 @@ pub(crate) fn recover_worker_admitted(
             admission.context("relay recovery has no session admission")?,
         )?),
         None => {
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             bail!("worker recovery requires a session identity");
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 None
             }
@@ -362,8 +362,8 @@ fn restart_owned_worker(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn recover_worker_controlled(
+#[cfg(any(test, feature = "test-support"))]
+pub fn recover_worker_controlled(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<&str>,

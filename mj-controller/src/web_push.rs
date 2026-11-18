@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
-pub(crate) fn wake() {
+pub fn wake() {
     wake_signal().notify_one();
 }
 /// The signal `wake` raises, for the delivery loop to wait on.
-pub(crate) fn wake_signal() -> &'static tokio::sync::Notify {
+pub fn wake_signal() -> &'static tokio::sync::Notify {
     WAKE.get_or_init(Default::default)
 }
-pub(crate) async fn blocking<T: Send + 'static>(
+pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     tokio::task::spawn_blocking(f)
@@ -42,7 +42,7 @@ pub struct SubscriptionKeys {
     pub auth: String,
 }
 impl Subscription {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let url = url::Url::parse(&self.endpoint)?;
         ensure!(
             url.scheme() == "https"
@@ -74,9 +74,9 @@ pub(crate) struct Notice {
     pub observed_revision: u64,
 }
 
-pub(crate) struct Vapid(signature::EcdsaKeyPair);
+pub struct Vapid(signature::EcdsaKeyPair);
 impl Vapid {
-    pub(crate) fn load() -> Result<Self> {
+    pub fn load() -> Result<Self> {
         let path = mj_core::config::data_dir().join("web-push-vapid.pk8");
         std::fs::create_dir_all(path.parent().context("key directory")?)?;
         if !path.exists() {
@@ -107,10 +107,10 @@ impl Vapid {
             .map_err(|_| anyhow::anyhow!("read VAPID key"))?,
         ))
     }
-    pub(crate) fn public(&self) -> String {
+    pub fn public(&self) -> String {
         B64.encode(self.0.public_key().as_ref())
     }
-    pub(crate) fn authorization(&self, endpoint: &str) -> Result<String> {
+    pub fn authorization(&self, endpoint: &str) -> Result<String> {
         let origin = url::Url::parse(endpoint)?.origin().ascii_serialization();
         // RFC 8292 permits at most 24 hours; use that documented validity.
         let claims = serde_json::json!({"aud":origin,"exp":chrono::Utc::now().timestamp()+24*60*60,"sub":"https://github.com/BrokkAi/mjolnir"});
@@ -147,7 +147,7 @@ fn expand(salt: &[u8], input: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>>
         .map_err(|_| anyhow::anyhow!("HKDF fill"))?;
     Ok(out)
 }
-pub(crate) fn encrypt(subscription: &Subscription, payload: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt(subscription: &Subscription, payload: &[u8]) -> Result<Vec<u8>> {
     let rng = SystemRandom::new();
     let private = agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &rng)
         .map_err(|_| anyhow::anyhow!("push ECDH key"))?;

@@ -151,7 +151,7 @@ pub(crate) mod testing {
     /// Held for as long as a test relies on `SESSIONWIKI_DATA`.
     pub(crate) static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+    pub fn lock() -> std::sync::MutexGuard<'static, ()> {
         INDEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

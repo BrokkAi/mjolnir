@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../../../mj-controller/src/web/viewer.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../../../mj-server/src/web/viewer.js', import.meta.url), 'utf8');
 const projectFunctions = source.slice(source.indexOf('function freshProjectPicker()'), source.indexOf('\nfunction textField('));
 
 function fixture() {

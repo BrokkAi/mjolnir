@@ -18,10 +18,7 @@ const ENGINE_OWNER: &str = "microvm-engine";
 /// the image refresher pulls to the host, and by doctor. Concurrent callers
 /// converge on one installation because the store publishes atomically and
 /// promotion is a rename.
-pub(crate) fn ensure_microvm_engine(
-    ssh: &SshTarget,
-    executor: &impl CommandExecutor,
-) -> Result<()> {
+pub fn ensure_microvm_engine(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<()> {
     // Only the store and the platform probe use this locator, and they take
     // its host and the shape of its workspace; nothing is created there.
     let host = targets::TargetLocator::SshBare {

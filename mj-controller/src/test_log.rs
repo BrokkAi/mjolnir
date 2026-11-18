@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 /// Tokio runtime runs spawned tasks on the same thread, so their events are
 /// recorded too.
 #[derive(Clone, Default)]
-pub(crate) struct CapturedLog(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+pub struct CapturedLog(Arc<Mutex<Vec<(tracing::Level, String)>>>);
 
 impl CapturedLog {
     /// Events at `level` or more severe.
-    pub(crate) fn at_or_above(&self, level: tracing::Level) -> Vec<String> {
+    pub fn at_or_above(&self, level: tracing::Level) -> Vec<String> {
         self.events()
             .into_iter()
             .filter(|(logged, _)| *logged <= level)
@@ -23,7 +23,7 @@ impl CapturedLog {
     }
 
     /// Events at exactly `level`.
-    pub(crate) fn at(&self, level: tracing::Level) -> Vec<String> {
+    pub fn at(&self, level: tracing::Level) -> Vec<String> {
         self.events()
             .into_iter()
             .filter(|(logged, _)| *logged == level)
@@ -31,7 +31,7 @@ impl CapturedLog {
             .collect()
     }
 
-    pub(crate) fn events(&self) -> Vec<(tracing::Level, String)> {
+    pub fn events(&self) -> Vec<(tracing::Level, String)> {
         self.0.lock().unwrap().clone()
     }
 }

@@ -330,7 +330,7 @@ impl WorkerBinarySourceSnapshot {
         }
     }
 
-    pub(super) fn resolve(
+    pub fn resolve(
         &self,
         arch: &str,
         requirement: WorkerBinaryRequirement,

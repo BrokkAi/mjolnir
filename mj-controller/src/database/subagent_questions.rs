@@ -102,7 +102,7 @@ pub(super) fn forward_subagent_question_with(
 
 /// Older workers leave forms open. Recover their pending questions without
 /// replaying historical questions that were already answered before this build.
-pub(crate) fn reconcile_pending_subagent_questions() -> Result<usize> {
+pub fn reconcile_pending_subagent_questions() -> Result<usize> {
     submit_database_write(
         "reconcile pending child questions",
         reconcile_pending_subagent_questions_with,

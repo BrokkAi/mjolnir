@@ -792,7 +792,7 @@ pub(crate) struct StoppedCleanupPlan<'a> {
     plan: WorkerControlPlan,
 }
 impl StoppedCleanupPlan<'_> {
-    pub(crate) fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
         self.plan.execute(executor)
     }
 }

@@ -11,10 +11,10 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use mj_controller::observe::{
+use mj_daemon::observe::{
     ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool, envelopes_for_transcript,
 };
-use mj_controller::server::api::{ApiSession, TranscriptItemView, TranscriptResponse};
+use mj_daemon::server::api::{ApiSession, TranscriptItemView, TranscriptResponse};
 
 use crate::api_client::ApiClient;
 

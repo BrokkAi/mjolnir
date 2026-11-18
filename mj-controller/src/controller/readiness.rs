@@ -17,7 +17,7 @@ use mj_core::relay::{HarnessPreparation, RelayExecutionState};
 
 use super::worker_binary::{WorkerProbe, probe_worker};
 
-pub(crate) use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
+pub use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 /// How long a worker that has said nothing at all is waited for. A worker that
 /// is recording startup progress is waited for longer; see
@@ -56,7 +56,7 @@ pub(super) enum NativeSessionReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HarnessPreparationFailure {
+pub struct HarnessPreparationFailure {
     pub step: String,
     pub error: String,
 }

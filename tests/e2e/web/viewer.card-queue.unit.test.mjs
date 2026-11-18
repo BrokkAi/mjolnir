@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const viewerSource = readFileSync(
-  new URL('../../../mj-controller/src/web/viewer.js', import.meta.url),
+  new URL('../../../mj-server/src/web/viewer.js', import.meta.url),
   'utf8',
 );
 

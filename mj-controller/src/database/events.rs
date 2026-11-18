@@ -2,7 +2,7 @@
 use super::*;
 use mj_core::event_outcome::{CommandOwner, CommandResult, CommandResultKind, OutcomeReason};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use mj_core::elicitation::ElicitationRequest;
 
 pub fn load_api_events(
@@ -145,7 +145,7 @@ pub(super) fn record_api_activities_with(
 /// Each batch bounds both the scan and the deletion, including stores with
 /// millions of legacy activity rows. Never reset sqlite_sequence: old cursors
 /// still name the same durable frontier after its last row has been removed.
-pub(crate) fn prune_api_activity_events(after_seq: u64) -> Result<Option<(u64, usize)>> {
+pub fn prune_api_activity_events(after_seq: u64) -> Result<Option<(u64, usize)>> {
     submit_database_write("prune API activity history", move |connection| {
         prune_api_activity_events_with(connection, after_seq, 1_000)
     })

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -38,6 +38,8 @@ mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.71.0", def
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.71.0" }
 mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.71.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.71.0" }
+mj-server = { path = "mj-server", package = "brokk-mj-server", version = "2.71.0" }
+mj-daemon = { path = "mj-daemon", package = "brokk-mj-daemon", version = "2.71.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.71.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.71.0" }
 sessionwiki = { package = "brokk-sessionwiki", version = "0.34.25" }
@@ -74,7 +76,7 @@ rayon = "1"
 # `rustls-no-provider` takes the process-wide rustls provider instead of
 # pulling aws-lc-rs, which needs a C toolchain and complicates
 # cross-compilation. Every executable installs the ring provider at startup
-# through `mj_controller::server::install_rustls_crypto_provider`.
+# through `mj_server::server::install_rustls_crypto_provider`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 ring = "0.17"
 rusqlite = { version = "0.41", features = ["backup", "bundled", "fallible_uint", "functions"] }

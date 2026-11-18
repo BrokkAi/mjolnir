@@ -5,7 +5,7 @@ use mj_core::storage::ActiveReviewGroup;
 
 /// Called inside the outcome save transaction: durable outcomes own whether a
 /// report is new, and the outbox commits with them. No delivery flags to recover.
-pub(crate) fn partial_review_events(
+pub fn partial_review_events(
     owner: &str,
     previous: Option<&ActiveReviewGroup>,
     current: &ActiveReviewGroup,

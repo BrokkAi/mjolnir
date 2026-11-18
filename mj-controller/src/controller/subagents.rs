@@ -530,7 +530,7 @@ impl Controller {
 /// Older daemons registered children before saving their initial input. A
 /// replay of a still-provisioning registration completes that old transaction
 /// boundary before any worker can start. Existing groups retain their payload.
-pub(crate) fn recover_registered_subagent_startup(
+pub fn recover_registered_subagent_startup(
     relation: &SubagentRecord,
     fast_mode: bool,
 ) -> Result<()> {

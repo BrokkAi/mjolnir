@@ -68,7 +68,7 @@ pub(super) fn clear_mailbox_with(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MailboxOutboxEntry {
+pub struct MailboxOutboxEntry {
     pub event_key: String,
     pub target_session_id: String,
     pub event_json: String,
@@ -76,7 +76,7 @@ pub(crate) struct MailboxOutboxEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubagentMailboxMessage {
+pub struct SubagentMailboxMessage {
     pub event_key: String,
     pub target_session_id: String,
     pub event_json: String,
@@ -90,14 +90,14 @@ pub(crate) struct SubagentMailboxMessage {
 /// gone (schema revision 121), so the caller learns there is no one to
 /// deliver to and decides whether that is an error for its sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Enqueued {
+pub enum Enqueued {
     Inserted,
     AlreadyQueued,
     TargetGone,
 }
 
 impl Enqueued {
-    pub(crate) fn inserted(self) -> bool {
+    pub fn inserted(self) -> bool {
         self == Self::Inserted
     }
 }
@@ -105,7 +105,7 @@ impl Enqueued {
 /// Insert one event once. Reusing a key for a different target or payload is a
 /// producer error; silently treating it as the original event could deliver
 /// the wrong message to the wrong session.
-pub(crate) fn enqueue_mailbox_event(
+pub fn enqueue_mailbox_event(
     event_key: &str,
     target_session_id: &str,
     event_json: &str,
@@ -191,7 +191,7 @@ pub(crate) fn enqueue_mailbox_event_with(
 }
 
 /// Select a bounded batch for each target so blocked targets cannot starve others.
-pub(crate) fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEntry>> {
+pub fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEntry>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT event_key, target_session_id, event_json, unpark
@@ -215,7 +215,7 @@ pub(crate) fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEn
         .collect()
 }
 
-pub(crate) fn mailbox_event_exists(event_key: &str) -> Result<bool> {
+pub fn mailbox_event_exists(event_key: &str) -> Result<bool> {
     let connection = open_reader(&database_path())?;
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
@@ -226,9 +226,7 @@ pub(crate) fn mailbox_event_exists(event_key: &str) -> Result<bool> {
 
 /// Recent parent messages addressed to this session's children, including
 /// whether the child's relay has accepted each waking event.
-pub(crate) fn subagent_mailbox_messages(
-    parent_session_id: &str,
-) -> Result<Vec<SubagentMailboxMessage>> {
+pub fn subagent_mailbox_messages(parent_session_id: &str) -> Result<Vec<SubagentMailboxMessage>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT mailbox_outbox.event_key, mailbox_outbox.target_session_id,
@@ -263,7 +261,7 @@ pub(crate) fn subagent_mailbox_messages(
 /// Permanently stop retrying a mailbox event that the published worker
 /// protocol cannot represent. `accepted_at` also makes protocol-75 daemons
 /// skip the row; newer readers distinguish this marker through `failure`.
-pub(crate) fn mark_mailbox_event_failed(event_key: &str, failure: &str) -> Result<()> {
+pub fn mark_mailbox_event_failed(event_key: &str, failure: &str) -> Result<()> {
     let event_key = event_key.to_owned();
     let failure = failure.to_owned();
     submit_database_write("mark_mailbox_event_failed", move |connection| {
@@ -276,11 +274,7 @@ pub(crate) fn mark_mailbox_event_failed(event_key: &str, failure: &str) -> Resul
     })
 }
 
-pub(crate) fn mark_mailbox_event_accepted(
-    event_key: &str,
-    command_id: &str,
-    ordinal: u64,
-) -> Result<()> {
+pub fn mark_mailbox_event_accepted(event_key: &str, command_id: &str, ordinal: u64) -> Result<()> {
     let event_key = event_key.to_owned();
     let command_id = command_id.to_owned();
     submit_database_write("mark_mailbox_event_accepted", move |connection| {
@@ -311,7 +305,7 @@ fn mark_mailbox_event_accepted_with(
 /// A stopped child cannot receive parent messages and cannot be resumed by
 /// `send_message`. Remove only unaccepted parent-message rows; keep accepted
 /// delivery history and events addressed to stopped primary sessions.
-pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
+pub fn prune_pending_messages_for_stopped_children() -> Result<usize> {
     submit_database_write(
         "prune pending messages for stopped children",
         |connection| {
@@ -332,7 +326,7 @@ pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
 /// A question forwarded to a parent invites a `send_message` answer. When the
 /// asking child can no longer receive one, the pending invitation can only
 /// fail; remove it. Accepted history stays.
-pub(crate) fn prune_stale_subagent_questions() -> Result<usize> {
+pub fn prune_stale_subagent_questions() -> Result<usize> {
     submit_database_write("prune stale subagent questions", |connection| {
         prune_stale_subagent_questions_with(connection)
     })

@@ -30,7 +30,7 @@ static HOMES: LazyLock<Mutex<BTreeMap<String, (Instant, PathBuf)>>> =
 const HOME_LABEL: &str = "hel-home";
 
 #[derive(Debug, Clone)]
-pub(crate) enum CacheHost {
+pub enum CacheHost {
     /// The machine running the controller.
     Local,
     Ssh(SshTarget),
@@ -101,7 +101,7 @@ impl CacheHost {
     /// The host a configured machine is, or `None` for a machine that has no
     /// standing host: an EC2 launch template creates an instance per session,
     /// so nothing persists between them to cache.
-    pub(crate) fn for_machine(machine: &mj_core::config::Machine) -> Option<Self> {
+    pub fn for_machine(machine: &mj_core::config::Machine) -> Option<Self> {
         match machine {
             mj_core::config::Machine::Local { .. } => Some(Self::Local),
             mj_core::config::Machine::Ssh { ssh, .. } => Some(Self::Ssh(SshTarget::from(ssh))),
@@ -200,7 +200,7 @@ impl CacheHost {
 
     /// An identity for this host, used to key cached host-side answers. Every
     /// runtime on one machine shares it.
-    pub(crate) fn key(&self) -> String {
+    pub fn key(&self) -> String {
         match self {
             Self::Local => "local".to_owned(),
             Self::Ssh(ssh) => format!("ssh:{}", ssh.destination),

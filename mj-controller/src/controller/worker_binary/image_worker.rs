@@ -113,7 +113,7 @@ pub(crate) const WORKER_BUILD_LABEL: &str = "org.brokk.mjolnir.worker-build";
 /// Docker's or Podman's shape; `None` when it has none or cannot be read.
 /// Sessions decide by asking the worker itself; this is for planning before
 /// a container exists.
-pub(crate) fn image_worker_label(inspection: &[u8]) -> Option<String> {
+pub fn image_worker_label(inspection: &[u8]) -> Option<String> {
     let images = serde_json::from_slice::<Vec<serde_json::Value>>(inspection).ok()?;
     let image = images.first()?;
     ["/Config/Labels", "/Labels"]

@@ -4,7 +4,7 @@ use mj_core::history::{HistoryQuery, HistoryRequest, HistoryResult};
 use serde_json::{Value, json};
 use sessionwiki::{index, model::Session};
 
-pub(crate) async fn execute(request: HistoryRequest) -> HistoryResult {
+pub async fn execute(request: HistoryRequest) -> HistoryResult {
     static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let id = request.request_id.clone();
@@ -88,7 +88,7 @@ fn query(request: &HistoryRequest) -> Result<Value> {
     }))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Result<Value> {
     query_in_with(
         connection,

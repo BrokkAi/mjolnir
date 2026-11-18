@@ -3,7 +3,7 @@ use super::*;
 use crate::web_push::{Notice, PushEntry, Subscription, card_entries};
 use mj_client::runtime_feed::RuntimeProjection;
 
-pub(crate) fn push_subscribe(subscription: Subscription) -> Result<()> {
+pub fn push_subscribe(subscription: Subscription) -> Result<()> {
     submit_database_write("subscribe Web Push device", move |db| {
         push_subscribe_with(db, subscription)
     })
@@ -46,7 +46,7 @@ fn push_subscribe_in(db: &Connection, subscription: Subscription) -> Result<()> 
     // Routine device reconciliation must preserve retry deadlines and errors.
     Ok(())
 }
-pub(crate) fn push_renew(old_endpoint: String, subscription: Subscription) -> Result<()> {
+pub fn push_renew(old_endpoint: String, subscription: Subscription) -> Result<()> {
     submit_database_write("renew Web Push subscription", move |db| {
         push_renew_with(db, &old_endpoint, subscription)
     })
@@ -68,7 +68,7 @@ fn push_renew_with(db: &Connection, old_endpoint: &str, subscription: Subscripti
     tx.commit()?;
     Ok(())
 }
-pub(crate) fn push_unsubscribe(endpoint: &str) -> Result<()> {
+pub fn push_unsubscribe(endpoint: &str) -> Result<()> {
     let endpoint = endpoint.to_owned();
     submit_database_write("unsubscribe Web Push device", move |db| {
         push_unsubscribe_with(db, &endpoint)
@@ -81,9 +81,7 @@ fn push_unsubscribe_with(db: &Connection, endpoint: &str) -> Result<()> {
 
 /// Reconcile the authoritative card snapshot and admit its sends in one
 /// transaction. Presence controls delivery and never changes entry identity.
-pub(crate) fn push_reconcile(
-    runtime: RuntimeProjection,
-) -> Result<(Vec<PushDelivery>, Option<i64>)> {
+pub fn push_reconcile(runtime: RuntimeProjection) -> Result<(Vec<PushDelivery>, Option<i64>)> {
     submit_database_write("reconcile Web Push entries", move |db| {
         push_reconcile_with(db, &runtime, Utc::now().timestamp())
     })
@@ -158,7 +156,7 @@ fn push_observe_in(
     Ok(())
 }
 
-pub(crate) fn push_test(endpoint: String) -> Result<()> {
+pub fn push_test(endpoint: String) -> Result<()> {
     submit_database_write("reserve Web Push test", move |db| {
         push_test_with(db, endpoint)
     })
@@ -187,7 +185,7 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
     Ok(())
 }
 
-pub(crate) struct PushDelivery {
+pub struct PushDelivery {
     pub subscription: Subscription,
     pub enrollment: String,
     pub identity: String,
@@ -314,7 +312,7 @@ fn push_entry_text(
         .and_then(|item| materialized_agent_message_text(std::iter::once(&item), &item.stable_id)))
 }
 
-pub(crate) fn push_recover() -> Result<()> {
+pub fn push_recover() -> Result<()> {
     submit_database_write("recover uncertain Web Push sends", |db| {
         push_recover_with(db)
     })
@@ -328,7 +326,7 @@ fn push_recover_with(db: &Connection) -> Result<()> {
     )?;
     Ok(())
 }
-pub(crate) fn push_result(
+pub fn push_result(
     subscription: Subscription,
     enrollment: String,
     identity: String,
@@ -413,7 +411,7 @@ fn push_result_with(
     db.execute("UPDATE push_entry_deliveries SET accepted=?3,flight_session=NULL,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND identity=?2 AND accepted IN (0,3)",params![endpoint,identity,accepted,retry_at,error])?;
     Ok(())
 }
-pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> {
+pub fn push_device_status(endpoint: String) -> Result<serde_json::Value> {
     let db = open_reader(&database_path())?;
     let subscribed = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM push_devices WHERE endpoint=?1)",

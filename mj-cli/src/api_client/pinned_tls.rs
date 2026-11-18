@@ -34,7 +34,7 @@ impl ServerCertVerifier for PinnedCertificate {
     ) -> std::result::Result<ServerCertVerified, Error> {
         // The pin names one exact certificate, so the host name, chain, and
         // validity window add nothing: the daemon vouches for these bytes.
-        if mj_controller::server::api::certificate_der_sha256(end_entity) == self.sha256 {
+        if mj_daemon::server::api::certificate_der_sha256(end_entity) == self.sha256 {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(Error::InvalidCertificate(

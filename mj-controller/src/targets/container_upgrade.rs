@@ -5,7 +5,7 @@ use mj_core::targets::SshTrafficClass;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RetainedContainer {
+pub struct RetainedContainer {
     pub locator: TargetLocator,
     pub source_id: String,
     pub name: String,
@@ -444,7 +444,7 @@ pub(crate) fn inspect_retained_container(
 }
 
 impl RetainedContainer {
-    pub(crate) fn preview(&self, session_id: &str) -> mj_core::state::ContainerUpgradePreview {
+    pub fn preview(&self, session_id: &str) -> mj_core::state::ContainerUpgradePreview {
         mj_core::state::ContainerUpgradePreview {
             warning: mj_core::state::CONTAINER_UPGRADE_WARNING.into(),
             session_id: session_id.into(),
@@ -569,7 +569,7 @@ impl RetainedContainer {
         )
     }
 
-    pub(crate) fn release_image_pin(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn release_image_pin(&self, executor: &impl CommandExecutor) -> Result<()> {
         if !self.image_pin_reserved {
             return Ok(());
         }
@@ -621,7 +621,7 @@ impl RetainedContainer {
         Ok(())
     }
 
-    pub(crate) fn prepare(&mut self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn prepare(&mut self, executor: &impl CommandExecutor) -> Result<()> {
         let (host, _) = host_and_name(&self.locator)?;
         if self.prepared_image.is_none() {
             let lock = crate::image_pull_gate::image_pull_mutex(&host, &self.target_image);
@@ -894,7 +894,7 @@ impl RetainedContainer {
         Ok(())
     }
 
-    pub(crate) fn retire_backup_for_destroy(
+    pub fn retire_backup_for_destroy(
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
@@ -921,7 +921,7 @@ impl RetainedContainer {
         Ok(())
     }
 
-    pub(crate) fn finish(&self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn finish(&self, session_id: &str, executor: &impl CommandExecutor) -> Result<()> {
         let (host, _) = host_and_name(&self.locator)?;
         let replacement =
             inspect(&host, &self.name, executor)?.context("replacement container disappeared")?;
@@ -1116,8 +1116,8 @@ fn checked(
     Ok(output)
 }
 
-#[cfg(test)]
-pub(crate) fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer {
+#[cfg(any(test, feature = "test-support"))]
+pub fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer {
     let name = resource_name(session_id).unwrap();
     RetainedContainer {
         locator: TargetLocator::LocalPodman {

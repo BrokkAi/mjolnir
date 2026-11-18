@@ -478,7 +478,7 @@ pub fn load_latest_startup_group(session_id: &str) -> Result<Vec<StartupDelivery
     load_latest_startup_group_with(&*open_reader(&database_path())?, session_id)
 }
 
-pub(crate) fn load_startup_group(session_id: &str, group_id: &str) -> Result<Vec<StartupDelivery>> {
+pub fn load_startup_group(session_id: &str, group_id: &str) -> Result<Vec<StartupDelivery>> {
     load_startup_group_with(&*open_reader(&database_path())?, session_id, Some(group_id))
 }
 
@@ -713,14 +713,11 @@ pub struct StartFollowup {
 /// alphanumerics, `-` and `_` in a command id, so the step key is joined with
 /// `-`, never `:`: a rejected id leaves `mj new --model` and every spawned
 /// child waiting forever for a step the worker will never admit.
-pub(crate) fn startup_step_id(group_id: &str, key: &str) -> String {
+pub fn startup_step_id(group_id: &str, key: &str) -> String {
     format!("{group_id}-{key}")
 }
 
-pub(crate) fn api_followup_steps(
-    group_id: &str,
-    followup: StartFollowup,
-) -> Vec<(String, StartupStep)> {
+pub fn api_followup_steps(group_id: &str, followup: StartFollowup) -> Vec<(String, StartupStep)> {
     let mut steps = Vec::new();
     for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
         if let Some(value) = value {

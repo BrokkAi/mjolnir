@@ -91,7 +91,7 @@ impl RelayJobDeferred {
 }
 
 impl ActorCommand {
-    pub(super) fn operation_name(&self) -> &'static str {
+    pub fn operation_name(&self) -> &'static str {
         match self {
             Self::Submit { .. } => "submit",
             Self::Sync { .. } => "sync",
@@ -104,7 +104,7 @@ impl ActorCommand {
         }
     }
 
-    pub(super) fn reject(self, session_id: &str, message: &str) {
+    pub fn reject(self, session_id: &str, message: &str) {
         match self {
             Self::Submit { reply, .. } => {
                 if reply.send(Err(message.to_owned().into())).is_err() {

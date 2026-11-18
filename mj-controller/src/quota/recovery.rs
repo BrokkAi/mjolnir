@@ -2,13 +2,13 @@
 use super::*;
 
 /// Whether a scoped quota window applies to the selected model.
-pub(crate) fn window_applies(window: &QuotaWindow, model: &str) -> bool {
+pub fn window_applies(window: &QuotaWindow, model: &str) -> bool {
     window.applies_to_model(model)
 }
 
 /// Score quota headroom against its reset deadline. Higher scores mean more
 /// sustainable capacity for the requested model.
-pub(crate) fn quota_score(windows: &[QuotaWindow], model: &str, now_seconds: i64) -> Option<f64> {
+pub fn quota_score(windows: &[QuotaWindow], model: &str, now_seconds: i64) -> Option<f64> {
     windows
         .iter()
         .filter(|window| window_applies(window, model))
@@ -48,7 +48,7 @@ pub(crate) fn quota_score(windows: &[QuotaWindow], model: &str, now_seconds: i64
 }
 
 /// Fill only missing reset data; fresh usage values always win.
-pub(crate) fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
+pub fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[QuotaWindow]) -> bool {
     let mut restored = false;
     for old in cached {
         if let Some(window) = windows
@@ -73,12 +73,12 @@ pub(crate) fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[Quot
 /// A relative statement is only true of the moment it was read: repeating it
 /// after a retry says nothing new about the deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StatedReset {
+pub struct StatedReset {
     pub at: i64,
     pub relative: bool,
 }
 
-pub(crate) fn message_reset(message: &str, observed_ms: i64) -> Option<StatedReset> {
+pub fn message_reset(message: &str, observed_ms: i64) -> Option<StatedReset> {
     let now = DateTime::from_timestamp_millis(observed_ms)?
         .with_timezone(&Local)
         .fixed_offset();
@@ -157,7 +157,7 @@ fn duration_seconds(value: &str) -> Option<i64> {
 }
 
 /// Whether `window` shows no quota left and has not reset by `now_seconds`.
-pub(crate) fn exhausted(window: &QuotaWindow, now_seconds: i64) -> bool {
+pub fn exhausted(window: &QuotaWindow, now_seconds: i64) -> bool {
     window
         .resets_at_epoch_seconds
         .is_none_or(|t| t > now_seconds)
@@ -169,7 +169,7 @@ pub(crate) fn exhausted(window: &QuotaWindow, now_seconds: i64) -> bool {
 }
 
 /// Only a long allowance with a distant or unknown continuation time merits a Move.
-pub(crate) fn long_window_stop(
+pub fn long_window_stop(
     windows: &[QuotaWindow],
     model: &str,
     explicit: Option<i64>,
@@ -189,7 +189,7 @@ pub(crate) fn long_window_stop(
 }
 
 /// A reset already used for an unsuccessful retry cannot schedule another retry.
-pub(crate) fn recovery_reset(
+pub fn recovery_reset(
     windows: &[QuotaWindow],
     explicit: Option<i64>,
     now_seconds: i64,
@@ -241,7 +241,7 @@ pub(crate) fn recovery_reset(
 /// since each attempt is spaced by the reset it names plus a minute, so repeated
 /// refusals pace themselves instead of spinning. A deadline already in the past
 /// has arrived, so the retry is due now rather than at a reset read earlier.
-pub(crate) fn retry_deadline(
+pub fn retry_deadline(
     windows: &[QuotaWindow],
     stated: Option<StatedReset>,
     now_seconds: i64,

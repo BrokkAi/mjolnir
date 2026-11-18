@@ -75,7 +75,7 @@ fn run_owned_worker_stop(
 /// caller's deadline and keeps its cancellation, because it is the work a
 /// stop's timeout does not name. The untimed scope pauses that deadline so the
 /// rerun retains its budget.
-pub(crate) fn run_control_command(
+pub fn run_control_command(
     caller: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -355,7 +355,7 @@ pub(in crate::controller) fn worker_exit_record_command(
 /// The reason a worker recorded for its exit, and when (epoch seconds), from
 /// the output of [`worker_exit_record_command`]. A reserved record that says
 /// `null` means the worker left no reason.
-pub(crate) fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
+pub fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
     serde_json::from_slice::<Option<WorkerExitRecord>>(output)
         .ok()
         .flatten()

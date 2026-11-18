@@ -19,7 +19,7 @@ use crate::targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
 };
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION};
 use mj_core::project_memory::ProjectMemoryIdentity;
 use mj_core::worker_build::{WORKER_BUILD_ID, verify_worker_build};
@@ -64,29 +64,29 @@ mod binary_source;
 pub use binary_source::*;
 mod binary_select;
 pub use binary_select::ssh_worker_binary_prerequisite;
-pub(crate) use binary_select::worker_source_problem;
+pub use binary_select::worker_source_problem;
 pub(super) use binary_select::*;
 mod harness;
 pub(super) use harness::*;
 mod catalog;
 pub(super) use catalog::*;
 mod image_worker;
-pub(crate) use image_worker::image_worker_label;
+pub use image_worker::image_worker_label;
 pub(super) use image_worker::*;
 mod install;
 mod prewarm;
 pub(super) use install::*;
-pub(crate) use prewarm::{prewarm_profile_content, shared_content_ssh};
+pub use prewarm::{prewarm_profile_content, shared_content_ssh};
 mod store;
 pub(in crate::controller) use store::install_worker_binary;
 use store::*;
 mod microvm;
-pub(crate) use microvm::ensure_microvm_engine;
+pub use microvm::ensure_microvm_engine;
 mod upgrade;
-pub(crate) use upgrade::*;
+pub use upgrade::*;
 mod process;
 pub(super) use process::*;
-pub(crate) use process::{recorded_exit_reason, run_control_command};
+pub use process::{recorded_exit_reason, run_control_command};
 
 #[cfg(test)]
 mod tests;

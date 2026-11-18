@@ -4,14 +4,14 @@ use super::*;
 use mj_core::mailbox::{LifecycleRecipient, MailboxEvent, MailboxEventBody};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubRepoCursor {
+pub struct GithubRepoCursor {
     pub updated_at: String,
     pub watch_started_at: String,
     pub reconciled_through: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubSeenItem {
+pub struct GithubSeenItem {
     pub number: i64,
     pub kind: String,
     pub title: String,
@@ -23,7 +23,7 @@ pub(crate) struct GithubSeenItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubItemClassification {
+pub struct GithubItemClassification {
     pub owner: String,
     pub repo: String,
     pub number: i64,
@@ -37,7 +37,7 @@ pub(crate) struct GithubItemClassification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubItemWatch {
+pub struct GithubItemWatch {
     pub owner: String,
     pub repo: String,
     pub number: i64,
@@ -62,7 +62,7 @@ pub(crate) struct GithubItemWatch {
 /// after the event was committed can still be told. `body_json` is a serialized
 /// `MailboxEventBody` addressed to the creator.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecordedLifecycle {
+pub struct RecordedLifecycle {
     pub key: String,
     pub body_json: String,
     pub at: String,
@@ -75,13 +75,13 @@ pub(crate) struct GithubSessionTurnWindow {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct GithubClassificationFailure {
+pub struct GithubClassificationFailure {
     pub attempts: i64,
     pub last_attempt_at_ms: i64,
     pub next_attempt_at_ms: i64,
 }
 
-pub(crate) fn load_github_classification_failures(
+pub fn load_github_classification_failures(
     owner: &str,
     repo: &str,
 ) -> Result<BTreeMap<(i64, String), GithubClassificationFailure>> {
@@ -102,7 +102,7 @@ pub(crate) fn load_github_classification_failures(
         .collect()
 }
 
-pub(crate) fn record_github_classification_failure(
+pub fn record_github_classification_failure(
     owner: String,
     repo: String,
     number: i64,
@@ -128,7 +128,7 @@ pub(crate) fn record_github_classification_failure(
 }
 
 /// Initialize the watch boundary once, before the first network request.
-pub(crate) fn github_repo_cursor(owner: &str, repo: &str) -> Result<GithubRepoCursor> {
+pub fn github_repo_cursor(owner: &str, repo: &str) -> Result<GithubRepoCursor> {
     let owner = owner.to_owned();
     let repo = repo.to_owned();
     submit_database_write("github_repo_cursor", move |connection| {
@@ -146,13 +146,13 @@ pub(crate) fn github_repo_cursor(owner: &str, repo: &str) -> Result<GithubRepoCu
     })
 }
 
-pub(crate) enum GithubFeedProgress {
+pub enum GithubFeedProgress {
     Main(String),
     Reconciled(String),
 }
 
 /// Recording never depends on classification or delivery. Each page is durable.
-pub(crate) fn record_github_page(
+pub fn record_github_page(
     owner: String,
     repo: String,
     items: Vec<GithubSeenItem>,
@@ -190,11 +190,7 @@ pub(crate) fn record_github_page(
 }
 
 /// Claim before requesting pages so failures and restarts cannot exceed the hourly rate.
-pub(crate) fn claim_github_reconciliation(
-    owner: String,
-    repo: String,
-    now_ms: i64,
-) -> Result<bool> {
+pub fn claim_github_reconciliation(owner: String, repo: String, now_ms: i64) -> Result<bool> {
     submit_database_write("claim_github_reconciliation", move |connection| {
         Ok(connection.execute(
             "UPDATE github_watch_cursors SET last_reconciled_at_ms=?3
@@ -204,7 +200,7 @@ pub(crate) fn claim_github_reconciliation(
     })
 }
 
-pub(crate) fn load_github_seen_items(owner: &str, repo: &str) -> Result<Vec<GithubSeenItem>> {
+pub fn load_github_seen_items(owner: &str, repo: &str) -> Result<Vec<GithubSeenItem>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT number, kind, title, url, author, body, created_at, updated_at FROM github_seen_items
@@ -226,7 +222,7 @@ pub(crate) fn load_github_seen_items(owner: &str, repo: &str) -> Result<Vec<Gith
         .collect()
 }
 
-pub(crate) fn load_github_item_classified_sessions(
+pub fn load_github_item_classified_sessions(
     owner: &str,
     repo: &str,
     number: i64,
@@ -244,7 +240,7 @@ pub(crate) fn load_github_item_classified_sessions(
 
 /// Classification, creator watch, and resulting interest event share one
 /// transaction. A process restart cannot leave one without the others.
-pub(crate) fn commit_github_item_classification(
+pub fn commit_github_item_classification(
     classification: GithubItemClassification,
     event: Option<(String, String, bool)>,
 ) -> Result<bool> {
@@ -379,7 +375,7 @@ pub(crate) fn commit_github_item_classification(
     Ok(inserted)
 }
 
-pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubItemWatch>> {
+pub fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubItemWatch>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT w.owner, w.repo, w.number, w.creator_session_id, w.kind, w.title, w.url, w.created_at,
@@ -493,7 +489,7 @@ fn interested_lifecycle_body(body: MailboxEventBody) -> MailboxEventBody {
 }
 
 /// An event mapped from a timeline read, before recipients are known.
-pub(crate) struct MappedGithubEvent {
+pub struct MappedGithubEvent {
     /// The creator's outbox key, and the base of every interested session's.
     pub key: String,
     pub body: MailboxEventBody,
@@ -569,7 +565,7 @@ fn ceil_to_second(timestamp_ms: i64) -> i64 {
     }
 }
 
-pub(crate) struct GithubItemProgress {
+pub struct GithubItemProgress {
     pub timeline_at: String,
     pub timeline_id: i64,
     pub review_comments_at: String,
@@ -585,7 +581,7 @@ pub(crate) struct GithubItemProgress {
 /// that it writes, so a session classified before it runs is a recipient, and
 /// one classified after it reads the lifecycle event recorded here (see
 /// `commit_github_item_classification`). Neither order loses a notice.
-pub(crate) fn commit_github_timeline(
+pub fn commit_github_timeline(
     watch: GithubItemWatch,
     progress: GithubItemProgress,
     events: Vec<MappedGithubEvent>,
@@ -719,7 +715,7 @@ pub(crate) fn commit_github_timeline(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn load_github_session_turn_windows_from(
     path: &Path,
     session_id: &str,
@@ -877,10 +873,7 @@ fn harness_turn_windows(
 /// new item's URL before it exists, so this ignores how the command was
 /// composed. Later turn text is not evidence: a session that merely mentions
 /// another session's new item afterwards would otherwise claim it.
-pub(crate) fn load_github_session_creation_output(
-    session_id: &str,
-    at_ms: i64,
-) -> Result<Vec<String>> {
+pub fn load_github_session_creation_output(session_id: &str, at_ms: i64) -> Result<Vec<String>> {
     load_github_session_creation_output_from(&database_path(), session_id, at_ms)
 }
 
@@ -937,8 +930,8 @@ fn load_github_session_creation_output_from(
     Ok(output)
 }
 
-#[cfg(test)]
-pub(crate) fn seed_github_test_turns(
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_github_test_turns(
     session_id: &str,
     completed_start_ms: i64,
     completed_at_ms: i64,
@@ -1003,10 +996,7 @@ pub(crate) fn seed_github_test_turns(
 
 /// A session with interest in one of the repository's watched items, to take a
 /// GitHub credential from when no live session or creator can supply one.
-pub(crate) fn first_github_watch_interested_session(
-    owner: &str,
-    repo: &str,
-) -> Result<Option<String>> {
+pub fn first_github_watch_interested_session(owner: &str, repo: &str) -> Result<Option<String>> {
     let connection = open_reader(&database_path())?;
     connection
         .query_row(
@@ -1022,7 +1012,7 @@ pub(crate) fn first_github_watch_interested_session(
         .map_err(Into::into)
 }
 
-pub(crate) fn load_github_watched_repositories() -> Result<Vec<(String, String)>> {
+pub fn load_github_watched_repositories() -> Result<Vec<(String, String)>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection
         .prepare("SELECT DISTINCT owner, repo FROM github_watch_items ORDER BY owner, repo")?;
@@ -1032,13 +1022,8 @@ pub(crate) fn load_github_watched_repositories() -> Result<Vec<(String, String)>
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn seed_github_retry_due(
-    owner: &str,
-    repo: &str,
-    number: i64,
-    session_id: &str,
-) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_github_retry_due(owner: &str, repo: &str, number: i64, session_id: &str) -> Result<()> {
     let owner = owner.to_owned();
     let repo = repo.to_owned();
     let session_id = session_id.to_owned();
@@ -1049,8 +1034,8 @@ pub(crate) fn seed_github_retry_due(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Result<()> {
     let owner = owner.to_owned();
     let repo = repo.to_owned();
     let at = at.to_owned();
@@ -1067,7 +1052,7 @@ pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Resul
 /// One read-only snapshot shared by all pairs for a session in a poll. Raw JSON
 /// preserves persisted tool-call field order for the frozen Python renderer.
 #[allow(dead_code)] // Wired by the relevance-policy integration milestone.
-pub(crate) fn load_github_history_snapshot(
+pub fn load_github_history_snapshot(
     session_id: &str,
 ) -> Result<Vec<mj_transcript::github_history::HistoryRow>> {
     load_github_history_snapshot_from(&database_path(), session_id)

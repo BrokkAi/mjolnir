@@ -60,9 +60,9 @@ pub enum ParkOutcome {
 
 /// An executor for stopping what a failed unpark started. The unpark's own
 /// executor may be the reason it failed, cancelled by a close of the child.
-pub(crate) const FAILED_STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+pub const FAILED_STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) fn failed_launch_cleanup_executor() -> targets::CancellableProcessExecutor {
+pub fn failed_launch_cleanup_executor() -> targets::CancellableProcessExecutor {
     targets::CancellableProcessExecutor::with_timeout(FAILED_STARTUP_CLEANUP_TIMEOUT)
 }
 

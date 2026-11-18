@@ -41,7 +41,7 @@ pub(crate) fn credential_sync_targets_with_auth(
     )
 }
 
-pub(crate) fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
+pub fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
     controller
         .state
         .sessions
@@ -62,7 +62,7 @@ pub(crate) fn staged_credential_sessions(controller: &Controller) -> BTreeSet<St
         .collect()
 }
 
-pub(crate) fn credential_sync_targets_from_sources(
+pub fn credential_sync_targets_from_sources(
     controller: &Controller,
     schemes: &BTreeMap<String, bool>,
     staged: &BTreeSet<String>,
@@ -106,7 +106,7 @@ pub(crate) fn credential_sync_targets_from_sources(
         .collect()
 }
 
-pub(crate) fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>) -> bool {
+pub fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>) -> bool {
     target.is_some()
 }
 

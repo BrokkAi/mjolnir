@@ -3,7 +3,7 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionRestartPhase {
+pub enum SessionRestartPhase {
     Stopping,
     RestoringInPlace,
     RecreatingContainer,
@@ -48,7 +48,7 @@ impl SessionRestartPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionRestartIntent {
+pub struct SessionRestartIntent {
     pub session_id: String,
     pub operation_id: String,
     pub phase: SessionRestartPhase,
@@ -63,7 +63,7 @@ pub(crate) struct SessionRestartIntent {
 }
 
 /// Create one intent, or return the unfinished intent the session already owns.
-pub(crate) fn begin_session_restart(
+pub fn begin_session_restart(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
@@ -72,7 +72,7 @@ pub(crate) fn begin_session_restart(
     begin_session_restart_with(session_id, operation_id, cancelled, None)
 }
 
-pub(crate) fn begin_container_upgrade(
+pub fn begin_container_upgrade(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
@@ -132,7 +132,7 @@ fn begin_session_restart_with(
     })
 }
 
-pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
+pub fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged, automatic, container_upgrade_json, handoff_json
@@ -183,7 +183,7 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
         .collect()
 }
 
-pub(crate) fn record_session_restart_checkpoint(
+pub fn record_session_restart_checkpoint(
     session_id: &str,
     operation_id: &str,
     checkpoint_sha256: &str,
@@ -210,10 +210,7 @@ pub(crate) fn record_session_restart_checkpoint(
     })
 }
 
-pub(crate) fn mark_session_restart_checkpoint_started(
-    session_id: &str,
-    operation_id: &str,
-) -> Result<()> {
+pub fn mark_session_restart_checkpoint_started(session_id: &str, operation_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write(
@@ -233,7 +230,7 @@ pub(crate) fn mark_session_restart_checkpoint_started(
     )
 }
 
-pub(crate) fn advance_session_restart(
+pub fn advance_session_restart(
     session_id: &str,
     operation_id: &str,
     phase: SessionRestartPhase,
@@ -301,7 +298,7 @@ pub(crate) fn advance_session_restart(
 
 /// Retain the settings lock while cancellation unwinds, but never recover
 /// accepted cancellation as another Restart after a daemon crash.
-pub(crate) fn request_session_restart_cancel(session_id: &str, operation_id: &str) -> Result<()> {
+pub fn request_session_restart_cancel(session_id: &str, operation_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("request_session_restart_cancel", move |connection| {
@@ -322,10 +319,7 @@ pub(crate) fn request_session_restart_cancel(session_id: &str, operation_id: &st
 
 /// A cancelled Restart must not become an ordinary pending suspension on
 /// startup: retain its environment and settle the recovery row atomically.
-pub(crate) fn recover_cancelled_session_restart(
-    session_id: &str,
-    operation_id: &str,
-) -> Result<()> {
+pub fn recover_cancelled_session_restart(session_id: &str, operation_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("recover_cancelled_session_restart", move |connection| {
@@ -353,7 +347,7 @@ pub(crate) fn recover_cancelled_session_restart(
     })
 }
 
-pub(crate) fn finish_session_restart(session_id: &str, operation_id: &str) -> Result<()> {
+pub fn finish_session_restart(session_id: &str, operation_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("finish_session_restart", move |connection| {
@@ -365,7 +359,7 @@ pub(crate) fn finish_session_restart(session_id: &str, operation_id: &str) -> Re
     })
 }
 
-pub(crate) fn cancel_session_restart(session_id: &str) -> Result<()> {
+pub fn cancel_session_restart(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("cancel_session_restart", move |connection| {
         connection.execute(
@@ -431,7 +425,7 @@ pub(super) fn load_session_restart_with(
 }
 
 /// Persist the immutable prepared image before stopping the source.
-pub(crate) fn prepare_container_upgrade(
+pub fn prepare_container_upgrade(
     session_id: &str,
     operation_id: &str,
     plan: crate::targets::RetainedContainer,
@@ -463,20 +457,20 @@ pub(super) fn ensure_container_parent_available(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ContainerUpgradeCommit {
+pub enum ContainerUpgradeCommit {
     Committed,
     /// Descriptions captured by the same transaction that refused replacement.
     Waiting(Vec<String>),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ContainerUpgradeCommit {
-    pub(crate) fn is_committed(&self) -> bool {
+    pub fn is_committed(&self) -> bool {
         matches!(self, Self::Committed)
     }
 }
 
-pub(crate) fn try_commit_container_upgrade(
+pub fn try_commit_container_upgrade(
     session_id: &str,
     operation_id: &str,
 ) -> Result<ContainerUpgradeCommit> {
@@ -561,7 +555,7 @@ pub(crate) fn record_session_restart_handoff(
     })
 }
 
-pub(crate) fn load_session_restart(session_id: &str) -> Result<Option<SessionRestartIntent>> {
+pub fn load_session_restart(session_id: &str) -> Result<Option<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     load_session_restart_with(&connection, session_id)
 }

@@ -127,14 +127,14 @@ fn now_epoch_seconds() -> u64 {
 }
 
 /// Make this process the owner that executors report full disks to.
-pub(crate) fn install_no_space_observer() {
+pub fn install_no_space_observer() {
     mj_core::targets::storage::set_no_space_observer(|host, detail| {
         observe_no_space(host, detail);
     });
 }
 
 /// Let a no-space observation wake the capacity service for a new reading.
-pub(crate) fn attach_refresh(refresh: tokio::sync::mpsc::Sender<()>) {
+pub fn attach_refresh(refresh: tokio::sync::mpsc::Sender<()>) {
     *board()
         .refresh
         .lock()
@@ -143,7 +143,7 @@ pub(crate) fn attach_refresh(refresh: tokio::sync::mpsc::Sender<()>) {
 
 /// Install a measurement. It replaces each sampled host's filesystems, and
 /// supersedes the full-disk failures it was taken after.
-pub(crate) fn record_samples(samples: &[HostStorageSample], sampled_at: u64) {
+pub fn record_samples(samples: &[HostStorageSample], sampled_at: u64) {
     if samples.is_empty() {
         return;
     }
@@ -237,7 +237,7 @@ pub fn views() -> Vec<TargetStorageView> {
 
 /// Readers share the board's publication until a measurement or disk failure
 /// changes it. Both replacement and reads hold the host lock.
-pub(crate) fn views_snapshot() -> mj_core::snapshot_map::SharedSnapshot<Vec<TargetStorageView>> {
+pub fn views_snapshot() -> mj_core::snapshot_map::SharedSnapshot<Vec<TargetStorageView>> {
     let board = board();
     let hosts = board.hosts();
     let mut publication = board
@@ -409,40 +409,44 @@ fn located_session_problem(
     full_problem(&paths.host, paths.all())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+/// One host with `/` holding the worker roots and `~/Projects` on a
+/// filesystem of its own, as on precision-3260.
+pub fn test_storage_sample(host: &str, root_free: u64, projects_free: u64) -> HostStorageSample {
+    HostStorageSample {
+        host: host.to_owned(),
+        home: Some("/home/jonathan".into()),
+        filesystems: vec![
+            FilesystemSpace {
+                mount: "/".into(),
+                available_bytes: root_free,
+                total_bytes: 500 << 30,
+                reserved_bytes: 25 << 30,
+                paths: vec![
+                    "/home/jonathan/.local/share/hel/workers".into(),
+                    "/home/jonathan/.local/share/hel/profiles".into(),
+                    "/home/jonathan/.cache/mjolnir".into(),
+                    "/tmp".into(),
+                ],
+            },
+            FilesystemSpace {
+                mount: "/home/jonathan/Projects".into(),
+                available_bytes: projects_free,
+                total_bytes: 1000 << 30,
+                reserved_bytes: 0,
+                paths: vec!["/home/jonathan/Projects".into()],
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use mj_core::targets::storage::WRITE_RESERVE_BYTES;
 
-    /// One host with `/` holding the worker roots and `~/Projects` on a
-    /// filesystem of its own, as on precision-3260.
-    pub(crate) fn sample(host: &str, root_free: u64, projects_free: u64) -> HostStorageSample {
-        HostStorageSample {
-            host: host.to_owned(),
-            home: Some("/home/jonathan".into()),
-            filesystems: vec![
-                FilesystemSpace {
-                    mount: "/".into(),
-                    available_bytes: root_free,
-                    total_bytes: 500 << 30,
-                    reserved_bytes: 25 << 30,
-                    paths: vec![
-                        "/home/jonathan/.local/share/hel/workers".into(),
-                        "/home/jonathan/.local/share/hel/profiles".into(),
-                        "/home/jonathan/.cache/mjolnir".into(),
-                        "/tmp".into(),
-                    ],
-                },
-                FilesystemSpace {
-                    mount: "/home/jonathan/Projects".into(),
-                    available_bytes: projects_free,
-                    total_bytes: 1000 << 30,
-                    reserved_bytes: 0,
-                    paths: vec!["/home/jonathan/Projects".into()],
-                },
-            ],
-        }
-    }
+    pub(crate) use super::test_storage_sample as sample;
 
     pub(crate) fn ssh_bare(host: &str) -> TargetLocator {
         TargetLocator::SshBare {

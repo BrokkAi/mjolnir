@@ -4,7 +4,7 @@ use mj_core::state::SessionRecord;
 
 /// What one prewarm did for one host and profile.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PrewarmOutcome {
+pub enum PrewarmOutcome {
     /// The host now holds this profile's shareable objects (the negotiation
     /// sent only the ones it lacked).
     Warm,
@@ -16,7 +16,7 @@ pub(crate) enum PrewarmOutcome {
 /// launches use the shared store. A Nitro guest does not share its profile
 /// objects with the hypervisor account or another guest, and a local target
 /// has no link to spare.
-pub(crate) fn shared_content_ssh(locator: &targets::TargetLocator) -> Option<&SshTarget> {
+pub fn shared_content_ssh(locator: &targets::TargetLocator) -> Option<&SshTarget> {
     match locator {
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. }
@@ -31,7 +31,7 @@ pub(crate) fn shared_content_ssh(locator: &targets::TargetLocator) -> Option<&Ss
 /// host the shareable objects, so the launch that follows sends only its
 /// private bundle. It rides the negotiation a launch uses, on the bulk lane,
 /// with no operation deadline: the executor's cancellation is what stops it.
-pub(crate) fn prewarm_profile_content(
+pub fn prewarm_profile_content(
     config: &mj_core::config::Config,
     session: &SessionRecord,
     profile_id: &str,
