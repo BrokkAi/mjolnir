@@ -1121,8 +1121,8 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport,
-        UnknownCost, UsageAgentRole, UsagePeriod,
+        AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, SessionUsageEstimate,
+        SessionUsageReport, UnknownCost, UsageAgentRole,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1245,6 +1245,20 @@ fn golden_dashboard_dialogs() {
             cost_usd_ticks: Err(UnknownCost),
         },
     ];
+    // Dollars per hour; the 20th bar also ran a model with no known rate, and
+    // the 14th ran only such models.
+    let hour_dollars = [
+        0u64, 0, 3, 8, 5, 0, 0, 12, 30, 22, 18, 9, 4, 0, 0, 0, 6, 14, 26, 41, 35, 20, 11, 7,
+    ];
+    report.hours = hour_dollars
+        .iter()
+        .enumerate()
+        .map(|(n, dollars)| HourlyUsage {
+            start_ms: (490_000 + n as i64) * HOUR_MS,
+            known_cost_usd_ticks: dollars * 10_000_000_000,
+            has_unknown_cost: n == 19 || n == 13,
+        })
+        .collect();
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
@@ -1336,40 +1350,53 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    usage.handle_key(key(KeyCode::Tab));
-    usage.handle_key(key(KeyCode::Enter));
+    // Clicking the first bar with cost selects its hour, and the rows reload.
+    let lines = drawn(&mut usage, 120, 36);
+    let base_row = lines.iter().position(|line| line.contains("$0 ")).unwrap();
+    let column = lines[base_row].chars().position(|c| c == '▂').unwrap();
+    let click = |usage: &mut DashboardState| {
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            usage.handle_mouse(mouse_at(kind, (column as u16, base_row as u16)));
+        }
+    };
+    click(&mut usage);
+    let (hour_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_start_ms, Some((490_000 + 2) * HOUR_MS));
+    usage.apply_session_usage_result(hour_request, Ok(codex_report.clone()));
     append_dialog_render(
         &mut output,
-        "Usage period dropdown",
+        "Usage one hour selected",
         120,
         36,
         &drawn(&mut usage, 120, 36),
     );
-    usage.handle_key(key(KeyCode::Down));
-    usage.handle_key(key(KeyCode::Enter));
+    // Clicking the selected hour again goes back to all hours.
+    click(&mut usage);
+    assert_eq!(usage.session_usage_request().unwrap().1.hour_start_ms, None);
+    let (all_request, _) = usage.session_usage_request().unwrap();
+    usage.apply_session_usage_result(all_request, Ok(codex_report.clone()));
+    // The arrow keys move from the clicked bar to its neighbour; Enter goes back to all hours.
+    usage.handle_key(key(KeyCode::Left));
     assert_eq!(
-        usage.session_usage_request().unwrap().1.period,
-        UsagePeriod::Daily
+        usage.session_usage_request().unwrap().1.hour_start_ms,
+        Some((490_000 + 1) * HOUR_MS)
     );
-    let (daily_request, _) = usage.session_usage_request().unwrap();
-    usage.apply_session_usage_result(daily_request, Ok(codex_report.clone()));
-    append_dialog_render(
-        &mut output,
-        "Usage daily",
-        120,
-        36,
-        &drawn(&mut usage, 120, 36),
-    );
-    usage.handle_key(key(KeyCode::Enter));
-    drawn(&mut usage, 120, 36);
-    usage.handle_key(key(KeyCode::Down));
-    usage.handle_key(key(KeyCode::Enter));
+    // Holding an arrow past the oldest hour stays on it instead of clearing the choice.
+    for _ in 0..30 {
+        usage.handle_key(key(KeyCode::Left));
+    }
     assert_eq!(
-        usage.session_usage_request().unwrap().1.period,
-        UsagePeriod::Weekly
+        usage.session_usage_request().unwrap().1.hour_start_ms,
+        Some(490_000 * HOUR_MS)
     );
+    usage.handle_key(key(KeyCode::Enter));
+    let (_, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.hour_start_ms, None);
     drawn(&mut usage, 120, 36);
-    usage.handle_key(key(KeyCode::Tab));
+    usage.handle_key(key(KeyCode::BackTab));
     usage.handle_key(key(KeyCode::Char(' ')));
     let (weekly_request, query) = usage.session_usage_request().unwrap();
     assert!(query.include_suspended);
@@ -1382,6 +1409,14 @@ fn golden_dashboard_dialogs() {
         120,
         36,
         &drawn(&mut usage, 120, 36),
+    );
+    // A short terminal drops the graph and keeps the rows.
+    append_dialog_render(
+        &mut output,
+        "Usage short terminal",
+        70,
+        17,
+        &drawn(&mut usage, 70, 17),
     );
     usage.apply_session_usage_result(weekly_request, Err("test store unavailable".into()));
     append_dialog_render(

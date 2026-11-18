@@ -70,6 +70,14 @@ use crate::pollers::{
 /// on a stop sees the exit rather than its own deadline.
 const SHUTDOWN_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The existing ten-minute reviewer Create idle bound (#1438) also measures
+/// time since the last byte of an active transfer (#1583, #1571).
+///
+/// The longest stage measured on 2026-11-06 under a load average of about 200
+/// on morannon was a roughly 190 s mkdir. Ten minutes is about three times
+/// that observed worst case.
+const LIFECYCLE_STALL_BOUND: Duration = Duration::from_secs(10 * 60);
+
 /// How long force destruction waits for a cancelled lifecycle to actually
 /// stop before refusing to destroy under it. Cancellation kills the
 /// operation's child process groups and unwinds its persistence, which is
@@ -258,6 +266,7 @@ pub struct RuntimeState {
     /// backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:
         std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
+    pub(crate) rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
@@ -601,6 +610,7 @@ struct LifecycleProgress {
     last_stage_change: tokio::time::Instant,
     next_stream: u64,
     streams: BTreeMap<u64, ActiveStream>,
+    stream_started: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct ActiveStream {
@@ -614,6 +624,7 @@ impl LifecycleProgress {
             last_stage_change: tokio::time::Instant::now(),
             next_stream: 0,
             streams: BTreeMap::new(),
+            stream_started: None,
         }
     }
 }

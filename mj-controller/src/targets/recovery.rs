@@ -60,11 +60,35 @@ pub(crate) fn recover_checkout_plan(
 }
 
 pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
+    relay_proxy_plan(locator, session_id, SshTrafficClass::Control)
+}
+
+/// The relay connection that carries one project-memory transaction. A paged
+/// snapshot or upload moves frames of up to 8 MiB; on the shared Control
+/// connection they sit in its send queue ahead of every other session's small
+/// relay RPC and channel open on that host (#1580). This is the only place
+/// that picks the lane for project-memory traffic.
+pub fn project_memory_relay_command(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<CommandSpec> {
+    relay_proxy_plan(locator, session_id, SshTrafficClass::Bulk)?
+        .commands
+        .into_iter()
+        .next()
+        .context("project-memory relay plan is empty")
+}
+
+fn relay_proxy_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    class: SshTrafficClass,
+) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
     let root = worker_root(locator, session_id)?;
     let binary = format!("{root}/hel");
     let command = locator_command(
-        SshTrafficClass::Control,
+        class,
         locator,
         vec![
             binary,

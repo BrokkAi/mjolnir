@@ -955,6 +955,12 @@ impl DurableRelay {
         state.activity = Some(mj_core::activity::classify(&facts));
         // The worker alone decides whether it will resubmit a failed turn once
         // its login changes; the daemon only reads the answer.
+        state.held_login_fingerprint =
+            if self.verdict_harness == Some(mj_core::config::HarnessKind::Claude) {
+                self.login_identity.snapshot().1
+            } else {
+                self.login_identity.file_fingerprint()
+            };
         state.authentication_retry_waiting = self
             .authentication_retry_identity()
             .map(|(_, rejected)| rejected.to_owned());

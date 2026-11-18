@@ -4955,6 +4955,7 @@ function conversionWarnings(preview) {
 /// and the destination supplies its own isolated workspace. The controller
 /// decides for real; this only decides whether to ask.
 function conversionApplies(session, targetId) {
+  if (session.failed_launch_retry) return false;
   if (!targetId) return false;
   const target = id => (snapshot.targets || []).find(item => item.id === id);
   return target(session.target_id)?.requires_project_directory === true
@@ -5018,6 +5019,7 @@ function resumeCardSignature(session) {
     session.profile_id,
     session.target_id,
     session.capabilities?.resume,
+    session.failed_launch_retry,
     session.capabilities?.destroy,
     session.launch_error,
     session.capabilities?.open,
@@ -5128,6 +5130,12 @@ function updateResumeCard(card, session, rebuild = false) {
   } else if (!canResume) {
     if (queuePinned) body.append(el('p', 'dim', 'Resume is unavailable while queued work is pinned to the retained destination.'));
     else if (!recovery && !noRecovery) body.append(el('p', 'dim', 'This session cannot be resumed from the web viewer.'));
+  } else if (session.failed_launch_retry) {
+    body.append(el('p', '', 'Relaunch this session with its saved settings.'));
+    body.append(el('p', 'dim', 'Prompts that failed with the previous launch are not resent.'));
+    const row = el('div', 'row');
+    row.append(action('Retry launch', '', { action: 'resume', id: session.id }));
+    body.append(row);
   } else if (!targetItems.length) {
     body.append(el('p', '', 'This session cannot resume on any target configured here. Finish recovery in the terminal.'));
   } else {
@@ -10169,7 +10177,11 @@ resumeDetail.onclick = async e => {
   // Keep failures with their session even if the user has left or a snapshot
   // rebuilt the card while the request was pending.
   const errorSink = { set textContent(value) { draft.error = value; } };
-  const success = await runSessionAction(target.dataset, errorSink, {
+  const success = await runSessionAction(target.dataset, errorSink, session.failed_launch_retry ? {
+    workspace_id: workspaceId,
+    target_id: session.target_id,
+    profile_id: session.profile_id,
+  } : {
     workspace_id: workspaceId,
     target_id: draft.targetId,
     profile_id: draft.profileId,

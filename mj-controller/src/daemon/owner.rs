@@ -16,6 +16,65 @@ struct WorkerInputsPublication {
 }
 
 impl PollableWorkerInputs {
+    // Credentials use the session's route and its ancestor chain. Unrelated
+    // record changes must not invalidate a session already admitted to sync.
+    fn session_is_current(&self, owner: &RuntimeStateOwner, session_id: &str) -> bool {
+        if self
+            .ids
+            .binary_search_by(|id| id.as_str().cmp(session_id))
+            .is_err()
+            || owner.worker_is_owned(session_id)
+            || owner.close_requested.contains(session_id)
+            || self.moves.get(session_id)
+                != owner
+                    .committed()
+                    .and_then(|committed| committed.moves.get(session_id))
+        {
+            return false;
+        }
+        let mut id = session_id;
+        let mut visited = BTreeSet::new();
+        while visited.insert(id) {
+            let Some(record) = self.records.sessions.get(id) else {
+                return false;
+            };
+            if owner.controller.state.sessions.get(id) != Some(record)
+                || !self.session_config_is_current(record, &owner.controller.config)
+            {
+                return false;
+            }
+            let relation = self.records.subagents.get(id);
+            if relation != owner.controller.state.subagents.get(id) {
+                return false;
+            }
+            let Some(relation) = relation else {
+                return true;
+            };
+            id = &relation.parent_session_id;
+        }
+        false
+    }
+
+    fn session_config_is_current(
+        &self,
+        record: &mj_core::state::SessionRecord,
+        config: &Config,
+    ) -> bool {
+        self.config == *config
+            || (self.config.profiles.get(&record.last_profile)
+                == config.profiles.get(&record.last_profile)
+                && self.config.github == config.github
+                && record.configuration_issue(&self.config) == record.configuration_issue(config)
+                && match (
+                    record.target_runtime_settings(&self.config),
+                    record.target_runtime_settings(config),
+                ) {
+                    (Ok(before), Ok(after)) => before == after,
+                    (Err(_), Err(_)) => true,
+                    _ => false,
+                })
+    }
+
     pub(super) fn staged_credentials(&self) -> BTreeSet<String> {
         let mut staged = crate::pollers::staged_credential_sessions(&self.controller());
         // Ancestors describe command routing, while the owner authorizes IDs.
@@ -126,12 +185,29 @@ impl RuntimeStateOwner {
         closing: &BTreeSet<String>,
         mut targets: Vec<mj_core::credentials::CredentialSyncTarget>,
         publication: &tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>,
+        wake: Option<&crate::recovery_gate::RecoveryGate>,
     ) -> bool {
-        if !Arc::ptr_eq(&self.pollable_worker_inputs(), inputs) || self.close_requested != *closing
-        {
+        let complete =
+            Arc::ptr_eq(&self.pollable_worker_inputs(), inputs) && self.close_requested == *closing;
+        if !complete && targets.is_empty() {
             return false;
         }
-        targets.retain(|target| !closing.contains(&target.session_id));
+        targets.retain(|target| {
+            !closing.contains(&target.session_id)
+                && (complete || inputs.session_is_current(self, &target.session_id))
+        });
+        let revalidated: Vec<_> = self
+            .credential_inputs
+            .as_ref()
+            .filter(|(old, _)| !Arc::ptr_eq(old, inputs))
+            .map(|(old, _)| {
+                targets
+                    .iter()
+                    .filter(|target| !old.session_is_current(self, &target.session_id))
+                    .map(|target| target.session_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         self.credential_inputs = Some((inputs.clone(), closing.clone()));
         publication.send_if_modified(|current| {
             if *current == targets {
@@ -141,7 +217,12 @@ impl RuntimeStateOwner {
                 true
             }
         });
-        true
+        if let Some(gate) = wake {
+            for id in revalidated {
+                gate.wake_credentials(&id);
+            }
+        }
+        complete
     }
 
     pub(super) fn projected_records(
@@ -436,6 +517,89 @@ impl RuntimeStateOwner {
 }
 
 impl RuntimeState {
+    pub(crate) fn credential_sync_skips(
+        &self,
+        profile_id: &str,
+        fanout: bool,
+        caused_by: Option<&str>,
+        present: impl Fn(&str) -> bool,
+    ) -> Vec<(String, &'static str)> {
+        let owner = self.owner();
+        let mut ids = BTreeSet::new();
+        if fanout {
+            ids.extend(owner.indexes.pollable.keys().filter_map(|id| {
+                owner
+                    .controller
+                    .state
+                    .sessions
+                    .get(id)
+                    .filter(|record| record.last_profile == profile_id)
+                    .map(|_| id.as_str())
+            }));
+        }
+        ids.extend(caused_by);
+        ids.into_iter()
+            .filter(|id| !present(id))
+            .map(|id| {
+                let reason = match owner.controller.state.sessions.get(id) {
+                    None => "session record is absent",
+                    Some(record) if record.last_profile != profile_id => "session changed profiles",
+                    Some(record) if record.state == SessionState::Disconnected => {
+                        "session is disconnected"
+                    }
+                    Some(record) if !crate::pollers::session_target_is_pollable(record) => {
+                        "session has no pollable worker"
+                    }
+                    Some(_) if owner.close_requested.contains(id) => "session is closing",
+                    Some(_) if owner.worker_is_owned(id) => "lifecycle operation owns the worker",
+                    Some(_) if !owner.controller.config.profiles.contains_key(profile_id) => {
+                        "profile is missing"
+                    }
+                    Some(_) => {
+                        "no published credential target for this worker's staged home and route"
+                    }
+                };
+                (id.to_owned(), reason)
+            })
+            .collect()
+    }
+
+    pub(crate) fn credential_session_ids(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord> {
+        self.owner().controller.state.sessions.clone()
+    }
+
+    pub(crate) fn credential_session_ended(&self, session_id: &str) -> bool {
+        self.owner()
+            .controller
+            .state
+            .sessions
+            .get(session_id)
+            .is_none_or(|record| {
+                !record.state.has_live_worker()
+                    || matches!(
+                        record.state,
+                        SessionState::Destroying | SessionState::StartupCleanup
+                    )
+                    || record.target.is_none()
+            })
+    }
+
+    pub(crate) fn credential_profile_source_is_current(
+        &self,
+        target: &mj_core::credentials::CredentialSyncTarget,
+    ) -> bool {
+        self.owner()
+            .controller
+            .config
+            .profiles
+            .get(&target.profile_id)
+            .is_some_and(|profile| {
+                profile.kind == target.harness && profile.home == target.profile_home
+            })
+    }
+
     pub(crate) fn credential_target_is_current(
         &self,
         target: &mj_core::credentials::CredentialSyncTarget,
@@ -446,9 +610,8 @@ impl RuntimeState {
             .credential_inputs
             .as_ref()
             .is_some_and(|(prepared, closing)| {
-                Arc::ptr_eq(prepared, &owner.pollable_worker_inputs())
-                    && *closing == owner.close_requested
-                    && !closing.contains(&target.session_id)
+                !closing.contains(&target.session_id)
+                    && prepared.session_is_current(&owner, &target.session_id)
                     && self.credential_targets.borrow().contains(target)
             }))
     }
@@ -608,28 +771,89 @@ mod tests {
             );
         }
         let (publication, receiver) = tokio::sync::watch::channel(Vec::new());
-        assert!(owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        assert!(owner.install_credentials(&inputs, &closing, Vec::new(), &publication, None));
         assert!(
             !receiver.has_changed().unwrap(),
             "an unchanged target set publishes nothing"
         );
         owner.close_requested.insert("active".into());
-        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication, None));
         owner.close_requested.clear();
         assert!(Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()));
         owner.edit_sessions(|sessions| {
             sessions.get_mut("active").unwrap().state = SessionState::Parked;
         });
-        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication, None));
         let parked = owner.pollable_worker_inputs();
         owner.controller.config.profiles.insert(
             "new".into(),
             serde_json::from_value(serde_json::json!({"kind":"codex", "home":"/profile"})).unwrap(),
         );
-        assert!(!owner.install_credentials(&parked, &closing, Vec::new(), &publication));
+        assert!(!owner.install_credentials(&parked, &closing, Vec::new(), &publication, None));
         assert!(
             !receiver.has_changed().unwrap(),
             "stale preparation never changes the published targets"
+        );
+    }
+
+    // Hard-won: #1581: an unrelated session change discarded a whole delivery fan-out.
+    #[test]
+    fn credential_fanout_revalidates_only_the_session_whose_record_changed() {
+        use mj_core::credentials::CredentialSyncTarget;
+
+        let mut state = mj_core::state::State::default();
+        let target = |id: &str| CredentialSyncTarget {
+            session_id: id.into(),
+            profile_id: "work".into(),
+            harness: mj_core::config::HarnessKind::Codex,
+            profile_home: "/profile".into(),
+            aws_credentials: None,
+            skips_login_file_sync: false,
+            github: Default::default(),
+            sync_github_token: false,
+            skills_scope: mj_core::skills::SkillsScope::Localhost,
+            spec: mj_core::targets::CommandSpec::new("fixture", [id]),
+        };
+        for id in ["a", "b", "c"] {
+            let mut record = runtime_test_session(id, "workspace", SessionState::Running);
+            record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: std::path::PathBuf::from("/worker").join(id),
+            }));
+            state.sessions.insert(id.into(), record);
+        }
+        let mut owner = RuntimeStateOwner::new(
+            Controller {
+                config: Config::default(),
+                state,
+            },
+            Arc::new(|_, _| {}),
+        );
+        let prepared = owner.pollable_worker_inputs();
+        let closing = BTreeSet::new();
+        let (published, receiver) = tokio::sync::watch::channel(Vec::new());
+        owner.edit_sessions(|sessions| {
+            sessions.get_mut("b").unwrap().state = SessionState::Checkpointing;
+        });
+
+        assert!(!owner.install_credentials(
+            &prepared,
+            &closing,
+            vec![target("a"), target("b"), target("c")],
+            &published,
+            None,
+        ));
+        assert_eq!(&*receiver.borrow(), &[target("a"), target("c")]);
+        let refreshed = owner.pollable_worker_inputs();
+        assert!(owner.install_credentials(
+            &refreshed,
+            &closing,
+            vec![target("a"), target("b"), target("c")],
+            &published,
+            None,
+        ));
+        assert_eq!(
+            &*receiver.borrow(),
+            &[target("a"), target("b"), target("c")]
         );
     }
 

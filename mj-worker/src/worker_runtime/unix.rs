@@ -1062,6 +1062,24 @@ pub async fn run_daemon_owned(
         }
     });
     let relay = Arc::new(RelayCell::new(durable_relay));
+    if let Ok(endpoint) = &credentials
+        && endpoint.harness != HarnessKind::Claude
+    {
+        let endpoint = endpoint.clone();
+        let relay = relay.clone();
+        tokio::spawn(async move {
+            let identity = relay
+                .observe()
+                .expect("relay state lock poisoned")
+                .login_identity
+                .clone();
+            if let Err(error) = requests::observe_initial_login(&endpoint, &identity).await {
+                tracing::warn!(%error, "could not read the session's staged login");
+            }
+            // Make the new observation visible to a relay change waiter.
+            drop(relay.lock().expect("relay state lock poisoned"));
+        });
+    }
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
@@ -2578,10 +2596,14 @@ pub(super) async fn serve_client_with_memory(
                 // command ledger.
                 let operation = envelope.request.method_name();
                 let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
-                let login_identity = relay.lock().expect("relay state lock poisoned").login_identity.clone();
+                let login_observed = login_installed || matches!(&envelope.request, RelayRequest::CredentialState);
+                let login_identity = relay.observe().expect("relay state lock poisoned").login_identity.clone();
                 let response = credential_response(envelope, &credentials, &relay_root, &login_identity).await;
                 if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
                     wake_dispatch(&relay, &dispatch_wake)?;
+                } else if login_observed {
+                    // A failed read can withdraw the previous observation.
+                    drop(relay.lock().expect("relay state lock poisoned"));
                 }
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;

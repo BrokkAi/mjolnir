@@ -1260,15 +1260,14 @@ impl ApiBackend {
                         let record = self.exports.session_record(&relation.child_session_id);
                         // This listing reports state; the mailbox carries reports.
                         let unknown = ChildProgress {
-                            turn_pending: true,
                             finished_span: None,
                             last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
                             answer: None,
-                            failed_turn: None,
-                            login_failure: None,
-                            provider_failure: None,
+                            state: ChildState::WaitingForWorker,
+                            failure_message: None,
+                            wake_error: None,
                             report_dir: None,
                         };
                         let (summary, progress) = summaries
@@ -1654,9 +1653,7 @@ impl ApiBackend {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut summaries = summaries;
-            self.observe_child_resolution(&mut summaries).await?;
-            self.describe_child_profile_failures(&mut summaries).await?;
-            self.settle_renewed_login_failures(&mut summaries).await?;
+            self.resolve_child_states(&mut summaries).await?;
             return Ok((summaries, starts));
         }
         // An offline backend has no writer publication to observe.
@@ -1676,9 +1673,7 @@ impl ApiBackend {
                 starts.insert(id.clone(), status);
             }
         }
-        self.observe_child_resolution(&mut summaries).await?;
-        self.describe_child_profile_failures(&mut summaries).await?;
-        self.settle_renewed_login_failures(&mut summaries).await?;
+        self.resolve_child_states(&mut summaries).await?;
         Ok((summaries, starts))
     }
 
@@ -1704,7 +1699,7 @@ impl ApiBackend {
         Ok(liveness_of(view.as_ref()))
     }
 
-    async fn observe_child_resolution(
+    async fn resolve_child_states(
         &self,
         children: &mut [(
             String,
@@ -1713,166 +1708,219 @@ impl ApiBackend {
         )],
     ) -> Result<()> {
         for (id, _, progress) in children {
-            if self
-                .exports
-                .session_record(id)
-                .is_none_or(|record| !record_may_be_running(record.state))
+            let record = self.exports.session_record(id);
+            let view = if record
+                .as_ref()
+                .is_some_and(|record| record_may_be_running(record.state))
             {
+                self.session_handle(id.clone())
+                    .await?
+                    .map(|handle| handle.view())
+            } else {
+                None
+            };
+            let connected = view
+                .as_ref()
+                .filter(|view| view.connected)
+                .and_then(|view| view.snapshot.as_ref());
+            // A projection commit can precede the actor publication for that
+            // completion. Resolve both the turn and its retry from one view.
+            let active = record
+                .as_ref()
+                .is_some_and(|record| record_may_be_running(record.state));
+            if active
+                && connected.is_some_and(|snapshot| {
+                    snapshot
+                        .materialized
+                        .last_turn_outcome
+                        .as_ref()
+                        .map(|turn| turn.completed_ordinal)
+                        != progress.last_completed_ordinal
+                        || !matches!(
+                            snapshot.materialized.execution,
+                            MaterializedExecutionState::Idle
+                        )
+                        || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
+                })
+            {
+                progress.state = ChildState::WaitingForWorker;
                 continue;
             }
-            let view = self
-                .session_handle(id.clone())
-                .await?
-                .map(|handle| handle.view());
-            // A projection commit can precede publication of its actor view.
-            // Only the worker publication for that completion can resolve it.
-            progress.turn_pending = view.as_ref().is_none_or(|view| {
-                !view.connected
-                    || view.snapshot.as_ref().is_none_or(|snapshot| {
-                        snapshot
-                            .materialized
-                            .last_turn_outcome
-                            .as_ref()
-                            .map(|turn| turn.completed_ordinal)
-                            != progress.last_completed_ordinal
-                            || !matches!(
-                                snapshot.materialized.execution,
-                                MaterializedExecutionState::Idle
-                            )
-                            || crate::server::api::WaitObservation::worker_turn_pending(snapshot)
-                    })
+            let state = self
+                .child_state(
+                    id,
+                    progress,
+                    record.as_ref().map(|record| record.last_profile.as_str()),
+                    connected.and_then(|snapshot| {
+                        snapshot.operational.authentication_retry_waiting.as_deref()
+                    }),
+                )
+                .await?;
+            progress.state = if active
+                && connected.is_none()
+                && matches!(state, ChildState::NoFailure | ChildState::Failed { .. })
+            {
+                ChildState::WaitingForWorker
+            } else {
+                state
+            };
+        }
+        Ok(())
+    }
+
+    async fn child_state(
+        &self,
+        id: &str,
+        progress: &ChildProgress,
+        profile: Option<&str>,
+        authentication_retry_waiting: Option<&str>,
+    ) -> Result<ChildState> {
+        use mj_core::credentials::CredentialSyncCause;
+        if let Some(error) = &progress.wake_error {
+            let (detail, evidence) = mj_core::subagent::WakeFailure::decode(error);
+            if let Some(mj_core::subagent::WakeFailure::Authentication {
+                profile_id,
+                staged_login,
+            }) = evidence
+            {
+                let current = self.current_child_profile_login(&profile_id).await?;
+                let verdict = self
+                    .rejected_logins
+                    .lock()
+                    .map_err(|_| anyhow!("refused logins lock poisoned"))?
+                    .wake_verdict(&staged_login, current.as_ref());
+                return Ok(ChildState::from_login_verdict(
+                    profile_id, verdict, false, detail,
+                ));
+            }
+            return Ok(ChildState::RetryableFailure {
+                reason: detail.to_owned(),
             });
         }
-        Ok(())
-    }
-
-    /// A child whose turn failed on a login that has since been renewed did
-    /// not fail for anything its parent can fix, as long as its worker is
-    /// waiting to resubmit the turn once the new login reaches it. The two
-    /// facts have two owners: the worker says it is waiting (it alone knows
-    /// whether a driver, a question, a goal state or a barrier forbids the
-    /// retry), and this daemon says whether the failed token is still the
-    /// profile's current one, deciding with
-    /// [`mj_core::credentials::classify_authentication_failure`] like the
-    /// credential sync. The child is held unfinished only while both hold, so
-    /// it is neither reported nor parked before the pushed login can arrive.
-    /// A worker that publishes nothing (an older one) never holds a child.
-    async fn settle_renewed_login_failures(
-        &self,
-        children: &mut [(
-            String,
-            Option<mj_core::state::MaterializedSessionSummary>,
-            ChildProgress,
-        )],
-    ) -> Result<()> {
-        for (id, _, progress) in children {
-            let Some(profile_id) = progress.login_failure.clone() else {
-                continue;
-            };
-            let Some(failed) = progress
-                .answer
-                .as_ref()
-                .and_then(|turn| turn.diagnostic.as_ref())
-                .and_then(|diagnostic| diagnostic.login_fingerprint.clone())
-            else {
-                continue;
-            };
-            let waiting = self
-                .session_handle(id.clone())
-                .await?
-                .and_then(|handle| handle.view().snapshot.clone())
-                .and_then(|snapshot| snapshot.operational.authentication_retry_waiting.clone());
-            if waiting.as_deref() != Some(failed.as_str()) {
-                continue;
-            }
-            let config = self.profile_catalog.live()?;
-            let Some(profile) = config.profiles.get(&profile_id) else {
-                continue;
-            };
-            let current = crate::worker_client::current_claude_access_token(profile).await;
-            if mj_core::credentials::classify_authentication_failure(
-                Some(&failed),
-                current.as_deref(),
-            ) == mj_core::credentials::AuthenticationVerdict::LoginRenewed
-            {
-                tracing::info!(
-                    session_id = %id,
-                    %profile_id,
-                    "a child's turn failed on a login that was renewed since; its worker is waiting for the pushed login, so no failure is reported"
-                );
-                progress.login_failure = None;
-                progress.failed_turn = None;
-                progress.turn_pending = true;
-            }
-        }
-        Ok(())
-    }
-
-    async fn describe_child_profile_failures(
-        &self,
-        children: &mut [(
-            String,
-            Option<mj_core::state::MaterializedSessionSummary>,
-            ChildProgress,
-        )],
-    ) -> Result<()> {
-        for (id, _, progress) in children {
-            let Some((command, diagnostic)) = progress.provider_failure.clone() else {
-                continue;
-            };
-            let id = id.clone();
-            let selection = blocking("load failed child turn profile", move || {
-                let selection = crate::database::load_session_turn_profile_model(&id, &command)?;
-                // Older turns may predate stored selections. Prefer the
-                // session's current profile, with the child model as fallback.
-                let child = crate::database::load_subagent(&id)?;
-                let oracle = child
-                    .as_ref()
-                    .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Oracle);
-                Ok(match selection {
-                    Some((profile, model @ Some(_))) => Some((profile, model, oracle)),
-                    Some((profile, None)) => child.map(|child| (profile, child.model, oracle)),
-                    None => child.map(|child| (child.profile_id, child.model, oracle)),
-                })
+        let Some(turn) = &progress.answer else {
+            return Ok(ChildState::NoFailure);
+        };
+        let Some((state, mut reason)) =
+            mj_core::subagent::failed_turn(turn, progress.failure_message.as_deref())
+        else {
+            return Ok(ChildState::NoFailure);
+        };
+        if let (Some(profile), Some(cause)) =
+            (profile, CredentialSyncCause::for_failed_turn(id, turn))
+        {
+            let id_for_lookup = id.to_owned();
+            let command = turn.command_id.clone();
+            let selection = blocking("load the failed turn's login profile", move || {
+                crate::database::load_session_turn_profile_model(&id_for_lookup, &command)
             })
             .await?;
-            let Some((profile, model, oracle)) = selection else {
-                continue;
-            };
-            let health = crate::profile_health::shared()
+            let profile = selection.map_or_else(|| profile.to_owned(), |(profile, _)| profile);
+            let current = self.current_child_profile_login(&profile).await?;
+            let verdict = self
+                .rejected_logins
                 .lock()
-                .map_err(|_| anyhow!("profile health lock poisoned"))?;
-            let description = model
-                .as_deref()
-                .and_then(|model| health.unhealthy(&profile, model, std::time::SystemTime::now()))
-                .map(|mark| format!("profile {profile} is {}", mark.describe()))
-                .unwrap_or_else(|| {
-                    let fault = match crate::profile_health::ProfileFault::of(&diagnostic) {
-                        Some(crate::profile_health::ProfileFault::RateLimited) => {
-                            "was rate-limited"
-                        }
-                        Some(crate::profile_health::ProfileFault::QuotaExhausted) => {
-                            "ran out of quota"
-                        }
-                        _ => "failed at the provider",
-                    };
-                    format!("profile {profile} {fault}: {}", diagnostic.message)
-                });
-            if let Some((_, message)) = &mut progress.failed_turn {
-                *message = if oracle {
-                    format!(
-                        "{}. Ask again with ask_oracle to start a fresh oracle.",
-                        description.trim_end_matches('.')
-                    )
-                } else {
-                    format!(
-                        "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
-                        description.trim_end_matches('.')
-                    )
-                };
+                .map_err(|_| anyhow!("refused logins lock poisoned"))?
+                .failure_verdict(&profile, &cause, current.as_ref());
+            let worker_waits = authentication_retry_waiting.is_some()
+                && authentication_retry_waiting == cause.login_fingerprint.as_deref();
+            return Ok(ChildState::from_login_verdict(
+                profile,
+                verdict,
+                worker_waits,
+                &reason,
+            ));
+        }
+        let diagnostic = turn.diagnostic.as_ref().filter(|diagnostic| {
+            state == "failed" && crate::profile_health::ProfileFault::of(diagnostic).is_some()
+        });
+        let provider_failure = if let Some(diagnostic) = diagnostic {
+            if let Some(description) = self
+                .describe_child_profile_failure(id, turn.command_id.clone(), diagnostic.clone())
+                .await?
+            {
+                reason = description;
+            }
+            true
+        } else {
+            false
+        };
+        Ok(ChildState::Failed {
+            state,
+            reason,
+            provider_failure,
+        })
+    }
+
+    async fn current_child_profile_login(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<mj_core::credentials::LoginFingerprint>> {
+        let Ok(config) = self.profile_catalog.live() else {
+            return Ok(None);
+        };
+        let Some(profile) = config.profiles.get(profile_id) else {
+            return Ok(None);
+        };
+        match crate::pollers::current_profile_login(profile).await {
+            Ok(current) => Ok(current),
+            Err(error) => {
+                tracing::warn!(%profile_id, %error, "failed to read the child's current profile login");
+                Ok(None)
             }
         }
-        Ok(())
+    }
+
+    async fn describe_child_profile_failure(
+        &self,
+        id: &str,
+        command: String,
+        diagnostic: mj_core::diagnostic::TurnDiagnostic,
+    ) -> Result<Option<String>> {
+        let id = id.to_owned();
+        let selection = blocking("load failed child turn profile", move || {
+            let selection = crate::database::load_session_turn_profile_model(&id, &command)?;
+            // Older turns may predate stored selections. Prefer the
+            // session's current profile, with the child model as fallback.
+            let child = crate::database::load_subagent(&id)?;
+            let oracle = child
+                .as_ref()
+                .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Oracle);
+            Ok(match selection {
+                Some((profile, model @ Some(_))) => Some((profile, model, oracle)),
+                Some((profile, None)) => child.map(|child| (profile, child.model, oracle)),
+                None => child.map(|child| (child.profile_id, child.model, oracle)),
+            })
+        })
+        .await?;
+        let Some((profile, model, oracle)) = selection else {
+            return Ok(None);
+        };
+        let health = crate::profile_health::shared()
+            .lock()
+            .map_err(|_| anyhow!("profile health lock poisoned"))?;
+        let description = model
+            .as_deref()
+            .and_then(|model| health.unhealthy(&profile, model, std::time::SystemTime::now()))
+            .map(|mark| format!("profile {profile} is {}", mark.describe()))
+            .unwrap_or_else(|| {
+                let fault = match crate::profile_health::ProfileFault::of(&diagnostic) {
+                    Some(crate::profile_health::ProfileFault::RateLimited) => "was rate-limited",
+                    Some(crate::profile_health::ProfileFault::QuotaExhausted) => "ran out of quota",
+                    _ => "failed at the provider",
+                };
+                format!("profile {profile} {fault}: {}", diagnostic.message)
+            });
+        Ok(Some(if oracle {
+            format!(
+                "{}. Ask again with ask_oracle to start a fresh oracle.",
+                description.trim_end_matches('.')
+            )
+        } else {
+            format!(
+                "{}. A new spawn will choose another eligible profile; send_message would run this child on {profile} again.",
+                description.trim_end_matches('.')
+            )
+        }))
     }
 
     /// Resolve every child that can still be reported, and the existing
@@ -2648,7 +2696,9 @@ fn finish_identity(
     output: Option<&str>,
     progress: &ChildProgress,
 ) -> mj_core::subagent::SubagentFinishIdentity {
-    if let Some((start_position, completed_ordinal)) = progress.finished_span {
+    if progress.wake_error.is_none()
+        && let Some((start_position, completed_ordinal)) = progress.finished_span
+    {
         return mj_core::subagent::SubagentFinishIdentity::Turn {
             start_position,
             completed_ordinal,
@@ -2729,8 +2779,11 @@ fn subagent_status(
         );
     }
     // A failed wake owns the output even when an earlier turn delivered a report.
-    if let Some(ChildFailureSource::Wake(failure)) = child_failure_source(record, None) {
-        return ("failed".into(), Some(failure.to_owned()), true);
+    if record.is_some_and(|record| record.state == SessionState::Parked)
+        && progress.wake_error.is_some()
+        && let Some((state, reason)) = progress.state.failure_output()
+    {
+        return (state.into(), Some(reason), true);
     }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
@@ -2759,50 +2812,32 @@ fn subagent_status(
             // Mjolnir is reminding it.
             Some(summary)
                 if idle(summary)
-                    && (progress.turn_pending
-                        || progress.awaiting_prompt(match start {
-                            Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
-                            _ => None,
-                        })
-                        || matches!(
-                            progress.report,
-                            ReportState::Pending { .. } | ReportState::Held { .. }
-                        )) =>
+                    && (matches!(
+                        progress.state,
+                        ChildState::WaitingForWorker | ChildState::Deciding | ChildState::RetryOwed
+                    ) || progress.awaiting_prompt(match start {
+                        Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
+                        _ => None,
+                    }) || matches!(
+                        progress.report,
+                        ReportState::Pending { .. } | ReportState::Held { .. }
+                    )) =>
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
             Some(summary) if idle(summary) => {
-                match (
-                    &progress.report,
-                    &progress.login_failure,
-                    &progress.failed_turn,
-                ) {
-                    (ReportState::Delivered(message), _, _) => {
-                        ("completed".into(), Some(message.clone()), true)
-                    }
-                    // A child whose profile could not sign in failed for a
-                    // reason its parent can fix, not for anything in its task
-                    // (#1160), so the answer names the profile and the fix.
-                    (_, Some(profile_id), _) => (
-                        "failed".into(),
-                        Some(format!(
-                            "profile {profile_id}: {}",
-                            mj_core::subagent::login_invalid_reason(profile_id)
-                        )),
-                        true,
-                    ),
-                    // A turn that failed says so, with its reason: it is not a
-                    // report, and the child can be given another prompt.
-                    (_, None, Some((state, reason))) => {
-                        ((*state).to_owned(), Some(reason.clone()), true)
-                    }
-                    _ => (
+                if let ReportState::Delivered(message) = &progress.report {
+                    ("completed".into(), Some(message.clone()), true)
+                } else if let Some((state, reason)) = progress.state.failure_output() {
+                    (state.into(), Some(reason), true)
+                } else {
+                    (
                         "completed".into(),
                         finished_turn_message
                             .map(str::to_owned)
                             .or_else(|| summary.last_agent_message.clone()),
                         true,
-                    ),
+                    )
                 }
             }
             Some(summary) => ("running".into(), summary.last_agent_message.clone(), false),
@@ -2859,9 +2894,6 @@ pub(crate) enum ChildReport {
 /// What the store says about a child's answer to its parent's newest prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildProgress {
-    /// The worker still owns assessment or retry resolution for this turn,
-    /// or its matching connected publication is not available yet.
-    pub turn_pending: bool,
     /// The completed turn observed here owns only this transcript span.
     pub finished_span: Option<(u64, u64)>,
     /// Stable terminal-failure generation even when the turn has no span.
@@ -2872,16 +2904,73 @@ pub(crate) struct ChildProgress {
     pub awaited_ordinal: Option<u64>,
     /// The outcome owning the child's answer.
     pub answer: Option<mj_core::state::MaterializedTurnOutcome>,
-    /// How that turn failed, when it did: `failed` or `interrupted`, and why.
-    pub failed_turn: Option<(&'static str, String)>,
-    /// The child's profile, when that turn failed because the provider
-    /// refused the profile's login.
-    pub login_failure: Option<String>,
-    /// The failed turn's identity and diagnostic, retained across async lookups.
-    provider_failure: Option<(String, mj_core::diagnostic::TurnDiagnostic)>,
+    state: ChildState,
+    failure_message: Option<String>,
+    wake_error: Option<String>,
     /// The directory on the parent's target where the child writes the
     /// details its report points to.
     pub report_dir: Option<String>,
+}
+
+/// The one verdict shared by reports, their metadata, and park admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildState {
+    NoFailure,
+    /// The matching worker publication is still pending or resolves this turn.
+    WaitingForWorker,
+    Deciding,
+    Refused {
+        profile_id: String,
+    },
+    RetryOwed,
+    RetryableFailure {
+        reason: String,
+    },
+    Failed {
+        state: &'static str,
+        reason: String,
+        provider_failure: bool,
+    },
+}
+
+impl ChildState {
+    fn from_login_verdict(
+        profile_id: String,
+        verdict: mj_core::credentials::LoginFailureVerdict,
+        worker_waits: bool,
+        detail: &str,
+    ) -> Self {
+        use mj_core::credentials::LoginFailureVerdict::*;
+        let reason = match verdict {
+            Deciding => return Self::Deciding,
+            Refused => return Self::Refused { profile_id },
+            Renewed if worker_waits => return Self::RetryOwed,
+            Renewed => "the login was renewed after this authentication failure".to_owned(),
+            Unrefused { reason } => {
+                format!("a refusal of the current login was not established ({reason})")
+            }
+        };
+        Self::RetryableFailure {
+            reason: format!(
+                "For profile {profile_id}, {reason}. Use `send_message` to continue the child with its current credentials. The original error was {detail}"
+            ),
+        }
+    }
+
+    fn failure_output(&self) -> Option<(&'static str, String)> {
+        match self {
+            Self::Refused { profile_id } => Some((
+                "failed",
+                format!(
+                    "profile {profile_id}: {}",
+                    mj_core::subagent::login_invalid_reason(profile_id)
+                ),
+            )),
+            Self::RetryableFailure { reason } => Some(("failed", reason.clone())),
+            Self::Failed { state, reason, .. } => Some((state, reason.clone())),
+            Self::NoFailure | Self::WaitingForWorker | Self::Deciding | Self::RetryOwed => None,
+        }
+    }
 }
 
 impl ChildProgress {
@@ -2890,15 +2979,14 @@ impl ChildProgress {
     #[cfg(test)]
     pub(crate) fn settled(report: ReportState) -> Self {
         Self {
-            turn_pending: false,
             finished_span: None,
             last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
             answer: None,
-            failed_turn: None,
-            login_failure: None,
-            provider_failure: None,
+            state: ChildState::NoFailure,
+            wake_error: None,
+            failure_message: None,
             report_dir: None,
         }
     }
@@ -2938,13 +3026,7 @@ fn child_progress(
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
     let handback_tool = subagent.is_some_and(|record| record.handback_tool);
-    let failure = project_child_failure(
-        child_failure_source(committed.state.sessions.get(child_id), last),
-        subagent.map(|record| record.profile_id.as_str()),
-        turn.and_then(|turn| turn.failed_message.as_deref()),
-    );
     ChildProgress {
-        turn_pending: false,
         finished_span: last.and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -2960,71 +3042,18 @@ fn child_progress(
         ),
         awaited_ordinal: recorded.awaited_ordinal,
         answer: last.cloned(),
-        failed_turn: failure.failed_turn,
-        login_failure: failure.login_failure,
-        provider_failure: failure.provider_failure,
+        state: ChildState::NoFailure,
+        wake_error: child_wake_error(committed.state.sessions.get(child_id)),
+        failure_message: turn.and_then(|turn| turn.failed_message.clone()),
         report_dir: recorded.report_dir.clone(),
     }
 }
 
-/// Select the source before deriving any failure metadata. A wake failure
-/// cannot carry a previous turn's diagnostic, command, or login classification.
-enum ChildFailureSource<'a> {
-    Wake(&'a str),
-    Turn(&'a mj_core::state::MaterializedTurnOutcome),
-}
-
-fn child_failure_source<'a>(
-    record: Option<&'a mj_core::state::SessionRecord>,
-    last: Option<&'a mj_core::state::MaterializedTurnOutcome>,
-) -> Option<ChildFailureSource<'a>> {
-    if let Some(message) = record
+/// A failed wake owns the failure even if an earlier turn delivered a report.
+fn child_wake_error(record: Option<&mj_core::state::SessionRecord>) -> Option<String> {
+    record
         .filter(|record| record.state == SessionState::Parked)
-        .and_then(|record| record.last_error.as_deref())
-    {
-        return Some(ChildFailureSource::Wake(message));
-    }
-    last.filter(|turn| mj_core::subagent::failed_turn(turn, None).is_some())
-        .map(ChildFailureSource::Turn)
-}
-
-#[derive(Default)]
-struct ChildFailureProjection {
-    failed_turn: Option<(&'static str, String)>,
-    login_failure: Option<String>,
-    provider_failure: Option<(String, mj_core::diagnostic::TurnDiagnostic)>,
-}
-
-fn project_child_failure(
-    source: Option<ChildFailureSource<'_>>,
-    profile: Option<&str>,
-    finished_message: Option<&str>,
-) -> ChildFailureProjection {
-    match source {
-        Some(ChildFailureSource::Wake(message)) => ChildFailureProjection {
-            login_failure: profile
-                .filter(|_| mj_core::credentials::text_reports_auth_failure(message))
-                .map(str::to_owned),
-            ..Default::default()
-        },
-        Some(ChildFailureSource::Turn(turn)) => ChildFailureProjection {
-            failed_turn: mj_core::subagent::failed_turn(turn, finished_message),
-            login_failure: profile
-                .filter(|_| mj_core::subagent::turn_failed_on_login(turn))
-                .map(str::to_owned),
-            provider_failure: provider_failure(turn),
-        },
-        None => ChildFailureProjection::default(),
-    }
-}
-
-fn provider_failure(
-    turn: &mj_core::state::MaterializedTurnOutcome,
-) -> Option<(String, mj_core::diagnostic::TurnDiagnostic)> {
-    let (state, _) = mj_core::subagent::failed_turn(turn, None)?;
-    let diagnostic = turn.diagnostic.as_ref()?;
-    (state == "failed" && crate::profile_health::ProfileFault::of(diagnostic).is_some())
-        .then(|| (turn.command_id.clone(), diagnostic.clone()))
+        .and_then(|record| record.last_error.clone())
 }
 
 /// Read a child's progress from the store. Report notifications and
@@ -3056,20 +3085,17 @@ pub(crate) fn load_child_progress(
         mj_core::clock::epoch_millis(),
     );
     let record = crate::database::load_session_record(child_id)?;
-    let source = child_failure_source(record.as_ref(), last.as_ref());
-    // Only the selected turn failure pays for reading its last message.
-    let message = if matches!(source, Some(ChildFailureSource::Turn(_))) {
+    let wake_error = child_wake_error(record.as_ref());
+    let failure_message = if wake_error.is_none()
+        && last
+            .as_ref()
+            .is_some_and(|turn| mj_core::subagent::failed_turn(turn, None).is_some())
+    {
         crate::database::load_materialized_finished_turn_message(child_id)?
     } else {
         None
     };
-    let failure = project_child_failure(
-        source,
-        subagent.as_ref().map(|record| record.profile_id.as_str()),
-        message.as_deref(),
-    );
     Ok(ChildProgress {
-        turn_pending: false,
         finished_span: last.as_ref().and_then(|turn| {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
@@ -3078,9 +3104,9 @@ pub(crate) fn load_child_progress(
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answer: last.clone(),
-        failed_turn: failure.failed_turn,
-        login_failure: failure.login_failure,
-        provider_failure: failure.provider_failure,
+        state: ChildState::NoFailure,
+        wake_error,
+        failure_message,
         report_dir: recorded.report_dir,
     })
 }
@@ -3117,20 +3143,24 @@ fn wait_agent_entry(
     if oracle {
         agent["oracle"] = serde_json::Value::Bool(true);
     }
-    if state == "failed"
-        && let Some(profile_id) = &progress.login_failure
-    {
-        agent["failure"] = serde_json::json!({
-            "kind": "login_invalid",
-            "profile_id": profile_id,
-        });
-    }
-    if state == "failed"
-        && progress.login_failure.is_none()
-        && progress.provider_failure.is_some()
-        && let Some((_, summary)) = &progress.failed_turn
-    {
-        agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
+    if state == "failed" {
+        match &progress.state {
+            ChildState::Refused { profile_id } => {
+                agent["failure"] = serde_json::json!({
+                    "kind": "login_invalid",
+                    "profile_id": profile_id,
+                });
+            }
+            ChildState::Failed {
+                reason,
+                provider_failure: true,
+                ..
+            } => {
+                agent["failure"] =
+                    serde_json::json!({"kind": "provider_failure", "summary": reason});
+            }
+            _ => {}
+        }
     }
     agent
 }
@@ -3200,8 +3230,10 @@ fn mark_promptable(
     record: Option<&mj_core::state::SessionRecord>,
 ) {
     if matches!(state, "failed" | "interrupted")
-        && progress.failed_turn.is_some()
-        && progress.login_failure.is_none()
+        && matches!(
+            progress.state,
+            ChildState::Failed { .. } | ChildState::RetryableFailure { .. }
+        )
         && record.is_some_and(|record| record.state.can_receive_child_work())
     {
         entry["promptable"] = serde_json::Value::Bool(true);

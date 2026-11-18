@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::credentials::{AuthenticationVerdict, SyncStep};
+use mj_core::credentials::{LoginFailureVerdict, LoginFingerprint, RejectedLogins, SyncStep};
 
 /// One immediate sync and notice per session per cooldown for an empty prompt
 /// response, so a harness that repeats it does not flood the UI. An
@@ -50,10 +50,7 @@ impl CredentialSyncSignalTracker {
         }
     }
 
-    pub(super) fn drain_due(
-        &mut self,
-        now: Instant,
-    ) -> Vec<(String, String, CredentialSyncReason, Option<String>)> {
+    pub(super) fn drain_due(&mut self, now: Instant) -> Vec<(String, CredentialSyncCause)> {
         let due = self
             .pending
             .keys()
@@ -77,10 +74,13 @@ impl CredentialSyncSignalTracker {
                     .insert(session_id.clone(), pending.signal.ordinal);
                 self.last_attempts.insert(session_id.clone(), now);
                 (
-                    session_id,
                     pending.profile_id,
-                    pending.signal.reason,
-                    pending.signal.login_fingerprint,
+                    CredentialSyncCause {
+                        session_id,
+                        ordinal: pending.signal.ordinal,
+                        reason: pending.signal.reason,
+                        login_fingerprint: pending.signal.login_fingerprint,
+                    },
                 )
             })
             .collect()
@@ -90,18 +90,39 @@ impl CredentialSyncSignalTracker {
 pub fn schedule_due_credential_syncs(
     tracker: &mut CredentialSyncSignalTracker,
     credential_sync: &CredentialSyncHandle,
+    rejected: &std::sync::Mutex<RejectedLogins>,
     now: Instant,
 ) {
-    for (session_id, profile_id, reason, login_fingerprint) in tracker.drain_due(now) {
-        credential_sync.sync_profile_now(
-            &profile_id,
-            Some(CredentialSyncCause {
-                session_id,
-                reason,
-                login_fingerprint,
-            }),
-        );
+    for (profile_id, cause) in tracker.drain_due(now) {
+        let mut rejected = rejected.lock().expect("rejected logins poisoned");
+        if credential_sync.sync_profile_now(&profile_id, Some(cause.clone())) {
+            rejected.accept(&profile_id, &cause);
+        }
     }
+}
+
+pub(crate) async fn current_profile_login(
+    profile: &mj_core::config::HarnessProfile,
+) -> anyhow::Result<Option<LoginFingerprint>> {
+    let kind = profile.kind;
+    let marker = match kind.login_store(mj_core::config::HarnessHost::current(), &profile.home) {
+        mj_core::config::HarnessLoginStore::MacKeychain => {
+            return Ok(crate::worker_client::current_claude_access_token(profile)
+                .await
+                .map(LoginFingerprint::AccessToken));
+        }
+        mj_core::config::HarnessLoginStore::File { marker } => marker,
+    };
+    let profile = profile.clone();
+    tokio::task::spawn_blocking(move || {
+        // Codex's auth scheme comes from its config file.
+        if profile.auth_scheme().uses_native_login_file() {
+            LoginFingerprint::read_file(kind, &marker)
+        } else {
+            Ok(None)
+        }
+    })
+    .await?
 }
 
 /// Turns finished credential syncs into UI notices.
@@ -156,13 +177,14 @@ pub struct CredentialNotice {
 impl CredentialSyncNotices {
     /// Healthy no-op cycles stay out of the UI; only actions, new failures, and
     /// answers to an event-triggered reconciliation are worth a notice.
+    #[cfg(test)]
     pub fn notice(
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
         harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
-        self.leveled_notice(result, harness, state)
+        self.leveled_notice(result, harness, state, None)
             .map(|notice| notice.text)
     }
 
@@ -174,6 +196,7 @@ impl CredentialSyncNotices {
         result: &mj_core::credentials::CredentialSyncResult,
         harness: Option<mj_core::config::HarnessKind>,
         state: &State,
+        login_verdict: Option<&LoginFailureVerdict>,
     ) -> Option<CredentialNotice> {
         let warning = |text: String| CredentialNotice {
             text,
@@ -191,20 +214,36 @@ impl CredentialSyncNotices {
                     (failed_session == session_id).then_some(detail)
                 })
             });
-            if let Some(detail) = sync_failure {
-                return Some(warning(match trigger.reason {
-                    CredentialSyncReason::AuthenticationFailure => format!(
-                        "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`{advice}.",
-                        result.profile_id, session, result.profile_id
+            if trigger.reason == CredentialSyncReason::AuthenticationFailure {
+                let profile = &result.profile_id;
+                let conclusion = match login_verdict {
+                    Some(LoginFailureVerdict::Refused) => format!(
+                        "the provider refused the login checked during reconciliation. Run `mj login --profile {profile}`{advice}."
                     ),
-                    CredentialSyncReason::EmptyPromptResponse => format!(
-                        "Session {} returned no response; credential reconciliation for profile {} failed: {detail}. The failure is recorded in the transcript.",
-                        session, result.profile_id
-                    ),
-                }));
+                    Some(LoginFailureVerdict::Renewed) if result.pushed_to(session_id) => {
+                        "the session held a stale login. The renewed login was pushed.".into()
+                    }
+                    Some(LoginFailureVerdict::Renewed) => {
+                        "the session failed on a stale login. The profile's login has since been renewed.".into()
+                    }
+                    _ if let Some(detail) = sync_failure => {
+                        format!("credential reconciliation failed: {detail}.")
+                    }
+                    Some(LoginFailureVerdict::Unrefused { reason }) => {
+                        format!("a refusal of the profile's current login was not established: {reason}.")
+                    }
+                    _ => return None,
+                };
+                return Some(warning(format!(
+                    "Auth failure on profile {profile} (session {session}): {conclusion}"
+                )));
             }
-            // A lifecycle can defer or preempt reconciliation. With no
-            // result for this session, we have not checked its credentials.
+            if let Some(detail) = sync_failure {
+                return Some(warning(format!(
+                    "Session {} returned no response; credential reconciliation for profile {} failed: {detail}. The failure is recorded in the transcript.",
+                    session, result.profile_id
+                )));
+            }
             if !result
                 .outcomes
                 .iter()
@@ -212,46 +251,17 @@ impl CredentialSyncNotices {
             {
                 return None;
             }
-            // The first ~80 columns are all most people read before a notice
-            // scrolls off, so the profile leads and the advice trails.
-            return Some(warning(
-                match (trigger.reason, result.pushed_to(session_id)) {
-                    (CredentialSyncReason::AuthenticationFailure, true)
-                        if result.authentication_verdict()
-                            == Some(AuthenticationVerdict::LoginRenewed) =>
-                    {
-                        format!(
-                            "Auth failure on profile {} (session {}): the login was renewed and the current login was pushed. If it repeats run `mj login --profile {}`{advice}.",
-                            result.profile_id, session, result.profile_id
-                        )
-                    }
-                    (CredentialSyncReason::AuthenticationFailure, true) => format!(
-                        "Auth failure on profile {} (session {}); refreshed credentials were pushed. If the session remains stopped, retry the prompt; if it repeats run `mj login --profile {}`{advice}.",
-                        result.profile_id, session, result.profile_id
-                    ),
-                    (CredentialSyncReason::AuthenticationFailure, false)
-                        if result.authentication_verdict()
-                            == Some(AuthenticationVerdict::LoginRenewed) =>
-                    {
-                        format!(
-                            "Auth failure on profile {} (session {}): the login was renewed and the session already holds the current login. If it repeats run `mj login --profile {}`{advice}.",
-                            result.profile_id, session, result.profile_id
-                        )
-                    }
-                    (CredentialSyncReason::AuthenticationFailure, false) => format!(
-                        "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
-                        result.profile_id, session, result.profile_id
-                    ),
-                    (CredentialSyncReason::EmptyPromptResponse, true) => format!(
-                        "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
-                        session, result.profile_id
-                    ),
-                    (CredentialSyncReason::EmptyPromptResponse, false) => format!(
-                        "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
-                        session, result.profile_id
-                    ),
-                },
-            ));
+            return Some(warning(if result.pushed_to(session_id) {
+                format!(
+                    "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
+                    session, result.profile_id
+                )
+            } else {
+                format!(
+                    "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
+                    session, result.profile_id
+                )
+            }));
         }
 
         let mut failures = std::collections::BTreeMap::new();

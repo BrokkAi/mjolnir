@@ -20,6 +20,7 @@ After this work, the controller sends a body only when the receiving host cannot
 - [x] 2026-11-17 19:47Z: Milestone 1 validation passed with #1583's byte-progress watchdog merged. The targeted receiver and Move tests passed, and Clippy reported no warnings in the controller or core crates. A new SSH Podman run sent 1,051,437 cold bytes and 1,643 warm bytes.
 - [x] 2026-11-17 20:06Z: Replaced credential detection with the coordinator's shareable-kind allowlist. The three targeted receiver tests and the Move reuse regression passed, including unknown and credential-bearing MCP files remaining private. Controller Clippy passed.
 - [x] 2026-11-17 20:11Z: The reviewed allowlist build passed the SSH Podman launch comparison. It sent 1,051,304 cold bytes and 1,574 warm bytes. The second launch sent zero shareable objects.
+- [x] 2026-11-17 21:53Z: Fixed the deployed descriptor exhaustion regression. The real receiver sent and published 1,152 cold objects with soft NOFILE=1,024, then sent zero warm object bodies. Overlap and concurrent dead-claim takeover regressions passed and controller Clippy was clean.
 - [ ] Milestone 2: recovery copies transfer only missing payload parts against the controller's retained object set; legacy ZIP assembled on demand.
 - [ ] Milestone 3: Move negotiates Git objects with the destination and sends only missing workspace files.
 - [ ] Milestone 4: one receiver-owned content store per host storage and account, with garbage collection from durable roots, replacing the ad hoc profile and worker paths.
@@ -35,6 +36,8 @@ After this work, the controller sends a body only when the receiving host cannot
 - Observation: Codex profile configuration can carry an actual bearer token inline. The existing regression for a custom provider named by `experimental_bearer_token` confirms this, in addition to native login files and generated AWS credentials. Review also confirmed that MCP argument arrays can carry credentials. The settings files themselves stay in the private bundle.
 - Observation: the old store uses a separate `.x` entry for owner-executable content. The receiver can pin either existing entry by SHA-256 and size, then applies the placement’s mode to a private copy. Identical bytes with different modes therefore transfer once.
 - Observation: the shared executor already drains stdout and stderr concurrently, but previously returned stdout only after stdin finished. The negotiated command observes stdout after stripping the SSH start marker and closes that reply stream on accepted command failure, including cancellation.
+
+- Observation: the first deployed receiver retained one locked descriptor per missing object. Release c4831a676 generated 49 cold Create/Unpark failures in roughly 35 minutes on EC2. A replay with 1,152 unique objects and a soft NOFILE limit of 1,024 reproduced the error before peak payload traffic began. The operation-lease receiver published all 1,152 objects under the same limit and reused them on the next offer.
 
 
 ## Decision Log
@@ -52,7 +55,7 @@ After this work, the controller sends a body only when the receiving host cannot
   Rationale: one owner per fact; the two changes touch the same staging code and must not both decide profile contents.
   Date/Author: 2026-11-17, coordinator session 5992a212.
 
-- Decision: tie each profile object claim to the receiver process that will verify and publish it. The controller ships a Perl receiver using standard modules in the SSH command and feature-detects its runtime. A short filesystem metadata lock serializes pinning, claim creation, and collection. Operation scratch and pins use the same filesystem as the store, including when it is a separate mount, and the legacy collector reserves their directory. The receiver holds each digest lock through its upload and publication. A busy reply can include independent claims, which finish before the sender releases the SSH stream and polls again. Older hosts without the receiver runtime use their existing archive path.
+- Decision: tie each profile object claim to the receiver process that will verify and publish it. The controller ships a Perl receiver using standard modules in the SSH command and feature-detects its runtime. A short filesystem metadata lock serializes pinning, claim creation, and collection. Operation scratch and pins use the same filesystem as the store, including when it is a separate mount, and the legacy collector reserves their directory. The receiver holds each claim through upload and publication, backed by the operation lease described below. A busy reply can include independent claims, which finish before the sender releases the SSH stream and polls again. Older hosts without the receiver runtime use their existing archive path.
   Rationale: closing the channel or killing the receiver releases the locks without a guessed timeout, PID reuse, cross-controller registry, or gap between negotiation and ownership. Bundling the receiver preserves compatibility with every currently installed worker and lets the progress watchdog count pipe writes through the same executor.
   Date/Author: 2026-11-17, Milestone 1 implementer.
 - Decision: Move adopts the existing executable store and its publication/collection ownership. Milestone 4 owns revising the worker store’s lifetime and lock scope.
@@ -70,6 +73,10 @@ After this work, the controller sends a body only when the receiving host cannot
 - Decision: share only explicitly staged plugin, skill, rule, and agent trees, known harness assets, and the memory replica and baseline roots returned by staging. Every other file goes into the private bundle, including harness settings, MCP configuration, instructions, credentials, and any unclassified entry. Launch and cache-only prewarm use this same inventory policy.
   Rationale: a profile setting might pass a credential positionally or under any flag or environment name. The producer's allowlist establishes which kinds may outlive the session. A spelling-based check cannot provide that guarantee.
   Date/Author: 2026-11-17, coordinator session 5992a212 after Milestone 1 review.
+
+- Decision: a receiver owns one locked operation lease for all of its claims. Each claim name is created exclusively as a hard link to that lease, and the existing metadata lock serializes stale-name takeover and publication. A nonblocking probe uses at most one extra descriptor and can still detect active claims from the old receiver. Publication unlinks that object's claim.
+  Rationale: the first deployed receiver kept one descriptor per missing object, which exhausted EC2's 1,024-descriptor soft limit during Create and Unpark. A locked inode allows us to keep the same death detection and mixed-version ownership without tying descriptor use to manifest size or raising limits.
+  Date/Author: 2026-11-17, Milestone 1 regression follow-up.
 
 
 ## Outcomes & Retrospective

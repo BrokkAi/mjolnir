@@ -129,6 +129,7 @@ impl RuntimeState {
                 })
             })),
             report_backend: std::sync::OnceLock::new(),
+            rejected_logins: Default::default(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             recent_launch: tokio::sync::watch::channel(None).0,
             recent_launch_update: Mutex::new(()),

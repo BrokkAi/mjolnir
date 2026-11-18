@@ -189,7 +189,14 @@ impl ViewerSnapshot {
                 .or_insert_with(Default::default)
                 .insert(relation.child_session_id.clone(), relation.kind);
         }
-        Self::from_config_records(config, state, revision, state.sessions.values(), &children)
+        Self::from_config_records(
+            config,
+            state,
+            revision,
+            state.sessions.values(),
+            &children,
+            None,
+        )
     }
 
     pub(crate) fn from_config_records<'a>(
@@ -198,6 +205,7 @@ impl ViewerSnapshot {
         revision: u64,
         records: impl Iterator<Item = &'a mj_core::state::SessionRecord>,
         children: &ViewerChildren,
+        failed_launch_retries: Option<&BTreeSet<String>>,
     ) -> Self {
         // Snapshot-local interning shares storage without caching compatibility decisions.
         let targets: Vec<Arc<str>> = config
@@ -249,7 +257,6 @@ impl ViewerSnapshot {
                         .cloned()
                         .collect(),
                 );
-                let lifecycle = ViewerLifecycleCategory::of(session.state);
                 // A sub-agent child works in its parent's checkout and owns no
                 // worktree, so its project identity has to come from the
                 // parent; its own record would name the parent's session id.
@@ -272,6 +279,21 @@ impl ViewerSnapshot {
                     .unwrap_or_default();
                 let start = session.start_selection();
                 let review = state.effective_review_config(&config.review, &session.id);
+                let failed_launch_retry = failed_launch_retries.map_or_else(
+                    || {
+                        crate::database::failed_first_launch(
+                            session,
+                            state.is_subagent_session(&session.id),
+                            None,
+                        )
+                    },
+                    |eligible| eligible.contains(&session.id),
+                );
+                let lifecycle = if failed_launch_retry {
+                    ViewerLifecycleCategory::Failed
+                } else {
+                    ViewerLifecycleCategory::of(session.state)
+                };
                 ViewerSession {
                     attention: Default::default(),
                     unread_frontier: None,
@@ -325,6 +347,7 @@ impl ViewerSnapshot {
                     has_error: session.last_error.is_some()
                         || session.configuration_issue(config).is_some(),
                     has_checkpoint: session.checkpoint.is_some(),
+                    failed_launch_retry,
                     retained_target: session.target.is_some(),
                     configuration_issue: session.configuration_issue(config),
                     // A session that failed to launch (or a close that left it
@@ -341,10 +364,8 @@ impl ViewerSnapshot {
                     // session alive and still owes the person a reason, so the
                     // controller's safe sentence is published whatever state
                     // the session is in (#1081).
-                    launch_error: matches!(
-                        session.state,
-                        SessionState::Error | SessionState::Stopped
-                    )
+                    launch_error: (failed_launch_retry
+                        || matches!(session.state, SessionState::Error | SessionState::Stopped))
                     .then(|| session.last_error.clone())
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
@@ -368,7 +389,8 @@ impl ViewerSnapshot {
                     additional_mounts: session.additional_mounts.clone(),
                     resource_allocation: session.resource_allocation.clone(),
                     lifecycle,
-                    transitioning: session.state.transition_kind().is_some(),
+                    transitioning: !failed_launch_retry
+                        && session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,
                     last_activity_at_ms: None,
                     last_message_at_ms: None,
@@ -408,6 +430,7 @@ impl ViewerSnapshot {
                                 session.state.as_str(),
                                 session.checkpoint.is_some(),
                                 session.target.is_some(),
+                                failed_launch_retry,
                             ),
                         move_session: false,
                         set_config: false,
@@ -554,14 +577,24 @@ pub(super) fn project_key(identity: &str) -> String {
     mj_core::hex::lower_hex(&digest[..8])
 }
 
-fn resume_source_available(state: &str, has_checkpoint: bool, retained_target: bool) -> bool {
-    has_checkpoint || (state == "error" && retained_target)
+fn resume_source_available(
+    state: &str,
+    has_checkpoint: bool,
+    retained_target: bool,
+    failed_launch_retry: bool,
+) -> bool {
+    failed_launch_retry || has_checkpoint || (state == "error" && retained_target)
 }
 
 impl ViewerSession {
     /// Recorded repair/restore candidates; the environment owner proves existence.
     pub(crate) fn has_resume_source(&self) -> bool {
-        resume_source_available(&self.state, self.has_checkpoint, self.retained_target)
+        resume_source_available(
+            &self.state,
+            self.has_checkpoint,
+            self.retained_target,
+            self.failed_launch_retry,
+        )
     }
 
     /// One interpretation for both current-state persistence and live API delivery.
@@ -690,6 +723,8 @@ pub struct ViewerSession {
     /// Whether an archive is available when the environment is absent.
     #[serde(default)]
     pub has_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed_launch_retry: bool,
     /// Internal placement evidence for API admission; existence is probed by Resume.
     #[serde(skip)]
     pub retained_target: bool,

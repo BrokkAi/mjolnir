@@ -4,6 +4,9 @@ use crate::pollers::*;
 use crate::quota::{ProfileQuota, QuotaReportMap, QuotaReportPublication};
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
+use mj_core::credentials::{
+    CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, RejectedLogins,
+};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, watch};
 
@@ -184,9 +187,7 @@ impl Policy {
         let (quotas_tx, quotas) = watch::channel(QuotaReportMap::new());
         let (refresh, refresh_rx) = mpsc::unbounded_channel();
         catalog.set_quota_reports(reports.clone());
-        let rejected = Arc::new(std::sync::Mutex::new(
-            mj_core::credentials::RejectedLogins::default(),
-        ));
+        let rejected = state.rejected_logins.clone();
         let runtime = state.clone();
         let backend = Arc::new(
             ApiBackend::new(
@@ -216,6 +217,7 @@ impl Policy {
             manager.clone(),
             state.worker_background_gate(),
             state.clone(),
+            rejected.clone(),
         );
         let mut policy = Self {
             services: Services {
@@ -430,10 +432,14 @@ impl Policy {
         let Some(session) = self.state.session_record(id) else {
             return;
         };
-        if let Some(signal) = &observation.credential_signal {
-            self.signals
-                .observe(id, &session.last_profile, signal.clone());
-        }
+        schedule_observed_credential_syncs(
+            &mut self.signals,
+            &self.credentials.handle(),
+            &self.rejected,
+            id,
+            &session.last_profile,
+            observation,
+        );
         if session.harness_kind == mj_core::config::HarnessKind::Claude
             && let Some(diagnostic) = observation
                 .outcome
@@ -596,8 +602,18 @@ impl Policy {
         schedule_due_credential_syncs(
             &mut self.signals,
             &self.credentials.handle(),
+            &self.rejected,
             Instant::now(),
         );
+        let sessions = self.state.session_records();
+        self.rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .retain_failures(|id| {
+                sessions.get(id).is_some_and(|record| {
+                    record.state != mj_core::state::SessionState::DestroyedWithDataLoss
+                })
+            });
         while let Some(result) = self.credentials.try_result() {
             log_credential_sync_actions(&result);
             if result.credential_sessions() > 0
@@ -607,19 +623,25 @@ impl Policy {
                 // Recheck now so a resolved refusal is not shown for an interval.
                 self.profiles_tx.send_replace(self.batch.clone());
             }
-            let notice = {
-                let owner = self.state.owner();
-                let controller = owner.controller();
-                let profile = controller.config.profiles.get(&result.profile_id);
-                if let Some(profile) = profile {
-                    self.rejected
-                        .lock()
-                        .expect("rejected logins poisoned")
-                        .observe(&result, profile);
-                }
-                self.notices
-                    .leveled_notice(&result, profile.map(|p| p.kind), &controller.state)
-            };
+            let profile = self
+                .state
+                .owner()
+                .controller()
+                .config
+                .profiles
+                .get(&result.profile_id)
+                .cloned();
+            let verdict = self
+                .rejected
+                .lock()
+                .expect("rejected logins poisoned")
+                .conclude(&result, profile.as_ref());
+            let notice = self.notices.leveled_notice(
+                &result,
+                profile.as_ref().map(|p| p.kind),
+                &self.state.owner().controller().state,
+                verdict.as_ref(),
+            );
             if let Some(notice) = notice {
                 if notice.routine {
                     tracing::info!(notice = %notice.text, "credential synchronization notice");
@@ -627,6 +649,58 @@ impl Policy {
                     tracing::warn!(notice = %notice.text, "credential synchronization notice");
                 }
                 self.state.push_notice("", notice.text);
+            }
+        }
+    }
+}
+
+fn schedule_observed_credential_syncs(
+    signals: &mut CredentialSyncSignalTracker,
+    credentials: &CredentialSyncHandle,
+    rejected: &std::sync::Mutex<RejectedLogins>,
+    id: &str,
+    profile: &str,
+    observation: &DelegationObservation,
+) {
+    let completed = observation
+        .outcome
+        .as_ref()
+        .map(|turn| turn.completed_ordinal);
+    if let Some(completed) = completed {
+        rejected
+            .lock()
+            .expect("rejected logins poisoned")
+            .supersede(id, completed);
+    }
+    // A later signal can advance the signal tracker's ordinal past this turn.
+    // The completed turn still owns a decision before it can be reported.
+    if let Some(cause) = observation
+        .outcome
+        .as_ref()
+        .and_then(|turn| CredentialSyncCause::for_failed_turn(id, turn))
+    {
+        let mut rejected = rejected.lock().expect("rejected logins poisoned");
+        if !rejected.was_accepted(id, cause.ordinal)
+            && credentials.sync_profile_now(profile, Some(cause.clone()))
+        {
+            rejected.accept(profile, &cause);
+        }
+    }
+    if let Some(signal) = observation
+        .credential_signal
+        .as_ref()
+        .filter(|signal| completed.is_none_or(|completed| completed <= signal.ordinal))
+    {
+        let auth = signal.reason == CredentialSyncReason::AuthenticationFailure;
+        if !auth
+            || !rejected
+                .lock()
+                .expect("rejected logins poisoned")
+                .was_accepted(id, signal.ordinal)
+        {
+            signals.observe(id, profile, signal.clone());
+            if auth {
+                schedule_due_credential_syncs(signals, credentials, rejected, Instant::now());
             }
         }
     }
@@ -704,6 +778,142 @@ fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: 53cccd856: a later auth warning replaced the failed turn's reconciliation
+    #[test]
+    fn a_later_auth_warning_does_not_displace_the_failed_turns_reconciliation() {
+        use mj_core::config::{HarnessKind, HarnessProfile};
+        use mj_core::credentials::{
+            CredentialSnapshot, CredentialSyncOutcome, CredentialSyncResult, CredentialSyncSignal,
+            LoginFailureVerdict, LoginFingerprint,
+        };
+        use mj_core::state::{MaterializedTurnOutcome, TurnOutcomeKind};
+
+        let turn = MaterializedTurnOutcome {
+            answered_through: None,
+            diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                code: Some(agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()),
+                http_status: None,
+                message: "Authentication required".into(),
+                reset_at: None,
+                login_fingerprint: Some("failed-token".into()),
+            }),
+            usage: None,
+            command_id: "task".into(),
+            accepted_ordinal: Some(7),
+            turn_start_position: Some(8),
+            completed_ordinal: 10,
+            completed_at_ms: 0,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "error".into(),
+            },
+            work_facts: None,
+        };
+        let cause = CredentialSyncCause::for_failed_turn("child", &turn).unwrap();
+        let current = LoginFingerprint::AccessToken("failed-token".into());
+        let home = tempfile::tempdir().unwrap();
+        let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf());
+        for warning_seen_first in [false, true] {
+            let (targets, _) = watch::channel(Vec::new());
+            let (triggers, mut queued) = mpsc::unbounded_channel();
+            let credentials = CredentialSyncHandle {
+                targets: Arc::new(targets),
+                triggers,
+            };
+            let rejected = std::sync::Mutex::new(RejectedLogins::default());
+            let mut tracker = CredentialSyncSignalTracker::default();
+            let mut snapshot = DelegationObservation {
+                requests: Default::default(),
+                completed: Vec::new(),
+                outcome: None,
+                in_flight: Vec::new(),
+                credential_signal: Some(CredentialSyncSignal {
+                    ordinal: 11,
+                    reason: CredentialSyncReason::AuthenticationFailure,
+                    login_fingerprint: None,
+                }),
+                work_liveness: None,
+                undelivered_mailbox_event_keys: Vec::new(),
+            };
+            if warning_seen_first {
+                schedule_observed_credential_syncs(
+                    &mut tracker,
+                    &credentials,
+                    &rejected,
+                    "child",
+                    "helper",
+                    &snapshot,
+                );
+            }
+            // The projection publishes only ordinal 11 as its latest signal,
+            // even when the same page also completes turn 10.
+            snapshot.outcome = Some(turn.clone());
+            schedule_observed_credential_syncs(
+                &mut tracker,
+                &credentials,
+                &rejected,
+                "child",
+                "helper",
+                &snapshot,
+            );
+            let mut registry = rejected.lock().unwrap();
+            assert_eq!(
+                registry.failure_verdict("helper", &cause, Some(&current)),
+                LoginFailureVerdict::Deciding
+            );
+            let first = queued.try_recv().unwrap();
+            let second = queued.try_recv().unwrap();
+            let (warning, completed) = if warning_seen_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            assert_eq!(warning.cause.unwrap().ordinal, 11);
+            assert_eq!(completed.cause.as_ref(), Some(&cause));
+            registry.observe(
+                &CredentialSyncResult {
+                    profile_id: completed.profile_id,
+                    trigger: completed.cause,
+                    failure: None,
+                    partial: false,
+                    outcomes: vec![CredentialSyncOutcome {
+                        session_id: cause.session_id.clone(),
+                        unchanged_login: Some(CredentialSnapshot::of(
+                            HarnessKind::Claude,
+                            b"fixture",
+                        )),
+                        current_access_token: cause.login_fingerprint.clone(),
+                        outcome: Ok(Vec::new()),
+                        step_failures: Vec::new(),
+                    }],
+                },
+                &profile,
+            );
+            assert_eq!(
+                registry.failure_verdict("helper", &cause, Some(&current)),
+                LoginFailureVerdict::Refused
+            );
+            drop(registry);
+
+            snapshot.credential_signal = Some(CredentialSyncSignal {
+                ordinal: cause.ordinal,
+                reason: cause.reason,
+                login_fingerprint: cause.login_fingerprint.clone(),
+            });
+            schedule_observed_credential_syncs(
+                &mut tracker,
+                &credentials,
+                &rejected,
+                "child",
+                "helper",
+                &snapshot,
+            );
+            assert!(
+                queued.try_recv().is_err(),
+                "reobserving the turn must not reconcile it again"
+            );
+        }
+    }
 
     // Hard-won: #1487: an older native-source scan could publish over edited profile inputs.
     #[tokio::test]

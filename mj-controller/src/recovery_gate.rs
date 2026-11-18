@@ -1037,6 +1037,11 @@ impl RecoveryGate {
         ready
     }
 
+    pub(crate) fn wake_credentials(&self, session_id: &str) {
+        self.credential_wakes
+            .send_if_modified(|sessions| sessions.insert(session_id.to_owned()));
+    }
+
     pub(crate) fn credential_wakes(&self) -> watch::Receiver<BTreeSet<String>> {
         let mut wakes = self.credential_wakes.subscribe();
         wakes.mark_changed();

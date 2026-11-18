@@ -258,7 +258,7 @@ impl Controller {
             // The parked home holds the login the child had when it parked; a
             // renewal since then revoked it. Stage the profile again so the
             // worker starts with the current login (#1547).
-            self.prepare_worker_files_for(
+            let staged_login = self.prepare_worker_files_for(
                 session_id,
                 &backend,
                 &worker_root,
@@ -335,14 +335,19 @@ impl Controller {
                 let liveness = super::worker_binary::probe_worker_liveness(executor, &backend, session_id, &worker_root).context("check whether the failed unpark worker exited")?;
                 if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
                     let detail = format!("{error:#}");
-                    let failure = if mj_core::credentials::text_reports_auth_failure(&detail) {
-                        let profile = &self.state.subagents[session_id].profile_id;
-                        format!("login_invalid: login refused for profile {profile} on target {}; run `mj login --profile {profile}` and retry send_message: {detail}", session.target_template_id)
-                    } else {
-                        detail
-                    };
-                    crate::database::fail_subagent_unpark(session_id, owner.operation_id(), &failure)?;
-                    anyhow::bail!("{failure}");
+                    let evidence = staged_login
+                        .filter(|_| mj_core::credentials::text_reports_auth_failure(&detail))
+                        .map(|staged_login| mj_core::subagent::WakeFailure::Authentication {
+                            profile_id: session.last_profile.clone(),
+                            staged_login,
+                        });
+                    crate::database::fail_subagent_unpark(
+                        session_id,
+                        owner.operation_id(),
+                        &detail,
+                        evidence.as_ref(),
+                    )?;
+                    anyhow::bail!("{detail}");
                 }
                 return Err(error);
             }
@@ -676,24 +681,63 @@ mod tests {
             crate::controller::test_support::worker_test_permit(LATCH_RELAY_SESSION, "test unpark")
                 .unwrap()
                 .unwrap();
-        owner.scope(async {
-            let intent = crate::database::WorkerRestartIntent {
-                operation_id: owner.operation_id().to_owned(), target: *target, desired_build: String::new(),
-            };
-            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
-            let failure = "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex`";
-            // A stale completion must leave the current boot and state intact.
-            assert!(crate::database::fail_subagent_unpark(LATCH_RELAY_SESSION, "stale-owner", failure).is_err());
-            assert_eq!(crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(), Some(SessionState::Running));
-            crate::database::fail_subagent_unpark(LATCH_RELAY_SESSION, owner.operation_id(), failure).unwrap();
-            let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION).unwrap().unwrap();
-            assert_eq!(record.state, SessionState::Parked);
-            assert_eq!(record.last_error.as_deref(), Some(failure));
-            assert!(crate::database::load_worker_restart(LATCH_RELAY_SESSION).unwrap().is_none());
-            // The same child can accept a later wake after login repair.
-            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
-            assert_eq!(crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(), Some(SessionState::Running));
-        }).await;
+        owner
+            .scope(async {
+                let intent = crate::database::WorkerRestartIntent {
+                    operation_id: owner.operation_id().to_owned(),
+                    target: *target,
+                    desired_build: String::new(),
+                };
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+                let detail = "workspace routing discovery unauthorized (401)";
+                let evidence = mj_core::subagent::WakeFailure::Authentication {
+                    profile_id: "codex".into(),
+                    staged_login: mj_core::credentials::LoginFingerprint::File("staged".into()),
+                };
+                // A stale completion must leave the current boot and state intact.
+                assert!(
+                    crate::database::fail_subagent_unpark(
+                        LATCH_RELAY_SESSION,
+                        "stale-owner",
+                        detail,
+                        Some(&evidence)
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
+                    Some(SessionState::Running)
+                );
+                crate::database::fail_subagent_unpark(
+                    LATCH_RELAY_SESSION,
+                    owner.operation_id(),
+                    detail,
+                    Some(&evidence),
+                )
+                .unwrap();
+                let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(record.state, SessionState::Parked);
+                let saved = record.last_error.as_deref().unwrap();
+                assert!(saved.starts_with(detail), "{saved}");
+                assert_eq!(
+                    mj_core::subagent::WakeFailure::decode(saved),
+                    (detail, Some(evidence))
+                );
+                assert!(
+                    crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .is_none()
+                );
+                // The same child can accept a later wake after login repair.
+                crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+                assert_eq!(
+                    crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
+                    Some(SessionState::Running)
+                );
+            })
+            .await;
     }
 
     // Hard-won: a6ad3cc3c: unpark waited for a resumed provider retry to finish and then stopped it.

@@ -255,6 +255,33 @@ impl RuntimeState {
                 full.metadata.container_upgrade_sessions.remove(id);
             }
         }
+        full.metadata.failed_launch_retries = history.full.metadata.failed_launch_retries.clone();
+        for id in history
+            .full
+            .records
+            .changes(&full.records)
+            .map(|(id, _)| id)
+            .chain(
+                history
+                    .full
+                    .subagents
+                    .changes(&full.subagents)
+                    .map(|(id, _)| id),
+            )
+            .chain(history.full.moves.changes(&full.moves).map(|(id, _)| id))
+        {
+            if full.records.get(id).is_some_and(|record| {
+                crate::database::failed_first_launch(
+                    record,
+                    full.subagents.contains_key(id),
+                    full.moves.get(id),
+                )
+            }) {
+                full.metadata.failed_launch_retries.insert(id.clone());
+            } else {
+                full.metadata.failed_launch_retries.remove(id);
+            }
+        }
         full.native_agents = history.full.native_agents.clone();
         for (owner, children) in history.native_owners.changes(&native_owners) {
             let empty = SnapshotMap::new();

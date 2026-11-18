@@ -346,6 +346,7 @@ fn transfer(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -356,6 +357,7 @@ mod tests {
         batches: Mutex<Vec<Vec<u8>>>,
         hold: Mutex<Option<Hold>>,
         pid: Option<&'a Path>,
+        nofile: Option<u32>,
     }
 
     impl<'a> LocalReceiver<'a> {
@@ -365,6 +367,7 @@ mod tests {
                 batches: Mutex::new(Vec::new()),
                 hold: Mutex::new(None),
                 pid: None,
+                nofile: None,
             }
         }
 
@@ -447,17 +450,16 @@ mod tests {
 
             let mut local = command.clone();
             let mut script = command.args.last().unwrap().clone();
+            let mut args = Vec::new();
             if let Some(pid) = self.pid {
                 script = format!("printf '%s\\n' \"$$\" > \"$1\"; exec {script}");
-                local.args = vec![
-                    "-c".into(),
-                    script,
-                    "test-receiver".into(),
-                    pid.display().to_string(),
-                ];
-            } else {
-                local.args = vec!["-c".into(), script];
+                args.extend(["test-receiver".into(), pid.display().to_string()]);
             }
+            if let Some(limit) = self.nofile {
+                script = format!("ulimit -Sn {limit} || exit; {script}");
+            }
+            local.args = vec!["-c".into(), script];
+            local.args.extend(args);
             local.program = "sh".into();
             local.ssh_session = None;
             local.ssh_destination = None;
@@ -580,11 +582,96 @@ mod tests {
             release.send(()).unwrap();
             assert!(original.join().unwrap().is_err());
         });
-        let retry = LocalReceiver::new(home);
-        upload(&retry, &dummy_ssh(), &first, "recovered", &roots).unwrap();
+        let manifest = ProfileContentManifest::from_staged(&first, &roots).unwrap();
+        let recover_key = digest(b"dead owner bytes");
+        let store = home.join(PROFILE_CONTENT_STORE);
+        let abandoned_claim = store.join(".stage-negotiated/claims").join(&recover_key);
+        let abandoned = std::fs::metadata(&abandoned_claim).unwrap();
+
+        // Start two receivers against the same dead claim and hold whichever
+        // receives it before any bytes are published. The other receiver
+        // must observe the fresh link as busy while the winner still owns it.
+        let contenders = [LocalReceiver::new(home), LocalReceiver::new(home)];
+        let (reached, ready) = mpsc::channel();
+        let releases = contenders.each_ref().map(|receiver| {
+            let (release, held) = mpsc::channel();
+            *receiver.hold.lock().unwrap() = Some((reached.clone(), held));
+            release
+        });
+        std::thread::scope(|scope| {
+            for contender in &contenders {
+                let manifest = &manifest;
+                scope.spawn(move || transfer(contender, &dummy_ssh(), manifest, None).unwrap());
+            }
+            ready.recv_timeout(Duration::from_secs(10)).unwrap();
+            let start = Instant::now();
+            while contenders
+                .iter()
+                .all(|receiver| receiver.batches.lock().unwrap().is_empty())
+                && start.elapsed() < Duration::from_secs(10)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                contenders
+                    .iter()
+                    .any(|receiver| !receiver.batches.lock().unwrap().is_empty())
+            );
+            assert!(!store.join(&recover_key).exists());
+            assert_ne!(
+                std::fs::metadata(&abandoned_claim).unwrap().ino(),
+                abandoned.ino()
+            );
+            for release in releases {
+                // The receiver that got only a busy reply dropped its hold.
+                let _ = release.send(());
+            }
+        });
+        let recovered: Vec<_> = contenders
+            .iter()
+            .flat_map(LocalReceiver::claimed_objects)
+            .flatten()
+            .collect();
+        assert_eq!(recovered.as_slice(), std::slice::from_ref(&recover_key));
         assert_eq!(
-            retry.claimed_objects(),
-            [BTreeSet::from([digest(b"dead owner bytes")])]
+            std::fs::read(store.join(recover_key)).unwrap(),
+            b"dead owner bytes"
+        );
+        assert!(!abandoned_claim.exists());
+    }
+
+    // Hard-won: c4831a676: cold EC2 receivers exhausted 1,024 file descriptors holding one lock per object.
+    #[test]
+    fn cold_profile_claims_more_objects_than_the_receiver_descriptor_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let source = home.join("source");
+        let objects = source.join("rules");
+        std::fs::create_dir_all(&objects).unwrap();
+        let limit = 1024_u32;
+        let mut expected = BTreeSet::new();
+        for index in 0..limit + 128 {
+            let bytes = index.to_le_bytes();
+            std::fs::write(objects.join(index.to_string()), bytes).unwrap();
+            expected.insert(digest(&bytes));
+        }
+        let receiver = LocalReceiver {
+            nofile: Some(limit),
+            ..LocalReceiver::new(home)
+        };
+        let roots = shared_profile_paths(HarnessKind::Codex);
+        let manifest = ProfileContentManifest::from_staged(&source, &roots).unwrap();
+
+        transfer(&receiver, &dummy_ssh(), &manifest, None).unwrap();
+        transfer(&receiver, &dummy_ssh(), &manifest, None).unwrap();
+
+        let store = home.join(PROFILE_CONTENT_STORE);
+        assert_eq!(receiver.claimed_objects(), [expected, BTreeSet::new()]);
+        assert_eq!(
+            std::fs::read_dir(store.join(".stage-negotiated/claims"))
+                .unwrap()
+                .count(),
+            0
         );
     }
 
