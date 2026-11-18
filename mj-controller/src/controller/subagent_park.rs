@@ -383,7 +383,7 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("worker-source");
-        std::fs::write(&worker, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+        std::fs::write(&worker, mj_core::worker_build::worker_build_stamp()).unwrap();
         IsolatedTest::new(test_name(module_path!(), test))
             .env(MARKER, "1")
             .env("MJ_WORKER_BINARY", worker)

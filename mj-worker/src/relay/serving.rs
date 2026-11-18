@@ -62,7 +62,7 @@ mod tests {
         };
         assert_eq!(
             worker_build.as_deref(),
-            Some(mj_core::worker_build::WORKER_BUILD_ID)
+            Some(mj_core::worker_build::worker_build_id())
         );
     }
 

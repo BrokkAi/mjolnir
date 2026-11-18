@@ -77,7 +77,7 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
 
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
-    bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+    bytes.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
     bytes
 }
 
@@ -120,7 +120,7 @@ fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
         stale.to_str().unwrap(),
         legacy.to_str().unwrap(),
         "2.0.0+",
-        WORKER_BUILD_ID,
+        worker_build_id(),
         "missing worker build stamp",
         "cargo build --target x86_64-unknown-linux-musl",
     ] {
@@ -179,10 +179,10 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
         let current = directory.path().join("current-worker");
         let mut body = format!(
             "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; liveness) echo dead ;; esac\nexit 0\n",
-            mj_core::worker_build::WORKER_BUILD_ID
+            mj_core::worker_build::worker_build_id()
         )
         .into_bytes();
-        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
         std::fs::write(&current, body).unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
@@ -264,10 +264,10 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
         let current = directory.path().join("current-worker");
         let mut body = format!(
             "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
-            mj_core::worker_build::WORKER_BUILD_ID
+            mj_core::worker_build::worker_build_id()
         )
         .into_bytes();
-        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
         std::fs::write(&current, body).unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
@@ -396,10 +396,10 @@ fn a_control_worker_install_waits_without_holding_admission_and_a_cancel_ends_it
         let current = directory.path().join("current-worker");
         let mut body = format!(
             "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
-            mj_core::worker_build::WORKER_BUILD_ID
+            mj_core::worker_build::worker_build_id()
         )
         .into_bytes();
-        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
         std::fs::write(&current, body).unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
@@ -536,7 +536,7 @@ fn in_isolated_store_with_worker(test: &str, worker_script: &str) -> bool {
     let directory = tempfile::tempdir().unwrap();
     let current = directory.path().join("current-worker");
     let mut body = format!("#!/bin/sh\n{worker_script}\n").into_bytes();
-    body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+    body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
     std::fs::write(&current, body).unwrap();
     std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
     IsolatedTest::new(test_name(module_path!(), test))
@@ -608,7 +608,7 @@ fn status_78_stages_the_control_worker_and_reruns_once() {
             let directory = tempfile::tempdir().unwrap();
             let current = directory.path().join("current-worker");
             let mut body = format!("#!/bin/sh\n{worker}\n").into_bytes();
-            body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+            body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
             std::fs::write(&current, body).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -694,10 +694,10 @@ fn probing_a_worker_installs_the_control_worker_itself() {
         let current = directory.path().join("current-worker");
         let mut body = format!(
             "#!/bin/sh\ncase \"$2\" in build-id) echo {} ;; esac\nexit 0\n",
-            mj_core::worker_build::WORKER_BUILD_ID
+            mj_core::worker_build::worker_build_id()
         )
         .into_bytes();
-        body.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        body.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
         std::fs::write(&current, body).unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         IsolatedTest::new(test_name(
@@ -867,7 +867,7 @@ fn pinning_logs_each_selected_worker_with_its_source_and_build() {
         "beside the mj binary",
         "x86_64-unknown-linux-musl",
         &worker.display().to_string(),
-        WORKER_BUILD_ID,
+        worker_build_id(),
     ] {
         assert!(line.contains(expected), "missing {expected:?} in {line}");
     }
@@ -2638,7 +2638,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
                 "recovered worker must read the new launch configuration"
             );
             ensure!(
-                connection.worker_build() == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                connection.worker_build() == Some(mj_core::worker_build::worker_build_id()),
                 "the recovered process must report the installed worker inputs"
             );
             Ok::<_, anyhow::Error>(())
@@ -2729,7 +2729,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
         as_root("chown 0:0 /opt/mjolnir/mj-worker && chmod 755 /opt/mjolnir/mj-worker")?;
         ensure!(
             image_worker_build(&locator, &ProcessExecutor)?.as_deref()
-                == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                == Some(mj_core::worker_build::worker_build_id()),
             "the image's worker reports this build"
         );
 
@@ -2811,7 +2811,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
                 }
             };
             ensure!(
-                connection.worker_build() == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                connection.worker_build() == Some(mj_core::worker_build::worker_build_id()),
                 "the image's worker must report this controller's build"
             );
             Ok::<_, anyhow::Error>(())

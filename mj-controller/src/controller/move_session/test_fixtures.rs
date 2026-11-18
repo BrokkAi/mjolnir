@@ -289,7 +289,7 @@ esac
 exit 0
 "#,
         checkpoint_only = LATCH_CHECKPOINT_ONLY,
-        worker_build = mj_core::worker_build::WORKER_BUILD_ID,
+        worker_build = mj_core::worker_build::worker_build_id(),
         relay_root = LATCH_RELAY_ROOT,
         root = shell_literal(worker_root),
         binary = shell_literal(&std::env::current_exe().unwrap()),

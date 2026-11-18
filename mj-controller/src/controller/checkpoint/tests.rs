@@ -663,7 +663,7 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         let executor = ExportExecutor::new(1, &failure).retry_stdin_after_failure();
         let directory = tempfile::tempdir().unwrap();
         let worker_binary = directory.path().join("hel-test-worker");
-        std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+        std::fs::write(&worker_binary, mj_core::worker_build::worker_build_stamp()).unwrap();
 
         let owner = crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,

@@ -268,7 +268,7 @@ impl Controller {
                 mj_core::worker_build::is_worker_build(build),
                 "retained worker returned an invalid build identity"
             );
-            build != WORKER_BUILD_ID
+            build != worker_build_id()
         } else {
             false
         };

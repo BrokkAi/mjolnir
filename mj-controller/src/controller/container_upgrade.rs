@@ -122,7 +122,7 @@ impl Controller {
                         executor.end_resumable_work("start container worker")?;
                         install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)?;
                         replace_installed_worker_launch_config(executor, &backend, session_id, &launch)?;
-                        owner.begin_restart(target, mj_core::worker_build::WORKER_BUILD_ID.into())?;
+                        owner.begin_restart(target, mj_core::worker_build::worker_build_id().into())?;
                         start_worker_durably(&owner, target, executor, &backend, &root, &self.config.github)?;
                     }
                     executor.begin_resumable_work()?;

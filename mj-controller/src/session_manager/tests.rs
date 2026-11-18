@@ -663,7 +663,7 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
     let restarted = directory.path().join("worker-restarted");
     let bytes = format!(
         "current worker binary{}",
-        mj_core::worker_build::WORKER_BUILD_STAMP
+        mj_core::worker_build::worker_build_stamp()
     );
     std::fs::write(&source, &bytes).unwrap();
     let current_digest = lower_hex(sha2::Sha256::digest(bytes.as_bytes()));

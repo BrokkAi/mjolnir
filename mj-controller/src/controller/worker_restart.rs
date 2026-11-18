@@ -250,7 +250,7 @@ impl Controller {
             .into_iter()
             .next()
             .context("reconnect plan is empty")?;
-        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
+        let installed = mj_core::worker_build::worker_build_id().to_owned();
         let current = worker_runs_installed_build(reported_build, &installed);
         // Worker-binary maintenance has no authority over the container or
         // its storage, regardless of the image a new session would use.

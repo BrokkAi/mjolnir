@@ -48,7 +48,7 @@ webbrowser = "1.2"
 tempfile.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["golden"] }
+mj-core = { workspace = true, features = ["golden", "test-identity"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
 tokio = { workspace = true, features = ["test-util"] }

@@ -18,6 +18,96 @@ pub const BUILD_COMMIT_TIME: &str = env!("MJ_BUILD_COMMIT_TIME");
 /// Referenced by the worker entry point so stripping cannot discard it.
 pub const WORKER_BUILD_STAMP: &str =
     concat!("\0MJ-WORKER-BUILD:", env!("MJ_WORKER_BUILD_ID"), "\0");
+
+/// The identities of the running program's build.
+///
+/// A program installs this first thing in `main` ([`install`]) and library
+/// code reads it through [`build_id`], [`worker_build_id`] and
+/// [`commit_time`]. Library crates do not compile the values in: a value that
+/// changes with every commit would make each crate that names it, and every
+/// crate above that one, stale after every commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildIdentity {
+    /// Package version, `+`, and the commit: see [`build_id`].
+    pub build_id: &'static str,
+    /// Package version, `+`, and the worker input digest: see [`worker_build_id`].
+    pub worker_build_id: &'static str,
+    /// The commit's time in Unix seconds, or empty when unknown.
+    pub commit_time: &'static str,
+}
+
+impl BuildIdentity {
+    /// The identity compiled into this crate.
+    #[must_use]
+    pub const fn compiled() -> Self {
+        Self {
+            build_id: BUILD_ID,
+            worker_build_id: WORKER_BUILD_ID,
+            commit_time: BUILD_COMMIT_TIME,
+        }
+    }
+}
+
+static INSTALLED: std::sync::OnceLock<BuildIdentity> = std::sync::OnceLock::new();
+
+/// Record the identity of the running program. Call it once, first thing in
+/// `main`.
+///
+/// # Panics
+///
+/// When a different identity is already installed: a process has one build.
+pub fn install(identity: BuildIdentity) {
+    let installed = INSTALLED.get_or_init(|| identity);
+    assert_eq!(
+        *installed, identity,
+        "a process cannot install two build identities"
+    );
+}
+
+fn installed() -> &'static BuildIdentity {
+    // A test binary has no `main` of ours to install one. Some tests hand
+    // their own executable to the code that verifies a worker binary, so the
+    // stamp has to be in that file, as it is in a real worker.
+    #[cfg(any(test, feature = "test-identity"))]
+    return INSTALLED.get_or_init(|| {
+        std::hint::black_box(WORKER_BUILD_STAMP);
+        BuildIdentity::compiled()
+    });
+    #[cfg(not(any(test, feature = "test-identity")))]
+    INSTALLED
+        .get()
+        .expect("the program did not install its build identity before using it")
+}
+
+/// Identity of this daemon build: package version plus commit. It orders
+/// daemon replacements and remains visible to users and clients.
+#[must_use]
+pub fn build_id() -> &'static str {
+    installed().build_id
+}
+
+/// Compatibility identity of workers built from the same Cargo inputs: the
+/// package version plus a digest of the worker's inputs at the commit.
+#[must_use]
+pub fn worker_build_id() -> &'static str {
+    installed().worker_build_id
+}
+
+/// The committer time, in Unix seconds, of the revision in [`build_id`], or
+/// empty when the build had neither Git nor `MJ_BUILD_COMMIT_TIME`.
+#[must_use]
+pub fn commit_time() -> &'static str {
+    installed().commit_time
+}
+
+/// The bytes a worker executable carries so its build can be read from the
+/// file: [`worker_build_id`] between the stamp's markers.
+#[must_use]
+pub fn worker_build_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| format!("\0MJ-WORKER-BUILD:{}\0", worker_build_id()))
+}
+
 const PREFIX: &[u8] = b"\0MJ-WORKER-BUILD:";
 // Preserve the existing stamp parser's search window, including its terminator.
 const STAMP_BYTES: usize = 192;

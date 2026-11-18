@@ -2696,7 +2696,7 @@ async fn closing_a_child_recovers_a_turn_that_never_settles_after_cancellation()
                 let source = directory.path().join("worker-source");
                 std::fs::write(
                     &source,
-                    mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes(),
+                    mj_core::worker_build::worker_build_stamp().as_bytes(),
                 )
                 .unwrap();
                 source

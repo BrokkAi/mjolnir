@@ -4841,7 +4841,7 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
             "session-1",
             &mj_controller::targets::ProcessExecutor,
             &state.session_manager,
-            Some(mj_core::worker_build::WORKER_BUILD_ID),
+            Some(mj_core::worker_build::worker_build_id()),
         )
         .await
         .unwrap();

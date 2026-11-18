@@ -47,10 +47,13 @@ include = [
 name = "mj_core"
 
 [features]
+# Lets a test binary, which has no `main` to install one, read the build
+# identity compiled into this crate.
+test-identity = []
 github-history = ["dep:tokenizers"]
 default = []
 golden = []
-test-hooks = []
+test-hooks = ["test-identity"]
 
 [lints]
 workspace = true

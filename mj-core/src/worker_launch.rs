@@ -556,7 +556,7 @@ impl WorkerLaunchConfig {
             serde_json::from_value(value)
         };
         let mut launch: Self = parse().with_context(|| {
-            format!("parse worker launch config {} with worker build {}", path.display(), crate::worker_build::WORKER_BUILD_ID)
+            format!("parse worker launch config {} with worker build {}", path.display(), crate::worker_build::worker_build_id())
         }).map_err(|error| {
             if error.root_cause().to_string().contains("unknown field") {
                 error.context("the worker may be older than the daemon that wrote launch.json; install the worker built with the running mj")
@@ -846,7 +846,7 @@ mod tests {
         assert!(error.contains("older than the daemon"), "{error}");
         assert!(error.contains("future_daemon_field"), "{error}");
         assert!(
-            error.contains(crate::worker_build::WORKER_BUILD_ID),
+            error.contains(crate::worker_build::worker_build_id()),
             "{error}"
         );
         std::fs::write(&path, b"not JSON").unwrap();

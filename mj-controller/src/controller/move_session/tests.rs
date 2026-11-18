@@ -2156,7 +2156,7 @@ impl CommandExecutor for RecordedMoveRestore {
         // The image carries this build's worker, so nothing is uploaded.
         let (status, stdout) = match command.purpose.as_str() {
             "read the container image's worker build" => {
-                (0, mj_core::worker_build::WORKER_BUILD_ID.as_bytes())
+                (0, mj_core::worker_build::worker_build_id().as_bytes())
             }
             "detect target platform" => (1, &b""[..]),
             _ => (0, &b""[..]),

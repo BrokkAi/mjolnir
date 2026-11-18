@@ -471,6 +471,7 @@ fn run_microvm() -> Result<()> {
 fn main() -> Result<()> {
     // First, before any thread or child: the harness and its tools inherit it.
     mj_core::subprocess::raise_open_file_limit();
+    mj_core::worker_build::install(mj_core::worker_build::BuildIdentity::compiled());
     std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
     if std::env::args_os()
         .nth(1)
@@ -621,7 +622,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             },
         ),
         WorkerCommand::BuildId => {
-            println!("{}", mj_core::worker_build::WORKER_BUILD_ID);
+            println!("{}", mj_core::worker_build::worker_build_id());
             Ok(())
         }
         WorkerCommand::ExportCheckpoint { spec } => {

@@ -648,7 +648,7 @@ impl DurableRelay {
             operator_away: Default::default(),
             root,
             relay_version: relay_version.into(),
-            worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
+            worker_build: Some(mj_core::worker_build::worker_build_id().to_owned()),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,

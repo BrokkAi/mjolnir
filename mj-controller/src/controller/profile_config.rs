@@ -408,7 +408,7 @@ pub async fn observe(
                     },
                     &executor,
                 )?;
-                if mj_core::worker_build::WORKER_BUILD_ID != worker_build {
+                if mj_core::worker_build::worker_build_id() != worker_build {
                     return Ok(choices);
                 }
             }

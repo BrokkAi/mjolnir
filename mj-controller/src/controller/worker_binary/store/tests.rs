@@ -8,7 +8,7 @@ fn source(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
     let mut bytes = vec![b'x'; 256 * 1024];
     bytes.extend_from_slice(name.as_bytes());
-    bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+    bytes.extend_from_slice(mj_core::worker_build::worker_build_stamp().as_bytes());
     std::fs::write(&path, bytes).unwrap();
     path
 }

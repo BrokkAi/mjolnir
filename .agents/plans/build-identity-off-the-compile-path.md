@@ -11,7 +11,7 @@ After this work the stamp lives in one tiny crate that only the two programs, `m
 ## Progress
 
 - [x] (2026-11-18) Confirmed the cause and that Cargo recompiles dependents even when a build script reruns with identical output (see Surprises).
-- [ ] Milestone 1: library code reads the build identity through functions in `mj_core::worker_build`, fed at program start. Values still come from `mj-core`'s own constants, so behaviour is unchanged.
+- [x] (2026-11-18) Milestone 1: library code reads the build identity through `mj_core::worker_build::{build_id, worker_build_id, commit_time, worker_build_stamp}`; `mj` and `mj-worker` install it first thing in `main`. Values still come from `mj-core`'s own constants, so behaviour is unchanged: `mj --version` prints the same, and the 23 tests of `mj-cli/tests/daemon_startup.rs` pass.
 - [ ] Milestone 2: the worker library and the worker program are separate packages.
 - [ ] Milestone 3: the stamp and the script that computes it move to `mj-build-id`; `mj-core` no longer watches Git in a development build.
 - [ ] Milestone 4: measure an empty commit before and after; record it here.
@@ -22,6 +22,11 @@ After this work the stamp lives in one tiny crate that only the two programs, `m
   Evidence: a two-crate scratch workspace whose script prints a constant `cargo:rustc-env` and names a trigger file in `cargo:rerun-if-changed`; touching the trigger printed `Compiling a` and `Compiling b`.
 - Observation: a package's library is rebuilt when any dependency of the package is, including one that only the package's program uses. So the worker library (107,000 lines) would rebuild on every commit as long as it shares a package with the worker program, and so would the tests of every crate that uses that library in its tests (`mj-controller`, `mj-daemon`, `mj-server`).
   Evidence: Cargo passes every `[dependencies]` entry to each target of the package.
+
+- Observation: some tests rely on the stamp's bytes being in the test executable. Four `controller::move_session` tests run a child of their own test binary and name that binary as `MJ_WORKER_BINARY`; the controller then reads the worker stamp out of the file. While the stamp was a string constant referenced by library code it was linked into every test binary. Built at run time it is not, and the tests failed with "missing worker build stamp". The test fallback in `worker_build::installed` now references the constant so the bytes stay in the file.
+  Evidence: `MJ_WORKER_BINARY does not match the running mj ... missing worker build stamp (legacy or invalid worker)`.
+- Observation: `mj-client`, `mj-chat` and `mj-tui` tests reach the identity without `mj-core`'s `test-hooks` feature, so the test fallback has its own feature, `test-identity`, which `test-hooks` implies and those three enable in their dev-dependencies.
+  Evidence: their `[dev-dependencies]` enabled only `golden`.
 
 ## Decision Log
 

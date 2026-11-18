@@ -500,7 +500,7 @@ kind = "podman"
                 "/profiles/claude-bedrock",
             )
             // The running build's worker identity changes with every commit.
-            .replace(mj_core::worker_build::WORKER_BUILD_ID, "<this build>");
+            .replace(mj_core::worker_build::worker_build_id(), "<this build>");
     }
 
     let mut rendered = Vec::new();

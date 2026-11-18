@@ -271,7 +271,7 @@ impl WorkerBinarySourceSnapshot {
                                 source = source.as_str(),
                                 path = %path.display(),
                                 pinned = %cached.display(),
-                                build = WORKER_BUILD_ID,
+                                build = worker_build_id(),
                                 resolve_ms = resolve_elapsed.as_millis(),
                                 pin_ms = pin_elapsed.as_millis(),
                                 "worker source selected"
@@ -301,7 +301,7 @@ impl WorkerBinarySourceSnapshot {
                         source = "MJ_WORKER_URL",
                         url = url.as_str(),
                         sha256 = sha256.as_str(),
-                        build = WORKER_BUILD_ID,
+                        build = worker_build_id(),
                         "worker source selected"
                     );
                     Ok(WorkerBinaryAvailability::Remote {
@@ -415,7 +415,7 @@ fn capture_worker_binary_sources() -> Result<WorkerBinarySourceSnapshot> {
 fn index_entry_path(cache_root: &Path, source: &Path) -> Option<PathBuf> {
     let metadata = std::fs::metadata(source).ok()?;
     let mut key = Sha256::new();
-    key.update(WORKER_BUILD_ID.as_bytes());
+    key.update(worker_build_id().as_bytes());
     key.update([0]);
     key.update(source.as_os_str().as_encoded_bytes());
     key.update(metadata.len().to_le_bytes());
@@ -777,8 +777,9 @@ pub(super) fn worker_binary_prerequisite_with_verifier(
     let rejected = rejected.into_inner();
     ensure!(
         rejected.is_empty(),
-        "no worker matching controller worker inputs {WORKER_BUILD_ID} for {triple}; rejected sources:\n{}\nInstall the worker from the same mj release, or rebuild it from the current workspace inputs with `cargo build --target {triple} -p brokk-mj-worker --bin mj-worker` and set MJ_WORKER_BINARY to that file (local native: `cargo build -p brokk-mj-worker --bin mj-worker`).",
-        rejected.join("\n")
+        "no worker matching controller worker inputs {build} for {triple}; rejected sources:\n{}\nInstall the worker from the same mj release, or rebuild it from the current workspace inputs with `cargo build --target {triple} -p brokk-mj-worker --bin mj-worker` and set MJ_WORKER_BINARY to that file (local native: `cargo build -p brokk-mj-worker --bin mj-worker`).",
+        rejected.join("\n"),
+        build = worker_build_id()
     );
     // Telling someone to install a worker beside a binary that is no longer
     // there sends them looking in the wrong place.

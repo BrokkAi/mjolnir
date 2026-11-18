@@ -13,7 +13,7 @@ pub(in crate::controller) const IMAGE_WORKER: &str = "/opt/mjolnir/mj-worker";
 const IMAGE_WORKER_BUILD_SCRIPT: &str = "if [ -e /opt/mjolnir/mj-worker ]; then exec /opt/mjolnir/mj-worker worker build-id; fi; echo absent";
 
 /// How a session's target gets the worker this controller needs. Either way
-/// the worker carries [`WORKER_BUILD_ID`].
+/// the worker carries [`worker_build_id`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::controller) enum WorkerInstall {
     /// The container's image carries this controller's worker build. The
@@ -40,7 +40,7 @@ impl WorkerInstall {
             return worker_binary_for(locator, executor).map(Self::Host);
         }
         let image_build = image_worker_build(locator, executor)?;
-        let image_is_current = image_build.as_deref() == Some(WORKER_BUILD_ID);
+        let image_is_current = image_build.as_deref() == Some(worker_build_id());
         if image_is_current && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
             return Ok(Self::Image);
         }
@@ -60,7 +60,8 @@ impl WorkerInstall {
                 );
                 Err(error.context(format!(
                     "the container's image carries {carried}, not this Mjolnir's worker build \
-                     {WORKER_BUILD_ID}, and no host worker can replace it"
+                     {}, and no host worker can replace it",
+                    worker_build_id()
                 )))
             }
         }

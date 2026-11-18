@@ -1693,7 +1693,7 @@ fn image_worker_summary(inspection: &[u8]) -> String {
     }
     match crate::controller::image_worker_label(inspection).as_deref() {
         Some(build)
-            if build == mj_core::worker_build::WORKER_BUILD_ID
+            if build == mj_core::worker_build::worker_build_id()
                 && mj_core::config::RELEASE_IMAGE_CARRIES_WORKER =>
         {
             format!(
@@ -1702,12 +1702,12 @@ fn image_worker_summary(inspection: &[u8]) -> String {
         }
         // A development build's identity covers committed inputs only, so it
         // prefers the worker it was built with (see `WorkerInstall::for_target`).
-        Some(build) if build == mj_core::worker_build::WORKER_BUILD_ID => format!(
+        Some(build) if build == mj_core::worker_build::worker_build_id() => format!(
             " It carries worker build {build}, which this development build runs only when it has no worker of its own."
         ),
         Some(build) => format!(
             " It carries worker build {build}, not this Mjolnir's {}, so sessions install the host worker.",
-            mj_core::worker_build::WORKER_BUILD_ID
+            mj_core::worker_build::worker_build_id()
         ),
         None => " It carries no Mjolnir worker, so sessions install the host worker.".to_owned(),
     }
@@ -3561,7 +3561,7 @@ fn worker_binary_check_on(
     } else {
         "a configured image"
     };
-    let build = mj_core::worker_build::WORKER_BUILD_ID;
+    let build = mj_core::worker_build::worker_build_id();
     let choice = if mj_core::config::RELEASE_IMAGE_CARRIES_WORKER {
         format!(
             "sessions run its worker when it is this Mjolnir's build ({build}), and otherwise install the host worker"
