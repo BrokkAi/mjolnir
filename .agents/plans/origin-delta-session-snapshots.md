@@ -332,12 +332,13 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
       - Untracked items are paths and stash untracked payloads. `UntrackedConsent::None` covers none of them, `Any` (the CLI flag) covers all, and `Shown(items)` (a dialog) covers only what the dialog displayed. An item that has since disappeared is fine; a new one is not.
       - In a managed checkout, each operation, identified by checkout path and kind, must be covered by `OperationConsent::Any` or by a matching `Shown` entry.
       - If anything is not covered, capture changes nothing and fails with `SnapshotRefused::Untracked(items)` or `SnapshotRefused::OperationInProgress(path, kind)`.
+      - Hidden tracked edits keep Move's existing guard (`mj-worker/src/move_workspace.rs`, around line 98). If any index entry has `assume-unchanged` or `skip-worktree` set, `git stash create` could miss its edits, so capture refuses with `SnapshotRefused::HiddenTrackedEdits(paths)`. There is no consent override; the message says to clear those flags first.
       - Submodules keep today's guard, with no consent override (see `mj-checkpoint/src/checkpoint/submodules.rs`). If a checked-out submodule has any status entry, untracked files included as today's guard checks, or its checked-out commit differs from the gitlink without being reachable from the submodule's remote-tracking refs, capture refuses with `SnapshotRefused::DirtySubmodule(path)`. A parent's pack and stash carry only the gitlink, never the submodule's own work. The message says to commit and push inside the submodule, or to discard the change.
 
       Capture itself is the single decision point, so nothing can appear between a separate check and the capture.
    3. Managed checkouts: run each covered abort (`git merge --abort`, `git rebase --abort`, `git cherry-pick --abort`, `git revert --abort`, `git am --abort`, `git bisect reset`).
    4. Raw checkouts: never abort. Mark the checkout `working_state_skipped`, and remember its pre-operation position for step 3:
-      - rebase: the branch named in `rebase-merge/head-name` or `rebase-apply/head-name`;
+      - rebase: the branch named in `rebase-merge/head-name` or `rebase-apply/head-name`. If that file says `detached HEAD`, the position is the commit in `orig-head`, recorded as detached;
       - bisect: the branch or commit in `BISECT_START`;
       - merge, cherry-pick, revert or am: HEAD is still the branch.
 
@@ -346,7 +347,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
    - **Managed checkout:** best-effort `git fetch --prune origin`, since Mjolnir owns this clone's refs.
    - **Raw checkout:** never fetch. The user's remote-tracking refs are theirs, and `--prune` could delete the last reference to commits. Read origin's heads and tags with `git ls-remote origin` instead, and use the SHAs that exist locally as exclusions in step 6.
 
-   In either case, when origin cannot be reached, exclude only the existing `refs/remotes/origin/*`, never local tags (a local tag may be unpublished), and set `remote_refs_stale`.
+   In either case, when origin cannot be reached, exclude only the existing `refs/remotes/origin/*`, never local tags (a local tag may be unpublished), and set `remote_refs_stale`. This is the user's accepted risk: using old refs is better than refusing to suspend. If origin force-pushed since the last fetch, the delta can omit objects origin no longer has, and a later restore then fails visibly at its missing-object check. Suspend's result and the session's notice say "origin was unreachable; commits origin has since removed may not be restorable", so the user can resume and push, or retry suspend once origin is reachable.
 3. **Pin the cut.** Read every ref once with `git for-each-ref`, plus each checkout's HEAD: a branch name or a detached commit, or the pre-operation position from step 1. Select the refs to keep:
    - **Managed checkout:** every ref under `refs/heads`, `refs/tags` and `refs/notes`, plus the durable Mjolnir refs under `refs/mj/` that the pre-push hook and review read (reviewed, overridden and push-base). Use the predicate today's clone capture applies for "durable Mjolnir refs" (`RepositoryMetadata::saved_refs`). Also the stash list.
    - **Neither kind keeps `refs/stash` as a ref.** It points at the original stash commit, which may have a `-u` or `-a` payload. The stash list, with its sanitized replacements, owns stash capture and restore.
@@ -375,7 +376,7 @@ The live-copy pipeline lives in `mj-controller/src/controller/checkpoint/`:
 4. Create every saved ref at its object ID.
 5. Rebuild the stash list with `git stash store -m <message> <commit>`, oldest first.
 6. Point HEAD at the saved position, with `git symbolic-ref HEAD refs/heads/<branch>` or `git update-ref --no-deref HEAD <commit>`. Then run `git reset --hard <saved head commit>`, so the index and working tree match the saved commit. Without the reset, a saved branch that is origin's default branch at a commit different from origin's tip would leave the clone's old files in place, where they would look like local changes.
-7. If there is a working-state commit, run `git stash apply --index <commit>`.
+7. Run `git submodule update --init --recursive -- <paths>` for the submodules that were initialized at capture; the snapshot records them per checkout. The capture guard already ensured each gitlink commit is reachable from the submodule's own remote. Then, if there is a working-state commit, run `git stash apply --index <commit>`.
 8. Recreate nested worktrees with `git worktree add` at their recorded relative paths. Position, reset and apply their working state the same way.
 
 When an object the snapshot names is missing, because neither the pack nor origin has it, fail with a message naming the ref and suggesting that origin may have rewritten history.
@@ -429,15 +430,18 @@ The new capture must never become active without its consent checks, so this mil
 Until Milestone 3 adds the dialogs, the terminal and web UIs show that refusal as an ordinary suspend failure. That is safe, because nothing is lost.
 
 **Freeze workspace writers before the final capture.** The relay barrier stops command dispatch, but a process the agent started earlier, such as a background command, a build or a dev server, can keep writing to the checkout. A file it creates after the consent check would then be deleted with the checkout, unseen.
-1. Under the barrier, after the early consent check, the worker sends `SIGSTOP` to every process group it owns for the session: the harness and the background commands it tracks.
-2. Capture then runs, as the single consent decision point.
-3. On every exit other than success, the worker sends `SIGCONT` and the session continues untouched. That covers a consent refusal, a Git or I/O error, cancellation, and a lost daemon connection. Implement it as a guard that resumes on drop, so no path can skip it.
-4. Before sending `SIGSTOP`, the worker writes the frozen group IDs to its durable state. If the worker process dies while they are frozen, the next worker start (or the daemon's recovery of that worker) reads the record, sends `SIGCONT`, and clears it before doing anything else.
-5. The freeze lasts until the teardown decision is confirmed, not just until capture returns. Writing the pack and archive, transferring it and verifying it at the daemon all happen while the groups are stopped, and any failure along the way releases them as in step 3. The point of no return is the daemon's verified installation of the archive, which already gates target deletion. Only after the worker receives that confirmation does it terminate the groups, as teardown already does: process groups first and files second. It then clears the record.
+1. Under the barrier, after the early consent check, the worker writes the IDs of every process group it owns for the session (the harness and the background commands it tracks) to its durable state as a freeze record. It then sends `SIGSTOP` to each group.
+2. The worker confirms that every member of those groups has actually stopped before capture begins. Sending the signal only queues it, and a process running on another CPU can still write. On Linux, poll `/proc/<pid>/stat` until each member's state is `T`; on macOS, poll `ps -o stat=`. Only then does the final inventory and capture run, so the consent check and the saved cut see the same workspace.
+3. Capture runs, as the single consent decision point.
+4. **The daemon alone decides whether the frozen groups resume or are retired,** and it decides from its durable suspend intent. The worker never resumes or kills them on its own judgment, so a lost acknowledgement can never split the decision.
+   - **Any failure before the daemon has verified and installed the archive** is reported to the daemon, which records the failed suspend and tells the worker to resume (`SIGCONT`). Failures include a consent refusal, a Git or I/O error, a transfer or verification error, and cancellation. The session then continues untouched.
+   - **Once the daemon has verified and installed the archive,** it records the teardown decision in the same transaction that already gates target deletion, and tells the worker to terminate the groups, process groups first and files second.
+   - **If the connection drops or the worker restarts while groups are frozen,** the worker keeps them frozen and, on reconnect, asks the daemon for the decision. The daemon's pending suspend intent, which already resumes after a daemon restart, answers resume or retire. The freeze record is cleared only when that answer has been carried out.
+   - **A user waiting on a stalled suspend** sees it as "suspending". They can retry, or run `suspend --without-checkpoint`, whose decision is retire. The processes are never left frozen without an owner.
 
 Processes that left the worker's process groups (daemonized with `setsid`) are outside this guarantee, exactly as they are outside today's teardown; say so in the code comment. Add tricky-condition tests: a background command creates a file after the preflight, and suspend without consent for it must refuse and then resume the command; a capture that fails with an injected Git error must also resume the frozen groups. At the end of this milestone, suspending and resuming a managed-clone session, a raw session (in place and onto another target) and a legacy-worktree session all work, and old archives still resume.
 
-**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
+**Archive format.** Add a new capture mode, `CheckpointRepositoryCapture::OriginDelta`, and a new archive schema version in `mj-checkpoint/src/archive.rs`. An older daemon's archive reader rejects unknown schema versions. Once a suspend writes the new format and removes the checkout, an older daemon could open the session but never resume it. So the store migration that ships with this milestone is **breaking**: advance the migration revision and raise the minimum compatible read and write revision in the same transaction, with that reason beside it, and test it with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. Milestone 5's `MoveOperation` change raises the floor again, under its own revision. The archive stores the `WorkspaceSnapshot` metadata in `RepositoryMetadata` (new fields beside the existing `saved_refs` and `stash_stack`) and the pack as a payload.
 
 **Spec version and older workers.** Raise `CHECKPOINT_EXPORT_PROTOCOL_VERSION` to 3 for specs that request `OriginDelta`.
 
@@ -617,7 +621,7 @@ Compaction no longer depends on a checkpoint holding a copy, so make sure Sessio
 
 **Scope.** A cross-target Move becomes the following sequence:
 
-1. Quiesce the source with the suspend barrier, stopping children as today.
+1. Quiesce the source with the suspend barrier, stopping children as today, and freeze its workspace writers exactly as suspend does (Milestone 2), confirming they have stopped. The freeze covers capture, the archive transfer and the separate `.mj/keep/` transfer, and lasts until the daemon's durable decision to retire the source (destination ready) or roll back (resume the frozen groups). A writer therefore cannot add to `.mj/keep/` after its tar stream finished.
 2. Capture with the same code as suspend: Milestone 1 for the repository plus the existing native capture. The result is one archive.
 3. Transfer the archive straight to the destination.
 4. Restore with the same code as resume.
@@ -660,7 +664,7 @@ Ownership is decided by the existing recovery classification, not by the phase n
 
 Add upgrade regressions for each case, setting the persisted destination owner and the Move phase together.
 
-**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. Resume on the same target checks that directory for the checkpoint's SHA-256 and uses that file when present; otherwise it uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours, even on a host that receives no further snapshots. Record each cached copy in its own row of a new table, `host_snapshot_cache` (host, SHA-256, path, written_at). The row is written before the copy, deleted only after the file is removed, and independent of the session's checkpoint row, so copies superseded by a later suspend, a purge or a Destroy are still tracked. Adding the table is a compatible migration: older daemons ignore it, and it changes no existing data. The daemon schedules a removal at `written_at` plus 48 hours, rebuilds those timers from the rows at startup, and removes overdue copies immediately. The removal itself extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also loads the snapshot's pack into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
+**Target cache.** After a successful suspend, the archive file is kept on the machine that hosts the target, named `<sha256>.hel.zip`, instead of being deleted after the verified download. It goes in host-owned storage that outlives the session's environment: for a bare target, Mjolnir's cache directory on that host; for a container target, the container host's Mjolnir cache directory, outside the container that suspend removes. Copy it out of the container before the container is retired. A replacement worker finds it by host and SHA-256. The copy is published atomically: written to a temporary name in the same directory, synced, then renamed to `<sha256>.hel.zip`. An interrupted copy therefore never sits at the final path. Resume on the same target checks that directory for the checkpoint's SHA-256, verifies the file's hash, and uses it only if the hash matches. Otherwise it deletes the file and uploads from the daemon. Cleanup of this host cache directory deletes files older than 48 hours, even on a host that receives no further snapshots. Record each cached copy in its own row of a new table, `host_snapshot_cache` (host, SHA-256, path, written_at). The row is written before the copy, deleted only after the file is removed, and independent of the session's checkpoint row, so copies superseded by a later suspend, a purge or a Destroy are still tracked. Adding the table is a compatible migration: older daemons ignore it, and it changes no existing data. The daemon schedules a removal at `written_at` plus 48 hours, rebuilds those timers from the rows at startup, and removes overdue copies immediately. The removal itself extends the existing sweep in `mj-controller/src/controller/checkpoint/leftovers.rs`. Restore also loads the snapshot's pack into the target's clone cache, if one exists, so later clones of that origin find those objects locally; losing them to Git garbage collection is harmless.
 
 **Tests.**
 
@@ -777,7 +781,8 @@ In `mj-checkpoint/src/snapshot.rs`, define:
         pub stash: Vec<SnapshotStashEntry>,        // newest first: commit, message
         pub working_state: Option<String>,         // `git stash create` commit
         pub working_state_skipped: bool,           // raw checkout with an operation in progress
-        pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state
+        pub worktrees: Vec<SnapshotWorktree>,      // relative path, head, working_state, initialized submodules
+        pub submodules: Vec<PathBuf>,              // initialized submodules of the primary checkout
         pub remote_refs_stale: bool,
         pub pack: Option<PathBuf>,                  // non-thin pack of what origin lacks
     }
@@ -933,3 +938,14 @@ Revision note (2026-11-18, review 6):
 - Older workers are upgraded before suspend, leaving one capture path.
 - The keep-directory transfer must succeed at both ends before the source is retired.
 - The purge decision no longer mentions retained Move sources.
+
+Revision note (2026-11-18, review 7):
+- The daemon's durable suspend intent alone decides whether frozen writers resume or are retired, which also covers lost acknowledgements and worker restarts.
+- The worker confirms writers are stopped before capturing.
+- Move holds the same freeze through the keep-directory transfer.
+- The first write of the new archive format raises the store compatibility floor.
+- The hidden-tracked-edits guard is kept.
+- A raw rebase that started from a detached HEAD uses `orig-head`.
+- Offline captures report the stale-refs risk to the user.
+- The host cache publishes atomically and verifies the hash before use.
+- Initialized submodules are restored.
