@@ -966,7 +966,7 @@ pub struct ViewerReviewVerdict {
 impl ViewerTurnReview {
     /// The phone's view of one review the daemon is running.
     #[must_use]
-    pub fn from_runtime(review: &crate::review_host::RuntimeReviewView) -> Self {
+    pub fn from_runtime(review: &mj_client::review::RuntimeReviewView) -> Self {
         Self {
             child_session_id: review.child_session_id.clone(),
             status: review.status.clone(),
@@ -981,9 +981,9 @@ impl ViewerTurnReview {
                 .collect(),
             verdict: review.verdict.as_ref().map(|verdict| ViewerReviewVerdict {
                 kind: match verdict.kind {
-                    crate::review_host::VerdictKind::Clean => "clean",
-                    crate::review_host::VerdictKind::Findings => "findings",
-                    crate::review_host::VerdictKind::Failed => "failed",
+                    mj_client::review::VerdictKind::Clean => "clean",
+                    mj_client::review::VerdictKind::Findings => "findings",
+                    mj_client::review::VerdictKind::Failed => "failed",
                 }
                 .to_owned(),
                 text: verdict.text.clone(),

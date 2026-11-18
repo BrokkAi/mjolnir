@@ -395,6 +395,7 @@ mod handlers;
 pub(crate) use handlers::validate_new_preflight;
 use handlers::*;
 mod validation;
+pub use validation::phone_prompt_blocks;
 use validation::*;
 mod errors;
 use errors::*;

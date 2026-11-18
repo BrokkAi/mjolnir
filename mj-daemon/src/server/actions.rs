@@ -369,7 +369,7 @@ impl ActionOutcome {
             ),
             Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                crate::daemon::lifecycle_failure_message(
+                lifecycle_failure_message(
                     "the controller could not start this action",
                     None,
                     None,
@@ -674,6 +674,23 @@ pub(super) fn deserialize_api_session_review<'de, D: serde::Deserializer<'de>>(
             serde_json::from_value(value).map_err(serde::de::Error::custom)
         })
         .transpose()
+}
+
+/// Render only trusted boundary guidance; raw diagnostic chains stay in logs.
+pub fn lifecycle_failure_message(
+    prefix: &str,
+    refusal: Option<&mj_core::refusal::Refusal>,
+    reason: Option<mj_controller::controller::LifecycleFailureReason>,
+    reference: &str,
+) -> String {
+    let reason = if let Some(refusal) = refusal {
+        format!("{refusal}. Follow this guidance, then retry the action.")
+    } else if let Some(reason) = reason {
+        reason.to_string()
+    } else {
+        "The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first.".into()
+    };
+    format!("{prefix}: {reason} Reference {reference}.")
 }
 
 #[cfg(test)]

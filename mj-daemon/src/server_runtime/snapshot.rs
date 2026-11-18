@@ -293,25 +293,6 @@ pub(super) fn session_capabilities(
     }
 }
 
-/// The ACP content blocks one phone prompt becomes: its text, then each
-/// attached image as the image block the prompt path already carries.
-pub(crate) fn phone_prompt_blocks(
-    text: String,
-    images: Vec<crate::server::ViewerPromptImage>,
-) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
-    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
-
-    let mut prompt = Vec::with_capacity(images.len() + 1);
-    if !text.is_empty() {
-        prompt.push(ContentBlock::Text(TextContent::new(text)));
-    }
-    prompt.extend(images.into_iter().map(|image| match image.attachment {
-        Some(reference) => reference.content_block(),
-        None => ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type)),
-    }));
-    prompt
-}
-
 /// The Mjolnir commands a phone may offer for one session.
 ///
 /// The list is built here, from what this session can actually do, and

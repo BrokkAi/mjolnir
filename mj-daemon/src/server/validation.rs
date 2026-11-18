@@ -352,7 +352,7 @@ fn serialized_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
 /// references, held to the worker's budget.
 fn ensure_prompt_command_fits(text: &str, images: &[ViewerPromptImage]) -> Result<(), ApiError> {
     let command = mj_core::relay::RelayCommand::Prompt {
-        prompt: crate::server_runtime::phone_prompt_blocks(text.to_owned(), images.to_vec()),
+        prompt: phone_prompt_blocks(text.to_owned(), images.to_vec()),
     };
     mj_core::relay::ensure_serialized_budget(
         &command,
@@ -1075,4 +1075,23 @@ pub(super) fn require_bundle(snapshot: &ViewerSnapshot, id: &str) -> Result<(), 
         .any(|bundle| bundle.id == id)
         .then_some(())
         .ok_or_else(|| ApiError::bad_request("unknown bundle"))
+}
+
+/// The ACP content blocks one phone prompt becomes: its text, then each
+/// attached image as the image block the prompt path already carries.
+pub fn phone_prompt_blocks(
+    text: String,
+    images: Vec<ViewerPromptImage>,
+) -> Vec<agent_client_protocol::v1::schema::ContentBlock> {
+    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, TextContent};
+
+    let mut prompt = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        prompt.push(ContentBlock::Text(TextContent::new(text)));
+    }
+    prompt.extend(images.into_iter().map(|image| match image.attachment {
+        Some(reference) => reference.content_block(),
+        None => ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type)),
+    }));
+    prompt
 }

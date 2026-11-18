@@ -83,7 +83,7 @@ use actions::*;
 mod project_sources;
 use project_sources::*;
 mod snapshot;
-pub(crate) use snapshot::phone_prompt_blocks;
+pub(crate) use crate::server::phone_prompt_blocks;
 use snapshot::*;
 
 #[cfg(test)]

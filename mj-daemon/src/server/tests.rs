@@ -3271,7 +3271,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
 /// A review reaches the phone with the single reviewer status and findings.
 #[test]
 fn a_running_review_projects_to_the_phone() {
-    use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
+    use mj_client::review::{RuntimeReviewView, VerdictKind, VerdictView};
     use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase};
 
     let review = RuntimeReviewView {

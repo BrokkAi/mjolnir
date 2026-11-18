@@ -829,25 +829,8 @@ impl LifecycleFailure {
     }
 
     fn public_message(&self, prefix: &str, reference: &str) -> String {
-        lifecycle_failure_message(prefix, self.refusal.as_ref(), self.reason, reference)
+        crate::server::lifecycle_failure_message(prefix, self.refusal.as_ref(), self.reason, reference)
     }
-}
-
-/// Render only trusted boundary guidance; raw diagnostic chains stay in logs.
-pub(crate) fn lifecycle_failure_message(
-    prefix: &str,
-    refusal: Option<&Refusal>,
-    reason: Option<mj_controller::controller::LifecycleFailureReason>,
-    reference: &str,
-) -> String {
-    let reason = if let Some(refusal) = refusal {
-        format!("{refusal}. Follow this guidance, then retry the action.")
-    } else if let Some(reason) = reason {
-        reason.to_string()
-    } else {
-        "The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first.".into()
-    };
-    format!("{prefix}: {reason} Reference {reference}.")
 }
 
 impl std::fmt::Display for LifecycleFailure {
