@@ -640,7 +640,8 @@ impl DurableRelay {
         // Stop is also accepted while Claude Code works on its own after a
         // background task: the cancel interrupts the running cycle, and that
         // cycle's result ends the turn (`claude_turn_result`). A Codex turn of
-        // this kind is a native goal, which has its own controls.
+        // this kind is a native goal, which has its own controls. An in-flight
+        // native resume is also a cancellable request, even without a prompt.
         let claude_harness_turn = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
             && self.snapshot.harness_turn.is_some();
         if let RelayCommand::Cancel = command
@@ -651,6 +652,15 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
+            && !self.snapshot.dispatches.values().any(|dispatch| {
+                dispatch.state == RelayDispatchState::InFlight
+                    && matches!(
+                        dispatch.command,
+                        RelayCommand::GoalControl {
+                            action: mj_core::goal::GoalControlAction::Resume,
+                        }
+                    )
+            })
             && !claude_harness_turn
             && self
                 .snapshot
@@ -1945,9 +1955,15 @@ impl DurableRelay {
         }
         self.require_dispatch(command_id)?;
         let command = self.snapshot.dispatches[command_id].command.kind();
-        let continuation_id = (reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted)
-            .then(|| self.restart_continuation_for(command_id))
-            .flatten();
+        let (continuation_id, recovery_warning) =
+            if reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted {
+                match self.restart_continuation_for(command_id) {
+                    Ok(id) => (id, None),
+                    Err(warning) => (None, Some(warning)),
+                }
+            } else {
+                (None, None)
+            };
         let observation = RelayObservation::CommandInterrupted {
             continuation_id,
             reason: Some(reason),
@@ -2002,6 +2018,11 @@ impl DurableRelay {
             }
             Err(error) => return Err(error),
         };
+        if let Some(message) = recovery_warning {
+            self.record_observation(RelayObservation::Warning {
+                message: message.into(),
+            })?;
+        }
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
@@ -2016,17 +2037,26 @@ impl DurableRelay {
     }
 
     /// The interruption event transfers this payload to recovery atomically.
-    fn restart_continuation_for(&self, command_id: &str) -> Option<String> {
+    fn restart_continuation_for(
+        &self,
+        command_id: &str,
+    ) -> std::result::Result<Option<String>, &'static str> {
         let dispatch = &self.snapshot.dispatches[command_id];
         if dispatch.command.kind() != RelayCommandKind::Prompt
             || dispatch.state != RelayDispatchState::InFlight
             || self.snapshot.cancelling_prompt_id.as_deref() == Some(command_id)
         {
-            return None;
+            return Ok(None);
         }
         // Native goals resume through controls, not generated relay prompts.
         // They do not replace an ordinary request interrupted alongside them.
-        Some(restart_continuation_id(command_id))
+        let id = restart_continuation_id(command_id);
+        if self.snapshot.handled_commands.contains_key(&id) {
+            return Err(
+                "The turn could not be resumed automatically because its recovery command ID is already occupied. Continue the task manually.",
+            );
+        }
+        Ok(Some(id))
     }
 
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {

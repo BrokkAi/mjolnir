@@ -7,7 +7,7 @@ type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
 /// Polled by both command loops. Dropping the session drops all request waits;
 /// the relay reports their commands interrupted rather than replaying them.
 #[derive(Default)]
-pub(super) struct PendingControls(Vec<(String, PendingControl)>);
+pub(super) struct PendingControls(Vec<PendingControl>);
 
 impl PendingControls {
     pub(super) fn is_empty(&self) -> bool {
@@ -24,20 +24,13 @@ impl PendingControls {
     ) {
         let connection = connection.clone();
         let session = session.clone();
-        let id = request_id.clone();
-        let automatic = mj_core::continuation::GeneratedPrompt::GoalResume
-            .suffix(&id)
-            .is_some();
-        self.0.push((id, Box::pin(async move {
-            // Explicit native resume may answer only when its turn finishes.
-            // Do not impose recovery's short acknowledgement timeout here.
-            let request = connection.send_request(control_request(&session, action, expected.as_ref())).block_task();
-            let response = if automatic {
-                match tokio::time::timeout(Duration::from_secs(30), request).await {
-                    Ok(response) => response.map_err(|error| error.to_string()),
-                    Err(_) => Err("goal resume acknowledgement timed out; current execution must be reconciled before retrying".to_owned()),
-                }
-            } else { request.await.map_err(|error| error.to_string()) };
+        self.0.push(Box::pin(async move {
+            // Resume may finish only when the native turn finishes. The relay
+            // dispatch owns admission throughout, just as for explicit resume.
+            let response = connection
+                .send_request(control_request(&session, action, expected.as_ref()))
+                .block_task()
+                .await;
             match response {
                 Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
                 Err(error) => RuntimeEvent::CommandRejected {
@@ -46,21 +39,13 @@ impl PendingControls {
                     message: format!("/goal {} failed: {error}", action.as_str()),
                 },
             }
-        })));
-    }
-
-    pub(super) fn blocks_input(&self) -> bool {
-        self.0.iter().any(|(id, _)| {
-            mj_core::continuation::GeneratedPrompt::GoalResume
-                .suffix(id)
-                .is_some()
-        })
+        }));
     }
 
     pub(super) async fn next(&mut self) -> RuntimeEvent {
         std::future::poll_fn(|cx| {
             for index in 0..self.0.len() {
-                if let std::task::Poll::Ready(event) = self.0[index].1.as_mut().poll(cx) {
+                if let std::task::Poll::Ready(event) = self.0[index].as_mut().poll(cx) {
                     // Keep requests ordered until their first poll sends them.
                     drop(self.0.remove(index));
                     return std::task::Poll::Ready(event);
@@ -273,8 +258,10 @@ async fn control(
     } else {
         mj_core::goal::GoalControlAction::Pause
     };
-    tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
-        .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
+    connection
+        .send_request(control_request(session, action, Some(goal)))
+        .block_task()
+        .await?;
     Ok(())
 }
 
@@ -1076,21 +1063,39 @@ for line in sys.stdin:
     }
 
     // Hard-won: d2f26b4c6: startup goal resume overtook queued input and had no busy owner.
+    // Hard-won: 753b1f960: native resume timed out and blocked cancellation while its turn ran.
     #[tokio::test]
     async fn automatic_goal_resume_waits_for_queued_work_and_owns_the_ack_interval() {
         use crate::relay::{DurableRelay, RelayCell};
         use mj_core::relay::*;
-        let root = tempfile::tempdir().unwrap();
-        let script = root.path().join("ordered_goal.py");
-        std::fs::write(&script, r#"
-import json, os, sys, time
+        for intervention in ["ack", "cancel", "pause"] {
+            let root = tempfile::tempdir().unwrap();
+            let script = root.path().join("ordered_goal.py");
+            std::fs::write(&script, r#"
+import json, os, sys, time, threading
 from pathlib import Path
-def emit(x): print(json.dumps(x), flush=True)
+lock=threading.RLock()
+pending=None
+def emit(x):
+    with lock: print(json.dumps(x), flush=True)
+def finish():
+    global pending
+    with lock:
+        if pending is not None:
+            Path('ack-sent').write_text('yes'); record('resume-ack')
+            emit({'jsonrpc':'2.0','id':pending,'result':{}}); pending=None
+def watch():
+    while True:
+        if Path('allow-ack').exists(): finish()
+        time.sleep(.005)
+threading.Thread(target=watch,daemon=True).start()
 def record(x):
     with open('order','a') as f: f.write(x+'\n')
 goal={'objective':'finish campaign','status':'active','createdAt':123,'controlMethod':'_session/goal'}
 for line in sys.stdin:
     r=json.loads(line); m=r.get('method'); i=r.get('id'); p=r.get('params',{})
+    if m=='session/cancel':
+        record('cancel'); continue
     if i is None: continue
     if m=='initialize':
         result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'resume':{}}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']}}}}}
@@ -1100,121 +1105,166 @@ for line in sys.stdin:
         text=p['prompt'][0]['text']; record(text)
         if text=='arriving during resume': assert Path('ack-sent').exists()
         result={'stopReason':'end_turn'}
+    elif m=='_session/goal' and p['action']=='pause':
+        record('pause'); result={}
     elif m=='_session/goal':
         assert p['action']=='resume'
         assert Path('order').read_text().splitlines()==['queued first']
-        record('resume-started')
+        record('resume-started'); pending=i
         emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'RESUME_WAIT'}}}})
-        while not Path('allow-ack').exists(): time.sleep(.005)
-        Path('ack-sent').write_text('yes'); record('resume-ack'); result={}
+        continue
     else: result={}
     emit({'jsonrpc':'2.0','id':i,'result':result})
 "#).unwrap();
-        let relay = Arc::new(RelayCell::new(
-            DurableRelay::open(root.path().join("relay"), "goal-order-session", "test").unwrap(),
-        ));
-        let submit = |id: &str, text: &str| {
-            let response = relay.lock().unwrap().handle(RelayRequestEnvelope {
-                request_id: id.into(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request: RelayRequest::Submit {
-                    command_id: id.into(),
-                    command: RelayCommand::Prompt {
-                        prompt: vec![ContentBlock::from(text)],
+            let relay = Arc::new(RelayCell::new(
+                DurableRelay::open(root.path().join("relay"), "goal-order-session", "test")
+                    .unwrap(),
+            ));
+            let submit = |id: &str, text: &str| {
+                let response = relay.lock().unwrap().handle(RelayRequestEnvelope {
+                    request_id: id.into(),
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    request: RelayRequest::Submit {
+                        command_id: id.into(),
+                        command: RelayCommand::Prompt {
+                            prompt: vec![ContentBlock::from(text)],
+                        },
                     },
-                },
-            });
-            assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
-        };
-        submit("queued-first", "queued first");
-        let (tx, rx) = mpsc::channel(8);
-        let (events, mut receive) = mpsc::channel(16);
-        let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext {
-            admission: Some(relay_goal_admission(relay.clone(), events.clone())),
-            ..Default::default()
-        }));
-        let repeated_admission = relay_goal_admission(relay.clone(), events.clone());
-        let spec = ordering_spec(&root, &script, context);
-        let task = tokio::spawn(run(spec, rx, events));
-        let mut repeated_recovery = None;
-        let mut in_flight = BTreeMap::new();
-        let mut closing = false;
-        loop {
-            let event = match tokio::time::timeout(Duration::from_secs(15), receive.recv())
-                .await
-                .unwrap()
-            {
-                Some(event) => event,
-                None => panic!(
-                    "ACP stopped before ordering completed: {:?}",
-                    task.await.unwrap()
-                ),
+                });
+                assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
             };
-            if matches!(event, RuntimeEvent::CloseApplied { .. }) {
-                break;
-            }
-            let waiting = matches!(&event, RuntimeEvent::SessionUpdate { update } if update.pointer("/content/text").and_then(serde_json::Value::as_str)==Some("RESUME_WAIT"));
-            let last = matches!(&event, RuntimeEvent::PromptFinished { request_id, .. } if request_id=="queued-later");
-            crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event).unwrap();
-            if waiting {
-                let goal = relay
-                    .observe()
+            submit("queued-first", "queued first");
+            let (tx, rx) = mpsc::channel(8);
+            let (events, mut receive) = mpsc::channel(16);
+            let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext {
+                admission: Some(relay_goal_admission(relay.clone(), events.clone())),
+                ..Default::default()
+            }));
+            let repeated_admission = relay_goal_admission(relay.clone(), events.clone());
+            let spec = ordering_spec(&root, &script, context);
+            let task = tokio::spawn(run(spec, rx, events));
+            let mut repeated_recovery = None;
+            let mut in_flight = BTreeMap::new();
+            let mut closing = false;
+            loop {
+                let event = match tokio::time::timeout(Duration::from_secs(15), receive.recv())
+                    .await
                     .unwrap()
-                    .operational_state()
-                    .goal
-                    .snapshot
-                    .unwrap();
-                let mut repeated = (repeated_admission.0)(goal);
-                // Drive recovery before allowing the native ACK. A restarted
-                // recovery must reuse the accepted dispatch, not resume twice.
-                std::future::poll_fn(|cx| {
-                    assert!(repeated.as_mut().poll(cx).is_pending());
-                    std::task::Poll::Ready(())
-                })
-                .await;
-                repeated_recovery = Some(tokio::spawn(repeated));
-                submit("queued-later", "arriving during resume");
-                assert!(
-                    relay
-                        .lock()
-                        .unwrap()
-                        .claim_pending_commands(true)
-                        .unwrap()
-                        .is_empty(),
-                    "the outstanding goal RPC must own admission"
-                );
-                std::fs::write(root.path().join("allow-ack"), "yes").unwrap();
-            }
-            if last {
-                closing = true;
-                tx.send(CommandRequest::Close {
-                    request_id: "test-close".into(),
-                })
-                .await
-                .unwrap();
-            }
-            if !closing {
-                let claimed = {
-                    let mut owner = relay.lock().unwrap();
-                    let ready = owner.is_acp_ready();
-                    owner.claim_pending_commands(ready).unwrap()
+                {
+                    Some(event) => event,
+                    None => panic!(
+                        "ACP stopped before ordering completed: {:?}",
+                        task.await.unwrap()
+                    ),
                 };
-                for claim in claimed {
-                    in_flight.insert(claim.command_id.clone(), claim.command.clone());
-                    tx.send(crate::worker_runtime::acp_command(&claim).unwrap())
-                        .await
+                if matches!(event, RuntimeEvent::CloseApplied { .. }) {
+                    break;
+                }
+                let waiting = matches!(&event, RuntimeEvent::SessionUpdate { update } if update.pointer("/content/text").and_then(serde_json::Value::as_str)==Some("RESUME_WAIT"));
+                let last = matches!(&event, RuntimeEvent::PromptFinished { request_id, .. } if request_id=="queued-later");
+                let stopped = matches!(&event, RuntimeEvent::CancelApplied { request_id } | RuntimeEvent::GoalControlApplied { request_id } if request_id == "stop-control");
+                crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event).unwrap();
+                if stopped {
+                    assert!(
+                        relay
+                            .lock()
+                            .unwrap()
+                            .claim_pending_commands(true)
+                            .unwrap()
+                            .is_empty()
+                    );
+                    std::fs::write(root.path().join("allow-ack"), "yes").unwrap();
+                }
+                if waiting {
+                    // A native resume may outlive the old 30-second ACK limit.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(31)).await;
+                    tokio::time::resume();
+                    let goal = relay
+                        .observe()
+                        .unwrap()
+                        .operational_state()
+                        .goal
+                        .snapshot
                         .unwrap();
+                    let mut repeated = (repeated_admission.0)(goal);
+                    // Drive recovery before allowing the native ACK. A restarted
+                    // recovery must reuse the accepted dispatch, not resume twice.
+                    std::future::poll_fn(|cx| {
+                        assert!(repeated.as_mut().poll(cx).is_pending());
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    repeated_recovery = Some(tokio::spawn(repeated));
+                    submit("queued-later", "arriving during resume");
+                    assert!(
+                        relay
+                            .lock()
+                            .unwrap()
+                            .claim_pending_commands(true)
+                            .unwrap()
+                            .is_empty(),
+                        "the outstanding goal RPC must own admission"
+                    );
+                    if intervention == "ack" {
+                        std::fs::write(root.path().join("allow-ack"), "yes").unwrap();
+                    } else {
+                        let command = if intervention == "cancel" {
+                            RelayCommand::Cancel
+                        } else {
+                            RelayCommand::GoalControl {
+                                action: mj_core::goal::GoalControlAction::Pause,
+                            }
+                        };
+                        let response = relay.lock().unwrap().handle(RelayRequestEnvelope {
+                            request_id: "stop-control".into(),
+                            protocol_version: RELAY_PROTOCOL_VERSION,
+                            request: RelayRequest::Submit {
+                                command_id: "stop-control".into(),
+                                command,
+                            },
+                        });
+                        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+                    }
+                }
+                if last {
+                    closing = true;
+                    tx.send(CommandRequest::Close {
+                        request_id: "test-close".into(),
+                    })
+                    .await
+                    .unwrap();
+                }
+                if !closing {
+                    let claimed = {
+                        let mut owner = relay.lock().unwrap();
+                        let ready = owner.is_acp_ready();
+                        owner.claim_pending_commands(ready).unwrap()
+                    };
+                    for claim in claimed {
+                        in_flight.insert(claim.command_id.clone(), claim.command.clone());
+                        tx.send(crate::worker_runtime::acp_command(&claim).unwrap())
+                            .await
+                            .unwrap();
+                    }
                 }
             }
+            drop(tx);
+            drop(repeated_admission);
+            repeated_recovery.unwrap().await.unwrap().unwrap();
+            while receive.recv().await.is_some() {}
+            task.await.unwrap().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("order")).unwrap(),
+                format!(
+                    "queued first\nresume-started\n{}resume-ack\narriving during resume\n",
+                    if intervention == "ack" {
+                        String::new()
+                    } else {
+                        format!("{intervention}\n")
+                    }
+                )
+            );
         }
-        drop(tx);
-        drop(repeated_admission);
-        repeated_recovery.unwrap().await.unwrap().unwrap();
-        while receive.recv().await.is_some() {}
-        task.await.unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("order")).unwrap(),
-            "queued first\nresume-started\nresume-ack\narriving during resume\n"
-        );
     }
 }

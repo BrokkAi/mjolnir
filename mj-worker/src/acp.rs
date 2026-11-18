@@ -471,7 +471,17 @@ async fn run_inner(
                 spec.native_session_may_have_history || restart.native_session_used,
                 spec.goal_recovery.clone(),
             ));
-            spec.goal_recovery = Arc::new(Mutex::new(Default::default()));
+            // Clear conversation state, retaining the worker's journal and
+            // admission wiring across this and subsequent bridge replacements.
+            let cleared_goal = {
+                let current = spec.goal_recovery.lock().expect("goal lock poisoned");
+                mj_core::goal::GoalRecoveryContext {
+                    journal: current.journal.clone(),
+                    admission: current.admission.clone(),
+                    ..Default::default()
+                }
+            };
+            spec.goal_recovery = Arc::new(Mutex::new(cleared_goal));
             spec.clear_context_request = Some(request_id);
             spec.resume_session = None;
             spec.native_session_may_have_history = false;

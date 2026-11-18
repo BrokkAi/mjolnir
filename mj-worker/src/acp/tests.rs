@@ -8071,6 +8071,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
 }
 
 // Hard-won: 29a80b2d2: Correct bridge startup exceeded the fixture event deadline under load.
+// Hard-won: 753b1f960: /clear discarded worker admission wiring for the next native goal.
 #[tokio::test]
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
@@ -8172,6 +8173,7 @@ async fn exercise_context_clear(fail_replacement: bool, harness: HarnessKind) {
 import json, os, sys
 root = sys.argv[1]
 fail = sys.argv[2] == 'true'
+verify_goal = sys.argv[3] == 'true'
 count_path = os.path.join(root, 'generation')
 generation = int(open(count_path).read()) + 1 if os.path.exists(count_path) else 1
 with open(count_path, 'w') as f: f.write(str(generation))
@@ -8185,6 +8187,8 @@ for line in sys.stdin:
     if ident is None: continue
     if method == 'initialize':
         result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}}
+        if verify_goal:
+            result['_meta']={'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']}}}}
     elif method in ('session/new', 'session/load', 'session/resume'):
         if generation == 2 and fail:
             print(json.dumps({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'replacement refused'}}), flush=True)
@@ -8192,6 +8196,16 @@ for line in sys.stdin:
         result = {'sessionId': 'original' if generation == 1 or method != 'session/new' else 'replacement',
                   'configOptions':options,
                   'modes': {'currentModeId':'plan' if generation == 1 else 'agent','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'},{'id':'auto','name':'Auto'}]}}
+        if verify_goal and generation >= 2:
+            result['_meta']={'jetbrains':{'air':{'goal':{'objective':'after clear','status':'active','createdAt':123,'controlMethod':'_session/goal'}}},'execution':{'version':1,'status':'idle'}}
+    elif method == 'session/set_mode':
+        if verify_goal and generation == 2 and request['params']['modeId'] == 'agent':
+            # Native goal output makes this a used thread which must resume.
+            print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'replacement','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'goal work after clear'}}}}), flush=True)
+            os._exit(0)
+        result={}
+    elif method == '_session/goal':
+        raise AssertionError('worker lost its admission callback')
     elif method == 'session/set_config_option':
         options[0]['currentValue'] = request['params']['value']
         result = {'configOptions':options}
@@ -8208,11 +8222,24 @@ for line in sys.stdin:
         script.to_string_lossy().into_owned(),
         temp.path().to_string_lossy().into_owned(),
         fail_replacement.to_string(),
+        (harness == HarnessKind::Codex && !fail_replacement).to_string(),
     ];
     spec.cwd = temp.path().to_path_buf();
     spec.harness = harness;
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    spec.goal_recovery.lock().unwrap().admission =
+        Some(mj_core::goal::GoalResumeAdmission(Arc::new({
+            let admitted = admitted.clone();
+            move |_| {
+                let admitted = admitted.clone();
+                Box::pin(async move {
+                    admitted.notify_one();
+                    Ok(())
+                })
+            }
+        })));
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
     wait_for_runtime_event(&mut event_rx, |event| {
         matches!(event, RuntimeEvent::SessionConfigured { .. })
@@ -8242,6 +8269,38 @@ for line in sys.stdin:
         matches!(event, RuntimeEvent::SessionConfigured { .. })
     })
     .await;
+    if harness == HarnessKind::Codex && !fail_replacement {
+        // A fresh session has no native goal recovery. Restart its bridge to
+        // exercise the worker wiring on the subsequent native resume.
+        request_tx
+            .send(CommandRequest::SetSessionMode {
+                request_id: "restart-after-clear".into(),
+                mode_id: "agent".into(),
+            })
+            .await
+            .unwrap();
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::HarnessRestarting { .. })
+        })
+        .await;
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::SessionConfigured { .. })
+        })
+        .await;
+        if tokio::time::timeout(crate::test_support::IO_TIMEOUT, admitted.notified())
+            .await
+            .is_err()
+        {
+            let mut remaining = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                remaining.push(event);
+            }
+            panic!(
+                "admission was not restored: {remaining:?}; requests: {}",
+                std::fs::read_to_string(temp.path().join("requests.jsonl")).unwrap()
+            );
+        }
+    }
     drop(request_tx);
     // Drain the bounded event channel while shutdown completes.
     let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
@@ -8296,6 +8355,7 @@ for line in sys.stdin:
             .filter(|method| method.as_str() == "session/load")
             .count(),
         usize::from(fail_replacement)
+            + usize::from(harness == HarnessKind::Codex && !fail_replacement)
     );
 }
 

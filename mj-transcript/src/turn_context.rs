@@ -11,7 +11,7 @@ struct TurnContextState {
     parent_activity: Option<std::time::Instant>,
     decision_log: Option<mj_core::jev::DecisionLog>,
     authorization: Option<mj_core::assessment::ContextHistory>,
-    user_prompt_tail: String,
+    user_prompt_tail: Option<String>,
     message_id: Option<String>,
     assistant_text_tail: String,
     last_completed_message: String,
@@ -85,28 +85,41 @@ impl TurnContext {
     /// person's latest request, and Jev scored those turns better without it
     /// (.agents/docs/jev-still-open-20261106.md).
     pub fn reset(&self, command_id: Option<&str>, prompt: &str) {
+        self.reset_request(command_id, prompt);
+    }
+
+    /// Returns whether this delivery establishes a request in the context.
+    fn reset_request(&self, command_id: Option<&str>, prompt: &str) -> bool {
+        let recovery = command_id.is_some_and(mj_core::continuation::is_restart_continuation);
         let user_prompt_tail =
-            if mj_core::continuation::is_user_authored_message(command_id, prompt) {
+            if recovery || mj_core::continuation::is_user_authored_message(command_id, prompt) {
                 tail(prompt, USER_PROMPT_BYTES)
             } else {
                 String::new()
             };
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
-        if command_id.is_some_and(mj_core::continuation::is_restart_continuation) {
+        if recovery {
+            if state.user_prompt_tail.is_none() {
+                state.user_prompt_tail = Some(user_prompt_tail);
+                // The carried request precedes the retained replay suffix.
+                // Preserve that suffix and its partially observed answer.
+                state.summary.push_user(prompt);
+                state.summary.entries.rotate_right(1);
+            }
             // Recovery continues the same request and partial answer. Advance
             // generation to reject stale classifier replies without erasing
             // the latest user correction or the evidence from before restart.
             state.generation = generation;
             state.parent_activity = Some(std::time::Instant::now());
-            return;
+            return false;
         }
         *state = TurnContextState {
             generation,
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             authorization: state.authorization.clone(),
-            user_prompt_tail,
+            user_prompt_tail: Some(user_prompt_tail),
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
             background_inventory: std::mem::take(&mut state.background_inventory),
@@ -115,6 +128,7 @@ impl TurnContext {
             summary: std::mem::take(&mut state.summary),
             ..Default::default()
         };
+        true
     }
 
     /// Record durable transcript observations through the same path during live work and replay.
@@ -133,17 +147,14 @@ impl TurnContext {
             | RelayObservation::MailboxEventsDelivered {
                 steering: Some(_), ..
             } => {
-                if let Some(prompt) = prompt {
-                    self.reset(delivered_prompt_command_id(observation), prompt);
-                    if !delivered_prompt_command_id(observation)
-                        .is_some_and(mj_core::continuation::is_restart_continuation)
-                    {
-                        self.0
-                            .lock()
-                            .expect("turn context lock poisoned")
-                            .summary
-                            .push_user(prompt);
-                    }
+                if let Some(prompt) = prompt
+                    && self.reset_request(delivered_prompt_command_id(observation), prompt)
+                {
+                    self.0
+                        .lock()
+                        .expect("turn context lock poisoned")
+                        .summary
+                        .push_user(prompt);
                 }
             }
             RelayObservation::SessionUpdate { update } => self.observe(update),
@@ -307,7 +318,7 @@ impl TurnContext {
     pub fn clear_history(&self) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
         state.summary = Default::default();
-        state.user_prompt_tail.clear();
+        state.user_prompt_tail = None;
         state.assistant_text_tail.clear();
         state.last_completed_message.clear();
         state.message_id = None;
@@ -381,7 +392,7 @@ impl TurnContext {
             transcript_summary: summary.render(48 * 1024),
             background_commands: facts.background_commands,
             queued_commands: facts.queued_commands,
-            user_prompt_tail: state.user_prompt_tail.clone(),
+            user_prompt_tail: state.user_prompt_tail.clone().unwrap_or_default(),
             assistant_text_tail: if state.assistant_text_tail.is_empty() {
                 state.last_completed_message.clone()
             } else {
@@ -632,5 +643,85 @@ mod tests {
             0,
         );
         assert!(evidence.user_prompt_tail.is_empty());
+    }
+    // Hard-won: 753b1f960: recovery lost its request when the original start left the hot journal.
+    #[test]
+    fn recovery_initializes_missing_request_and_preserves_restored_corrections() {
+        use mj_core::relay::RelayObservation;
+        for restored in [false, true] {
+            let context = TurnContext::default();
+            if restored {
+                context.observe_relay(
+                    &RelayObservation::CommandStarted {
+                        command_id: "correction".into(),
+                        started_at_ms: 1,
+                    },
+                    Some("Use the corrected approach"),
+                );
+                context.observe(&message("partial", "Partial work"));
+            } else {
+                context.mark_earlier_history_omitted();
+                context.observe(&message("suffix", "Only the tail survived"));
+            }
+            let recovery = mj_core::continuation::restart_continuation_id("original");
+            context.observe_relay(
+                &RelayObservation::CommandStarted {
+                    command_id: recovery.clone(),
+                    started_at_ms: 2,
+                },
+                Some("Original request"),
+            );
+            let evidence = context.evidence(
+                HarnessKind::Codex,
+                TurnPhase::Running,
+                &ActivityFacts::default(),
+                0,
+            );
+            assert_eq!(
+                evidence.user_prompt_tail,
+                if restored {
+                    "Use the corrected approach"
+                } else {
+                    "Original request"
+                }
+            );
+            assert!(evidence.transcript_summary.contains(if restored {
+                "Use the corrected approach"
+            } else {
+                "Original request"
+            }));
+            assert_eq!(
+                evidence.assistant_text_tail,
+                if restored {
+                    "Partial work"
+                } else {
+                    "Only the tail survived"
+                }
+            );
+            assert!(evidence.transcript_summary.contains(if restored {
+                "Partial work"
+            } else {
+                "Only the tail survived"
+            }));
+            let before = evidence.transcript_summary;
+            context.observe_relay(
+                &RelayObservation::CommandStarted {
+                    command_id: mj_core::continuation::restart_continuation_id(&recovery),
+                    started_at_ms: 3,
+                },
+                Some("Original request"),
+            );
+            assert_eq!(
+                context
+                    .evidence(
+                        HarnessKind::Codex,
+                        TurnPhase::Running,
+                        &ActivityFacts::default(),
+                        0
+                    )
+                    .transcript_summary,
+                before
+            );
+        }
     }
 }

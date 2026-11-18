@@ -726,6 +726,30 @@ impl DurableRelay {
             let mut next_snapshot = self.snapshot.clone();
             apply_relay_event(&mut next_snapshot, &event)?;
             ensure_serialized_budget(&next_snapshot, RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
+            if let Some(head) = next_snapshot.queued_prompts.first()
+                && mj_core::continuation::is_restart_continuation(&head.command_id)
+            {
+                let id = &head.command_id;
+                // Keep room to start the recovery while it is queued. Later
+                // admissions must not consume the space its transfer reserved.
+                // Use the full representation of a positive i64 timestamp so
+                // a later clock digit boundary cannot invalidate admission.
+                let mut started = RelayEvent {
+                    ordinal: ordinal
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("relay event ordinal exhausted"))?,
+                    command_id: Some(id.clone()),
+                    observation: RelayObservation::CommandStarted {
+                        command_id: id.clone(),
+                        started_at_ms: i64::MAX,
+                    },
+                    ..event.clone()
+                };
+                started.digest = relay_event_digest(&started)?;
+                let mut running = next_snapshot.clone();
+                apply_relay_event(&mut running, &started)?;
+                ensure_serialized_budget(&running, RELAY_SNAPSHOT_BYTE_BUDGET, "relay snapshot")?;
+            }
             ensure_serialized_budget(
                 &next_snapshot.operational_state(),
                 RELAY_STATE_BYTE_BUDGET,

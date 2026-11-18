@@ -914,7 +914,7 @@ pub(super) async fn serve_session(
                 }
                 continue;
             }
-            request = requests.recv(), if !goal_controls.blocks_input() => match request { Some(request) => request, None => break },
+            request = requests.recv() => match request { Some(request) => request, None => break },
         };
         let request = match request {
             CommandRequest::PromptAttachments {
