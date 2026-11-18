@@ -83,7 +83,9 @@ use mj_core::state::{
     new_session_id, normalize_session_title,
 };
 
-use crate::targets::{self, AdditionalMount, CommandExecutor, CommandSpec, SshTarget};
+#[cfg(test)]
+use crate::targets::CommandSpec;
+use crate::targets::{self, AdditionalMount, CommandExecutor, SshTarget};
 
 pub use crate::targets::image_refresh_plan;
 pub use backend::backend_locator;
