@@ -53,7 +53,13 @@ On bifrost-dev relation bugs, supplying the complete decisive fact is close to s
 - Round L's OT lift (+27.5 points) came from briefs that 15 of 17 leak judgments flagged.
 - The no-leak arm's ON − AF lift (+37.3 points) passed a weaker leak rule, Opus-only `missed` at any confidence, with edits that often dropped elements of the fact. This arm shows that keeping the fact complete under the stricter Opus/Sol rule makes most briefs leak again.
 
-So neither lift can be credited to a non-leaking decisive fact. Both measure briefs that state, or come close to stating, the defect. Nothing more is claimed here. For the 6 editor-failure diffs the question stays open: their editors never produced a fidelity-passing candidate in the final round, so the leak judges never tested whether their complete facts can be stated neutrally.
+So neither lift can be credited to a non-leaking decisive fact. Both measure briefs that state, or come close to stating, the defect. Nothing more is claimed here.
+
+The 6 editor-failure diffs are excluded on their final round's fidelity failure, but each had a fidelity-passing brief judged in an earlier round:
+- Five were flagged in those rounds, caught or partial: python-filescope, incompatible-semantic, kotlin-source-constructor, php and unproven-override. This is the same pattern as the leak-gate exclusions, though their final rounds produced no fidelity-passing candidate.
+- python-module-mutation got two `missed` pairs with Opus at medium confidence, an unresolved judgment.
+
+For these 6 the registered exclusion is "editor failure". The earlier-round evidence leans toward leaking for five of them and is unresolved for python-module-mutation.
 
 ## Cost
 
