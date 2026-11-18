@@ -1646,6 +1646,20 @@ mod settled_task_tests {
         relay.store_assessment(important.clone()).unwrap();
         assert_eq!(relay.snapshot.notification_stack.revision, first_revision);
 
+        let mut ordinary = important.clone();
+        ordinary.attention = None;
+        relay.store_assessment(ordinary.clone()).unwrap();
+        assert!(relay.snapshot.notification_stack.entries.is_empty());
+        let withdrawn_revision = relay.snapshot.notification_stack.revision;
+        assert_eq!(withdrawn_revision, relay.snapshot.latest_ordinal);
+        assert!(withdrawn_revision > first_revision);
+        relay.store_assessment(ordinary).unwrap();
+        assert_eq!(
+            relay.snapshot.notification_stack.revision,
+            withdrawn_revision
+        );
+        relay.store_assessment(important.clone()).unwrap();
+
         let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
         legacy["format_version"] = serde_json::json!(26);
         legacy.as_object_mut().unwrap().remove("notification_stack");
@@ -1671,6 +1685,25 @@ mod settled_task_tests {
         let generated = mj_core::continuation::GeneratedPrompt::SessionMessageTurn;
         let mut question = run(&mut relay, &generated.command_id("first-wake"), None);
         question.action = Some(Action::AwaitInput);
+        relay.store_assessment(question.clone()).unwrap();
+        let mut ordinary = question.clone();
+        ordinary.action = Some(Action::Finished);
+        relay.store_assessment(ordinary).unwrap();
+        assert!(relay.snapshot.open_request().is_none());
+        assert_eq!(
+            relay.snapshot.notification_stack.revision,
+            relay.snapshot.latest_ordinal
+        );
+        assert_eq!(relay.snapshot.notification_stack.entries.len(), 1);
+        assert_eq!(
+            relay.snapshot.notification_stack.entries[0].completed_ordinal,
+            important.completed_ordinal,
+        );
+        assert!(
+            !relay
+                .finish_question_locator(question.completed_ordinal, None)
+                .unwrap()
+        );
         relay.store_assessment(question.clone()).unwrap();
         assert!(
             relay

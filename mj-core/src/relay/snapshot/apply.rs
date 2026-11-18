@@ -412,21 +412,38 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         message,
                         event.ordinal,
                     );
-                } else if assessment.current()
-                    && assessment.attention == Some(AssessmentAttention::Important)
-                    && assessment.completed_ordinal > snapshot.notifications_read_through
-                {
-                    let message = snapshot
-                        .completed_reply_message
-                        .clone()
-                        .map_or(EntryMessage::None, EntryMessage::Found);
-                    record_notification(
-                        snapshot,
-                        assessment.completed_ordinal,
-                        NotificationKind::Important,
-                        message,
-                        event.ordinal,
-                    );
+                } else {
+                    let completed = assessment.completed_ordinal;
+                    if snapshot.request.as_ref().is_some_and(|request| {
+                        request.question.completed_ordinal == completed
+                            && request.question.turn_id == assessment.turn_id
+                    }) {
+                        snapshot.request = None;
+                    }
+                    if assessment.current()
+                        && assessment.attention == Some(AssessmentAttention::Important)
+                        && completed > snapshot.notifications_read_through
+                    {
+                        let message = snapshot
+                            .completed_reply_message
+                            .clone()
+                            .map_or(EntryMessage::None, EntryMessage::Found);
+                        record_notification(
+                            snapshot,
+                            completed,
+                            NotificationKind::Important,
+                            message,
+                            event.ordinal,
+                        );
+                    } else if let Ok(index) = snapshot
+                        .notification_stack
+                        .entries
+                        .binary_search_by_key(&completed, |entry| entry.completed_ordinal)
+                    {
+                        let stack = Arc::make_mut(&mut snapshot.notification_stack);
+                        stack.entries.remove(index);
+                        stack.revision = event.ordinal;
+                    }
                 }
             }
             snapshot.retry_assessment = None;
