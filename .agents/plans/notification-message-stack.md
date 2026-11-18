@@ -30,8 +30,8 @@ To see it working, in an isolated instance: run a session whose turn ends with a
 - [x] (2026-11-17) Milestone 5, surfaces: TUI pane and web screen with Previous, Next, position, per-entry text and Clear (slice C).
 - [x] (2026-11-17) Integration: merged in a detached worktree; integrated review clean after two fixes (distinct native request identities, review verdicts on cards) and two declined findings (one form per card; id-less text after a canonical restore). Workspace clippy, the core, client, worker, TUI, CLI dashboard and controller suites and the viewer tests pass, apart from failures that also occur on master or pass alone (the worker suite times out under host load average above 200 and passes with 16 test threads).
 - [x] (2026-11-17) Order cards by their oldest visible item (`since_ms`) and keep the reader's item when a new one arrives (user decision): timestamps 883d5133c and bf2b4a05f, web 3c4e3c1ce, TUI in the following commit. Skip is keyed by session and lasts until the card disappears, so new items in a skipped session do not bring it forward.
-- [ ] Shown `?` cursor (`questions_shown_through`): a shown question never goes back to held.
-- [ ] After 2026-11-20: measure whether the hold still earns its place under wording C.
+- [x] (2026-11-18) Shown `?` cursor tried and replaced: the user dropped the hold instead.
+- [x] (2026-11-18) Dropped the hold and idle gate for `?`; removed the cursor and migration 139 (net 856 lines removed, e962c80f1); kept per-item destinations (one helper, `NotificationCard::item_destination`) and the alert fixes.
 - [ ] Install (ask the user first) and check live behavior in an isolated instance.
 
 
@@ -113,6 +113,11 @@ To see it working, in an isolated instance: run a session whose turn ends with a
   Rationale: a wrong hold input can then only show a question early, once, never flicker. The #1518 study found about 98% of held questions were still open when shown, so an early release changes timing, not outcome. Tracking every owner of own work continuously multiplies gaps with each work source.
   Follow-up: after the 2026-11-20 confirmation study, measure whether the hold still removes false `?` under wording C or mostly delays real asks; if the latter, propose deleting the hold to the user (it reverses their 2026-11-13 decision).
   Date/Author: 2026-11-18, parent session with the Advisor (91233b0e).
+- Decision (user, 2026-11-18: "Drop the hold"): the #1518 hold and the idle gate no longer apply to `?`. A `?` entry is on the card whenever it is in the worker's stack, from its turn's end until the person answers, replies or clears; like `!` except that reading does not clear it. The session glyph comes from the card, so a session with a `?` entry reads `?` while it works.
+  - This replaces the 2026-11-18 shown-question cursor (`questions_shown_through`, migration 139, the pending-write queue and its retries), which is removed unshipped. Visibility now has one owner, the worker's stack, and no daemon state.
+  - Kept: each card item resolves its own destination (stack entries belong to the card's session, only the live form to its holder), and TUI desktop/bell alerts track the highest question ordinal already alerted per session.
+  Rationale: the hold never removed a question, only delayed it ("hold, then always show"). The logs since 2026-11-09 show 718 held questions, 218 re-held after a release (the flicker gaps), and released holds delayed by a median 3.4 min, p90 16 min, max 5.9 h. Keeping that delay flicker-free cost about nine review findings in daemon-side state. Cost accepted: until the recalibrated classifier ships, a false `?` on a "your call later" wait shows at turn end instead of when the children finish.
+  Date/Author: 2026-11-18, user on the Advisor's recommendation.
 
 ## Outcomes & Retrospective
 
