@@ -173,17 +173,23 @@ def container(sid):
                        for m in mounts]}
 
 
-def reviewer_runtime(child):
+def reviewer_runtime(child, carrier):
     """The reviewer's container image and runtime, read while the reviewer is alive (reviewers are
-    destroyed at role end). Harness binaries come from mj, so the mj version and mounts name them."""
+    destroyed at role end). Podman reviewers run inside the carrier's container, which carries the
+    carrier's session label; a reviewer with a container of its own is read from that instead.
+    Harness binaries come from mj, so the mj version and mounts name them."""
     ids = subprocess.check_output(["podman", "ps", "--filter", f"label=dev.mj.session={child}",
                                    "--format", "{{.ID}}"]).decode().split()
+    source = "reviewer"
+    if not ids:
+        ids, source = [carrier], "carrier"
     if len(ids) != 1:
         return None
     info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]]))[0]
     image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]]))[0]
     version = subprocess.check_output([str(MJX), "--version"]).decode().strip()
-    return {"container": ids[0], "image": info["Image"], "image_digest": image.get("Digest"),
+    return {"container": ids[0], "container_source": source, "image": info["Image"],
+            "image_digest": image.get("Digest"),
             "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
             "mj_version": version, "observed_ns": time.time_ns(),
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
@@ -191,10 +197,11 @@ def reviewer_runtime(child):
 
 
 def record_runtimes(d, children):
+    carrier = json.loads((d / "placement.json").read_text())["container"]
     for child in children:
         path = d / "reviewers" / child[:12] / "runtime.json"
         if not path.exists():
-            runtime = reviewer_runtime(child)
+            runtime = reviewer_runtime(child, carrier)
             if runtime:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 save(path, runtime)

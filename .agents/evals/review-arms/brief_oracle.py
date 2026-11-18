@@ -715,7 +715,10 @@ def noleak_check_collect(n):
     for bug, d in decisions.items():
         if d["decision"] == "carries":
             path = W / "texts" / bug / f"round-{n}.md"
-            if path.exists() and path.read_text() == edits[bug]["brief"]:
+            if path.exists():
+                if path.read_text() != edits[bug]["brief"]:
+                    # Never overwrite: a differing text is evidence that a frozen input drifted.
+                    raise SystemExit(f"{path} holds text other than the accepted edit")
                 continue
             # Write then rename, so an interrupted write never leaves a truncated text in place.
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -746,7 +749,8 @@ def noleak_publish(jobs_out):
             raise SystemExit(f"{d}: a different brief is already published")
         d.mkdir(parents=True, exist_ok=True)
         (d / "brief.md").write_text(text)
-    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": "ON"} for r in retained])
+    # ON and its same-image no-brief control AF, interleaved per diff (the plan's AF amendment).
+    save(pathlib.Path(jobs_out), [{"bug": r["bug"], "arm": arm} for r in retained for arm in ("ON", "AF")])
     # Registered: fewer than 8 retained diffs reads Inconclusive whatever the scores. With none
     # retained there is nothing to review or score, so the outcome is recorded here.
     outcome = "Inconclusive (fewer than 8 retained diffs)" if len(retained) < 8 else None

@@ -153,6 +153,13 @@ def build(arms, per_batch):
     corpus = CORPUS
     rows = sessions(arms)
     require_complete(rows, arms)
+    if READING == "bifrost-oracle-noleak":
+        # ON - AF reads a brief effect only if both arms ran on one image (the AF amendment).
+        images = {(r["bug"], r["arm"]): json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json")
+                                                   .read_text())["image"]
+                  for r in rows if r["arm"] in ("ON", "AF")}
+        if len(set(images.values())) != 1:
+            raise SystemExit(f"ON and AF ran on more than one image: {sorted(set(images.values()))}")
     if REFERENCE_ROUND:
         # Check the reference before freezing the round: score compares the same sessions, and
         # finding a mismatch only then would orphan completed verdicts.
