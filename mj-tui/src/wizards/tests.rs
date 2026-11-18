@@ -3358,13 +3358,17 @@ fn non_apple_container_overcommit_warns_and_can_submit() {
     assert!(wizard.sizing_error.is_none());
     assert!(target_advance_enabled(&dashboard, wizard));
     let screen = captured_drawn(&mut dashboard, 120, 30).join("\n");
-    assert!(screen.contains("It will still start."), "{screen}");
+    assert!(
+        screen.contains("Asks for more RAM than the") && screen.contains("it will still start."),
+        "{screen}"
+    );
+    assert!(!screen.contains("more CPUs"), "{screen}");
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
 }
 
 #[test]
-fn apple_container_cpu_overcommit_warns_and_can_submit() {
+fn apple_container_cpu_overcommit_does_not_warn_and_can_submit() {
     let mut dashboard = wizard_with_capacity(
         TargetTemplate::AppleContainer {
             container: config().targets["podman"].container().unwrap().clone(),
@@ -3379,7 +3383,7 @@ fn apple_container_cpu_overcommit_warns_and_can_submit() {
     assert!(wizard.sizing_error.is_none());
     assert!(target_advance_enabled(&dashboard, wizard));
     let screen = captured_drawn(&mut dashboard, 120, 30).join("\n");
-    assert!(screen.contains("more CPUs than the 2 left"), "{screen}");
+    assert!(!screen.contains("more CPUs"), "{screen}");
     assert!(!screen.contains("more RAM than"), "{screen}");
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_ne!(new_wizard(&dashboard).step, WizardStep::Target);
@@ -3527,7 +3531,7 @@ fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets()
     let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(screen.contains("RAM left unavailable"), "{screen}");
     assert!(!screen.contains("RAM left: 0"), "{screen}");
-    assert!(screen.contains("The session will still start."), "{screen}");
+    assert!(!screen.contains("will still start"), "{screen}");
 }
 
 // Hard-won: d27eb9f56: the TUI ignored daemon reservations while sizing a new session.
@@ -4134,7 +4138,7 @@ fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
     assert!(!wizard.target_step_skipped);
     let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(
-        target.contains("Machine nas has no runtime: it did not answer."),
+        target.contains("nas did not answer.") && !target.contains("Check that"),
         "{target}"
     );
 }
@@ -4453,6 +4457,18 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
             .config
             .machines
             .insert("machine".into(), bare_ssh_machine());
+        // A second runtime on the same machine shares its one line.
+        let TargetTemplate::SshBare { ssh, .. } = bare_ssh_target() else {
+            unreachable!("a bare SSH target");
+        };
+        let container = dashboard.config.targets["podman"]
+            .container()
+            .unwrap()
+            .clone();
+        dashboard.config.targets.insert(
+            "machine-podman".into(),
+            TargetTemplate::SshPodman { ssh, container },
+        );
         match flow {
             "New session" => {
                 open_new_session_wizard(&mut dashboard);
@@ -4474,8 +4490,16 @@ fn target_steps_list_only_what_is_there_and_name_an_unresponsive_host() {
         assert!(text.contains("target"), "{flow}: {text}");
         assert!(text.contains("podman"), "{flow}: {text}");
         assert!(
-            text.contains("machine: machine did not answer.") && !text.contains("unavailable"),
+            text.contains("machine did not answer; not listing machine, machine-podman.")
+                && !text.contains("unavailable")
+                && !text.contains("Connection timed out")
+                && !text.contains("Check that"),
             "{flow}: an unresponsive host is named, not listed: {text}"
+        );
+        assert_eq!(
+            text.matches("machine did not answer").count(),
+            1,
+            "{flow}: the machine is named once: {text}"
         );
         assert!(
             !text.contains("docker"),

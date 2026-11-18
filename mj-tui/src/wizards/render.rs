@@ -71,9 +71,10 @@ fn target_step_choices<W: WizardDraft>(
                             ),
                             theme::muted(),
                         ));
-                        if let Some(allocation) = wizard.resource_allocation()
-                            && let Some(message) =
-                                capacity.overcommit(allocation).warning(&capacity)
+                        // The Host line already says when the RAM left is unknown.
+                        if capacity.complete
+                            && let Some(allocation) = wizard.resource_allocation()
+                            && let Some(message) = capacity.overcommit_warning(allocation)
                         {
                             help.push(Line::styled(message, warning));
                         }
@@ -105,12 +106,14 @@ fn target_step_choices<W: WizardDraft>(
         .collect();
     // What is not there has no row, so it is named here with the reason,
     // rather than missing from the list without a word.
-    help.extend(
-        dashboard
-            .missing_target_lines()
-            .into_iter()
-            .map(|line| Line::styled(line, warning)),
-    );
+    help.extend(dashboard.missing_target_lines().into_iter().map(|line| {
+        let style = if line.routine {
+            theme::muted()
+        } else {
+            warning
+        };
+        Line::styled(line.text, style)
+    }));
     (target_table(rows), help, selected_row)
 }
 

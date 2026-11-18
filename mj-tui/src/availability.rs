@@ -58,10 +58,22 @@ impl Default for Availability {
 /// An entry the pickers leave out, and the line that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Missing {
-    /// Named under the list.
+    /// Named under the list, by the detail alone; the fix lives in Settings
+    /// and `mj doctor`.
     Named(String),
+    /// Its machine did not answer. Routine (a sleeping laptop), so the list
+    /// names the machine once, however many runtimes it hides.
+    Unreachable { machine: String },
     /// A standard runtime whose engine was never installed here.
     Silent,
+}
+
+/// One line under the target list. A `routine` line (a machine that did not
+/// answer) is muted; the others are warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingTargetLine {
+    pub(crate) text: String,
+    pub(crate) routine: bool,
 }
 
 impl DashboardState {
@@ -207,15 +219,38 @@ impl DashboardState {
             .collect()
     }
 
-    /// The line under a target list for each enabled runtime it leaves out,
-    /// then for each machine that runs nothing yet.
-    pub(crate) fn missing_target_lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
-            .config
-            .targets
-            .keys()
-            .filter_map(|id| Some(format!("{id}: {}", self.target_missing_line(id)?)))
-            .collect();
+    /// The lines under a target list: one for each enabled runtime it leaves
+    /// out, except that a machine that did not answer is named once with every
+    /// runtime it hides; then one for each machine that runs nothing yet.
+    pub(crate) fn missing_target_lines(&self) -> Vec<MissingTargetLine> {
+        let mut lines = Vec::new();
+        let mut unreachable_machines: Vec<(String, Vec<&str>)> = Vec::new();
+        for id in self.config.targets.keys() {
+            if self.config.enabled_target(id).is_none() {
+                continue;
+            }
+            match self.target_missing(id) {
+                Some(Missing::Named(reason)) => lines.push(MissingTargetLine {
+                    text: format!("{id}: {reason}"),
+                    routine: false,
+                }),
+                Some(Missing::Unreachable { machine }) => {
+                    match unreachable_machines.iter_mut().find(|(m, _)| *m == machine) {
+                        Some((_, ids)) => ids.push(id),
+                        None => unreachable_machines.push((machine, vec![id])),
+                    }
+                }
+                Some(Missing::Silent) | None => {}
+            }
+        }
+        lines.extend(
+            unreachable_machines
+                .into_iter()
+                .map(|(machine, ids)| MissingTargetLine {
+                    text: format!("{machine} did not answer; not listing {}.", ids.join(", ")),
+                    routine: true,
+                }),
+        );
         lines.extend(self.machines_without_runtime_lines());
         lines
     }
@@ -276,13 +311,9 @@ impl DashboardState {
                         self.config.machines.get(machine_id) == Some(&probe.machine)
                     })?;
                 match &probe.finding {
-                    MachineFinding::Unreachable {
-                        detail,
-                        remediation,
-                    } => Some(Missing::Named(sentence(
-                        &format!("{machine_id} did not answer. {}", detail.trim()),
-                        remediation,
-                    ))),
+                    MachineFinding::Unreachable { .. } => Some(Missing::Unreachable {
+                        machine: machine_id.to_owned(),
+                    }),
                     MachineFinding::Answered { runtimes, rejected } => {
                         if runtimes
                             .iter()
@@ -291,10 +322,7 @@ impl DashboardState {
                             return None;
                         }
                         let rejected = rejected.iter().find(|runtime| runtime.kind == kind)?;
-                        Some(Missing::Named(sentence(
-                            &rejected.detail,
-                            rejected.remediation.as_deref().unwrap_or_default(),
-                        )))
+                        Some(Missing::Named(sentence(&rejected.detail, "")))
                     }
                 }
             }
@@ -308,6 +336,7 @@ impl DashboardState {
         self.config.enabled_target(id)?;
         match self.target_missing(id)? {
             Missing::Named(reason) => Some(reason),
+            Missing::Unreachable { machine } => Some(format!("{machine} did not answer.")),
             Missing::Silent => None,
         }
     }
@@ -434,7 +463,7 @@ impl DashboardState {
     }
 
     /// The machines no runtime runs on, for the line under the target list.
-    pub(crate) fn machines_without_runtime_lines(&self) -> Vec<String> {
+    pub(crate) fn machines_without_runtime_lines(&self) -> Vec<MissingTargetLine> {
         let ids: BTreeSet<&str> = self
             .config
             .machines_without_runtimes()
@@ -442,8 +471,22 @@ impl DashboardState {
             .collect();
         ids.into_iter()
             .filter_map(|id| {
-                self.machine_runtime_reason(id)
-                    .map(|reason| format!("Machine {id} has no runtime: {reason}"))
+                let machine = self.config.machines.get(id)?;
+                let probe = self
+                    .availability
+                    .machines
+                    .get(id)
+                    .filter(|probe| probe.machine == *machine)?;
+                Some(match &probe.finding {
+                    MachineFinding::Unreachable { .. } => MissingTargetLine {
+                        text: format!("{id} did not answer."),
+                        routine: true,
+                    },
+                    finding => MissingTargetLine {
+                        text: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
+                        routine: false,
+                    },
+                })
             })
             .collect()
     }

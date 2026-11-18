@@ -61,7 +61,11 @@ impl DashboardState {
         }
         if self.offered_target_indices().is_empty() {
             self.begin_settings_section("targets", None);
-            let missing = self.missing_target_lines();
+            let missing: Vec<String> = self
+                .missing_target_lines()
+                .into_iter()
+                .map(|line| line.text)
+                .collect();
             if !missing.is_empty() {
                 self.notices.set(format!(
                     "No runtime is available here. {}",

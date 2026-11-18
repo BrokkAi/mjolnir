@@ -452,21 +452,17 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         memory_bytes: 4 << 30,
     };
     assert!(!capacity.refuses(&cpu_overcommit, true));
-    assert!(capacity.overcommit(&cpu_overcommit).cpus);
-    assert!(!capacity.overcommit(&cpu_overcommit).memory);
+    assert_eq!(capacity.overcommit_warning(&cpu_overcommit), None);
     let ram_overcommit = SessionResourceAllocation::Container {
         cpus: 8,
         memory_bytes: 8 << 30,
     };
     assert!(capacity.refuses(&ram_overcommit, true));
     assert!(!capacity.refuses(&ram_overcommit, false));
-    let warning = capacity
-        .overcommit(&ram_overcommit)
-        .warning(&capacity)
-        .unwrap();
-    assert!(warning.contains("more CPUs"));
-    assert!(warning.contains("more RAM"));
-    assert!(warning.contains("still start"));
+    assert_eq!(
+        capacity.overcommit_warning(&ram_overcommit).as_deref(),
+        Some("Asks for more RAM than the 4 GiB left on this host; it will still start.")
+    );
 
     // Hard-won: #1538: a container created at the target's defaults was
     // counted at a later, smaller Container settings request.
@@ -514,8 +510,7 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
     assert!(!capacity.refuses(&allocation, false));
     assert!(
         capacity
-            .overcommit(&allocation)
-            .warning(&capacity)
+            .overcommit_warning(&allocation)
             .unwrap()
             .contains("no recorded size")
     );
