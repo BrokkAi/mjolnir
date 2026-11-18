@@ -3312,17 +3312,20 @@ fn resolve_move_size_for_environment(
     previous: Option<&MoveOperation>,
 ) -> Result<(bool, bool)> {
     let sealed = previous.is_some_and(MoveOperation::holds_source_environment);
-    // A size is resolved before the decision wherever comparing sizes means
-    // something: the environment's own size is known, so a request that
-    // resolves to the size it already has is not a change. That covers a
-    // clear request, and a request that leaves the size out while the record's
-    // own next-creation size was cleared -- rebuilding a container to the size
-    // it already has would contradict the decision this very selection states.
+    // An explicit clear means "the destination's default" and is always
+    // resolved: the person asked for a size, so an unknown current size is no
+    // reason to keep an unbounded container. Otherwise a size is resolved
+    // before the decision wherever comparing sizes means something -- the
+    // environment's own size is known -- so a request that resolves to the
+    // size the container already has is not a change. A profile-only Move of a
+    // container whose size is unknown resolves nothing here, and keeps its
+    // environment.
     let comparable = mj_core::state::applied_container_settings(source)
         .resource_allocation
         .is_some();
-    let mut sized_by_destination_default =
-        !sealed && comparable && resolve_move_destination_size(source, selection, state, target);
+    let mut sized_by_destination_default = !sealed
+        && (selection.clear_resource_allocation || comparable)
+        && resolve_move_destination_size(source, selection, state, target);
     let mut in_place = move_in_place_for_record(source, selection, targets, is_subagent, previous)?;
     // A Move that provisions needs a size to create the container with. It
     // takes the inherited one, else the destination's default. Sizing it can

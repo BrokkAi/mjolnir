@@ -6887,6 +6887,35 @@ fn a_move_size_and_a_clear_retry_keep_their_destination_meaning() {
     assert!(kept, "an unchanged profile Move keeps the environment");
     assert!(!sized_by_default);
     assert_eq!(profile_only, selection("podman", None, false));
+
+    // The same unsized container asked to clear its sizing is a different
+    // request: the person wants the destination's size, so it is resolved and
+    // the container is rebuilt with it rather than left unbounded.
+    let mut clear_unsized = selection("podman", None, true);
+    let (kept, sized_by_default) = super::resolve_move_size_for_environment(
+        &unsized_container,
+        &mut clear_unsized,
+        &state,
+        &config.targets,
+        &config.targets["podman"],
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(!kept, "an unknown size is replaced by a known one");
+    assert!(sized_by_default);
+    assert_eq!(clear_unsized.resource_allocation, container_size(12, 24));
+    assert!(!clear_unsized.clear_resource_allocation);
+    assert!(
+        !super::move_in_place_for_record(
+            &unsized_container,
+            &clear_unsized,
+            &config.targets,
+            false,
+            None
+        )
+        .unwrap()
+    );
     // The environment decision the admission inside execution re-makes from
     // the sealed selection agrees with it.
     assert!(
