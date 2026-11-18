@@ -231,8 +231,9 @@ jobs:
     - name: Run tests
       run: cargo test --no-fail-fast ${{ matrix.tests }}
 
+    # Also after a test failure: the doc tests do not depend on the tests.
     - name: Run doc tests
-      if: ${{ matrix.doc-tests }}
+      if: ${{ !cancelled() && matrix.doc-tests }}
       run: cargo test --doc ${{ matrix.doc-tests }}
 
   # Check-ins run Linux only. macOS and Windows run nightly in nightly.yml,
