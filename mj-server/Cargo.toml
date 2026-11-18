@@ -59,7 +59,7 @@ mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-controller = { workspace = true, features = ["test-support"] }
 mj-review.workspace = true
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker", features = ["test-hooks"] }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
 http-body-util = "0.1"
 rusqlite.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

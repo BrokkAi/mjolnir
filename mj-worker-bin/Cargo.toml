@@ -1,0 +1,46 @@
+[package]
+name = "brokk-mj-worker"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+description = "Target-side worker program for Mjolnir sessions"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+
+# The program is its own package so that what only it needs (its build stamp)
+# is not a dependency of the worker library, which other crates' tests use.
+[[bin]]
+name = "mj-worker"
+path = "src/main.rs"
+
+[features]
+default = []
+test-hooks = ["mj-core/test-hooks", "mj-worker/test-hooks"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+mj-checkpoint.workspace = true
+mj-worker.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+mimalloc = "0.1"
+
+[dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
+mj-worker = { workspace = true, features = ["test-hooks"] }
+agent-client-protocol.workspace = true
+# Cross-runtime fixtures stay local; versionless dev dependencies are not published.
+mj-controller = { path = "../mj-controller", package = "brokk-mj-controller" }
+tempfile.workspace = true

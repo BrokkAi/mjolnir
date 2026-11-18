@@ -80,7 +80,7 @@ mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 mj-targets = { workspace = true, features = ["test-support"] }
 mj-store = { workspace = true, features = ["test-support"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
-mj-worker = { path = "../mj-worker", package = "brokk-mj-worker", features = ["test-hooks"] }
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker-runtime", features = ["test-hooks"] }
 http-body-util = "0.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

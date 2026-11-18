@@ -105,9 +105,13 @@ it or introduce a dependency between sibling branches.
 - `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
   their matching directories. They build on core and share review logic,
   archive handling, and transcript projection across the runtime branches.
-- `brokk-mj-worker` (`mj-worker/`, library `mj_worker`) is the target side. It
-  runs locally, in a container, or on an SSH/EC2 host and owns the harness,
-  durable command queue, and relay journal.
+- `brokk-mj-worker-runtime` (`mj-worker/`, library `mj_worker`) is the target
+  side. It runs locally, in a container, or on an SSH/EC2 host and owns the
+  harness, durable command queue, and relay journal.
+- `brokk-mj-worker` (`mj-worker-bin/`) is the `mj-worker` program: argument
+  parsing and the entry point over the runtime library. It is its own package
+  so that what only the program needs, its build stamp, is not a dependency
+  of the library that other crates' tests use.
 - `brokk-mj-client` (`mj-client/`, library `mj_client`) holds client-facing
   contracts and shared presentation helpers. It uses the foundation.
 - `brokk-mj-targets` (`mj-targets/`, library `mj_targets`) is where a

@@ -1,5 +1,10 @@
 use super::*;
 
+/// The name the worker gives an agent as its ACP client. It is the name of
+/// the package that ships the worker program, which this library was once
+/// part of; agents and their logs have always seen this name.
+const CLIENT_NAME: &str = "brokk-mj-worker";
+
 /// Record possible native history only when the prompt is ready to be sent.
 async fn record_prompt_use(
     opened: &Arc<Mutex<Option<OpenedSession>>>,
@@ -172,8 +177,7 @@ pub(super) async fn serve_session(
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1)
                 .client_info(
-                    Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-                        .title("Mjolnir"),
+                    Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")).title("Mjolnir"),
                 )
                 .client_capabilities(capabilities),
         )

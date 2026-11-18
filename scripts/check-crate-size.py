@@ -23,7 +23,7 @@ BUDGET = 50_000
 OVER_BUDGET = {
     'brokk-mj-controller',
     'brokk-mj-daemon',
-    'brokk-mj-worker',
+    'brokk-mj-worker-runtime',
     'brokk-mj-tui',
     'brokk-mj-core',
     'brokk-mj-chat',

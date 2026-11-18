@@ -16,6 +16,7 @@
 !mj-checkpoint/
 !mj-transcript/
 !mj-worker/
+!mj-worker-bin/
 !mj-client/
 !mj-targets/
 !mj-store/

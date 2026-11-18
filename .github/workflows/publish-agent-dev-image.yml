@@ -20,6 +20,7 @@ on:
       - 'mj-review/**'
       - 'mj-transcript/**'
       - 'mj-worker/**'
+      - 'mj-worker-bin/**'
   workflow_dispatch: {}
   # Called by release.yml so a tagged release publishes agent-dev:<version>
   # from the same workflow that publishes :latest from master. The push,

@@ -12,7 +12,7 @@ use mj_worker::relay::DurableRelay;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
-#[path = "../src/test_support/timeouts.rs"]
+#[path = "../../mj-worker/src/test_support/timeouts.rs"]
 mod timeouts;
 use timeouts::IO_TIMEOUT;
 

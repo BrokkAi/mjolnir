@@ -8,4 +8,5 @@ mj-core
 mj-review
 mj-transcript
 mj-worker
+mj-worker-bin
 rust-toolchain.toml
