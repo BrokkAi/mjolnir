@@ -589,6 +589,24 @@ fn sample_session() -> SessionRecord {
         .expect("sample session")
 }
 
+// Hard-won: 1b293a48e: container sessions never used the YOLO sub-agent set because the predicate required ssh-bare.
+#[test]
+fn recorded_container_execution_policy_selects_yolo_subagents() {
+    let mut config = sample_config();
+    let mut container = sample_session();
+    container.target_template_id = "podman".into();
+    let runtime = TargetRuntimeSettings::from(&config.targets["podman"]);
+    assert_eq!(runtime.execution_policy, crate::config::ExecutionPolicy::Unconstrained);
+    container.target_runtime = Some(std::sync::Arc::new(runtime));
+    assert!(container.is_yolo_target(&config));
+    assert!(container.execution_enforcement(&config).is_some());
+
+    let mut localhost = sample_session();
+    config.targets.insert("local".into(), TargetTemplate::LocalBare);
+    localhost.target_template_id = "local".into();
+    assert!(!localhost.is_yolo_target(&config));
+}
+
 #[test]
 fn session_records_written_before_container_overrides_still_load() {
     let mut session = sample_session();

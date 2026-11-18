@@ -1054,7 +1054,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
         }
         "use_same_on_all_targets" => {
-            "Leave checked to use these choices on every target. Uncheck to give targets with `permissions = \"yolo\"` their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
+            "Leave checked to use these choices on every target. Uncheck to give targets whose harness runs without approvals (containers, and SSH targets with `permissions = \"yolo\"`) their own choices. The maximum concurrent children limit stays shared, and unchecking again restores the YOLO choices."
         }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
