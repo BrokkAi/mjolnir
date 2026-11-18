@@ -9,10 +9,16 @@ impl ChatState {
         let chained = std::mem::take(&mut self.chain_kill);
         let keypad = key.state.contains(KeyEventState::KEYPAD);
         let (code, modifiers) = normalize_key(key.code, key.modifiers);
-        if self.earlier.is_some() {
+        if self.earlier_reader_has_focus() {
             return self.earlier_key(code);
         }
-        if code == KeyCode::PageUp && modifiers.contains(KeyModifiers::CONTROL) {
+        if code == KeyCode::PageUp
+            && modifiers.contains(KeyModifiers::CONTROL)
+            && !self
+                .elicitation
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_notification_surface())
+        {
             self.open_earlier_messages();
             return ChatAction::None;
         }

@@ -2361,6 +2361,36 @@ async fn stale_clipboard_results_do_not_cross_capability_or_input_context_change
         assert!(chat.state.composer_runtime.attachment_queue.is_empty());
         assert!(!chat.state.composer_runtime.paste_in_flight);
     }
+    // A second presentation is the same answer target, even if its
+    // conversation redraws the earlier-message reader during the read.
+    let mut chat = clipboard_test_chat();
+    chat.state.restore_elicitation(ElicitationRequest::from_acp_params("shared-form", serde_json::json!({
+        "mode": "form", "sessionId": "clipboard-test", "message": "Answer", "requestedSchema": {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]
+        }
+    })).unwrap());
+    chat.state.earlier = Some(Default::default());
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+    let pending = clipboard_result(&chat, ClipboardContent::Text("shared answer".into()));
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
+    chat.state.apply_composer_update(pending);
+    chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+    let ChatAction::RespondElicitation { response, .. } =
+        chat.state.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("notification answer remains editable while the conversation reader is open");
+    };
+    assert_eq!(
+        response,
+        mj_core::elicitation::ElicitationResponse::Accept {
+            content: [(
+                "path".into(),
+                mj_core::elicitation::ElicitationValue::String("shared answer".into())
+            )]
+            .into_iter()
+            .collect(),
+        }
+    );
 }
 
 #[tokio::test]

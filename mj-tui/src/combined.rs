@@ -442,10 +442,8 @@ fn render_combined_themed(
     dashboard.rebuild_palette_entries();
     dashboard.reset_component_geometry();
     dashboard.begin_surface_frame();
-    for session_id in dashboard.pane_session_ids() {
-        if let Some(chat) = chats.get_mut(&session_id) {
-            chat.reset_component_geometry();
-        }
+    for chat in chats.values_mut() {
+        chat.reset_component_geometry();
     }
     dashboard.pane_areas = None;
     dashboard.notifications_area = None;
@@ -657,6 +655,13 @@ fn render_combined_themed(
             dashboard.selected_notification_text(entry)
         });
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
+        if let Some(chat) = dashboard
+            .notification_form_session()
+            .and_then(|session| chats.get(&session))
+            && let Some(height) = chat.elicitation_height(notification_width.saturating_sub(4))
+        {
+            return height.saturating_add(6);
+        }
         let lines = Paragraph::new(notification_text.as_str())
             .wrap(Wrap { trim: false })
             .line_count(notification_width.saturating_sub(4).max(1));
@@ -879,12 +884,16 @@ fn render_combined_themed(
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let notifications_area = support_bands[2];
     dashboard.notifications_area = Some(notifications_area);
+    let notification_chat = dashboard
+        .notification_form_session()
+        .and_then(|session| chats.get_mut(&session));
     crate::notifications_pane::render(
         frame,
         notifications_area,
         dashboard,
         &notification_entries,
         notification_text,
+        notification_chat,
     );
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
@@ -2395,8 +2404,8 @@ mod tests {
             .started_at_epoch_seconds = u64::MAX;
     }
 
-    #[test]
-    fn golden_combined_dashboard_render() {
+    #[tokio::test]
+    async fn golden_combined_dashboard_render() {
         use std::fmt::Write as _;
 
         let mut output = String::new();
@@ -2750,6 +2759,63 @@ mod tests {
             "failed destroy transition and recovery guidance",
             100,
             40,
+            &lines,
+        );
+
+        let mut inline = dashboard_with_session(running_session());
+        serve_attention(
+            &mut inline,
+            &["session-1"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        let request = crate::test_support::question("session-1");
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![request.clone()];
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .last_activity_at_ms = Some(0);
+        inline.notifications.size = PaneSize::Maximized;
+        inline.focus = Focus::Notifications;
+        for (label, error) in [
+            ("notification form attaches in the background", None),
+            (
+                "notification form attachment fails visibly",
+                Some("Worker unavailable".to_owned()),
+            ),
+        ] {
+            inline.set_notification_form_error("session-1", error);
+            let lines = render_combined_golden(&mut inline, 120, 44);
+            append_combined_golden(&mut output, label, 120, 44, &lines);
+        }
+        inline.set_notification_form_error("session-1", None);
+        let (chat, _answers) = crate::notifications_pane::tests::form_chat("session-1", request);
+        let mut chats = BTreeMap::from([("session-1".to_owned(), chat)]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        crate::with_no_color_override_for_test(true, || {
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut inline,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+        });
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        append_combined_golden(
+            &mut output,
+            "notification and conversation share an inline form",
+            120,
+            44,
             &lines,
         );
 

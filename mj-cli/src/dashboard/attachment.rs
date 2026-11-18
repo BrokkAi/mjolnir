@@ -1,4 +1,4 @@
-//! One cancellable attachment per selection; failed requests require a retry.
+//! One cancellable attachment per session, shared by its display surfaces.
 
 use mj_chat::chat::{ActiveChat, ChatInstance};
 use mj_tui::tile_layout::PaneId;
@@ -13,7 +13,7 @@ pub(super) const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Default)]
 pub(super) struct SessionAttachment {
     selection: Option<String>,
-    assignment: Option<mj_tui::PaneAssignment>,
+    assignments: BTreeMap<PaneId, mj_tui::PaneAssignment>,
     generation: u64,
     task: Option<JoinHandle<()>>,
 }
@@ -23,14 +23,14 @@ pub(super) struct SessionAttachment {
 pub(super) struct ChatRetirement {
     session_id: String,
     chat: Option<ChatInstance>,
-    attachments: BTreeMap<PaneId, u64>,
+    attachments: BTreeMap<String, u64>,
 }
 
 impl ChatRetirement {
     pub(super) fn capture(
         session_id: &str,
         chats: &BTreeMap<String, ActiveChat>,
-        attachments: &BTreeMap<PaneId, SessionAttachment>,
+        attachments: &BTreeMap<String, SessionAttachment>,
     ) -> Self {
         Self {
             session_id: session_id.to_owned(),
@@ -40,7 +40,7 @@ impl ChatRetirement {
                 .filter_map(|(pane, attachment)| {
                     attachment
                         .identity(session_id)
-                        .map(|generation| (*pane, generation))
+                        .map(|generation| (pane.clone(), generation))
                 })
                 .collect(),
         }
@@ -49,7 +49,7 @@ impl ChatRetirement {
     pub(super) fn is_current(
         &self,
         chats: &BTreeMap<String, ActiveChat>,
-        attachments: &BTreeMap<PaneId, SessionAttachment>,
+        attachments: &BTreeMap<String, SessionAttachment>,
     ) -> bool {
         chats.get(&self.session_id).is_none_or(|chat| {
             self.chat
@@ -66,7 +66,7 @@ impl ChatRetirement {
         &self.session_id
     }
 
-    pub(super) fn retire_attachments(&self, attachments: &mut BTreeMap<PaneId, SessionAttachment>) {
+    pub(super) fn retire_attachments(&self, attachments: &mut BTreeMap<String, SessionAttachment>) {
         for (pane, generation) in &self.attachments {
             if let Some(attachment) = attachments.get_mut(pane)
                 && attachment.accepts(*generation, Some(&self.session_id))
@@ -78,9 +78,13 @@ impl ChatRetirement {
 }
 
 impl SessionAttachment {
-    /// A completion supplies content only to the assignment that requested it.
-    /// Read the navigation owner directly: it may have changed before the
-    /// supervisor has observed another selection or spawned another attempt.
+    /// A navigation assignment joins the session's one attachment operation.
+    pub(super) fn bind(&mut self, pane: PaneId, assignment: mj_tui::PaneAssignment) {
+        if self.assignments.insert(pane, assignment) != Some(assignment) && !self.pending() {
+            self.selection = None;
+        }
+    }
+
     pub(super) fn accepts_pane_result(
         &self,
         generation: u64,
@@ -90,19 +94,30 @@ impl SessionAttachment {
         session: &str,
     ) -> bool {
         self.accepts(generation, Some(session))
+            && self.assignments.get(&pane) == Some(&assignment)
             && dashboard.pane_assignment(pane) == Some(assignment)
             && dashboard.pane_session(pane) == Some(session)
     }
 
-    /// Observe the authoritative pane binding before starting or accepting work.
-    pub(super) fn bind(&mut self, assignment: Option<mj_tui::PaneAssignment>) -> bool {
-        if self.assignment == assignment {
-            return false;
-        }
-        self.cancel();
-        self.selection = None;
-        self.assignment = assignment;
-        true
+    pub(super) fn accepts_surface_result(
+        &self,
+        generation: u64,
+        dashboard: &mj_tui::DashboardState,
+        session: &str,
+    ) -> bool {
+        self.accepts(generation, Some(session))
+            && (dashboard.notification_form_session().as_deref() == Some(session)
+                || self.assignments.iter().any(|(pane, assignment)| {
+                    self.accepts_pane_result(generation, *assignment, dashboard, *pane, session)
+                }))
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        self.task.is_some()
+    }
+
+    pub(super) fn finish(&mut self) {
+        self.task = None;
     }
 
     fn identity(&self, session_id: &str) -> Option<u64> {

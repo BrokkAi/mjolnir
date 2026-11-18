@@ -237,7 +237,7 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let pane = dashboard.focused_pane();
     let assignment = dashboard.pane_assignment(pane).unwrap();
     let mut attachment = attachment::SessionAttachment::default();
-    attachment.bind(Some(assignment));
+    attachment.bind(pane, assignment);
     let (finish, wait) = tokio::sync::oneshot::channel();
     let (report, received) = tokio::sync::oneshot::channel();
     attachment.spawn(
@@ -255,12 +255,13 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
     let (generation, result) = received.await.unwrap();
     assert!(result.is_ok());
     assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
+    assert!(!attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 
     // A new attempt for the current assignment can complete, even if another
     // pane became active while it was loading.
     let current = dashboard.pane_assignment(pane).unwrap();
-    attachment.bind(Some(current));
+    attachment.bind(pane, current);
     let (report, received) = tokio::sync::oneshot::channel();
     attachment.spawn(
         "session-1",
@@ -275,6 +276,7 @@ async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
         .unwrap();
     assert!(attachment.accepts_pane_result(generation, current, &dashboard, pane, "session-1"));
+    assert!(attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert_eq!(dashboard.selected_session_id(), Some("session-2"));
     assert_eq!(dashboard.focused_pane(), other);
 
@@ -1693,8 +1695,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     assert!(!captured.is_current(&chats, &attachments));
 
     let captured = attachment::ChatRetirement::capture("session", &chats, &attachments);
-    let pane = populated_dashboard().browse_pane();
-    let attachment = attachments.entry(pane).or_default();
+    let attachment = attachments.entry("session".to_owned()).or_default();
     attachment.spawn(
         "session",
         Duration::from_secs(30),
@@ -1704,7 +1705,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     assert!(!captured.is_current(&chats, &attachments));
     captured.retire_attachments(&mut attachments);
     // Retiring an old operation leaves the new attachment selected and alive.
-    assert!(!attachments.get_mut(&pane).unwrap().select("session"));
+    assert!(!attachments.get_mut("session").unwrap().select("session"));
 }
 
 /// The runtime feed carries only live sessions, so a chat can still be

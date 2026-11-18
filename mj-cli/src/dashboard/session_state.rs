@@ -150,32 +150,62 @@ impl DashboardContext {
             {
                 continue;
             }
-            let assignment = self.dashboard.pane_assignment(pane);
-            if self.attachments.entry(pane).or_default().bind(assignment) {
-                self.selection.clear();
-                self.opening_chat_sessions.remove(&pane);
+            if let Some(assignment) = self.dashboard.pane_assignment(pane) {
+                self.attachments
+                    .entry(session.clone())
+                    .or_default()
+                    .bind(pane, assignment);
             }
             if self.dashboard.pane_session_is_suspended(&session) {
                 self.cancel_chat_open_in(pane);
                 continue;
             }
             if self.dashboard.pane_session_can_attach(&session)
-                && self.attachments.entry(pane).or_default().select(&session)
+                && self
+                    .attachments
+                    .entry(session.clone())
+                    .or_default()
+                    .select(&session)
             {
                 self.open_chat_session_into(pane, &session);
             }
         }
-        let stale: Vec<_> = self
-            .opening_chat_sessions
-            .iter()
-            .filter(|(pane, session)| self.dashboard.pane_session(**pane) != Some(session.as_str()))
-            .map(|(pane, _)| *pane)
-            .collect();
-        for pane in stale {
-            self.cancel_chat_open_in(pane);
+        if let Some(session) = self.dashboard.notification_form_session()
+            && self.dashboard.pane_session_can_attach(&session)
+            && self
+                .attachments
+                .entry(session.clone())
+                .or_default()
+                .select(&session)
+        {
+            self.start_chat_attach(&session);
         }
+        let wanted = self.wanted_chat_sessions();
+        for (session, attachment) in &mut self.attachments {
+            if !wanted.contains(session) {
+                attachment.defer();
+            }
+        }
+        self.opening_chat_sessions = self
+            .dashboard
+            .pane_sessions()
+            .into_iter()
+            .filter(|(_, session)| {
+                self.attachments
+                    .get(session)
+                    .is_some_and(|attachment| attachment.pending())
+            })
+            .collect();
         self.retire_chats_outside_the_layout();
         self.sync_opening_session();
+    }
+
+    pub(super) fn wanted_chat_sessions(&self) -> BTreeSet<String> {
+        let mut sessions = self.dashboard.pane_session_ids();
+        if let Some(session) = self.dashboard.notification_form_session() {
+            sessions.insert(session);
+        }
+        sessions
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays
@@ -185,7 +215,11 @@ impl DashboardContext {
     }
 
     pub(crate) fn cancel_chat_open_in(&mut self, pane: PaneId) {
-        self.attachments.entry(pane).or_default().cancel();
+        if let Some(session) = self.dashboard.pane_session(pane)
+            && let Some(attachment) = self.attachments.get_mut(session)
+        {
+            attachment.cancel();
+        }
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
     }
@@ -203,7 +237,11 @@ impl DashboardContext {
     /// Gives up this pane's attach in a way that allows one fresh
     /// attempt when whatever owns the session has finished with it.
     pub(crate) fn defer_chat_open_in(&mut self, pane: PaneId) {
-        self.attachments.entry(pane).or_default().defer();
+        if let Some(session) = self.dashboard.pane_session(pane)
+            && let Some(attachment) = self.attachments.get_mut(session)
+        {
+            attachment.defer();
+        }
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
     }

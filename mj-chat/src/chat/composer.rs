@@ -552,7 +552,16 @@ impl ChatState {
                 staging,
             } => {
                 self.composer_runtime.paste_in_flight = false;
-                if generation != self.input_generation() || target != self.clipboard_target() {
+                // An accepted form paste belongs to its request, even when
+                // the other presentation (or its history reader) redraws.
+                let target_matches = match &target {
+                    input_state::ClipboardTarget::Answer(id) => self
+                        .elicitation
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.request().id == *id),
+                    _ => target == self.clipboard_target(),
+                };
+                if generation != self.input_generation() || !target_matches {
                     return;
                 }
                 self.composer_runtime.accepting_staged = staging;

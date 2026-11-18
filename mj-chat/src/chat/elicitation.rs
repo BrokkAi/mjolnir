@@ -121,14 +121,29 @@ pub(super) struct ElicitationDialog {
     option_cursors: Vec<usize>,
     display_fields: Vec<DisplayField>,
     active_custom_fields: BTreeSet<usize>,
-    /// The form is the sole focus and pointer authority for this modal.
-    form: RefCell<Form<ElicitationControl>>,
     error: Option<String>,
     /// Page navigation is independent of control focus; only an explicit
     /// answer action confirms a page, and edits invalidate that confirmation.
     current_question: usize,
     confirmed: BTreeSet<usize>,
     confirming_unanswered: bool,
+    focus: Cell<Option<ElicitationControl>>,
+    view: ElicitationView,
+    other_view: ElicitationView,
+    surface: ElicitationSurface,
+}
+
+/// Independent presentation geometry for the two hosts of one logical form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElicitationSurface {
+    Conversation,
+    Notification,
+}
+
+#[derive(Debug, Clone)]
+struct ElicitationView {
+    form: RefCell<Form<ElicitationControl>>,
+    page: Option<(usize, bool)>,
     message_scroll: Cell<u16>,
     message_page_height: Cell<u16>,
     message_max_scroll: Cell<u16>,
@@ -163,6 +178,24 @@ struct OptionClick {
     column: u16,
     row: u16,
     at: Instant,
+}
+
+impl ElicitationView {
+    fn new() -> Self {
+        Self {
+            form: RefCell::new(Form::new()),
+            page: None,
+            message_scroll: Cell::new(0),
+            message_page_height: Cell::new(0),
+            message_max_scroll: Cell::new(0),
+            message_area: Cell::new(None),
+            message_anchor: Cell::new(None),
+            message_anchor_width: Cell::new(0),
+            rendered_area: Cell::new(None),
+            focus_scroll: Cell::new(0),
+            last_option_click: Cell::new(None),
+        }
+    }
 }
 
 impl ElicitationDialog {
@@ -201,23 +234,59 @@ impl ElicitationDialog {
             option_cursors,
             display_fields,
             active_custom_fields,
-            form: RefCell::new(Form::new()),
             error: None,
             current_question: 0,
             confirmed: BTreeSet::new(),
             confirming_unanswered: false,
-            message_scroll: Cell::new(0),
-            message_page_height: Cell::new(0),
-            message_max_scroll: Cell::new(0),
-            message_area: Cell::new(None),
-            message_anchor: Cell::new(None),
-            message_anchor_width: Cell::new(0),
-            rendered_area: Cell::new(None),
-            focus_scroll: Cell::new(0),
-            last_option_click: Cell::new(None),
+            focus: Cell::new(None),
+            view: ElicitationView::new(),
+            other_view: ElicitationView::new(),
+            surface: ElicitationSurface::Conversation,
         };
         dialog.reset_controls();
         dialog
+    }
+
+    /// Only the active presentation supplies focus. Inactive Forms retain
+    /// hitboxes and pointer capture, and receive that focus when activated.
+    pub(super) fn select_surface(&mut self, surface: ElicitationSurface) {
+        if self.surface == surface {
+            return;
+        }
+        let focus = self.focus.get();
+        std::mem::swap(&mut self.view, &mut self.other_view);
+        self.surface = surface;
+        if self.view.page != Some((self.current_question, self.confirming_unanswered)) {
+            self.view = ElicitationView::new();
+            self.reset_controls();
+        }
+        if let Some(display) = self.display_fields.get(self.current_question).copied() {
+            self.view.form.borrow_mut().declare(
+                ElicitationControl::Field(self.current_question),
+                display_control_kind(&self.request, &self.values, &self.option_cursors, display),
+            );
+        }
+        if let Some(focus) = focus {
+            self.view.form.borrow_mut().focus(focus);
+        }
+        self.focus.set(focus);
+    }
+
+    pub(super) fn is_notification_surface(&self) -> bool {
+        self.surface == ElicitationSurface::Notification
+    }
+
+    pub(super) fn pointer_surface(&self) -> Option<ElicitationSurface> {
+        if self.view.form.borrow().captures_pointer() {
+            Some(self.surface)
+        } else if self.other_view.form.borrow().captures_pointer() {
+            Some(match self.surface {
+                ElicitationSurface::Conversation => ElicitationSurface::Notification,
+                ElicitationSurface::Notification => ElicitationSurface::Conversation,
+            })
+        } else {
+            None
+        }
     }
 
     pub(super) fn request(&self) -> &ElicitationRequest {
@@ -256,10 +325,10 @@ impl ElicitationDialog {
             option_cursors: self.option_cursors.clone(),
             active_custom_fields: self.active_custom_fields.clone(),
             focus: self.focus_index(),
-            message_scroll: self.message_scroll.get(),
-            message_anchor: self.message_anchor.get(),
-            message_anchor_width: self.message_anchor_width.get(),
-            focus_scroll: self.focus_scroll.get(),
+            message_scroll: self.view.message_scroll.get(),
+            message_anchor: self.view.message_anchor.get(),
+            message_anchor_width: self.view.message_anchor_width.get(),
+            focus_scroll: self.view.focus_scroll.get(),
             current_question: Some(self.current_question),
             confirmed: self.confirmed.clone(),
         }
@@ -287,15 +356,15 @@ impl ElicitationDialog {
             .collect();
         dialog.reset_controls();
         dialog.focus_control(draft.focus.min(dialog.display_fields.len() + 2));
-        dialog.message_scroll = Cell::new(draft.message_scroll);
-        dialog.message_anchor = Cell::new(draft.message_anchor);
-        dialog.message_anchor_width = Cell::new(draft.message_anchor_width);
-        dialog.focus_scroll = Cell::new(draft.focus_scroll);
+        dialog.view.message_scroll = Cell::new(draft.message_scroll);
+        dialog.view.message_anchor = Cell::new(draft.message_anchor);
+        dialog.view.message_anchor_width = Cell::new(draft.message_anchor_width);
+        dialog.view.focus_scroll = Cell::new(draft.focus_scroll);
         Some(dialog)
     }
 
     pub(super) fn paste(&mut self, text: &str) {
-        self.last_option_click.set(None);
+        self.view.last_option_click.set(None);
         let text = crate::text_input::single_line_paste(&sanitize_terminal_text(text));
         if text.is_empty() {
             return;
@@ -323,13 +392,23 @@ impl ElicitationDialog {
     }
 
     pub(super) fn handle_key_event(&mut self, key: KeyEvent) -> Option<ElicitationResponse> {
+        let response = self.handle_key_in_view(key);
+        self.finish_surface();
+        response
+    }
+
+    pub(super) fn finish_surface(&self) {
+        self.focus.set(self.view.form.borrow().focused());
+    }
+
+    fn handle_key_in_view(&mut self, key: KeyEvent) -> Option<ElicitationResponse> {
         let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
         let key = KeyEvent::new_with_kind_and_state(code, modifiers, key.kind, key.state);
         if key.kind == crossterm::event::KeyEventKind::Release {
             return None;
         }
         // A key between two clicks makes them two separate clicks.
-        self.last_option_click.set(None);
+        self.view.last_option_click.set(None);
         if key.kind == crossterm::event::KeyEventKind::Press {
             if self.confirming_unanswered && code == KeyCode::Esc {
                 self.go_back();
@@ -344,7 +423,7 @@ impl ElicitationDialog {
                 if code == KeyCode::Enter
                     && modifiers.is_empty()
                     && matches!(
-                        self.form.borrow().focused(),
+                        self.view.form.borrow().focused(),
                         Some(ElicitationControl::Field(_))
                     )
                 {
@@ -376,12 +455,12 @@ impl ElicitationDialog {
             )
             && (!matches!(code, KeyCode::Up | KeyCode::Down) || !modifiers.is_empty())
         {
-            self.form.borrow_mut().cancel_pointer();
+            self.view.form.borrow_mut().cancel_pointer();
             self.edit_text(key);
             return None;
         }
         let event = crossterm::event::Event::Key(key);
-        let result = self.form.borrow_mut().handle(&event);
+        let result = self.view.form.borrow_mut().handle(&event);
         if let Some(interaction) = result.action {
             return self.apply_interaction(interaction);
         }
@@ -455,8 +534,18 @@ impl ElicitationDialog {
         mouse: MouseEvent,
         now: Instant,
     ) -> Option<ElicitationResponse> {
+        let response = self.handle_mouse_in_view(mouse, now);
+        self.finish_surface();
+        response
+    }
+
+    fn handle_mouse_in_view(
+        &mut self,
+        mouse: MouseEvent,
+        now: Instant,
+    ) -> Option<ElicitationResponse> {
         let event = crossterm::event::Event::Mouse(mouse);
-        let result = self.form.borrow_mut().handle_at(&event, now);
+        let result = self.view.form.borrow_mut().handle_at(&event, now);
         let click = matches!(
             mouse.kind,
             MouseEventKind::Up(crossterm::event::MouseButton::Left)
@@ -468,14 +557,14 @@ impl ElicitationDialog {
                 | MouseEventKind::ScrollLeft
                 | MouseEventKind::ScrollRight
         ) {
-            self.last_option_click.set(None);
+            self.view.last_option_click.set(None);
         }
         // The dialog alone decides double-clicks on pages that pick on
         // purpose: a second click on the cell of the last option click,
         // within the interval, is a double-click on the option drawn there
         // then, whatever the first click has since reflowed onto that cell.
         if click
-            && let Some(first) = self.last_option_click.take()
+            && let Some(first) = self.view.last_option_click.take()
             && (first.column, first.row) == (mouse.column, mouse.row)
             && now.saturating_duration_since(first.at) <= DOUBLE_CLICK_INTERVAL
         {
@@ -487,6 +576,7 @@ impl ElicitationDialog {
                     Some((index, row))
                 }
                 Interaction::Activate(ElicitationControl::Field(index)) if click => self
+                    .view
                     .form
                     .borrow()
                     .selected(ElicitationControl::Field(index))
@@ -524,6 +614,7 @@ impl ElicitationDialog {
             return None;
         }
         if !self
+            .view
             .message_area
             .get()
             .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
@@ -539,29 +630,34 @@ impl ElicitationDialog {
     }
 
     pub(super) fn component_handles_mouse_at(&self, column: u16, row: u16) -> bool {
-        let form = self.form.borrow();
+        let form = self.view.form.borrow();
         form.captures_pointer() || form.contains(column, row)
     }
 
     pub(super) fn rendered_area_contains(&self, column: u16, row: u16) -> bool {
-        self.rendered_area
+        self.view
+            .rendered_area
             .get()
             .is_some_and(|area| area.contains(Position::new(column, row)))
     }
 
     pub(super) fn cancel_component_pointer(&self) {
-        self.form.borrow_mut().cancel_pointer();
-        self.last_option_click.set(None);
+        for view in [&self.view, &self.other_view] {
+            view.form.borrow_mut().cancel_pointer();
+            view.last_option_click.set(None);
+        }
     }
 
     pub(super) fn reset_component_geometry(&self) {
-        self.form.borrow_mut().reset_geometry();
-        self.rendered_area.set(None);
-        self.last_option_click.set(None);
+        for view in [&self.view, &self.other_view] {
+            view.form.borrow_mut().reset_geometry();
+            view.rendered_area.set(None);
+            view.last_option_click.set(None);
+        }
     }
 
     fn focus_index(&self) -> usize {
-        match self.form.borrow().focused() {
+        match self.focus.get() {
             Some(ElicitationControl::Field(index)) => index,
             Some(ElicitationControl::Submit) => self.display_fields.len(),
             Some(ElicitationControl::Cancel) => self.display_fields.len() + 2,
@@ -581,7 +677,8 @@ impl ElicitationDialog {
             self.current_question = index;
             self.reset_page();
         }
-        self.form.borrow_mut().focus(control);
+        self.focus.set(Some(control));
+        self.view.form.borrow_mut().focus(control);
     }
 
     fn actions(&self) -> [(ElicitationControl, &'static str, bool); 3] {
@@ -597,6 +694,7 @@ impl ElicitationDialog {
     }
 
     fn reset_controls(&mut self) {
+        self.view.page = Some((self.current_question, self.confirming_unanswered));
         let mut form = Form::new();
         let first = if self.confirming_unanswered {
             ElicitationControl::Previous
@@ -614,15 +712,16 @@ impl ElicitationDialog {
             form.declare_with_enabled(id, ControlKind::Button, enabled);
         }
         form.end_frame(first);
-        self.form = RefCell::new(form);
+        self.view.form = RefCell::new(form);
+        self.finish_surface();
     }
 
     fn reset_page(&mut self) {
-        self.last_option_click.set(None);
-        self.message_scroll.set(0);
-        self.message_anchor.set(None);
-        self.message_anchor_width.set(0);
-        self.focus_scroll.set(0);
+        self.view.last_option_click.set(None);
+        self.view.message_scroll.set(0);
+        self.view.message_anchor.set(None);
+        self.view.message_anchor_width.set(0);
+        self.view.focus_scroll.set(0);
         self.reset_controls();
     }
 
@@ -725,7 +824,7 @@ impl ElicitationDialog {
 
     /// The message pane's content area, recorded by the last frame.
     pub(super) fn message_area(&self) -> Option<Rect> {
-        self.message_area.get()
+        self.view.message_area.get()
     }
 
     /// The message text a selection covers, reconstructed as source lines.
@@ -767,12 +866,12 @@ impl ElicitationDialog {
     }
 
     fn message_page_step(&self) -> u16 {
-        self.message_page_height.get().saturating_sub(1).max(1)
+        self.view.message_page_height.get().saturating_sub(1).max(1)
     }
 
     pub(super) fn scroll_message(&self, delta: isize) {
-        let current = usize::from(self.message_scroll.get());
-        let maximum = usize::from(self.message_max_scroll.get());
+        let current = usize::from(self.view.message_scroll.get());
+        let maximum = usize::from(self.view.message_max_scroll.get());
         let next = if delta.is_negative() {
             current.saturating_sub(delta.unsigned_abs())
         } else {
@@ -781,14 +880,14 @@ impl ElicitationDialog {
         if next == current {
             return;
         }
-        self.message_scroll.set(next as u16);
+        self.view.message_scroll.set(next as u16);
         // A user scroll establishes a new logical anchor. Subsequent redraws
         // and resizes retain that source position instead of repeatedly
         // replacing it with whichever wrapped row happens to be at the top.
-        if self.message_anchor_width.get() > 0 {
-            self.message_anchor.set(Some(message_position_at_row(
+        if self.view.message_anchor_width.get() > 0 {
+            self.view.message_anchor.set(Some(message_position_at_row(
                 &self.prompt_text(),
-                self.message_anchor_width.get(),
+                self.view.message_anchor_width.get(),
                 next,
             )));
         }
@@ -816,7 +915,7 @@ impl ElicitationDialog {
             return None;
         }
         self.toggle_current();
-        self.last_option_click.set(Some(OptionClick {
+        self.view.last_option_click.set(Some(OptionClick {
             field: index,
             option: row,
             column: mouse.column,
@@ -1033,7 +1132,7 @@ impl ElicitationDialog {
     }
 
     fn editable_field(&self) -> Option<(usize, bool)> {
-        let Some(ElicitationControl::Field(index)) = self.form.borrow().focused() else {
+        let Some(ElicitationControl::Field(index)) = self.view.form.borrow().focused() else {
             return None;
         };
         let display = self.display_fields.get(index)?;
@@ -1300,6 +1399,7 @@ pub(super) fn render_elicitation_in(
     focused: bool,
 ) {
     render_elicitation_at(frame, dialog, surfaces, bounds, focused);
+    dialog.finish_surface();
 }
 
 fn render_elicitation_at(
@@ -1313,7 +1413,7 @@ fn render_elicitation_at(
     // rectangle so hidden transcript text cannot show through it, while the
     // navigator and every neighboring pane remain untouched.
     frame.render_widget(Clear, area);
-    dialog.rendered_area.set(Some(area));
+    dialog.view.rendered_area.set(Some(area));
     let title = if dialog.confirming_unanswered {
         "Unanswered questions".to_owned()
     } else if dialog.display_fields.is_empty() {
@@ -1333,7 +1433,7 @@ fn render_elicitation_at(
     let focus = focus_content(dialog);
     let focused_field = dialog.current_question;
     let inner = {
-        let mut form = dialog.form.borrow_mut();
+        let mut form = dialog.view.form.borrow_mut();
         form.begin_frame();
         let title_line = crate::modal::dismissible_modal_title(
             &mut form,
@@ -1426,8 +1526,8 @@ fn render_elicitation_body(
     let message = Paragraph::new(prompt.as_str()).wrap(Wrap { trim: true });
     let total_lines = u16::try_from(message.line_count(chunks[0].width)).unwrap_or(u16::MAX);
     let maximum_scroll = total_lines.saturating_sub(chunks[0].height);
-    let anchored_scroll = (dialog.message_anchor_width.get() != chunks[0].width)
-        .then(|| dialog.message_anchor.get())
+    let anchored_scroll = (dialog.view.message_anchor_width.get() != chunks[0].width)
+        .then(|| dialog.view.message_anchor.get())
         .flatten()
         .map(|(line, row)| {
             let source = prompt.split('\n').nth(line).unwrap_or("");
@@ -1441,20 +1541,20 @@ fn render_elicitation_body(
             )
         });
     let message_scroll = anchored_scroll
-        .unwrap_or_else(|| dialog.message_scroll.get())
+        .unwrap_or_else(|| dialog.view.message_scroll.get())
         .min(maximum_scroll);
-    dialog.message_scroll.set(message_scroll);
-    if dialog.message_anchor.get().is_none() {
-        dialog.message_anchor.set(Some(message_position_at_row(
+    dialog.view.message_scroll.set(message_scroll);
+    if dialog.view.message_anchor.get().is_none() {
+        dialog.view.message_anchor.set(Some(message_position_at_row(
             &prompt,
             chunks[0].width,
             usize::from(message_scroll),
         )));
     }
-    dialog.message_anchor_width.set(chunks[0].width);
-    dialog.message_page_height.set(chunks[0].height);
-    dialog.message_max_scroll.set(maximum_scroll);
-    dialog.message_area.set(Some(chunks[0]));
+    dialog.view.message_anchor_width.set(chunks[0].width);
+    dialog.view.message_page_height.set(chunks[0].height);
+    dialog.view.message_max_scroll.set(maximum_scroll);
+    dialog.view.message_area.set(Some(chunks[0]));
     frame.render_widget(message.scroll((message_scroll, 0)), chunks[0]);
     // The message pane scrolls its own rows, so it registers in content space:
     // a drag can reach the plan text above and below the viewport.
@@ -1487,7 +1587,7 @@ fn render_elicitation_body(
     };
     let field_index = focused_field.min(dialog.display_fields.len().saturating_sub(1));
     {
-        let mut form = dialog.form.borrow_mut();
+        let mut form = dialog.view.form.borrow_mut();
         if !dialog.confirming_unanswered
             && let Some(display) = dialog.display_fields.get(focused_field).copied()
         {
@@ -1531,7 +1631,7 @@ fn render_elicitation_body(
             });
         prefix_rows.saturating_add(cursor_row)
     });
-    let mut focus_scroll = dialog.focus_scroll.get().min(focus_max_scroll);
+    let mut focus_scroll = dialog.view.focus_scroll.get().min(focus_max_scroll);
     let target_row = target_row.min(usize::from(u16::MAX)) as u16;
     if target_row < focus_scroll {
         focus_scroll = target_row;
@@ -1540,12 +1640,12 @@ fn render_elicitation_body(
             .saturating_sub(focus_area.height.saturating_sub(1))
             .min(focus_max_scroll);
     }
-    dialog.focus_scroll.set(focus_scroll);
+    dialog.view.focus_scroll.set(focus_scroll);
     if !dialog.confirming_unanswered
         && let Some(display) = dialog.display_fields.get(focused_field).copied()
     {
         let id = ElicitationControl::Field(field_index);
-        let mut form = dialog.form.borrow_mut();
+        let mut form = dialog.view.form.borrow_mut();
         if select_option_count(&dialog.request.fields[display.field]).is_some() {
             ChoiceList::render_wrapped(
                 frame,
@@ -1616,7 +1716,7 @@ fn render_elicitation_body(
         render_focus(frame, focus_area, &focus, focus_scroll, focused);
     }
     {
-        let mut form = dialog.form.borrow_mut();
+        let mut form = dialog.view.form.borrow_mut();
         ButtonRow::render(frame, chunks[2], &dialog.actions(), &mut form);
         form.end_frame(if dialog.confirming_unanswered {
             ElicitationControl::Previous

@@ -167,7 +167,7 @@ impl ChatState {
     }
 
     pub(super) fn handle_terminal_paste(&mut self, pasted: &str) -> ChatAction {
-        if self.earlier.is_some() {
+        if self.earlier_reader_has_focus() {
             return ChatAction::None;
         }
         if pasted.is_empty() {

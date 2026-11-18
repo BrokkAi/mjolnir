@@ -25,6 +25,7 @@ impl ActiveChat {
         prompt_focused: bool,
         transcript_selected: bool,
     ) {
+        self.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
         render_in(
             frame,
             &mut self.state,
@@ -32,6 +33,40 @@ impl ActiveChat {
             prompt_focused,
             transcript_selected,
         );
+    }
+
+    pub(super) fn select_elicitation_surface(&mut self, surface: super::super::ElicitationSurface) {
+        if let Some(dialog) = self.state.elicitation.as_mut() {
+            dialog.select_surface(surface);
+        }
+    }
+
+    pub fn has_elicitation(&self) -> bool {
+        self.state.elicitation.is_some()
+    }
+
+    pub fn elicitation_pointer_surface(&self) -> Option<super::super::ElicitationSurface> {
+        self.state
+            .elicitation
+            .as_ref()
+            .and_then(|dialog| dialog.pointer_surface())
+    }
+
+    /// The chat, including reviewer routing, owns which form is current.
+    pub fn elicitation_height(&self, width: u16) -> Option<u16> {
+        self.state
+            .elicitation
+            .as_ref()
+            .map(|dialog| dialog.natural_height(width))
+    }
+
+    /// Draw the current form without making another draft or response path.
+    pub fn draw_elicitation_in(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+        self.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        if let Some(dialog) = self.state.elicitation.as_ref() {
+            let mut surfaces = crate::selection::FrameSurfaces::new();
+            render_elicitation_in(frame, dialog, &mut surfaces, area, focused);
+        }
     }
 
     /// Visible host footer commands, indexed through the supplied chords then

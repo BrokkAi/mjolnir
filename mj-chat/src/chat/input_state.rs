@@ -171,7 +171,7 @@ impl ChatState {
     }
 
     pub(crate) fn handle_clipboard_content(&mut self, content: ClipboardContent) {
-        if self.clipboard_target() == ClipboardTarget::Unavailable {
+        if self.clipboard_target() == ClipboardTarget::Unavailable && self.elicitation.is_none() {
             return;
         }
         if self.elicitation.is_some() {
@@ -313,7 +313,7 @@ impl ChatState {
     }
 
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
-        if self.earlier.is_some() {
+        if self.earlier_reader_has_focus() {
             ClipboardTarget::Unavailable
         } else if let Some(dialog) = &self.elicitation {
             ClipboardTarget::Answer(dialog.request().id.clone())

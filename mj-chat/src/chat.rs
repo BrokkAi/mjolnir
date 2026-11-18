@@ -77,7 +77,7 @@ use autocomplete::{
 };
 use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
-pub use elicitation::ElicitationDraft;
+pub use elicitation::{ElicitationDraft, ElicitationSurface};
 use history::HistorySearch;
 #[cfg(test)]
 use rendering::voice_button_area;

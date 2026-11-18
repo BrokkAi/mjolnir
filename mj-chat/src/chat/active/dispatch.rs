@@ -14,6 +14,17 @@ impl ActiveChat {
     /// Applies one terminal event, reporting whether the conversation consumed
     /// it and whatever action it asks the host to take.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        self.select_elicitation_surface(super::super::ElicitationSurface::Conversation);
+        self.handle_surface_event(event)
+    }
+
+    /// The host routes notification input through the same action dispatcher.
+    pub fn handle_elicitation_event(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        self.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        self.handle_surface_event(event)
+    }
+
+    fn handle_surface_event(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
         let action = match &event {
             Event::Key(key) => self.state.handle_key(*key),
             Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),

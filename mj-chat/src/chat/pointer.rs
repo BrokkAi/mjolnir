@@ -205,7 +205,9 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
-        if let Some(reader) = self.earlier.as_mut() {
+        if self.earlier_reader_has_focus()
+            && let Some(reader) = self.earlier.as_mut()
+        {
             match mouse.kind {
                 MouseEventKind::ScrollUp => reader.scroll = reader.scroll.saturating_sub(3),
                 MouseEventKind::ScrollDown => reader.scroll = reader.scroll.saturating_add(3),
