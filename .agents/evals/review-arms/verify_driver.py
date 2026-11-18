@@ -81,8 +81,8 @@ def ensure_checkout():
     import fcntl
     import shutil
     REPO.parent.mkdir(parents=True, exist_ok=True)
-    with open(REPO.parent / ".repo-setup.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(REPO.parent / ".repo-setup.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
         if REPO.exists():
             return
         tmp = REPO.with_name(REPO.name + f".building.{os.getpid()}")
@@ -111,8 +111,8 @@ def ensure_workspace():
     publishes its record atomically so a concurrent driver never reads a partial file."""
     import fcntl
     REPO.parent.mkdir(parents=True, exist_ok=True)
-    with open(REPO.parent / ".repo-setup.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(REPO.parent / ".repo-setup.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
         if WORKSPACE_RECORD.exists():
             return
         WORKSPACE_RECORD.parent.mkdir(parents=True, exist_ok=True)
@@ -249,9 +249,9 @@ def run(batch_path, judge=None):
     import fcntl
     n = batch_path.name if a.kind == "task" else batch_path.stem.split("-")[1]
     tag = n if judge is None else f"{n}-{judge}"
-    with open(V / "sessions" / f"unit-{tag}.lock", "w") as lock:
+    with open(V / "sessions" / f"unit-{tag}.lock", "w") as held:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError(f"unit {tag} is being run by another invocation") from None
         return run_unit(batch_path, judge)
@@ -270,9 +270,14 @@ def run_unit(batch_path, judge=None):
         made_by = (producer.get("config") or {}).get("model")
         made_on = producer.get("profile")
         if (made_by is not None and made_by != a.model) or (made_on is not None and made_on not in PROFILES):
-            # Mark the unit ineligible so no invocation publishes an aggregate containing it.
-            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
-                                                                  "requested": [PROFILES, a.model]}})
+            # Mark the unit ineligible and retire any aggregate in one serialized step, so no collector
+            # reads verdicts this check rejects.
+            import fcntl
+            with open(V / "workflow-out.lock", "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
+                                                                      "requested": [PROFILES, a.model]}})
+                (V / "workflow-out.json").unlink(missing_ok=True)
             raise RuntimeError(f"unit {tag} already has output from {made_on}/{made_by}, not "
                                f"{','.join(PROFILES)}/{a.model}; move {out_path.name} and "
                                f"sessions/batch-{tag}.json aside to rerun it")
@@ -369,6 +374,8 @@ def run_unit(batch_path, judge=None):
     out = {**out, "producer": {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
                                "launch_profile": rec.get("profile"), "config": rec.get("config")}}
     save(out_path, out)
+    # A valid replacement makes the unit eligible again.
+    (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)
     mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
     return tag, "done"
 
@@ -385,9 +392,10 @@ if a.kind == "judge":
     import fcntl
     # A judge output that is absent (never run, or moved aside for a rejudge) makes the combined
     # aggregate stale: retire it under the aggregate lock so no collector reads the old round.
-    with open(V / "workflow-out.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(V / "workflow-out.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
         if not all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
+                   and not (V / "out" / f"invalid-{b.stem.split('-')[1]}-{j}.json").exists()
                    for b in batches for j in ("A", "B")):
             (V / "workflow-out.json").unlink(missing_ok=True)
 failed = 0
@@ -409,8 +417,8 @@ if a.kind == "judge" and not failed:
     # present, read them, and replace the aggregate. A concurrent A or B invocation (or a rejudge)
     # therefore publishes from the verdict files as they are when it holds the lock, never a stale
     # read taken before another invocation's publication.
-    with open(V / "workflow-out.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(V / "workflow-out.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
         # Publish only when both sides have output and neither side is marked ineligible.
         if all((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").exists()
                and not (V / "out" / f"invalid-{b.stem.split('-')[1]}-{j}.json").exists() for b, j in both):
