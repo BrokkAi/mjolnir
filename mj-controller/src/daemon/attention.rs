@@ -27,7 +27,7 @@ pub(super) fn update(
     previous: &RuntimeProjection,
     next: &mut RuntimeProjection,
     committed: Option<&CommittedState>,
-) -> BTreeMap<String, u64> {
+) {
     let global = previous.metadata.config != next.metadata.config
         || previous.metadata.reviews != next.metadata.reviews
         || previous.metadata.lifecycles != next.metadata.lifecycles
@@ -78,7 +78,7 @@ pub(super) fn update(
                 .clone()
                 .unwrap_or_default(),
         );
-        return BTreeMap::new();
+        return;
     }
     for id in ids.clone() {
         for runtime in [previous, &*next] {
@@ -101,8 +101,6 @@ pub(super) fn update(
         targets,
         holders,
         cards,
-        held_questions,
-        question_advances,
     } = project_states(next, ids.clone(), committed);
     next.metadata.form_holders = previous.metadata.form_holders.clone();
     next.metadata.session_attention = previous.metadata.session_attention.clone();
@@ -139,47 +137,6 @@ pub(super) fn update(
         } else {
             next.metadata.unread_frontiers.remove(&id);
         }
-        if let Some(request) = next
-            .sessions
-            .get(&id)
-            .and_then(|view| view.operational.as_deref())
-            .and_then(|live| live.open_request.as_ref())
-        {
-            let work = request_hold(next, &id);
-            let unshown = |runtime: &RuntimeProjection| {
-                runtime.records.get(&id).is_some_and(|record| {
-                    record.questions_shown_through < request.question.completed_ordinal
-                })
-            };
-            let held = held_questions.contains(&id) && unshown(next);
-            let was_held = unshown(previous)
-                && semantic_question(previous, &id).is_some()
-                && previous
-                    .sessions
-                    .get(&id)
-                    .and_then(|view| view.operational.as_deref())
-                    .and_then(|live| live.open_request.as_ref())
-                    .map(|request| &request.question)
-                    == Some(&request.question)
-                && !request_hold(previous, &id).is_empty();
-            if held && !was_held {
-                tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, ?work, "holding open request");
-            } else if (question_advances.contains_key(&id)
-                || states.get(&id) == Some(&SessionAttention::NeedsInput))
-                && work.is_empty()
-                && semantic_question(next, &id).is_some()
-                && was_held
-                && previous
-                    .sessions
-                    .get(&id)
-                    .and_then(|view| view.operational.as_deref())
-                    .and_then(|live| live.open_request.as_ref())
-                    .map(|request| &request.question)
-                    == Some(&request.question)
-            {
-                tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, work = ?waiting_on_own_work(previous, &id), "releasing open request");
-            }
-        }
         let target = targets.get(&id).cloned();
         if let Some(target) = target {
             if next.metadata.notification_dismissals.get(&id) != Some(&target) {
@@ -199,7 +156,6 @@ pub(super) fn update(
         }
     }
     next.metadata.notification_cards = Some(published_cards);
-    question_advances
 }
 
 /// Read receipts are durable before the worker reclaims any entries. The
@@ -208,43 +164,14 @@ pub(super) async fn prune_read_notifications(
     state: std::sync::Arc<super::RuntimeState>,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
-    maintain_notifications(
-        state,
-        cancellation,
-        crate::database::advance_questions_shown_through,
-    )
-    .await
-}
-
-pub(super) async fn maintain_notifications(
-    state: std::sync::Arc<super::RuntimeState>,
-    cancellation: tokio_util::sync::CancellationToken,
-    write: fn(&str, u64) -> anyhow::Result<u64>,
-) -> anyhow::Result<()> {
     use mj_core::snapshot_map::SnapshotMap;
     let mut revisions = state.revisions.subscribe();
     let mut previous_records = SnapshotMap::default();
     let mut previous_views = SnapshotMap::default();
     let mut attempted = BTreeMap::new();
     let mut tasks = tokio::task::JoinSet::new();
-    let mut cursor_tasks = tokio::task::JoinSet::new();
-    let mut writing = BTreeSet::new();
     loop {
         revisions.borrow_and_update();
-        // Pending decisions survive failures and deferred admission. Only a
-        // committed cursor or an explicit worker stack removal settles them.
-        state.runtime_publication()?;
-        let advances = state
-            .feed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .question_advances
-            .clone();
-        for id in advances.keys() {
-            if writing.insert(id.clone()) {
-                cursor_tasks.spawn(persist_shown_question(state.clone(), id.clone(), write));
-            }
-        }
         let (records, views) = {
             let owner = state.owner();
             (
@@ -297,83 +224,15 @@ pub(super) async fn maintain_notifications(
             tokio::select! {
                 _ = cancellation.cancelled() => {
                     tasks.shutdown().await;
-                    cursor_tasks.shutdown().await;
                     return Ok(());
                 }
                 changed = revisions.changed() => {
                     changed?;
                     break;
                 }
-                Some(joined) = cursor_tasks.join_next(), if !cursor_tasks.is_empty() => {
-                    writing.remove(&joined?);
-                    if !crate::upgrade::gate().is_open() {
-                        tasks.shutdown().await;
-                        cursor_tasks.shutdown().await;
-                        return Ok(());
-                    }
-                    break;
-                }
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     joined?;
                 }
-            }
-        }
-    }
-}
-
-/// A session has one writer task; the shared pending map owns its latest advance.
-/// Admission belongs only to each write, never to drain waits or retry backoff.
-async fn persist_shown_question(
-    state: std::sync::Arc<super::RuntimeState>,
-    id: String,
-    write: fn(&str, u64) -> anyhow::Result<u64>,
-) -> String {
-    // Follow the supervised Observe delivery loop's 1s-to-60s backoff.
-    let mut backoff = std::time::Duration::from_secs(1);
-    loop {
-        if !crate::upgrade::gate().wait_after_draining().await {
-            return id;
-        }
-        let through = state
-            .feed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .question_advances
-            .get(&id)
-            .copied();
-        let Some(through) = through else { return id };
-        let write_id = id.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
-            else {
-                return Ok(None);
-            };
-            let _admission = admission;
-            write(&write_id, through).map(Some)
-        })
-        .await;
-        match result {
-            Ok(Ok(None)) => continue,
-            Ok(Ok(Some(receipt))) => {
-                let mut history = state
-                    .feed
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if history
-                    .question_advances
-                    .get(&id)
-                    .is_some_and(|pending| *pending <= receipt)
-                {
-                    history.question_advances.remove(&id);
-                }
-                drop(history);
-                state.publish_revision();
-                backoff = std::time::Duration::from_secs(1);
-            }
-            error => {
-                tracing::error!(session_id = %id, ?error, retry_after_ms = backoff.as_millis(), "could not persist shown question");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
             }
         }
     }
@@ -423,61 +282,6 @@ fn semantic_question(
             completed_ordinal: outcome.completed_ordinal,
         })
     }
-}
-
-fn request_hold(runtime: &RuntimeProjection, id: &str) -> Vec<&'static str> {
-    // Holding is safe only when the worker retains the request: a pre-64
-    // worker's latest-turn question is replaced by the agent-only turn that
-    // ends the wait, so holding it would lose the question.
-    if runtime.subagents.contains_key(id)
-        || !runtime
-            .records
-            .get(id)
-            .is_some_and(|record| record.harness_kind.has_reliable_background_inventory())
-        || !runtime
-            .sessions
-            .get(id)
-            .and_then(|view| view.operational.as_deref())
-            .is_some_and(|live| live.supports_open_request())
-    {
-        return vec![];
-    }
-    waiting_on_own_work(runtime, id)
-}
-
-fn waiting_on_own_work(runtime: &RuntimeProjection, id: &str) -> Vec<&'static str> {
-    let Some(live) = runtime
-        .sessions
-        .get(id)
-        .and_then(|view| view.operational.as_deref())
-    else {
-        return vec![];
-    };
-    let mut work = vec![];
-    if runtime.subagents.iter().any(|(child, metadata)| {
-        metadata.parent_session_id == id
-            && runtime
-                .sessions
-                .get(child)
-                .and_then(|view| view.operational.as_deref())
-                // The shared "still owns work" answer: a closed child (or one
-                // that is only expecting a continuation) must not hold forever.
-                .is_some_and(|child| {
-                    child.activity_state().has_work_in_flight() || !child.queued_prompts.is_empty()
-                })
-    }) {
-        work.push("managed child");
-    }
-    if live.native_agent_count > 0 {
-        work.push("native agent");
-    }
-    // Background commands do not hold: coordinators keep Claude Monitors (and
-    // agents keep servers) running for hours, so a hold bounded by their end
-    // could hide a real question indefinitely. Children and sub-agents end.
-    if mj_core::activity::turn_imminent(&live.facts(), mj_core::clock::epoch_millis()) {
-        work.push("imminent turn");
-    }
-    work
 }
 
 fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
@@ -582,8 +386,6 @@ struct AttentionProjection {
     targets: BTreeMap<String, mj_core::attention::NotificationDismissal>,
     holders: BTreeMap<String, String>,
     cards: BTreeMap<String, NotificationCard>,
-    held_questions: BTreeSet<String>,
-    question_advances: BTreeMap<String, u64>,
 }
 
 fn project_states(
@@ -695,8 +497,6 @@ fn project_states(
         }
     }
     let mut cards = BTreeMap::new();
-    let mut held_questions = BTreeSet::new();
-    let mut question_advances = BTreeMap::new();
     let mut attention: BTreeMap<_, _> = ids
         .iter()
         .filter_map(|id| runtime.records.get(id).map(|record| (id, record)))
@@ -755,21 +555,12 @@ fn project_states(
                     _ => Working,
                 }
             } else if let Some(live) = live {
-                if let Some(question) = semantic_question(runtime, id) {
-                    if request_hold(runtime, id).is_empty() {
-                        if live.supports_notification_stack()
-                            && question.completed_ordinal > record.questions_shown_through
-                        {
-                            question_advances.insert(id.clone(), question.completed_ordinal);
-                            Idle
-                        } else {
-                            raised_question = Some(question);
-                            NeedsInput
-                        }
-                    } else {
-                        held_questions.insert(id.clone());
-                        Working
-                    }
+                if let Some(question) = (!live.supports_notification_stack())
+                    .then(|| semantic_question(runtime, id))
+                    .flatten()
+                {
+                    raised_question = Some(question);
+                    NeedsInput
                 } else if live.activity_state().is_idle() {
                     let tail = runtime.transcripts.get(id);
                     if !live.supports_notification_stack()
@@ -928,8 +719,6 @@ fn project_states(
         targets,
         holders,
         cards,
-        held_questions,
-        question_advances,
     }
 }
 
@@ -999,9 +788,7 @@ fn notification_card(
                 NotificationKind::Important => {
                     entry.completed_ordinal > record.viewed_through_event_ordinal
                 }
-                NotificationKind::NeedsInput => {
-                    entry.completed_ordinal <= record.questions_shown_through
-                }
+                NotificationKind::NeedsInput => true,
             })
             .cloned()
             .collect();
@@ -1166,325 +953,6 @@ mod tests {
 
     fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection) {
         super::update(previous, next, None);
-    }
-
-    // Hard-won: 8dd7f6384: clearing a visible Important entry dismissed a held question.
-    #[test]
-    fn open_request_releases_when_only_the_managed_child_changes() {
-        use mj_core::assessment::{InferredQuestion, OpenRequest};
-        use mj_core::config::HarnessKind;
-        use mj_core::relay::{HarnessTurn, RELAY_PROTOCOL_VERSION, RelaySnapshot};
-        let mut next = runtime();
-        let mut config = (*next.metadata.config).clone();
-        for (id, kind) in [("claude", HarnessKind::Claude), ("kimi", HarnessKind::Kimi)] {
-            config.profiles.insert(
-                id.into(),
-                mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::new()),
-            );
-        }
-        next.metadata.config = config.into();
-        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
-        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
-        next.subagents.insert(
-            "child".into(),
-            mj_core::subagent::SubagentMetadata {
-                kind: Default::default(),
-                child_session_id: "child".into(),
-                parent_session_id: "parent".into(),
-                task_name: String::new(),
-                profile_id: String::new(),
-                model: None,
-                effort: None,
-                working_directory: Default::default(),
-                request_key: String::new(),
-                created_at: String::new(),
-                noticed_turn: None,
-                reported_finish: None,
-                handback_tool: false,
-            },
-        );
-        let mut parent = RelaySnapshot::new("parent".into()).operational_state();
-        parent.relay_protocol_version = Some(RELAY_PROTOCOL_VERSION);
-        parent.open_request = Some(OpenRequest {
-            question: InferredQuestion {
-                turn_id: "original".into(),
-                completed_ordinal: 10,
-            },
-            question_message: None,
-        });
-        parent.notification_stack = mj_core::attention::NotificationStack {
-            revision: 11,
-            entries: vec![
-                NotificationStackEntry {
-                    completed_at_ms: 100,
-                    completed_ordinal: 7,
-                    kind: NotificationKind::Important,
-                    message: EntryMessage::None,
-                },
-                NotificationStackEntry {
-                    completed_at_ms: 20,
-                    completed_ordinal: 10,
-                    kind: NotificationKind::NeedsInput,
-                    message: EntryMessage::None,
-                },
-            ],
-        }
-        .into();
-        next.sessions.get_mut("parent").unwrap().operational = Some(parent.into());
-        let mut materialized = MaterializedSession::empty("parent");
-        materialized
-            .transcript
-            .push(std::sync::Arc::new(mj_core::state::TranscriptItem {
-                stable_id: "user:session-message-turn-background".into(),
-                position: 20,
-                latest_content_event_ordinal: None,
-                created_at_ms: 20,
-                last_changed_at_ms: 20,
-                body: mj_core::state::TranscriptBody::User {
-                    content: vec![
-                        serde_json::json!({"type":"text","text":"An agent-only follow-up"}),
-                    ],
-                },
-            }));
-        next.transcripts.insert(
-            "parent".into(),
-            mj_client::runtime_feed::SessionTail::of(
-                &materialized,
-                &ProjectionWindow::of(&materialized),
-                0,
-            ),
-        );
-        let mut child = RelaySnapshot::new("child".into()).operational_state();
-        child.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
-        next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
-        update(&RuntimeProjection::default(), &mut next);
-        let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
-        assert_eq!(card.badge, NotificationKind::Important);
-        assert_eq!(card.entries.len(), 1);
-        assert_eq!(card.since_ms, 100, "held questions do not order the card");
-        let Some(NotificationDismissal::ReadThrough(through)) = card.dismissal else {
-            panic!("Clear must leave the held question intact");
-        };
-        assert_eq!(through, 7);
-        let before_clear = next.clone();
-        next.records
-            .get_mut("parent")
-            .unwrap()
-            .viewed_through_event_ordinal = through;
-        update(&before_clear, &mut next);
-        assert_eq!(
-            next.metadata.session_attention["parent"],
-            SessionAttention::Working
-        );
-        assert!(
-            !next
-                .metadata
-                .notification_cards
-                .as_ref()
-                .unwrap()
-                .contains_key("parent")
-        );
-        // A pre-64 worker cannot retain the request, so it is never held.
-        let mut legacy_runtime = next.clone();
-        let mut legacy = (*next.sessions["parent"].operational.clone().unwrap()).clone();
-        legacy.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL - 1);
-        legacy_runtime
-            .sessions
-            .get_mut("parent")
-            .unwrap()
-            .operational = Some(legacy.into());
-        assert!(request_hold(&legacy_runtime, "parent").is_empty());
-        next.transcripts
-            .get_mut("parent")
-            .unwrap()
-            .header
-            .pending_elicitations
-            .push(mj_core::elicitation::ElicitationRequest {
-                id: "form".into(),
-                message: "A question now".into(),
-                title: None,
-                description: None,
-                fields: vec![],
-                tool_permission: None,
-            });
-        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
-        next.transcripts
-            .get_mut("parent")
-            .unwrap()
-            .header
-            .pending_elicitations
-            .clear();
-        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
-        next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
-        assert_eq!(
-            project_states(&next, next.records.keys().cloned().collect())
-                .question_advances
-                .get("parent"),
-            Some(&10)
-        );
-        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
-        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
-        child.harness_turn = None;
-        child
-            .background_commands
-            .push(mj_core::relay::BackgroundCommand {
-                id: "child-build".into(),
-                started_at_ms: 1,
-                command: "cargo test".into(),
-                can_stop: false,
-            });
-        child.background_needed = Some(true);
-        assert!(matches!(
-            child.activity_state(),
-            mj_core::activity::ActivityState::Background { .. }
-        ));
-        next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
-        assert_eq!(project(&next)["parent"], SessionAttention::Working);
-        let previous = next.clone();
-        child.background_commands.clear();
-        next.sessions.get_mut("child").unwrap().operational = Some(child.into());
-        let advances = super::update(&previous, &mut next, None);
-        assert_eq!(advances.get("parent"), Some(&10));
-        assert!(
-            !next
-                .metadata
-                .notification_cards
-                .as_ref()
-                .unwrap()
-                .contains_key("parent")
-        );
-        assert!(
-            !crate::web_push::card_entries(&next)
-                .unwrap()
-                .values()
-                .any(|entry| entry.session == "parent")
-        );
-        // Committed cursor publication, never the eligibility decision, exposes it.
-        let before_commit = next.clone();
-        next.records
-            .get_mut("parent")
-            .unwrap()
-            .questions_shown_through = 10;
-        update(&before_commit, &mut next);
-        assert_eq!(
-            next.metadata.session_attention["parent"],
-            SessionAttention::NeedsInput
-        );
-        assert_eq!(
-            next.metadata.notification_dismissals["parent"],
-            NotificationDismissal::Stack { revision: 11 },
-        );
-        assert_eq!(
-            next.metadata.notification_cards.as_ref().unwrap()["parent"].entries[0]
-                .completed_ordinal,
-            10,
-        );
-        let original = next.sessions["parent"].operational.clone().unwrap();
-        let mut with_background = (*original).clone();
-        with_background
-            .background_commands
-            .push(mj_core::relay::BackgroundCommand {
-                id: "build".into(),
-                started_at_ms: 1,
-                command: "build".into(),
-                can_stop: true,
-            });
-        with_background.background_needed = Some(true);
-        next.sessions.get_mut("parent").unwrap().operational = Some(with_background.into());
-        assert!(matches!(
-            next.sessions["parent"]
-                .operational
-                .as_ref()
-                .unwrap()
-                .activity_state(),
-            mj_core::activity::ActivityState::Background { .. }
-        ));
-        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
-        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
-        next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
-        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
-        // A background command alone never holds, even when judged needed: a
-        // monitor or server can outlive any wait and hide the question
-        // indefinitely. The worker inferred idle here, as after a needs-input
-        // verdict, so only the hold could hide the question.
-        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
-        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
-        let mut idle_with_background =
-            (*next.sessions["parent"].operational.clone().unwrap()).clone();
-        idle_with_background.activity =
-            Some(mj_core::activity::ActivityState::Idle { since_ms: Some(1) });
-        next.sessions.get_mut("parent").unwrap().operational = Some(idle_with_background.into());
-        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
-        for connected in [false, true] {
-            let previous = next.clone();
-            next.sessions.get_mut("child").unwrap().connected = connected;
-            let mut child = mj_core::relay::RelaySnapshot::new("child".into()).operational_state();
-            child.harness_turn = Some(HarnessTurn { started_at_ms: 2 });
-            next.sessions.get_mut("child").unwrap().operational = Some(child.into());
-            update(&previous, &mut next);
-            assert_eq!(
-                next.metadata.session_attention["parent"],
-                SessionAttention::NeedsInput
-            );
-            assert_eq!(
-                next.metadata.notification_cards.as_ref().unwrap()["parent"].badge,
-                NotificationKind::NeedsInput
-            );
-        }
-        // A stays shown when the worker opens a newer B while its child works.
-        let previous = next.clone();
-        let mut newer = (*next.sessions["parent"].operational.clone().unwrap()).clone();
-        newer
-            .open_request
-            .as_mut()
-            .unwrap()
-            .question
-            .completed_ordinal = 20;
-        let stack = std::sync::Arc::make_mut(&mut newer.notification_stack);
-        stack.revision = 20;
-        stack.entries.push(NotificationStackEntry {
-            completed_at_ms: 200,
-            completed_ordinal: 20,
-            kind: NotificationKind::NeedsInput,
-            message: EntryMessage::Found("agent:held-b".into()),
-        });
-        next.sessions.get_mut("parent").unwrap().operational = Some(newer.into());
-        let advances = super::update(&previous, &mut next, None);
-        assert!(advances.is_empty());
-        let card = &next.metadata.notification_cards.as_ref().unwrap()["parent"];
-        assert_eq!(card.entries.len(), 1);
-        assert_eq!(card.entries[0].completed_ordinal, 10);
-        // A later agent-only turn and a missing child view cannot hide it either.
-        let previous = next.clone();
-        next.sessions.remove("child");
-        let mut working = (*next.sessions["parent"].operational.clone().unwrap()).clone();
-        working.harness_turn = Some(HarnessTurn { started_at_ms: 3 });
-        working.activity = None;
-        next.sessions.get_mut("parent").unwrap().operational = Some(working.clone().into());
-        update(&previous, &mut next);
-        assert_eq!(
-            next.metadata.session_attention["parent"],
-            SessionAttention::NeedsInput
-        );
-        assert_eq!(crate::web_push::card_entries(&next).unwrap().len(), 1);
-        // Clear and person admission both publish an empty worker stack.
-        let previous = next.clone();
-        working.notification_stack = Default::default();
-        working.open_request = None;
-        next.sessions.get_mut("parent").unwrap().operational = Some(working.into());
-        update(&previous, &mut next);
-        assert!(
-            !next
-                .metadata
-                .notification_cards
-                .as_ref()
-                .unwrap()
-                .contains_key("parent")
-        );
-        assert_eq!(
-            next.metadata.session_attention["parent"],
-            SessionAttention::Working
-        );
     }
 
     // Hard-won: 8dd7f6384: native requests shared one push identity and review verdicts had none.
@@ -1707,13 +1175,43 @@ mod tests {
                 .cloned()
         };
         let card = publish(&mut previous, &mut next).unwrap();
-        assert_eq!(card.badge, NotificationKind::Important);
-        assert_eq!(card.entries, &worker.notification_stack.entries[..1]);
+        assert_eq!(card.badge, NotificationKind::NeedsInput);
+        assert_eq!(card.entries, worker.notification_stack.entries);
         assert_eq!(card.since_ms, 20);
         assert_eq!(
             next.metadata.session_attention["parent"],
-            SessionAttention::Important
+            SessionAttention::NeedsInput
         );
+
+        // Later own-work snapshots and child-only activity cannot retract a stack question.
+        next.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentMetadata {
+                kind: Default::default(),
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: String::new(),
+                profile_id: String::new(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: String::new(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
+        let mut child = RelaySnapshot::new("child".into()).operational_state();
+        child.harness_turn = Some(HarnessTurn { started_at_ms: 40 });
+        next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
+        assert_eq!(publish(&mut previous, &mut next), Some(card.clone()));
+        child.harness_turn = None;
+        next.sessions.get_mut("child").unwrap().operational = Some(child.into());
+        assert_eq!(publish(&mut previous, &mut next), Some(card.clone()));
+        worker.native_agent_count = 1;
+        next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
+        assert_eq!(publish(&mut previous, &mut next), Some(card.clone()));
 
         next.records.get_mut("parent").unwrap().state = SessionState::Error;
         assert!(publish(&mut previous, &mut next).is_none());
@@ -1739,12 +1237,6 @@ mod tests {
             .notifications_ignored = false;
         worker.harness_turn = None;
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
-        let uncommitted = publish(&mut previous, &mut next).unwrap();
-        assert_eq!(uncommitted.entries.len(), 1);
-        next.records
-            .get_mut("parent")
-            .unwrap()
-            .questions_shown_through = 11;
         let mixed = publish(&mut previous, &mut next).unwrap();
         assert_eq!(mixed.entries.len(), 2);
         assert_eq!(mixed.since_ms, 20);
@@ -1755,9 +1247,9 @@ mod tests {
             .get_mut("parent")
             .unwrap()
             .viewed_through_event_ordinal = 12;
-        let working = publish(&mut previous, &mut next).unwrap();
-        assert_eq!(working.badge, NotificationKind::NeedsInput);
-        assert_eq!(working.entries, &worker.notification_stack.entries[1..]);
+        let working_question = publish(&mut previous, &mut next).unwrap();
+        assert_eq!(working_question.badge, NotificationKind::NeedsInput);
+        assert_eq!(working_question.entries.len(), 1);
 
         worker.harness_turn = None;
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.clone().into());
@@ -1769,6 +1261,7 @@ mod tests {
             "read Important entries do not order the card"
         );
 
+        worker.native_agent_count = 0;
         worker.relay_protocol_version = Some(RELAY_NOTIFICATION_STACK_PROTOCOL - 1);
         next.sessions.get_mut("parent").unwrap().operational = Some(worker.into());
         let legacy = publish(&mut previous, &mut next).unwrap();

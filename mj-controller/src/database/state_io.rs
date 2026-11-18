@@ -817,7 +817,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         draft_input: _,
         // Written by `replace_checkpoint`.
         checkpoint: _,
-        questions_shown_through: _,
     } = session;
     let changed = tx.execute(
         // The detach ordinal only ever moves forward, so a transition that
@@ -1403,7 +1402,7 @@ const SESSION_QUERY: &str =
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
                 s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
-                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation, s.questions_shown_through
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(
@@ -1534,7 +1533,6 @@ fn decode_session(
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         viewed_through_event_ordinal: row.get::<_, u64>(12)?,
-        questions_shown_through: row.get(40)?,
         draft_input: row.get(18)?,
         last_error: row.get(13)?,
         failure_generation: row.get(39)?,

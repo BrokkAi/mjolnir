@@ -3195,7 +3195,6 @@ mod tests {
             created_at: "2026-09-01T00:00:00Z".into(),
             updated_at: "2026-09-01T01:00:00Z".into(),
             viewed_through_event_ordinal: 0,
-            questions_shown_through: 0,
             draft_input: String::new(),
             last_error: None,
             dismissed_failure: None,

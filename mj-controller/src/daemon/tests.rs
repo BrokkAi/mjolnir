@@ -1766,7 +1766,6 @@ pub(crate) fn runtime_test_session(
         created_at: "2026-09-03T00:00:00Z".into(),
         updated_at: "2026-09-03T00:00:00Z".into(),
         viewed_through_event_ordinal: 0,
-        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
@@ -15143,8 +15142,6 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// The whole dismiss seam: a served question target, the daemon operation the
 /// web and TUI menus call, and the next view the worker publishes once the
 /// command lands. The attention must drop so the card glyph clears.
-// Hard-won: 4c2c5b4f8: failed and drain-deferred cursor writes were forgotten.
-// Hard-won: b654fe1df: a withdrawn coalesced endpoint discarded older pending questions.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
     use mj_core::attention::{
@@ -15246,71 +15243,6 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .publish_session("session-1".into(), question_view(false))
         .await
         .unwrap();
-    let held = state.runtime_publication().unwrap();
-    assert_eq!(held.records["session-1"].questions_shown_through, 0);
-    assert_eq!(
-        held.metadata.notification_cards.as_ref().unwrap()["session-1"].badge,
-        NotificationKind::Important
-    );
-    // Neither a handoff that later lapses nor a failed write may consume the
-    // decision. No worker view or session record changes during either retry.
-    static ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static FAILED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-    fn fail_once(id: &str, through: u64) -> Result<u64> {
-        if ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-            FAILED.notify_one();
-            anyhow::bail!("injected cursor write failure");
-        }
-        crate::database::advance_questions_shown_through(id, through)
-    }
-    let cancellation = CancellationToken::new();
-    crate::upgrade::gate().begin_draining();
-    assert!(crate::upgrade::activity_unless_draining("question shown cursor").is_err());
-    let mut persistence = Box::pin(super::attention::maintain_notifications(
-        state.clone(),
-        cancellation.clone(),
-        fail_once,
-    ));
-    // Poll the actual supervised loop: moving the map out before admission
-    // would already lose this advance here, before its writer can run.
-    assert!(futures::poll!(&mut persistence).is_pending());
-    assert_eq!(ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(state.feed.lock().unwrap().question_advances["session-1"], 9);
-    crate::upgrade::gate().expire_drain_for_test();
-    let persistence = tokio::spawn(persistence);
-    tokio::time::timeout(Duration::from_secs(5), FAILED.notified())
-        .await
-        .unwrap();
-    assert_eq!(state.feed.lock().unwrap().question_advances["session-1"], 9);
-    assert_eq!(
-        state.runtime_publication().unwrap().records["session-1"].questions_shown_through,
-        0
-    );
-    let mut revisions = state.revisions.subscribe();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            revisions.borrow_and_update();
-            if state.runtime_publication().unwrap().records["session-1"].questions_shown_through
-                == 9
-            {
-                break;
-            }
-            revisions.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("question cursor commits and publishes");
-    cancellation.cancel();
-    persistence.await.unwrap().unwrap();
-    assert_eq!(ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert!(
-        !state
-            .feed
-            .lock()
-            .unwrap()
-            .question_advances
-            .contains_key("session-1")
-    );
     let served = state.runtime_publication().unwrap();
     assert_eq!(
         served.metadata.session_attention["session-1"],
@@ -15378,136 +15310,6 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .notification_dismissals
             .contains_key("session-1")
     );
-    // Keep an older reader snapshot while a newer capture queues another
-    // question. Clearing belongs to publication, even with maintenance stopped.
-    let older_reader = cleared;
-    let mut pending_view = question_view(false);
-    let pending = pending_view.snapshot.as_mut().unwrap();
-    pending.materialized.applied_event_ordinal = 20;
-    pending.materialized.applied_event_digest = "20".repeat(32);
-    pending.window = mj_core::state::ProjectionWindow::of(&pending.materialized);
-    pending.operational.person_input_through = 10;
-    pending.operational.open_request.as_mut().unwrap().question =
-        mj_core::assessment::InferredQuestion {
-            turn_id: "next-question".into(),
-            completed_ordinal: 20,
-        };
-    pending.operational.notification_stack = NotificationStack {
-        revision: 20,
-        entries: vec![NotificationStackEntry {
-            completed_at_ms: 0,
-            completed_ordinal: 20,
-            kind: NotificationKind::NeedsInput,
-            message: EntryMessage::None,
-        }],
-    }
-    .into();
-    state
-        .publish_session("session-1".into(), pending_view.clone())
-        .await
-        .unwrap();
-    state.runtime_publication().unwrap();
-    assert_eq!(
-        state.feed.lock().unwrap().question_advances["session-1"],
-        20
-    );
-    assert_eq!(older_reader.records["session-1"].questions_shown_through, 9);
-    let pending = pending_view.snapshot.as_mut().unwrap();
-    pending.materialized.applied_event_ordinal = 21;
-    pending.materialized.applied_event_digest = "21".repeat(32);
-    pending.window = mj_core::state::ProjectionWindow::of(&pending.materialized);
-    pending.operational.person_input_through = 21;
-    pending.operational.open_request = None;
-    pending.operational.notification_stack = Default::default();
-    state
-        .publish_session("session-1".into(), pending_view.clone())
-        .await
-        .unwrap();
-    state.runtime_publication().unwrap();
-    assert!(
-        !state
-            .feed
-            .lock()
-            .unwrap()
-            .question_advances
-            .contains_key("session-1")
-    );
-    // A is eligible and pending, B supersedes it, then B alone is withdrawn.
-    // There is no open request to nominate A again after the withdrawal.
-    for (ordinal, questions, request, expected_prefix) in [
-        (30, vec![30], Some(30), 30),
-        (40, vec![30, 40], Some(40), 40),
-        (41, vec![30], None, 30),
-    ] {
-        let pending = pending_view.snapshot.as_mut().unwrap();
-        pending.materialized.applied_event_ordinal = ordinal;
-        pending.materialized.applied_event_digest = format!("{ordinal:064x}");
-        pending.window = mj_core::state::ProjectionWindow::of(&pending.materialized);
-        pending.operational.person_input_through = 21;
-        pending.operational.open_request =
-            request.map(|completed_ordinal| mj_core::assessment::OpenRequest {
-                question: mj_core::assessment::InferredQuestion {
-                    turn_id: format!("question-{completed_ordinal}"),
-                    completed_ordinal,
-                },
-                question_message: None,
-            });
-        pending.operational.notification_stack = NotificationStack {
-            revision: ordinal,
-            entries: questions
-                .into_iter()
-                .map(|completed_ordinal| NotificationStackEntry {
-                    completed_at_ms: 0,
-                    completed_ordinal,
-                    kind: NotificationKind::NeedsInput,
-                    message: EntryMessage::None,
-                })
-                .collect(),
-        }
-        .into();
-        state
-            .publish_session("session-1".into(), pending_view.clone())
-            .await
-            .unwrap();
-        state.runtime_publication().unwrap();
-        assert_eq!(
-            state.feed.lock().unwrap().question_advances["session-1"],
-            expected_prefix
-        );
-    }
-    let cancellation = CancellationToken::new();
-    let persistence = tokio::spawn(super::attention::prune_read_notifications(
-        state.clone(),
-        cancellation.clone(),
-    ));
-    let mut revisions = state.revisions.subscribe();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            revisions.borrow_and_update();
-            if state.runtime_publication().unwrap().records["session-1"].questions_shown_through
-                == 30
-            {
-                break;
-            }
-            revisions.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("surviving eligible question commits without an open request");
-    cancellation.cancel();
-    persistence.await.unwrap().unwrap();
-    let shown = state.runtime_publication().unwrap();
-    assert!(
-        shown.sessions["session-1"]
-            .operational
-            .as_ref()
-            .unwrap()
-            .open_request
-            .is_none()
-    );
-    let card = &shown.metadata.notification_cards.as_ref().unwrap()["session-1"];
-    assert_eq!(card.badge, NotificationKind::NeedsInput);
-    assert_eq!(card.entries[0].completed_ordinal, 30);
     // Recorded failures use the same action without a worker: the database
     // writer publishes committed records before replying, and owner() observes
     // that publication before attention is projected.

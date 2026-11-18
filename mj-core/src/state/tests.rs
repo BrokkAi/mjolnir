@@ -325,7 +325,6 @@ fn sample_state() -> State {
         created_at: "2026-08-09T12:00:00Z".into(),
         updated_at: "2026-08-09T12:01:00Z".into(),
         viewed_through_event_ordinal: 0,
-        questions_shown_through: 0,
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
@@ -595,7 +594,6 @@ fn sample_session() -> SessionRecord {
         .expect("sample session")
 }
 
-// Hard-won: 4c2c5b4f8: the SQL cursor changed strict wire and nested session JSON.
 #[test]
 fn session_records_written_before_container_overrides_still_load() {
     let mut session = sample_session();
@@ -606,24 +604,15 @@ fn session_records_written_before_container_overrides_still_load() {
     object.insert("no_mailbox".into(), opt_out);
     assert!(object.remove("container_cpus").is_none());
     assert!(object.remove("container_memory").is_none());
-    assert!(!object.contains_key("questions_shown_through"));
 
     let loaded: SessionRecord = serde_json::from_value(json).expect("load older session");
     assert_eq!(loaded, session);
 
-    let mut edited = session.clone();
-    edited.questions_shown_through = 42;
-    let json = serde_json::to_string(&edited).expect("serialize");
-    assert!(
-        !serde_json::from_str::<serde_json::Value>(&json)
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("questions_shown_through")
-    );
-    let round_tripped: SessionRecord = serde_json::from_str(&json).expect("reload edited session");
-    // The SQL-only cursor must not change the strict session JSON contract.
-    assert_eq!(round_tripped, session);
+    let edited = session.clone();
+    let round_tripped: SessionRecord =
+        serde_json::from_str(&serde_json::to_string(&edited).expect("serialize"))
+            .expect("reload edited session");
+    assert_eq!(round_tripped, edited);
 }
 
 #[test]

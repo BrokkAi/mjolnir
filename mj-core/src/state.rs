@@ -1733,9 +1733,6 @@ pub struct SessionRecord {
     pub updated_at: String,
     #[serde(default, alias = "detached_after_event_ordinal")]
     pub viewed_through_event_ordinal: u64,
-    /// Daemon-owned SQL cursor, excluded from session wire and operation JSON.
-    #[serde(skip)]
-    pub questions_shown_through: u64,
     /// Unsent chat input carried across a detach, so returning to a session
     /// restores what the user was typing. Empty means no draft.
     #[serde(default, skip_serializing_if = "String::is_empty")]

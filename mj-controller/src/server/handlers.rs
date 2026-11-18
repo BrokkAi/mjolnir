@@ -281,8 +281,10 @@ pub(super) async fn notification_message(
             Message::Shown(entry)
         } else {
             let holder = session
-                .form_holder
-                .as_deref()
+                .notification_card
+                .as_ref()
+                .map(|card| card.item_destination(&session_id, card.entries.len()))
+                .or(session.form_holder.as_deref())
                 .filter(|holder| snapshot.sessions.get(holder).is_some())
                 .unwrap_or(&session_id)
                 .to_owned();

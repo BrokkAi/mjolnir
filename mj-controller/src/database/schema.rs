@@ -2660,19 +2660,6 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         ))?;
     }
-    // Compatible: supported older writers UPDATE named columns or use INSERT
-    // ON CONFLICT DO UPDATE, preserving this daemon-owned cursor on existing rows.
-    // The cursor is SQL-only, so strict session JSON readers remain compatible.
-    if version < 139 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE sessions ADD COLUMN questions_shown_through INTEGER NOT NULL DEFAULT 0;
-             INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (139, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             PRAGMA user_version = 139;
-             COMMIT;",
-        )?;
-    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3390,11 +3377,6 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 pub(super) fn drop_environment_schema(connection: &Connection) {
     // These historical fixtures also predate removal of the size columns.
     legacy_schema::ensure_session_container_override_columns(connection).unwrap();
-    if legacy_schema::table_has_column(connection, "sessions", "questions_shown_through").unwrap() {
-        connection
-            .execute_batch("ALTER TABLE sessions DROP COLUMN questions_shown_through;")
-            .unwrap();
-    }
     for (table, column) in [
         ("session_moves", "source_environment_id"),
         ("retained_move_sources", "environment_id"),
@@ -4486,8 +4468,7 @@ mod reader_tests {
         legacy_schema::ensure_session_container_override_columns(&connection).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN questions_shown_through;
-                 DROP TRIGGER session_rows_deleted;
+                "DROP TRIGGER session_rows_deleted;
                  DROP TRIGGER session_rows_destroyed;
                  DROP TRIGGER github_watch_items_live_creator;
                  DROP TABLE github_watch_items;
@@ -4897,14 +4878,6 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 139
-            && legacy_schema::table_has_column(&connection, "sessions", "questions_shown_through")
-                .unwrap()
-        {
-            connection
-                .execute_batch("ALTER TABLE sessions DROP COLUMN questions_shown_through;")
-                .unwrap();
-        }
         if version < 137 {
             connection
                 .execute_batch(
@@ -5687,56 +5660,6 @@ mod reader_tests {
         failed.state = SessionState::Error;
         super::super::sessions::save_lifecycle_session_to(&path, &failed).unwrap();
         assert!(intents(&path).is_empty());
-    }
-
-    #[test]
-    fn questions_shown_migration_preserves_cursor_across_old_writes_and_restart() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mj.sqlite3");
-        let mut record = super::super::tests::session("question", "project");
-        super::super::save_session_to(&path, &record).unwrap();
-        stamp_schema_version(&path, 138);
-        let writer = open_writer(&path).unwrap();
-        let schema = read_schema_state(&writer).unwrap();
-        assert_eq!(schema.revision, 139);
-        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-        schema.ensure_supported_by(138).unwrap();
-        assert_eq!(
-            super::super::load_state_from(&path).unwrap().sessions["question"]
-                .questions_shown_through,
-            0
-        );
-        drop(writer);
-        assert_eq!(
-            super::super::advance_questions_shown_through_to(&path, "question", 10).unwrap(),
-            10
-        );
-        assert_eq!(
-            super::super::advance_questions_shown_through_to(&path, "question", 7).unwrap(),
-            10
-        );
-        // Lifecycle upserts predate the cursor and must preserve it even when
-        // their record was read before the question became visible.
-        record.title = "old writer".into();
-        super::super::save_session_to(&path, &record).unwrap();
-        assert_eq!(
-            super::super::load_state_from(&path).unwrap().sessions["question"]
-                .questions_shown_through,
-            10
-        );
-        super::super::sessions::save_lifecycle_session_to(&path, &record).unwrap();
-        assert_eq!(
-            super::super::load_state_from(&path).unwrap().sessions["question"]
-                .questions_shown_through,
-            10
-        );
-        drop(open_writer(&path).unwrap());
-        let restored = super::super::load_state_from(&path).unwrap();
-        assert_eq!(restored.sessions["question"].questions_shown_through, 10);
-        assert_eq!(
-            super::super::advance_questions_shown_through_to(&path, "question", 9).unwrap(),
-            10
-        );
     }
 
     #[test]

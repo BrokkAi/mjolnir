@@ -177,7 +177,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 created_at: "now".into(),
                 updated_at: "now".into(),
                 viewed_through_event_ordinal: 0,
-                questions_shown_through: 0,
                 draft_input: String::new(),
                 last_error: Some("secret-token at /highly/secret/codex".into()),
                 dismissed_failure: None,

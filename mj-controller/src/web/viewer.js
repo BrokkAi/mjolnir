@@ -1269,12 +1269,17 @@ function inboxSessionFailed(entry) {
 /// Quick reply sends to this session and Go to Session opens it. A parent
 /// promoted by a child's pending request opens the form holder. A launch
 /// failure opens the session it was for, when there is one.
+// Stack entries address their session; only the live form addresses its holder.
+function notificationItemDestination(stack, sessionId, index) {
+  return stack.form && index >= stack.entries.length ? stack.holder ?? sessionId : sessionId;
+}
+
 function inboxDestination(entry, selectedIndex = null) {
   if (entry.launchFailure) return sessionById(entry.launchFailure.session_id)?.id ?? null;
   if (entry.notification_card) {
     const stack = entry.notification_card;
     const index = selectedIndex ?? stack.entries.length + Number(Boolean(stack.form)) - 1;
-    return stack.form && index >= stack.entries.length ? stack.holder ?? entry.id : entry.id;
+    return notificationItemDestination(stack, entry.id, index);
   }
   if (inboxSessionFailed(entry)) return entry.id;
   const holder = childFormHolder(entry);
@@ -1285,7 +1290,7 @@ function inboxDestination(entry, selectedIndex = null) {
 function inboxKey(entry) {
   if (entry.launchFailure) return `launch-failure|${entry.launchFailure.id}`;
   const stack = entry.notification_card;
-  if (stack) return JSON.stringify([entry.id, stack.holder, stack.badge, stack.dismissal,
+  if (stack) return JSON.stringify([entry.id, notificationItemDestination(stack, entry.id, stack.entries.length), stack.badge, stack.dismissal,
     stack.entries, stack.form?.request_id]);
   const identity = inboxTextIdentity(entry);
   return [entry.id, identity.holder, entry.attention, identity.requests, identity.question,
@@ -1576,7 +1581,7 @@ function inboxHasReplyCard(destination) {
     const card = inboxCard(entry);
     const stack = entry.notification_card;
     const destinations = stack
-      ? [ ...(stack.entries.length ? [entry.id] : []), ...(stack.form ? [stack.holder ?? entry.id] : []) ]
+      ? [ ...(stack.entries.length ? [entry.id] : []), ...(stack.form ? [notificationItemDestination(stack, entry.id, stack.entries.length)] : []) ]
       : [card.destination];
     return card.canReply && destinations.includes(destination);
   });

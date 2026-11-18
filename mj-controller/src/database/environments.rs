@@ -1052,7 +1052,6 @@ mod tests {
         connection.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('old-move',?1,?2,'[]','now')",params![parent.id,serde_json::to_string(&source_json).unwrap()]).unwrap();
         connection.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE sessions SET harness_kind='removed-harness' WHERE session_id='33333333333333333333333333333333';
             PRAGMA ignore_check_constraints=OFF; ALTER TABLE session_moves DROP COLUMN source_environment_id; ALTER TABLE retained_move_sources DROP COLUMN environment_id; DROP TRIGGER environment_report_registered; DROP TRIGGER environment_report_updated; DROP TRIGGER reclaimed_environment_owner_deleted; DROP TRIGGER reclaimed_environment_binding_deleted; DROP TABLE environment_reports; DROP TABLE environment_bindings; DROP TABLE environment_workers; DROP TABLE environments;
-            ALTER TABLE sessions DROP COLUMN questions_shown_through;
             DELETE FROM schema_migrations WHERE version>=122;
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;

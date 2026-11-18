@@ -221,7 +221,9 @@ impl NotificationEntry {
         }
         let previous_form = previous.form.as_ref()?;
         let form = card.form.as_ref()?;
-        (card.holder == previous.holder && form.request_id == previous_form.request_id)
+        (card.item_destination(&self.session_id, card.entries.len())
+            == previous.item_destination(&self.session_id, previous.entries.len())
+            && form.request_id == previous_form.request_id)
             .then_some(card.entries.len())
     }
 
@@ -531,9 +533,9 @@ impl DashboardState {
 
     fn notification_destination(&self, entry: &NotificationEntry) -> String {
         match &entry.published {
-            Some(card) if self.selected_notification_item(entry) >= card.entries.len() => card
-                .holder.clone().unwrap_or_else(|| entry.session_id.clone()),
-            Some(_) => entry.session_id.clone(),
+            Some(card) => card
+                .item_destination(&entry.session_id, self.selected_notification_item(entry))
+                .to_owned(),
             None => self.notification_content_session(&entry.session_id, entry.level),
         }
     }
@@ -993,7 +995,8 @@ impl DashboardState {
                 Some(card) => {
                     (!card.entries.is_empty() && entry.session_id == session_id)
                         || (card.form.is_some()
-                            && card.holder.as_deref().unwrap_or(&entry.session_id) == session_id)
+                            && card.item_destination(&entry.session_id, card.entries.len())
+                                == session_id)
                 }
                 None => self.notification_destination(entry) == session_id,
             })

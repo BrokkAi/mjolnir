@@ -335,6 +335,16 @@ pub struct NotificationCard {
 }
 
 impl NotificationCard {
+    /// Stack messages belong to the card session; only the live form uses its holder.
+    /// `item` is the oldest-first entry index, with the form after the entries.
+    pub fn item_destination<'a>(&'a self, session: &'a str, item: usize) -> &'a str {
+        if self.form.is_some() && item >= self.entries.len() {
+            self.holder.as_deref().unwrap_or(session)
+        } else {
+            session
+        }
+    }
+
     /// The newest shown stack question, even when a live form shares the card.
     pub fn shown_question(&self) -> Option<&mj_core::attention::NotificationStackEntry> {
         if !matches!(
@@ -973,6 +983,10 @@ mod tests {
             }),
         };
         assert_eq!(card.shown_question(), Some(&question));
+        let wire: NotificationCard =
+            serde_json::from_slice(&serde_json::to_vec(&card).unwrap()).unwrap();
+        assert_eq!(wire.item_destination("parent", 0), "parent");
+        assert_eq!(wire.item_destination("parent", 1), "child");
     }
 
     fn cursor(incarnation: &str, sequence: u64) -> RuntimeCursor {

@@ -246,7 +246,7 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
     };
     let mut entries = BTreeMap::new();
     for (session, card) in cards {
-        let holder = card.holder.as_deref().unwrap_or(session);
+        let holder = card.item_destination(session, card.entries.len());
         for entry in &card.entries {
             let (identity, message_id) = match &entry.message {
                 EntryMessage::Locating => continue,
@@ -265,7 +265,7 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
                 session,
                 completed_ordinal: Some(entry.completed_ordinal),
                 paused: unavailable(session),
-                holder: session,
+                holder: card.item_destination(session, 0),
                 kind: entry.kind,
                 text: None,
                 message_id,

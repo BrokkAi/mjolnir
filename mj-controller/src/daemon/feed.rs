@@ -14,7 +14,6 @@ type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
     capacity: super::capacity::ContainerCapacityProjection,
-    pub(super) question_advances: BTreeMap<String, u64>,
     incarnation: String,
     sequence: u64,
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
@@ -337,43 +336,7 @@ impl RuntimeState {
             history.full.metadata.launch_recency.clone()
         };
         let mut source = full.clone();
-        let question_advances =
-            super::attention::update(&history.attention_source, &mut full, committed.as_deref());
-        for (id, through) in question_advances {
-            let pending = history.question_advances.entry(id).or_default();
-            *pending = (*pending).max(through);
-        }
-        // Decisions and their removal belong to this serialized capture. A
-        // background observer must never prune newer decisions using an older
-        // projection it retained after releasing this lock.
-        history.question_advances.retain(|id, through| {
-            let Some(record) = full.records.get(id) else {
-                return false;
-            };
-            if let Some(live) = full
-                .sessions
-                .get(id)
-                .and_then(|view| view.operational.as_deref())
-            {
-                // The accepted advance covers a prefix. Withdrawing its newest
-                // question must not withdraw older eligible questions too.
-                let surviving = live
-                    .notification_stack
-                    .entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.kind == mj_core::attention::NotificationKind::NeedsInput
-                            && entry.completed_ordinal <= *through
-                    })
-                    .map(|entry| entry.completed_ordinal)
-                    .max();
-                let Some(surviving) = surviving else {
-                    return false;
-                };
-                *through = surviving;
-            }
-            record.questions_shown_through < *through
-        });
+        super::attention::update(&history.attention_source, &mut full, committed.as_deref());
         // Preserve decorated rows as well as the attention tree across polls.
         let mut sessions = history.full.sessions.clone();
         for (id, view) in history.attention_source.sessions.changes(&source.sessions) {

@@ -751,11 +751,10 @@ mod tests {
         let subscription = subscription();
         push_subscribe_with(&db, subscription.clone()).unwrap();
         db.execute_batch(
-            "ALTER TABLE sessions DROP COLUMN questions_shown_through;
-             DROP TABLE push_entry_deliveries;
+            "DROP TABLE push_entry_deliveries;
              DROP TABLE push_entries;
              DROP TABLE push_entry_cutover;
-             DELETE FROM schema_migrations WHERE version>=138;
+             DELETE FROM schema_migrations WHERE version=138;
              PRAGMA user_version=137;
              INSERT INTO push_episodes VALUES('s','legacy','{}','[]',1);",
         )

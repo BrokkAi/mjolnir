@@ -277,6 +277,10 @@ impl DashboardState {
     /// the recorded error, or the last line the agent wrote.
     pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
         if level == AttentionLevel::Waiting
+            && self
+                .session_details
+                .get(session_id)
+                .is_none_or(|detail| detail.pending_elicitations.is_empty())
             && let Some(entry) = self
                 .notification_cards
                 .as_ref()
@@ -674,15 +678,24 @@ mod tests {
         let detail = dashboard.session_details.get_mut("asks").unwrap();
         detail.supports_open_request = true;
         detail.question_message = Some("agent:original".into());
-        // A remains shown while B is the worker's newer, held open request.
+        // The stack owns the shown question even when the latest reply differs.
         detail.question_message = Some("agent:held".into());
-        detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
-            stable_id: "agent:held".into(), position: 2, latest_content_event_ordinal: None,
-            created_at_ms: 2, last_changed_at_ms: 2,
-            body: mj_core::state::TranscriptBody::Agent {
-                chunks: vec![serde_json::json!({"content":{"type":"text","text":"Hidden newer question?"}})], streaming: false,
-            },
-        }));
+        detail
+            .projection
+            .transcript
+            .push(std::sync::Arc::new(mj_core::state::TranscriptItem {
+                stable_id: "agent:held".into(),
+                position: 2,
+                latest_content_event_ordinal: None,
+                created_at_ms: 2,
+                last_changed_at_ms: 2,
+                body: mj_core::state::TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content":{"type":"text","text":"Newer reply?"}}),
+                    ],
+                    streaming: false,
+                },
+            }));
         dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
             "asks".into(),
             mj_client::runtime_feed::NotificationCard {
@@ -717,6 +730,7 @@ mod tests {
     }
 
     // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.
+    // Hard-won: c27046237: a new approval alert reused an already alerted question's text.
     #[test]
     fn a_new_question_notifies_once_after_the_delay() {
         let mut dashboard = dashboard();
@@ -811,6 +825,10 @@ mod tests {
         let again = dashboard.notification_events(63_000);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].session_id, "asks");
+        assert_eq!(
+            again[0].body, "Which branch should I use?",
+            "a new form alerts with its own text, even alongside an already alerted question"
+        );
         dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
         assert!(dashboard.notification_events(64_000).is_empty());
         dashboard

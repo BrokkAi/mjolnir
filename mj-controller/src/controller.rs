@@ -1110,7 +1110,6 @@ impl Controller {
             created_at: now.clone(),
             updated_at: now,
             viewed_through_event_ordinal: 0,
-            questions_shown_through: 0,
             draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
             dismissed_failure: None,
