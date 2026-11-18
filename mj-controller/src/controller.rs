@@ -1,24 +1,24 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
 pub mod backend;
-mod cache_host;
 pub use cache_host::CacheHost;
+pub(crate) use mj_build_cache::cache_host;
 pub mod checkpoint;
 mod container_upgrade;
 pub mod environment;
 pub use crate::database::SessionResumeOptions;
-mod git_cache;
+pub(crate) use mj_build_cache::git_cache;
 mod github_app;
 mod interrupted;
 pub use interrupted::interrupted_lifecycle_cause;
 pub mod lifecycle;
 pub use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;
-pub mod mbx;
+pub use mj_build_cache::mbx;
 pub mod move_session;
 mod network_git;
 mod new_session_preflight;
-mod tool_cache;
+pub(crate) use mj_build_cache::tool_cache;
 pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
 pub mod profile_config;

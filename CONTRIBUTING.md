@@ -146,6 +146,11 @@ it or introduce a dependency between sibling branches.
   history queries read: keeping it in sync and answering queries over it. It
   builds on the targets, store and import crates. `mj_controller` re-exports
   its module under its old name.
+- `brokk-mj-build-cache` (`mj-build-cache/`, library `mj_build_cache`) is the
+  caches Mjolnir keeps on a session's host: the mbx compiler cache and its
+  installation, the shared clone cache, and the native build-tool caches. It
+  builds on the targets, store and import crates. `mj_controller::controller`
+  re-exports its modules under their old names.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

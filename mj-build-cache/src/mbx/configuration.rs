@@ -10,11 +10,11 @@ const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
 /// provisioned before machine-level policy. No container recreation is needed.
-pub(super) fn shared_directory(cache: &Path) -> PathBuf {
+pub fn shared_directory(cache: &Path) -> PathBuf {
     mj_core::config::build_cache_configuration_directory(cache)
 }
 
-pub(super) fn host_directory(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
+pub fn host_directory(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
     if matches!(host, CacheHost::Local) {
         return dirs::config_dir()
             .map(|path| path.join("mbx"))
@@ -36,7 +36,7 @@ pub(super) fn host_directory(host: &CacheHost, executor: &impl CommandExecutor) 
     Ok(path)
 }
 
-pub(super) fn read_file(
+pub fn read_file(
     host: &CacheHost,
     path: &Path,
     executor: &impl CommandExecutor,
@@ -58,7 +58,7 @@ pub(super) fn read_file(
 }
 
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
-pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
+pub fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct Document<'a> {
         gc: Gc<'a>,
@@ -96,11 +96,7 @@ pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> 
     ))
 }
 
-pub(super) fn configured_limit(
-    text: Option<&str>,
-    table: &str,
-    field: &str,
-) -> Result<Option<String>> {
+pub fn configured_limit(text: Option<&str>, table: &str, field: &str) -> Result<Option<String>> {
     let Some(text) = text else {
         return Ok(None);
     };
@@ -141,7 +137,7 @@ if [ -f "$file" ]; then actual=$(sha256sum -- "$file"); actual=${actual%% *}; fi
 mv -f -- "$temporary" "$file"
 "#;
 
-pub(super) fn apply(
+pub fn apply(
     host: &CacheHost,
     cache: &ResolvedBuildCache,
     executor: &impl CommandExecutor,
@@ -180,7 +176,7 @@ pub(super) fn apply(
     Ok(true)
 }
 
-pub(super) fn application(previous: Option<&str>, desired: Option<&str>) -> BuildCacheApplication {
+pub fn application(previous: Option<&str>, desired: Option<&str>) -> BuildCacheApplication {
     if previous == desired {
         BuildCacheApplication::Applied
     } else {

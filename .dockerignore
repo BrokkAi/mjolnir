@@ -24,6 +24,7 @@
 !mj-accounts/
 !mj-import/
 !mj-sessionwiki/
+!mj-build-cache/
 !mj-github-relevance/
 !mj-controller/
 !mj-setup/

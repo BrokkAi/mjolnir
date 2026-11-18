@@ -12,8 +12,8 @@
 //! configuration failures are reported rather than launching with stale policy.
 
 mod configuration;
-pub(crate) mod install;
-pub(crate) mod release;
+pub mod install;
+pub mod release;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -84,7 +84,7 @@ fn platform_limit(
 
 /// What a container target's host offers as a build cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedBuildCache {
+pub struct ResolvedBuildCache {
     /// Cache directory on the host, mounted at the same path in the container.
     pub directory: PathBuf,
     /// The compatible native mbx executable used to refresh the cache copy.
@@ -163,7 +163,7 @@ fn inspect(
 
 /// Resolve the build cache for one container target, or `None` when this
 /// target runs without one.
-pub(super) fn resolve(
+pub fn resolve(
     target: &targets::TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Option<ResolvedBuildCache> {
@@ -377,7 +377,7 @@ fn publish_at(
 
 /// Upgrade an existing container through its existing cache mount. Resolving
 /// ownership uses its actual host, never a target name that can be reassigned.
-pub(super) fn prepare_session_configuration(
+pub fn prepare_session_configuration(
     config: &Config,
     backend: &targets::TargetLocator,
     recorded: &SessionBuildCache,
@@ -755,7 +755,7 @@ fn read_stats(
 
 /// The host's own mbx: its absolute resolved path and version.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NativeMbx {
+pub struct NativeMbx {
     pub program: PathBuf,
     pub version: String,
 }
@@ -764,7 +764,7 @@ pub(crate) struct NativeMbx {
 /// per-user install directory, then resolve symlinks before reporting it.
 /// Links are followed one at a time because macOS before 12.3 has no
 /// `readlink -f`; every path handed to `readlink` starts with `/`.
-pub(super) const NATIVE_VERSION_SCRIPT: &str = r#"for candidate in "$(command -v mbx 2>/dev/null || true)" "$HOME/.local/bin/mbx" "$HOME/.cargo/bin/mbx"; do
+pub const NATIVE_VERSION_SCRIPT: &str = r#"for candidate in "$(command -v mbx 2>/dev/null || true)" "$HOME/.local/bin/mbx" "$HOME/.cargo/bin/mbx"; do
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
     case "$candidate" in /*) resolved=$candidate ;; *) resolved=$PWD/$candidate ;; esac
     hops=0
@@ -786,7 +786,7 @@ done
 exit 1"#;
 
 /// The host's own mbx, or `None` when no supported candidate can run.
-pub(super) fn probe_native_version(
+pub fn probe_native_version(
     host: &CacheHost,
     executor: &impl CommandExecutor,
 ) -> Result<Option<NativeMbx>> {
@@ -830,13 +830,13 @@ fn parse_native_probe_output(stdout: &[u8]) -> Result<NativeMbx> {
 
 /// The current native mbx copy visible through the shared cache mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CachedMbxBinary {
+pub struct CachedMbxBinary {
     pub path: PathBuf,
     pub version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum CachedMbxSync {
+pub enum CachedMbxSync {
     Ready(CachedMbxBinary),
     Unavailable(String),
 }
@@ -906,14 +906,14 @@ if ! probe_matches; then
 fi
 printf 'synced\n'"#;
 
-pub(super) fn cache_binary_path(directory: &Path) -> PathBuf {
+pub fn cache_binary_path(directory: &Path) -> PathBuf {
     directory.join(MBX_COPY_RELATIVE)
 }
 
 /// Copy the current compatible host executable into a cache directory that is
 /// already mounted read-write in its containers. A missing or old native mbx
 /// leaves any previous copy untouched.
-pub(super) fn sync_current_mbx_binary(
+pub fn sync_current_mbx_binary(
     host: &CacheHost,
     directory: &Path,
     executor: &impl CommandExecutor,
@@ -931,7 +931,7 @@ pub(super) fn sync_current_mbx_binary(
 /// Atomically refresh one cache copy from a version that has already been
 /// classified as compatible. Version and size avoid copying an unchanged
 /// multi-megabyte executable on every resume or reconciliation tick.
-pub(super) fn sync_mbx_binary_from_native(
+pub fn sync_mbx_binary_from_native(
     host: &CacheHost,
     native: &NativeMbx,
     directory: &Path,
@@ -995,7 +995,7 @@ pub(super) fn sync_mbx_binary_from_native(
 
 /// The available column of a `df -P` report (the third field of its data row).
 /// Callers decide the block size used by the report they requested.
-pub(super) fn available_bytes(report: &str) -> Option<u64> {
+pub fn available_bytes(report: &str) -> Option<u64> {
     let row = report
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -1045,7 +1045,7 @@ fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result
 }
 
 /// The local directories mbx uses for its cache and managed targets.
-pub(crate) fn local_storage_paths() -> Vec<PathBuf> {
+pub fn local_storage_paths() -> Vec<PathBuf> {
     let config_file = dirs::config_dir()
         .map(|directory| directory.join("mbx/config.toml"))
         .and_then(|path| std::fs::read_to_string(path).ok());
@@ -1250,7 +1250,7 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 /// Decide the build cache for one session and attach its mounts, returning the
 /// placement to record on the session. Resumes and moves resolve current
 /// machine policy instead of reviving a saved session budget.
-pub(super) fn prepare(
+pub fn prepare(
     target: &targets::TargetTemplate,
     session: &mj_core::state::SessionRecord,
     mounts: &mut Vec<targets::AdditionalMount>,
@@ -1331,7 +1331,7 @@ fn attach_mounts(
 
 /// Read the configuration on the host that actually owns this container.
 /// The named template may have been removed or reassigned since creation.
-pub(super) fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheHost> {
+pub fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheHost> {
     match target {
         targets::TargetLocator::LocalPodman { .. } | targets::TargetLocator::LocalDocker { .. } => {
             Some(CacheHost::Local)
@@ -1346,7 +1346,7 @@ pub(super) fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheH
 }
 
 /// Refresh a new-scheme session's copy from the host that owns its container.
-pub(super) fn sync_mbx_binary_for_container(
+pub fn sync_mbx_binary_for_container(
     target: &targets::TargetLocator,
     directory: &Path,
     executor: &impl CommandExecutor,
@@ -2146,7 +2146,7 @@ mod tests {
         assert_eq!(preview.stats, None);
     }
     fn session(container_workspace: Option<&str>) -> mj_core::state::SessionRecord {
-        let mut record = crate::controller::test_support::checkpoint_test_session("session-1");
+        let mut record = crate::database::test_fixtures::checkpoint_test_session("session-1");
         record.container_workspace = container_workspace.map(PathBuf::from);
         record
     }

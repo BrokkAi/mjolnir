@@ -39,7 +39,7 @@ pub enum CacheHost {
 /// A cache host's operating system, which decides which of its sessions can
 /// use what the host itself has installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HostPlatform {
+pub enum HostPlatform {
     /// Containers run on the host's own kernel, so they can mount its caches
     /// and run its mbx.
     Linux,
@@ -55,7 +55,7 @@ pub(super) enum HostPlatform {
 
 impl CacheHost {
     /// Ask the host itself, not the controller or a container on that host.
-    pub(super) fn platform(&self, executor: &impl CommandExecutor) -> Result<HostPlatform> {
+    pub fn platform(&self, executor: &impl CommandExecutor) -> Result<HostPlatform> {
         if self.ssh().is_none() && !cfg!(unix) {
             return Ok(HostPlatform::Windows);
         }
@@ -80,7 +80,7 @@ impl CacheHost {
         })
     }
 
-    pub(super) fn for_target(target: &targets::TargetTemplate) -> Option<Self> {
+    pub fn for_target(target: &targets::TargetTemplate) -> Option<Self> {
         match target {
             targets::TargetTemplate::LocalPodman(_)
             | targets::TargetTemplate::LocalDocker(_)
@@ -113,7 +113,7 @@ impl CacheHost {
     /// `for_target`, every target kind has one: a bare target's paths live on
     /// its machine, and an EC2 template's editable paths are this machine's,
     /// because no instance exists before a session starts.
-    pub(super) fn for_path_target(target: &mj_core::config::TargetTemplate) -> Result<Self> {
+    pub fn for_path_target(target: &mj_core::config::TargetTemplate) -> Result<Self> {
         match target {
             mj_core::config::TargetTemplate::LocalBare
             | mj_core::config::TargetTemplate::LocalPodman { .. }
@@ -130,7 +130,7 @@ impl CacheHost {
 
     /// The host that owns a path on a configured machine. An EC2 machine has
     /// no standing instance, so its editable paths are this machine's.
-    pub(super) fn for_path_machine(machine: &mj_core::config::Machine) -> Result<Self> {
+    pub fn for_path_machine(machine: &mj_core::config::Machine) -> Result<Self> {
         match machine {
             mj_core::config::Machine::Local { .. } | mj_core::config::Machine::AwsEc2 { .. } => {
                 Ok(Self::Local)
@@ -153,7 +153,7 @@ impl CacheHost {
 
     /// The login home on this host, cached for ten minutes per host. Only a
     /// successful answer is cached; a host that was unreachable is retried.
-    pub(super) fn home(&self, executor: &impl CommandExecutor) -> Result<PathBuf> {
+    pub fn home(&self, executor: &impl CommandExecutor) -> Result<PathBuf> {
         let Self::Ssh(_) = self else {
             return mj_core::path_input::user_home()
                 .context("Cannot expand ~: the home directory is unavailable.");
@@ -191,7 +191,7 @@ impl CacheHost {
     }
 
     /// The SSH connection to this host, or `None` when it is this machine.
-    pub(super) fn ssh(&self) -> Option<&SshTarget> {
+    pub fn ssh(&self) -> Option<&SshTarget> {
         match self {
             Self::Local => None,
             Self::Ssh(ssh) => Some(ssh),
@@ -207,7 +207,7 @@ impl CacheHost {
         }
     }
 
-    pub(super) fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
+    pub fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
         let command = match self {
             Self::Local => CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned()),
             Self::Ssh(ssh) => targets::ssh_command_owned(SshTrafficClass::Control, ssh, remote),
@@ -217,7 +217,7 @@ impl CacheHost {
 
     /// Run `script` through `sh -c` on the host. `label` becomes `$0`, and
     /// `arguments` become `$1` onwards.
-    pub(super) fn shell_command(
+    pub fn shell_command(
         &self,
         script: &str,
         label: &str,

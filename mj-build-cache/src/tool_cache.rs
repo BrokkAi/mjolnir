@@ -9,7 +9,7 @@ use mj_core::state::ToolCachePlacement;
 use super::cache_host::{CacheHost, HostPlatform};
 use crate::targets::{self, CommandExecutor};
 
-pub(super) fn prepare(
+pub fn prepare(
     config: &Config,
     template_id: &str,
     mounts: &mut Vec<targets::AdditionalMount>,

@@ -646,6 +646,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-build-cache"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "brokk-mj-core",
+ "brokk-mj-import",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "dirs 6.0.0",
+ "flate2",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "brokk-mj-build-id"
 version = "2.71.0"
 dependencies = [
@@ -742,6 +765,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "brokk-mj-accounts",
+ "brokk-mj-build-cache",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
@@ -752,7 +776,6 @@ dependencies = [
  "brokk-mj-transcript",
  "brokk-mj-worker-runtime",
  "chrono",
- "dirs 6.0.0",
  "flate2",
  "futures",
  "getrandom 0.3.4",

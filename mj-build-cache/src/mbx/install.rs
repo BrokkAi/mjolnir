@@ -171,7 +171,7 @@ enum InstallDestination {
 
 /// The login-profile change shown before and after installing mbx.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MbxProfileDetails {
+pub struct MbxProfileDetails {
     pub file: String,
     pub warning: Option<String>,
     pub manual_path_line: Option<String>,
@@ -192,7 +192,7 @@ pub fn install_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
     install_candidate_kind(preview)
 }
 
-pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
+pub fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
     // The pinned release is a static Linux executable.
     if matches!(
         &preview.off_reason,
@@ -561,7 +561,7 @@ fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) 
     checked(executor.execute(&command)?, &command).map(|_| ())
 }
 
-pub(super) fn login_profile_details(
+pub fn login_profile_details(
     host: &CacheHost,
     executor: &impl CommandExecutor,
 ) -> Result<Option<MbxProfileDetails>> {
@@ -1304,12 +1304,10 @@ mod tests {
         const CHILD: &str = "MJ_MBX_OFFLINE_CACHE_TEST";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "verified_download_cache_survives_staging_cleanup_and_supports_offline_retry",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "verified_download_cache_survives_staging_cleanup_and_supports_offline_retry",
+            ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "mbx-offline-cache")
             .isolated_store(root.path())

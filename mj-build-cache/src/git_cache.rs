@@ -61,19 +61,19 @@ impl CacheHost {
             .command(remote, "find live container Git cache snapshots")
             .stage(ProvisionStage::Cloning);
         let output = checked(executor.execute(&command)?, &command)?;
-        super::recovery_scan::managed_sessions_from_container_json(&output.stdout)
+        targets::managed_sessions_from_container_json(&output.stdout)
             .map(|sessions| sessions.into_iter().map(|(session, _)| session).collect())
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PreparedCloneCache {
+pub struct PreparedCloneCache {
     host: CacheHost,
     session_root: PathBuf,
 }
 
 impl PreparedCloneCache {
-    pub(super) fn cleanup(&self, executor: &impl CommandExecutor) -> Result<()> {
+    pub fn cleanup(&self, executor: &impl CommandExecutor) -> Result<()> {
         cleanup_session_root(&self.host, &self.session_root, executor)
     }
 }
@@ -85,7 +85,7 @@ impl PreparedCloneCache {
 /// A repository with a history cutoff gets a Git bundle of the cutoff commits
 /// and their ancestors instead of a copy of the mirror, so nothing later is
 /// mounted into its container.
-pub(super) fn prepare(
+pub fn prepare(
     target: &targets::TargetTemplate,
     session_id: &str,
     bundle: &mut ProjectBundleSpec,

@@ -176,7 +176,7 @@ enum Store {
 
 /// The build state of workspaces Mjolnir has removed, and where it lives.
 #[derive(Debug, Clone)]
-pub(in crate::controller) struct BuildStateRelease {
+pub struct BuildStateRelease {
     host: CacheHost,
     store: Store,
     preferred_mbx: Option<PathBuf>,
@@ -193,7 +193,7 @@ pub(in crate::controller) struct BuildStateRelease {
 
 impl BuildStateRelease {
     /// A managed clone or linked worktree, on this machine or an SSH host.
-    pub(in crate::controller) fn managed_checkout(ssh: Option<SshTarget>, root: &Path) -> Self {
+    pub fn managed_checkout(ssh: Option<SshTarget>, root: &Path) -> Self {
         Self {
             host: ssh.map_or(CacheHost::Local, CacheHost::Ssh),
             store: Store::Native,
@@ -209,7 +209,7 @@ impl BuildStateRelease {
     /// cache. `None` for a target another session owns, one that never had
     /// build state Mjolnir can name, and a container that ran without the cache.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(in crate::controller) fn for_target(
+    pub fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,
         config: &Config,
@@ -222,7 +222,7 @@ impl BuildStateRelease {
         )
     }
 
-    pub(in crate::controller) fn for_environment(
+    pub fn for_environment(
         session_id: &str,
         placement: &crate::database::EnvironmentPlacement,
         backend: &targets::TargetLocator,
@@ -286,7 +286,7 @@ impl BuildStateRelease {
     /// so the target a Move retires can hold the same paths as the one the
     /// session continues in. Any path under the live root is kept, whether or
     /// not the live target has the build cache.
-    pub(in crate::controller) fn excluding(
+    pub fn excluding(
         mut self,
         live: Option<(&SessionRecord, &targets::TargetLocator)>,
     ) -> Option<Self> {
@@ -308,7 +308,7 @@ impl BuildStateRelease {
     /// Release the target root, or each known workspace for older mbx. Never
     /// fails: a release that does not complete is logged, shown to the person,
     /// and recorded for `mj doctor`.
-    pub(in crate::controller) fn run(&self, executor: &impl CommandExecutor) {
+    pub fn run(&self, executor: &impl CommandExecutor) {
         if !enabled() {
             return;
         }
@@ -610,7 +610,7 @@ fn enabled() -> bool {
 
 /// Turn releases on for the current test thread until the guard drops.
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::controller) fn enable_for_test() -> impl Drop {
+pub fn enable_for_test() -> impl Drop {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -624,7 +624,7 @@ pub(in crate::controller) fn enable_for_test() -> impl Drop {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::controller::mbx::MBX_VERSION;
+    use crate::mbx::MBX_VERSION;
     use crate::targets::{CancellableProcessExecutor, ProcessExecutor};
 
     /// A directory with a test-only `mbx` that logs each `clean` or rejects
@@ -1155,7 +1155,7 @@ mod tests {
         id: &str,
         backend_host: Option<&str>,
     ) -> (SessionRecord, targets::TargetLocator) {
-        let mut session = crate::controller::test_support::checkpoint_test_session(id);
+        let mut session = crate::database::test_fixtures::checkpoint_test_session(id);
         session.container_workspace = Some(mj_core::targets::new_container_workspace(id).unwrap());
         session.build_cache = Some(mj_core::state::SessionBuildCache {
             host: backend_host.map_or_else(|| "local".to_owned(), |host| format!("ssh:{host}")),
@@ -1271,7 +1271,7 @@ mod tests {
     fn an_ssh_bare_bundle_uses_its_workspace_as_the_release_root() {
         let id = "0123456789abcdef0123456789abcdef";
         let config = bundle_config(&["app", "nested/lib"]);
-        let session = crate::controller::test_support::checkpoint_test_session(id);
+        let session = crate::database::test_fixtures::checkpoint_test_session(id);
         let backend = targets::TargetLocator::SshBare {
             ssh: SshTarget {
                 destination: "builder.test".into(),
@@ -1300,7 +1300,7 @@ mod tests {
     fn a_workspace_that_is_not_the_sessions_own_has_no_release_root() {
         let id = "0123456789abcdef0123456789abcdef";
         let config = bundle_config(&["app"]);
-        let session = crate::controller::test_support::checkpoint_test_session(id);
+        let session = crate::database::test_fixtures::checkpoint_test_session(id);
         let shared_bare = targets::TargetLocator::SshBare {
             ssh: SshTarget {
                 destination: "builder.test".into(),
@@ -1350,7 +1350,7 @@ mod tests {
         }
         assert!(BuildStateRelease::for_target(&session, &borrowed_backend, &config).is_none());
 
-        let mut unmanaged = crate::controller::test_support::checkpoint_test_session(id);
+        let mut unmanaged = crate::database::test_fixtures::checkpoint_test_session(id);
         unmanaged.project_directory = Some("/home/user/project".into());
         let bare_backend = targets::TargetLocator::SshBare {
             ssh: SshTarget {
