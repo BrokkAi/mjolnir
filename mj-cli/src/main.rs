@@ -58,9 +58,9 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use mj_controller::controller::update::StartupUpdateNotice;
-use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
+use mj_setup::setup::run_setup_command;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -2670,10 +2670,10 @@ fn setup(args: SetupArgs) -> Result<()> {
     match args.command {
         Some(SetupCommand::Instructions { platform }) => {
             let platform = match platform {
-                SetupPlatform::Linux => mj_controller::doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_controller::doctor::InstructionsPlatform::Macos,
+                SetupPlatform::Linux => mj_setup::doctor::InstructionsPlatform::Linux,
+                SetupPlatform::Macos => mj_setup::doctor::InstructionsPlatform::Macos,
             };
-            print!("{}", mj_controller::doctor::setup_instructions(platform));
+            print!("{}", mj_setup::doctor::setup_instructions(platform));
             Ok(())
         }
         None => run_setup_command(&config_path()),
@@ -2687,9 +2687,9 @@ const CATALOG_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The catalogues each enabled profile advertises, read from a daemon that is
 /// already running. Doctor never starts one: it is a diagnostic, and the
 /// answer "not checked" is accurate when nothing has discovered the models.
-async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doctor::Catalogs {
-    use mj_controller::doctor::Catalogs;
-    let ids = mj_controller::doctor::catalog_profile_ids(config);
+async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_setup::doctor::Catalogs {
+    use mj_setup::doctor::Catalogs;
+    let ids = mj_setup::doctor::catalog_profile_ids(config);
     if ids.is_empty() {
         return Catalogs::Read(Default::default());
     }
@@ -2716,21 +2716,20 @@ async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doc
 }
 
 async fn doctor(args: DoctorArgs) -> Result<()> {
-    let mut checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
-        smoke: args.smoke,
-    });
+    let mut checks =
+        mj_setup::doctor::run_current(mj_setup::doctor::DoctorOptions { smoke: args.smoke });
     // An unreadable configuration is already reported by the checks above.
     if let Ok(config) = mj_core::config::Config::load_from(&mj_core::config::config_path()) {
         let catalogs = doctor_catalogs(&config).await;
-        checks.extend(mj_controller::doctor::catalog_checks(&config, &catalogs));
+        checks.extend(mj_setup::doctor::catalog_checks(&config, &catalogs));
     }
     if let Ok(client) = api_client::ApiClient::connect_running().await {
         match client.profile_login_errors().await {
-            Ok(failures) => checks.extend(mj_controller::doctor::login_checks(&failures)),
-            Err(error) => checks.push(mj_controller::doctor::DoctorCheck {
+            Ok(failures) => checks.extend(mj_setup::doctor::login_checks(&failures)),
+            Err(error) => checks.push(mj_setup::doctor::DoctorCheck {
                 id: "harness.logins".into(),
                 title: "Profile login status".into(),
-                status: mj_controller::doctor::CheckStatus::Warning,
+                status: mj_setup::doctor::CheckStatus::Warning,
                 detail: format!(
                     "The running daemon did not report profile login status: {error:#}"
                 ),
@@ -2741,9 +2740,9 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
-        mj_controller::doctor::render_human(&checks, &mut io::stdout())?;
+        mj_setup::doctor::render_human(&checks, &mut io::stdout())?;
     }
-    if mj_controller::doctor::all_ready(&checks) {
+    if mj_setup::doctor::all_ready(&checks) {
         Ok(())
     } else {
         Err(doctor_failure(args.json))

@@ -43,8 +43,7 @@ pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 // a poor trade.
 const SMOKE_TEST_IMAGE: &str = "ubuntu:24.04";
 /// The official signed package Apple publishes for its container runtime.
-pub(crate) const APPLE_CONTAINER_INSTALL_URL: &str =
-    "https://github.com/apple/container#initial-install";
+pub const APPLE_CONTAINER_INSTALL_URL: &str = "https://github.com/apple/container#initial-install";
 
 /// How long a single prerequisite probe may take before doctor reports it as a
 /// fixable check instead of waiting for it.
@@ -115,7 +114,7 @@ impl DoctorCheck {
         }
     }
 
-    pub(crate) fn fixable(
+    pub fn fixable(
         id: impl Into<String>,
         title: impl Into<String>,
         detail: impl Into<String>,
@@ -1881,7 +1880,7 @@ fn docker_image_check(
 ///
 /// Both SSH-backed checks run this first: an unreachable host makes every
 /// later probe fail with a misleading message.
-pub(crate) enum SshConnectivity {
+pub enum SshConnectivity {
     Reachable,
     Failed {
         detail: String,
@@ -1894,7 +1893,7 @@ pub(crate) enum SshConnectivity {
 ///
 /// Hel never generates keys, runs `ssh-copy-id`, or accepts a host key on the
 /// user's behalf; it only says exactly which command would fix the failure.
-pub(crate) fn ssh_connectivity(
+pub fn ssh_connectivity(
     ssh: &RuntimeSshTarget,
     executor: &impl CommandExecutor,
 ) -> SshConnectivity {
@@ -2130,7 +2129,7 @@ fn ssh_bare_check(
 }
 
 /// What a failed remote Podman preflight on `destination` says, and the fix.
-pub(crate) fn ssh_podman_failure(destination: &str, error: &anyhow::Error) -> (String, String) {
+pub fn ssh_podman_failure(destination: &str, error: &anyhow::Error) -> (String, String) {
     let remediation = match podman_remediation_match(error) {
         Some(remediation) => {
             format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
@@ -2143,7 +2142,7 @@ pub(crate) fn ssh_podman_failure(destination: &str, error: &anyhow::Error) -> (S
 }
 
 /// The fix for a failed remote Docker preflight on `destination`.
-pub(crate) fn ssh_docker_failure_remediation(destination: &str) -> String {
+pub fn ssh_docker_failure_remediation(destination: &str) -> String {
     format!(
         "Verify `ssh {destination}` succeeds noninteractively from this host, then install and start Docker Engine there; make sure `docker info` succeeds for the configured SSH user."
     )
@@ -3805,7 +3804,7 @@ mod tests;
 
 /// What one repository still holds from a Mjolnir review capture.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ReviewResidue {
+pub struct ReviewResidue {
     /// Durable `refs/mj/*` refs and legacy `refs/hel/*` refs in the repository.
     pub refs: Vec<String>,
     /// Scratch index files left in the Git directory by an interrupted capture.
@@ -3826,7 +3825,7 @@ impl ReviewResidue {
 /// under `refs/mj/worktrees/` (formerly `refs/hel/worktrees/`). Review
 /// residue is the user's to remove, so this only reads. The managed base is
 /// retained state and must stay rooted for Git GC.
-pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
+pub fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
     if !git_dir.exists() {
@@ -3963,7 +3962,7 @@ fn review_residue_repositories_for_state(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn review_residue_repositories(
+pub fn review_residue_repositories(
     configured: impl IntoIterator<Item = PathBuf>,
     sessions: &[&mj_core::state::SessionRecord],
 ) -> Vec<PathBuf> {

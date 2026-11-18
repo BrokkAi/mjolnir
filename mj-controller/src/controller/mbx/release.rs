@@ -47,7 +47,7 @@ const FAILURES_MAX_BYTES: u64 = 256 * 1024;
 
 /// How long `mj doctor` keeps reporting a failed release. mbx's own age limit
 /// reclaims the output after 30 days by default.
-pub(crate) const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
+pub const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
 /// its configuration home, `$4` the preferred in-cache mbx path, `$5` the
@@ -566,14 +566,14 @@ fn cleanup_was_interrupted(error: &anyhow::Error) -> bool {
 
 /// A release that failed recently, for `mj doctor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReleaseFailure {
+pub struct ReleaseFailure {
     pub host: String,
     pub error: String,
     pub remediation: String,
 }
 
 /// Releases that failed within [`FAILURE_REPORT_SECS`], newest last.
-pub(crate) fn recent_release_failures() -> Vec<ReleaseFailure> {
+pub fn recent_release_failures() -> Vec<ReleaseFailure> {
     let Ok(text) = std::fs::read_to_string(failures_path()) else {
         return Vec::new();
     };

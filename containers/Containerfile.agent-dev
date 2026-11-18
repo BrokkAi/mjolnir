@@ -42,6 +42,7 @@ COPY mj-accounts/ mj-accounts/
 COPY mj-import/ mj-import/
 COPY mj-github-relevance/ mj-github-relevance/
 COPY mj-controller/ mj-controller/
+COPY mj-setup/ mj-setup/
 COPY mj-server/ mj-server/
 COPY mj-daemon/ mj-daemon/
 COPY mj-chat/ mj-chat/

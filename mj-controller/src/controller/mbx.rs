@@ -427,13 +427,13 @@ pub(super) fn prepare_session_configuration(
 }
 
 /// Native mbx compatibility for a host used by configured container targets.
-pub(crate) struct DoctorHostMbx {
+pub struct DoctorHostMbx {
     pub host: String,
     pub targets: Vec<String>,
     pub status: DoctorHostMbxStatus,
 }
 
-pub(crate) enum DoctorHostMbxStatus {
+pub enum DoctorHostMbxStatus {
     Unsupported(String),
     Absent,
     Compatible(String),
@@ -477,10 +477,7 @@ fn cache_unavailable_reason(status: &NativeMbxStatus) -> String {
 
 /// Check each relevant host once. The cache is optional, so disabled caches
 /// and hosts with no Podman or Docker target need no compatibility check.
-pub(crate) fn doctor_host_mbx(
-    config: &Config,
-    executor: &impl CommandExecutor,
-) -> Vec<DoctorHostMbx> {
+pub fn doctor_host_mbx(config: &Config, executor: &impl CommandExecutor) -> Vec<DoctorHostMbx> {
     let mut hosts: std::collections::BTreeMap<String, (CacheHost, Vec<String>)> =
         std::collections::BTreeMap::new();
     let mut checks = Vec::new();

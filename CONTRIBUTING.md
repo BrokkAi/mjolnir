@@ -150,6 +150,10 @@ it or introduce a dependency between sibling branches.
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client
   branches.
+- `brokk-mj-setup` (`mj-setup/`, library `mj_setup`) is what Mjolnir finds on
+  a machine and what it can say is wrong with it: first-run discovery
+  (`setup`) and the doctor's checks (`doctor`). It sits above the controller,
+  which it inspects and which does not use it.
 - `brokk-mj-server` (`mj-server/`, library `mj_server`) is the daemon's HTTP
   API and web viewer server: routes, request and response types,
   authentication, and the embedded viewer assets. It builds on the controller

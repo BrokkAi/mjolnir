@@ -92,7 +92,7 @@ pub(super) async fn execute(
                 Ok(DaemonReply::CheckpointArchiveSizes(sizes))
             }
             DaemonAction::DiscoverSetup { scope, machines } => {
-                use mj_controller::setup::{self, DEFAULT_IMAGE};
+                use mj_setup::setup::{self, DEFAULT_IMAGE};
                 let mut config = Config::default();
                 let mut rejected_runtimes = Vec::new();
                 let mut machine_probes = Vec::new();
@@ -143,7 +143,7 @@ pub(super) async fn execute(
                     .map(|(id, profile)| {
                         (
                             id.clone(),
-                            mj_controller::setup::profile_presence(id, profile, &executor).err(),
+                            mj_setup::setup::profile_presence(id, profile, &executor).err(),
                         )
                     })
                     .collect();
@@ -158,7 +158,7 @@ pub(super) async fn execute(
                 )))
             }
             DaemonAction::CheckAvailability => {
-                use mj_controller::setup::{self, DEFAULT_IMAGE};
+                use mj_setup::setup::{self, DEFAULT_IMAGE};
                 // Only quitting stops the check. A host that runs out the
                 // deadline fails its own probe; every other answer still lands.
 
@@ -282,9 +282,9 @@ pub(super) async fn execute(
 }
 
 fn machine_runtime_probe(
-    probe: mj_controller::setup::MachineProbe,
+    probe: mj_setup::setup::MachineProbe,
 ) -> mj_client::availability::MachineRuntimeProbe {
-    use mj_controller::setup::MachineProbeOutcome;
+    use mj_setup::setup::MachineProbeOutcome;
     let finding = match &probe.outcome {
         MachineProbeOutcome::Answered(_) => mj_client::availability::MachineFinding::Answered {
             runtimes: probe.runtimes(),

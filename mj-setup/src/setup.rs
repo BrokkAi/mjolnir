@@ -14,15 +14,15 @@ use mj_core::config::{
 };
 use mj_core::remote_git::Shorthand;
 
-pub(crate) use crate::harness_auth::*;
-pub(crate) use crate::import::github_repository;
+pub use crate::harness_auth::*;
+pub use crate::import::github_repository;
 pub use crate::import::{GithubRepository, github_repository_from_origin};
 
 mod availability;
 pub use availability::{AvailabilityReport, check_availability, profile_presence};
 mod machines;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use machines::machine_probe_fixture;
+pub use machines::machine_probe_fixture;
 pub use machines::{
     MachineProbe, MachineProbeOutcome, add_machine_runtimes, probe_machine, probe_machines,
 };
@@ -298,10 +298,7 @@ fn discover_installed_harnesses(
 /// when the probe could not run (cancelled, timed out). Discovery offers a
 /// profile for an installed command before its first login, and a
 /// configured profile without a home is still present while it does.
-pub(crate) fn harness_cli_installed(
-    kind: HarnessKind,
-    executor: &impl CommandExecutor,
-) -> Option<bool> {
+pub fn harness_cli_installed(kind: HarnessKind, executor: &impl CommandExecutor) -> Option<bool> {
     let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
         .purpose("detect installed harness before first login");
     match executor.execute(&probe) {
@@ -317,7 +314,7 @@ pub(crate) fn harness_cli_installed(
     }
 }
 
-pub(crate) fn discover_harness_homes_with_executor(
+pub fn discover_harness_homes_with_executor(
     home: Option<&Path>,
     overrides: impl IntoIterator<Item = (HarnessKind, PathBuf)>,
     executor: &impl CommandExecutor,

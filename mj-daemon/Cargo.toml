@@ -53,6 +53,7 @@ tracing.workspace = true
 url.workspace = true
 anvil-client.workspace = true
 mj-controller.workspace = true
+mj-setup.workspace = true
 mj-server.workspace = true
 mj-github-relevance.workspace = true
 

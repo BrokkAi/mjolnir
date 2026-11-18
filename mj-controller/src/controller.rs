@@ -99,8 +99,8 @@ pub use github_app::{
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
-pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
-pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
+pub use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
+pub use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
 pub use mbx::{MBX_VERSION, preview_build_cache};
 pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,

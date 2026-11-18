@@ -4186,9 +4186,9 @@ mod tests {
         let mut output = String::from("mj sessions --session s1\n");
         output.push_str(&session_report_lines(&session, 0).join("\n"));
         output.push_str("\n\nmj doctor\n");
-        let checks = mj_controller::doctor::login_checks(&[("claude".into(), failure)].into());
+        let checks = mj_setup::doctor::login_checks(&[("claude".into(), failure)].into());
         let mut doctor = Vec::new();
-        mj_controller::doctor::render_human(&checks, &mut doctor).unwrap();
+        mj_setup::doctor::render_human(&checks, &mut doctor).unwrap();
         output.push_str(&String::from_utf8(doctor).unwrap());
         output.push_str("\nSession JSON login status: ");
         output

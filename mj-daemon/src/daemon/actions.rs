@@ -79,7 +79,7 @@ pub(super) async fn handle_action(
         DaemonAction::RunFirstRunSetup => {
             let report = blocking(|| {
                 let executor = mj_controller::targets::ProcessExecutor;
-                let report = mj_controller::setup::run_setup(
+                let report = mj_setup::setup::run_setup(
                     &mj_core::config::config_path(),
                     &mj_core::config::data_dir(),
                     false,
@@ -102,14 +102,14 @@ pub(super) async fn handle_action(
             // Not `blocking`: the doctor only reads, so it takes no upgrade
             // admission, and a handoff abandons it instead of waiting for it.
             let errors = tokio::task::spawn_blocking(|| {
-                let executor = mj_controller::doctor::probe_executor();
-                let checks = mj_controller::doctor::run_with_config_path(
+                let executor = mj_setup::doctor::probe_executor();
+                let checks = mj_setup::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
                     &executor,
-                    mj_controller::doctor::current_apple_platform(&executor),
-                    mj_controller::doctor::DoctorOptions { smoke: false },
+                    mj_setup::doctor::current_apple_platform(&executor),
+                    mj_setup::doctor::DoctorOptions { smoke: false },
                 );
-                mj_controller::setup::actionable_errors(&checks)
+                mj_setup::setup::actionable_errors(&checks)
             })
             .await
             .context("daemon doctor task panicked")?;

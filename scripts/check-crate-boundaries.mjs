@@ -21,11 +21,12 @@ const allowed = {
   'brokk-mj-github-relevance': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-targets'],
   'brokk-mj-store': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets'],
   'brokk-mj-controller': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import'],
+  'brokk-mj-setup': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-targets', 'brokk-mj-store', 'brokk-mj-accounts', 'brokk-mj-import', 'brokk-mj-controller'],
   'brokk-mj-server': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-github-relevance'],
-  'brokk-mj-daemon': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-server', 'brokk-mj-github-relevance'],
+  'brokk-mj-daemon': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-server', 'brokk-mj-github-relevance', 'brokk-mj-setup'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],
-  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-daemon', 'brokk-mj-chat', 'brokk-mj-tui', 'brokk-mj-build-id'],
+  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-daemon', 'brokk-mj-chat', 'brokk-mj-tui', 'brokk-mj-build-id', 'brokk-mj-setup'],
   'brokk-mj-voice-worker': [],
 };
 const packages = new Set(metadata.packages.map(p => p.name));

@@ -26,6 +26,7 @@ mj-build-id.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-controller.workspace = true
+mj-setup.workspace = true
 mj-daemon.workspace = true
 mj-chat.workspace = true
 mj-tui.workspace = true

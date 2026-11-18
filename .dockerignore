@@ -25,6 +25,7 @@
 !mj-import/
 !mj-github-relevance/
 !mj-controller/
+!mj-setup/
 !mj-server/
 !mj-daemon/
 !mj-chat/
