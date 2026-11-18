@@ -188,12 +188,35 @@ def reviewer_runtime(child, carrier):
     info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]]))[0]
     image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]]))[0]
     version = subprocess.check_output([str(MJX), "--version"]).decode().strip()
+    # The installed CLI can change during a run; the container's live processes name the worker and
+    # harness binaries actually serving this review.
+    processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
+                               text=True, timeout=60).stdout.splitlines()
     return {"container": ids[0], "container_source": source, "image": info["Image"],
             "image_digest": image.get("Digest"),
             "repo_digests": image.get("RepoDigests"), "image_labels": (info.get("Config") or {}).get("Labels"),
-            "mj_version": version, "observed_ns": time.time_ns(),
+            "mj_cli_version_at_observation": version, "processes": processes, "observed_ns": time.time_ns(),
             "mounts": [{"source": m.get("Source"), "destination": m.get("Destination"), "rw": m.get("RW")}
                        for m in info.get("Mounts") or []]}
+
+
+# --same-image: every job of this run must use the image the first job recorded, checked before
+# its review starts, so a moving image tag cannot split a paired comparison (ON/AF amendment).
+IMAGE_PIN = None
+IMAGE_PIN_LOCK = threading.Lock()
+
+
+def check_image_pin(place):
+    if IMAGE_PIN is None:
+        return
+    with IMAGE_PIN_LOCK:
+        if IMAGE_PIN.exists():
+            pinned = json.loads(IMAGE_PIN.read_text())["image"]
+            if place["image"] != pinned:
+                raise RuntimeError(f"carrier image {place['image']} differs from the run's pinned image {pinned}; "
+                                   "review not started")
+        else:
+            save(IMAGE_PIN, {"image": place["image"], "time_ns": time.time_ns()})
 
 
 def record_runtimes(d, children):
@@ -431,6 +454,7 @@ def run_job(job, gate):
         save(d / "placement.json", place)
         before = inventory(place, "pin", bug["base_commit"])
         save(d / "pre-inventory.json", before)
+    check_image_pin(place)
     assert list(before["session_start"].values()) == [bug["base_commit"]], before["session_start"]
     assert not before["remotes"] and not before["alternates"] and not before["status"], before
     assert before["base_tree"] != before["head_tree"]
@@ -602,9 +626,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--jobs", required=True)
     p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--same-image", help="path of a pin file: every job must use the first job's image")
     p.add_argument("--stop-on-failure", action="store_true",
                    help="stop admitting new jobs after a failed, held, or recovery-needed job")
     a = p.parse_args()
+    global IMAGE_PIN
+    IMAGE_PIN = pathlib.Path(a.same_image) if a.same_image else None
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
     # Serialize session creation and startup; reviews themselves run concurrently.
     gate = threading.Semaphore(2)
