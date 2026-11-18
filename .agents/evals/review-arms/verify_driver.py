@@ -274,6 +274,11 @@ def run_unit(batch_path, judge=None):
     if rec_path.exists():
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
+        # A session set up for another model or profile is not this invocation's unit to resume.
+        recorded_model = (rec.get("config") or {}).get("model")
+        if (recorded_model is not None and recorded_model != a.model) or rec.get("profile") not in PROFILES:
+            raise RuntimeError(f"unit {tag} has a session for {rec.get('profile')}/{recorded_model}, not "
+                               f"{','.join(PROFILES)}/{a.model}; move sessions/batch-{tag}.json aside to rerun it")
     else:
         profile = pick_profile()
         if os.environ.get("REVIEW_ARMS_QUOTA_FLOOR"):
