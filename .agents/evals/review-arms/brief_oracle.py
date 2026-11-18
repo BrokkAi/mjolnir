@@ -999,9 +999,17 @@ def noleak_gate_collect(n):
                             "why": "; ".join(f"judge {c['judge']}: {c.get('why')}" for c in flagged) or "clean"}
         results[bug]["verdicts_sha256"] = verdicts_fingerprint(r)
     record = {"round": n, "results": results}
-    if out_path.exists() and json.loads(out_path.read_text()) != record:
-        raise SystemExit(f"{out_path} holds different gate results")
-    save(out_path, record)
+    if out_path.exists():
+        frozen = json.loads(out_path.read_text())
+        # A record frozen before the `answers` field existed is compared without it; it is never
+        # rewritten, so the frozen bytes stay as collected.
+        strip = lambda rec: {"round": rec["round"], "results": {b: {k: v for k, v in x.items() if k != "answers"}
+                                                               for b, x in rec["results"].items()}}
+        legacy = not any("answers" in x for x in frozen["results"].values())
+        if (strip(frozen) != strip(record)) if legacy else (frozen != record):
+            raise SystemExit(f"{out_path} holds different gate results")
+    else:
+        save(out_path, record)
     print(json.dumps({"round": n, "pass": sorted(b for b, x in results.items() if x["pass"]),
                       "fail": {b: x["why"][:120] for b, x in results.items() if not x["pass"]}}))
 
