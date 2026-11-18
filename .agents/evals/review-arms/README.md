@@ -1152,10 +1152,11 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
 - The rewording replaced explicit absence and contrast clauses with literal
   descriptions in 13 of 17 briefs, so some relations reached reviewers less
   explicitly; the blind fact checker still found the decisive fact in each.
-- Excluding the eight brief-construction deviations (five edits that dropped
-  a relation, three inferred fact checks) leaves 9 diffs at +44.4 (+18.5 to
-  +70.4), still Facts carry. A stricter fact-check standard leaves 7 or
-  fewer diffs, below the minimum, so a classification is not established.
+- Under the registered construction rules applied strictly (no relation
+  dropped, the fact stated in the quoted item), 7 diffs remain at +47.6
+  (+14.3 to +81.0), below the 8-diff minimum, so a classification is not
+  established. A lenient reading leaves 9 diffs at +44.4 (+18.5 to +70.4),
+  Facts carry.
 - Unchanged with the hand-check assessor's labels (ON − AF +41.2). Recorded
   new spend is $18.81 or more at API-equivalent rates. It shows that
   supplying the whole neutral brief lifts reviewers, not which of its
@@ -1167,4 +1168,4 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
   whose edits dropped a stated relation leaves 8 or 9 diffs, where the
   classification turns on single diffs: Inconclusive at 9 (+18.5, 0.0 to
   +37.0) and Facts carry at 8 (+20.8, +4.2 to +41.7). Removing every
-  documented concern together leaves 5 diffs, too few to classify.
+  documented concern together leaves 2 diffs, too few to classify.
