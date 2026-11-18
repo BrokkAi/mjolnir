@@ -1,4 +1,7 @@
 use super::*;
+pub(crate) use crate::database::api_followup_steps;
+#[cfg(test)]
+use crate::database::startup_step_id;
 
 #[derive(Debug)]
 pub(super) struct StartupRejected(pub String);
@@ -10,14 +13,6 @@ impl std::fmt::Display for StartupRejected {
 }
 
 impl std::error::Error for StartupRejected {}
-
-/// One startup step's durable command id. The worker relay accepts only ASCII
-/// alphanumerics, `-` and `_` in a command id, so the step key is joined with
-/// `-`, never `:`: a rejected id leaves `mj new --model` and every spawned
-/// child waiting forever for a step the worker will never admit.
-pub(crate) fn startup_step_id(group_id: &str, key: &str) -> String {
-    format!("{group_id}-{key}")
-}
 
 impl RuntimeState {
     pub(crate) async fn queue_api_followup(
@@ -126,42 +121,6 @@ impl RuntimeState {
         )
         .await
     }
-}
-
-pub(crate) fn api_followup_steps(
-    group_id: &str,
-    followup: crate::server::api::StartFollowup,
-) -> Vec<(String, StartupStep)> {
-    let mut steps = Vec::new();
-    for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
-        if let Some(value) = value {
-            steps.push((
-                startup_step_id(group_id, key),
-                StartupStep::Configure {
-                    key: key.to_owned(),
-                    value,
-                    optional: false,
-                },
-            ));
-        }
-    }
-    if followup.fast_mode {
-        steps.push((
-            startup_step_id(group_id, "fast-mode"),
-            StartupStep::Configure {
-                key: "fast-mode".to_owned(),
-                value: "on".to_owned(),
-                optional: true,
-            },
-        ));
-    }
-    if let Some(text) = followup.prompt {
-        steps.push((
-            startup_step_id(group_id, "prompt"),
-            StartupStep::ApiPrompt { text },
-        ));
-    }
-    steps
 }
 
 pub(crate) async fn configure_startup(

@@ -90,6 +90,7 @@ pub use mounts::*;
 mod turn_reviews;
 pub use turn_reviews::*;
 mod startup;
+pub use startup::StartFollowup;
 pub(crate) use startup::*;
 mod delegation;
 pub(crate) use delegation::*;

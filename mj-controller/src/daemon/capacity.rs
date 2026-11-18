@@ -915,9 +915,7 @@ mod tests {
         let state = crate::daemon::tests::test_runtime_state_loading_the_store();
         // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
         state.profile_catalog.get_or_init(|| {
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            )
+            crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
         });
         let target_ids = vec!["podman".into(), "apple".into()];
         let target = crate::targets::DeploymentCapacityTarget {

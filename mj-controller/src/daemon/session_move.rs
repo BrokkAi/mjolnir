@@ -1047,9 +1047,7 @@ impl RuntimeState {
             Controller::load,
         ));
         state.profile_catalog.get_or_init(|| {
-            crate::server_runtime::profile_catalog::ProfileCatalog::new(
-                tokio_util::sync::CancellationToken::new(),
-            )
+            crate::profile_catalog::ProfileCatalog::new(tokio_util::sync::CancellationToken::new())
         });
         state
     }

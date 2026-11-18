@@ -248,8 +248,7 @@ impl HostState {
         }
         // Startup owns the relay command ID; driver role keys only identify
         // logical review work and are not the prompt the child answered.
-        let command_id =
-            crate::daemon::startup_followup::startup_step_id(&registration.request_key, "prompt");
+        let command_id = crate::database::startup_step_id(&registration.request_key, "prompt");
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -536,10 +535,8 @@ impl HostState {
                     .registrations
                     .iter()
                     .find(|item| item.child_session_id.as_deref() == Some(child))?;
-                let command_id = crate::daemon::startup_followup::startup_step_id(
-                    &registration.request_key,
-                    "prompt",
-                );
+                let command_id =
+                    crate::database::startup_step_id(&registration.request_key, "prompt");
                 Some((
                     session_id.clone(),
                     slot.epoch,

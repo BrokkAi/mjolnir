@@ -25,6 +25,7 @@ pub mod image;
 pub mod import;
 pub mod observe;
 pub mod opencode_logins;
+pub(crate) mod profile_catalog;
 pub mod profile_health;
 pub mod profile_login;
 pub(crate) mod profile_scheduler;

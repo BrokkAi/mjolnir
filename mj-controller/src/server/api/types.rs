@@ -757,15 +757,7 @@ pub struct TurnState {
 
 pub use crate::database::TurnSummary;
 
-/// Configuration and a first prompt to apply once a newly created session's
-/// harness is ready. Served in M2.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StartFollowup {
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub prompt: Option<String>,
-    pub fast_mode: bool,
-}
+pub use crate::database::StartFollowup;
 
 /// How far a created session's follow-up has got. Served in M2.
 #[derive(Debug, Clone, PartialEq, Eq)]

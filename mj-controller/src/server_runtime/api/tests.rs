@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
+use crate::profile_catalog::{ProfileCatalog, counting_probe, test_config};
 use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
@@ -148,7 +148,7 @@ fn usage_priced(profile_id: &str) -> ProfileQuota {
 
 /// A probe that answers each profile with the models given for it and the
 /// efforts `low` and `high`, and fails for a profile it has no models for.
-fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profile_catalog::Probe> {
+fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::profile_catalog::Probe> {
     let offers = offers
         .iter()
         .map(|(profile, models)| {
@@ -1096,7 +1096,7 @@ async fn reviewer_ready_candidates_do_not_trigger_stalled_muse_refresh() {
     let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = calls.clone();
     let stall_probe = stalled.clone();
-    let probe: Arc<crate::server_runtime::profile_catalog::Probe> = Arc::new(move |_| {
+    let probe: Arc<crate::profile_catalog::Probe> = Arc::new(move |_| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let stall = stall_probe.load(std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {

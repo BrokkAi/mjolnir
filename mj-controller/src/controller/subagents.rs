@@ -556,9 +556,9 @@ fn initial_startup_deliveries(
         return Ok(Vec::new());
     }
     let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
-    crate::daemon::startup_followup::api_followup_steps(
+    crate::database::api_followup_steps(
         &group_id,
-        crate::server::api::StartFollowup {
+        crate::database::StartFollowup {
             model: relation.model.clone(),
             effort: relation.effort.clone(),
             fast_mode,

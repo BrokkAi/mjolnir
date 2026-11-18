@@ -196,7 +196,7 @@ pub struct ControllerEnvironment {
 
 /// The daemon installs its profile catalog after the review host starts.
 pub(crate) type SharedProfileCatalog =
-    Arc<std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>>;
+    Arc<std::sync::OnceLock<Arc<crate::profile_catalog::ProfileCatalog>>>;
 
 pub(crate) type SharedReviewerRuntime =
     Arc<std::sync::OnceLock<std::sync::Weak<crate::daemon::RuntimeState>>>;

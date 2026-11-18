@@ -800,7 +800,7 @@ impl Controller {
         let Some(record) = self.state.sessions.get_mut(session_id) else {
             return Ok(false);
         };
-        if crate::pollers::interrupted_lifecycle_cause(record).is_none() {
+        if crate::controller::interrupted_lifecycle_cause(record).is_none() {
             return Ok(false);
         }
         let previous = record.clone();

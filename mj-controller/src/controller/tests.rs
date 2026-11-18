@@ -2137,8 +2137,8 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     let group_id = format!("subagent-spawn-{}", child.request_key);
     let initial = crate::database::load_startup_group(&child_id, &group_id).unwrap();
     assert!(matches!(
-        serde_json::from_str::<crate::daemon::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
-        crate::daemon::StartupStep::ApiPrompt { text } if text == child.initial_prompt
+        serde_json::from_str::<crate::database::StartupStep>(&initial.last().unwrap().step_json).unwrap(),
+        crate::database::StartupStep::ApiPrompt { text } if text == child.initial_prompt
     ));
     // A previous daemon could have committed registration but crashed before
     // writing input. Recovery restores the same brief without rewriting a

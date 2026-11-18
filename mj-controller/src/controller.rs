@@ -8,6 +8,8 @@ pub(crate) mod environment;
 pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
+mod interrupted;
+pub use interrupted::interrupted_lifecycle_cause;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;
