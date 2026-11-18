@@ -166,6 +166,10 @@ impl ActiveChat {
                 self.finish_session_reconnect(result);
                 return;
             }
+            ChatIoUpdate::ReviewerAnswered { draft, result } => {
+                self.finish_reviewer_answer(*draft, result);
+                return;
+            }
             ChatIoUpdate::ReviewerNotice(notice) => {
                 self.state.conversation_notice(notice);
                 return;

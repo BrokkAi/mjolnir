@@ -31,7 +31,7 @@ pub(crate) struct NotificationsPane {
     scroll_card: Option<CardIdentity>,
     selected_item: usize,
     selection_revision: u64,
-    rendered_revision: Option<u64>,
+    rendered_presentation: Option<(u64, PaneSize)>,
     text_generation: u64,
     text_rows: Option<mj_chat::selection::SelectableText>,
     form_text: Option<(String, u16)>,
@@ -54,7 +54,7 @@ impl Default for NotificationsPane {
             scroll_card: None,
             selected_item: 0,
             selection_revision: 0,
-            rendered_revision: None,
+            rendered_presentation: None,
             text_generation: 0,
             text_rows: None,
             form_text: None,
@@ -629,7 +629,7 @@ impl DashboardState {
     }
 
     /// A card requests a warm chat; only that chat decides which form it shows.
-    pub fn notification_form_session(&self) -> Option<String> {
+    pub(crate) fn notification_form_content_session(&self) -> Option<String> {
         let entries = self.notification_entries();
         let entry = entries.first()?;
         let form_selected = entry
@@ -641,10 +641,22 @@ impl DashboardState {
                     .is_some_and(|form| form.requires_elicitation())
                     && self.selected_notification_item(entry) == card.entries.len()
             });
-        (entry.level == AttentionLevel::Waiting
-            && form_selected
-            && self.notifications.size != PaneSize::Minimized)
+        (entry.level == AttentionLevel::Waiting && form_selected)
             .then(|| self.notification_destination(entry))
+    }
+
+    pub fn notification_form_session(&self) -> Option<String> {
+        (self.notifications.size != PaneSize::Minimized)
+            .then(|| self.notification_form_content_session())
+            .flatten()
+    }
+
+    pub(crate) fn notification_presentation_changed(&self) -> bool {
+        self.notifications.rendered_presentation
+            != Some((
+                self.notifications.selection_revision,
+                self.notifications.size,
+            ))
     }
 
     /// A notification-only attach reports in its card; a requested
@@ -677,8 +689,7 @@ impl DashboardState {
 
     /// Input batching refreshes newly selected form content before any next event.
     pub fn notification_input_needs_frame(&self) -> bool {
-        self.notification_form_session().is_some()
-            && self.notifications.rendered_revision != Some(self.notifications.selection_revision)
+        self.notification_form_session().is_some() && self.notification_presentation_changed()
     }
 
     pub fn notification_form_owns_keyboard(&self) -> bool {
@@ -1254,7 +1265,10 @@ pub(crate) fn render(
     mut chat: Option<&mut mj_chat::chat::ActiveChat>,
 ) {
     dashboard.notifications.form_area = None;
-    dashboard.notifications.rendered_revision = Some(dashboard.notifications.selection_revision);
+    dashboard.notifications.rendered_presentation = Some((
+        dashboard.notifications.selection_revision,
+        dashboard.notifications.size,
+    ));
     let focused = dashboard.focus == Focus::Notifications;
     let minimized = dashboard.notifications.size == PaneSize::Minimized;
     let clearing = dashboard
@@ -1272,7 +1286,7 @@ pub(crate) fn render(
         entries.len(),
         if clearing > 0 { " clearing…" } else { "" }
     );
-    let block = theme::panel(focused)
+    let mut block = theme::panel(focused)
         .title(title)
         .title(crate::render::sessions::pane_size_controls(
             dashboard.notifications.size,
@@ -1283,6 +1297,17 @@ pub(crate) fn render(
         } else {
             Borders::ALL
         });
+    if !minimized
+        && chat.as_ref().is_some_and(|chat| chat.has_elicitation())
+        && let Some(error) = entries
+            .first()
+            .and_then(|entry| dashboard.notifications.errors.get(&entry.session_id))
+    {
+        block = block.title_bottom(Line::styled(
+            format!(" Could not clear: {error} "),
+            ratatui::style::Style::default().fg(theme::palette().error),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     dashboard
@@ -2012,6 +2037,55 @@ pub(crate) mod tests {
                     );
                 })
                 .unwrap();
+            // Hard-won: 1f62bc101: a hidden presentation could regain an old pressed button when it returned.
+            let lines = buffer_lines(terminal.backend().buffer());
+            let card = dashboard.notifications_area.unwrap();
+            let (x, y) = point(
+                &lines[usize::from(card.y)..usize::from(card.bottom())],
+                "Answer & Next",
+            );
+            let press = crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: card.y + y,
+                modifiers: KeyModifiers::NONE,
+            };
+            dashboard
+                .handle_notification_form_event(&mut chats, &Event::Mouse(press))
+                .unwrap();
+            tiny.draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+            assert!(chats["session-1"].elicitation_pointer_surface().is_none());
+            terminal
+                .draw(|frame| {
+                    crate::combined::render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &Default::default(),
+                        false,
+                    );
+                })
+                .unwrap();
+            dashboard
+                .handle_notification_form_event(
+                    &mut chats,
+                    &Event::Mouse(crossterm::event::MouseEvent {
+                        kind: MouseEventKind::Up(MouseButton::Left),
+                        ..press
+                    }),
+                )
+                .unwrap();
+            assert!(chats["session-1"].has_elicitation());
+            assert!(answers.try_recv().is_err());
             dashboard
                 .handle_notification_form_event(&mut chats, &Event::Key(key(KeyCode::Enter)))
                 .unwrap();
@@ -2531,8 +2605,9 @@ pub(crate) mod tests {
     }
 
     // Hard-won: dc77f11c1: an id-less question skipped its bounded text read.
-    #[test]
-    fn notification_navigation_keeps_reads_bound_to_the_selected_entry() {
+    // Hard-won: 1f62bc101: changing card items retained a hidden form's armed click.
+    #[tokio::test]
+    async fn notification_navigation_keeps_reads_bound_to_the_selected_entry() {
         use crossterm::event::{MouseButton, MouseEventKind};
         let mut dashboard = published_dashboard();
         let entries = dashboard.notification_entries();
@@ -2553,6 +2628,77 @@ pub(crate) mod tests {
             Some("q2"),
             "a selected form remains answerable beside dismissible messages"
         );
+        // Hard-won: 1f62bc101: changing the selected item left the retained chat's notification button armed.
+        let mut request = question("q2");
+        request.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::Boolean {
+            default: Some(true),
+        };
+        let (chat, mut answers) = form_chat("q2", request);
+        let mut chats = std::collections::BTreeMap::from([("q2".into(), chat)]);
+        dashboard.set_current_session(Some("q2"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 44)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        let card = dashboard.notifications_area.unwrap();
+        let (x, y) = point(
+            &lines[usize::from(card.y)..usize::from(card.bottom())],
+            "Answer & Next",
+        );
+        let press = mouse_at(MouseEventKind::Down(MouseButton::Left), (x, card.y + y));
+        dashboard
+            .handle_notification_form_event(&mut chats, &crossterm::event::Event::Mouse(press))
+            .unwrap();
+        assert_eq!(
+            chats["q2"].elicitation_pointer_surface(),
+            Some(mj_chat::chat::ElicitationSurface::Notification)
+        );
+        dashboard.handle_key(alt(KeyCode::PageUp));
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        assert!(chats["q2"].elicitation_pointer_surface().is_none());
+        dashboard.handle_key(alt(KeyCode::PageDown));
+        terminal
+            .draw(|frame| {
+                crate::combined::render_combined_for_test(
+                    frame,
+                    &mut dashboard,
+                    &mut chats,
+                    &Default::default(),
+                    false,
+                );
+            })
+            .unwrap();
+        dashboard
+            .handle_notification_form_event(
+                &mut chats,
+                &crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..press
+                }),
+            )
+            .unwrap();
+        assert!(chats["q2"].has_elicitation());
+        assert!(answers.try_recv().is_err());
         let newest = drawn(&mut dashboard, 120, 44);
         assert!(newest.iter().any(|line| line.contains("2 of 2")));
         assert!(newest.iter().any(|line| line.contains("Which approach")));

@@ -197,7 +197,7 @@ pub struct ChatFooter<'a> {
 /// The local form state saved while the dashboard attaches another session.
 /// The reviewer metadata is part of the identity because reviewer answers are
 /// delivered to a different harness than primary-agent answers.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChatElicitationDraft {
     form: ElicitationDraft,
     reviewer: bool,
@@ -312,8 +312,7 @@ pub enum ChatAction {
     /// the role that asked, never to the primary: a turn review can have
     /// several harnesses waiting at once.
     RespondReviewerElicitation {
-        role: Option<String>,
-        elicitation_id: String,
+        draft: ChatElicitationDraft,
         response: ElicitationResponse,
     },
     PasteFromClipboard,
@@ -1315,6 +1314,20 @@ impl ChatState {
         self.elicitation_is_reviewers = draft.reviewer;
         self.elicitation_role = draft.reviewer_role;
         true
+    }
+
+    fn restore_failed_reviewer_elicitation(&mut self, draft: ChatElicitationDraft, error: String) {
+        let request = draft.request().clone();
+        if self.elicitation.is_none() {
+            self.show_review_role_elicitation(draft.reviewer_role.clone(), request.clone());
+            self.restore_elicitation_draft(draft.clone());
+        }
+        if self.elicitation_source() == (true, draft.reviewer_role.as_deref())
+            && let Some(dialog) = self.elicitation.as_mut()
+            && dialog.request() == &request
+        {
+            dialog.set_response_error(error);
+        }
     }
 
     fn restore_failed_elicitation(&mut self, request: ElicitationRequest, error: String) {

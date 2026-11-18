@@ -108,6 +108,10 @@ enum ChatIoUpdate {
     ReviewerStarted(std::result::Result<(), String>),
     /// A sentence about a reviewer form answer, for the conversation.
     ReviewerNotice(String),
+    ReviewerAnswered {
+        draft: Box<ChatElicitationDraft>,
+        result: std::result::Result<(), String>,
+    },
     /// The system browser could not be started for a clicked link.
     LinkOpenFailed {
         url: String,
@@ -257,7 +261,9 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         }
         // Reviewer updates are handled where the session handle is, because
         // acting on one starts more reviewer work.
-        ChatIoUpdate::ReviewerStarted(_) | ChatIoUpdate::ReviewerNotice(_) => {}
+        ChatIoUpdate::ReviewerStarted(_)
+        | ChatIoUpdate::ReviewerNotice(_)
+        | ChatIoUpdate::ReviewerAnswered { .. } => {}
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }

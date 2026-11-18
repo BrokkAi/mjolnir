@@ -7,6 +7,7 @@ impl ActiveChat {
         role: Option<String>,
         elicitation_id: String,
         response: mj_core::elicitation::ElicitationResponse,
+        draft: Option<ChatElicitationDraft>,
     ) {
         let control = self.session_manager.clone();
         let child = match role.as_ref() {
@@ -18,14 +19,29 @@ impl ActiveChat {
                         })
                 });
                 if !owns_question {
-                    self.report_review_refusal(
-                        "The reviewer's question is no longer active".to_owned(),
-                    );
+                    let error = "The reviewer's question is no longer active".to_owned();
+                    if let Some(draft) = draft {
+                        self.state.restore_failed_reviewer_elicitation(
+                            draft,
+                            format!("Answer was not sent: {error}"),
+                        );
+                    }
+                    self.report_review_refusal(error);
                     return;
                 }
                 child.clone()
             }
-            None => return,
+            None => {
+                if let Some(draft) = draft {
+                    let error = "The reviewer for this question is no longer available".to_owned();
+                    self.state.restore_failed_reviewer_elicitation(
+                        draft,
+                        format!("Answer was not sent: {error}"),
+                    );
+                    self.report_review_refusal(error);
+                }
+                return;
+            }
         };
         let updates = self.chat_io_tx.clone();
         let automatic = mj_core::acp::is_plan_review_id(&elicitation_id);
@@ -35,13 +51,36 @@ impl ActiveChat {
                 Err(error) => Err(error),
             }
             .map_err(|error| format!("{error:#}"));
-            let Some(update) = reviewer_answer_update(result, automatic) else {
+            let update = if let Some(draft) = draft {
+                ChatIoUpdate::ReviewerAnswered {
+                    draft: Box::new(draft),
+                    result,
+                }
+            } else if let Some(update) = reviewer_answer_update(result, automatic) {
+                update
+            } else {
                 return;
             };
             if let Err(error) = updates.send(update) {
                 tracing::debug!(%error, "reviewer form answer result dropped");
             }
         });
+    }
+
+    pub(super) fn finish_reviewer_answer(
+        &mut self,
+        draft: ChatElicitationDraft,
+        result: std::result::Result<(), String>,
+    ) {
+        if let Err(error) = &result {
+            self.state.restore_failed_reviewer_elicitation(
+                draft,
+                format!("Answer was not sent: {error}"),
+            );
+        }
+        if let Some(update) = reviewer_answer_update(result, false) {
+            self.apply_io_update(update);
+        }
     }
 
     /// Puts a form the reviewer is waiting on in front of the user, or answers
@@ -65,7 +104,12 @@ impl ActiveChat {
             // decision; the reviewer was asked to critique, not to implement,
             // so it is declined and its critique stands as the answer.
             if mj_core::acp::is_plan_review_id(&request.id) {
-                self.answer_reviewer(role, request.id, mj_core::acp::plan_review_keep_planning());
+                self.answer_reviewer(
+                    role,
+                    request.id,
+                    mj_core::acp::plan_review_keep_planning(),
+                    None,
+                );
                 continue;
             }
             if self.state.reviewer_elicitation_open() {

@@ -38,7 +38,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// allowed to allocate an unbounded buffer.
 const MAXIMUM_OFFSCREEN_ROWS: usize = 4_096;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum FieldValue {
     Text(#[serde(with = "draft_text")] TextInput),
     Single(Option<usize>),
@@ -82,7 +82,7 @@ enum ElicitationControl {
 /// A process-local copy of an unanswered form. The request is retained in the
 /// snapshot deliberately: an id can be reused by a harness for a different
 /// form, and local answers must never be applied to that new form.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ElicitationDraft {
     request: ElicitationRequest,
     values: Vec<FieldValue>,
@@ -106,7 +106,7 @@ pub struct ElicitationDraft {
     confirmed: BTreeSet<usize>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ElicitationViewport {
     message_scroll: u16,
     message_anchor: Option<(usize, usize)>,
@@ -114,7 +114,7 @@ struct ElicitationViewport {
     focus_scroll: u16,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ElicitationViewports {
     conversation: ElicitationViewport,
     notification: ElicitationViewport,
@@ -328,14 +328,33 @@ impl ElicitationDialog {
         self.surface == ElicitationSurface::Notification
     }
 
+    fn pointer_surface_is_rendered(&self, surface: ElicitationSurface) -> bool {
+        if surface == ElicitationSurface::Notification {
+            return self.was_rendered_in(surface);
+        }
+        let view = if self.surface == surface {
+            &self.view
+        } else {
+            &self.other_view
+        };
+        view.rendered_area
+            .get()
+            .is_some_and(|area| area.width > 0 && area.height > 0)
+    }
+
     pub(super) fn pointer_surface(&self) -> Option<ElicitationSurface> {
-        if self.view.form.borrow().captures_pointer() {
+        let other = match self.surface {
+            ElicitationSurface::Conversation => ElicitationSurface::Notification,
+            ElicitationSurface::Notification => ElicitationSurface::Conversation,
+        };
+        if self.pointer_surface_is_rendered(self.surface)
+            && self.view.form.borrow().captures_pointer()
+        {
             Some(self.surface)
-        } else if self.other_view.form.borrow().captures_pointer() {
-            Some(match self.surface {
-                ElicitationSurface::Conversation => ElicitationSurface::Notification,
-                ElicitationSurface::Notification => ElicitationSurface::Conversation,
-            })
+        } else if self.pointer_surface_is_rendered(other)
+            && self.other_view.form.borrow().captures_pointer()
+        {
+            Some(other)
         } else {
             None
         }
@@ -754,6 +773,16 @@ impl ElicitationDialog {
             .is_some_and(|area| area.contains(Position::new(column, row)))
     }
 
+    pub(super) fn cancel_pointer_in(&self, surface: ElicitationSurface) {
+        let view = if self.surface == surface {
+            &self.view
+        } else {
+            &self.other_view
+        };
+        view.form.borrow_mut().cancel_pointer();
+        view.last_option_click.set(None);
+    }
+
     pub(super) fn cancel_component_pointer(&self) {
         for view in [&self.view, &self.other_view] {
             view.form.borrow_mut().cancel_pointer();
@@ -762,7 +791,18 @@ impl ElicitationDialog {
     }
 
     pub(super) fn reset_component_geometry(&self) {
-        for view in [&self.view, &self.other_view] {
+        for surface in [
+            ElicitationSurface::Conversation,
+            ElicitationSurface::Notification,
+        ] {
+            let view = if self.surface == surface {
+                &self.view
+            } else {
+                &self.other_view
+            };
+            if !self.pointer_surface_is_rendered(surface) {
+                view.form.borrow_mut().cancel_pointer();
+            }
             view.form.borrow_mut().reset_geometry();
             view.rendered_area.set(None);
             view.last_option_click.set(None);

@@ -498,7 +498,12 @@ fn render_combined_themed(
     dashboard.rebuild_palette_entries();
     dashboard.reset_component_geometry();
     dashboard.begin_surface_frame();
+    let notification = dashboard.notification_form_session();
+    let notification_changed = dashboard.notification_presentation_changed();
     for chat in chats.values_mut() {
+        if notification_changed || notification.as_deref() != Some(chat.session_id()) {
+            chat.cancel_elicitation_pointer_in(mj_chat::chat::ElicitationSurface::Notification);
+        }
         if !dashboard.chat_input_available(chat.session_id()) {
             chat.cancel_component_pointer();
         }
@@ -716,13 +721,13 @@ fn render_combined_themed(
             dashboard.selected_notification_text(entry)
         });
     let notification_minimum = dashboard
-        .notification_form_session()
+        .notification_form_content_session()
         .and_then(|session| chats.get(&session))
         .and_then(|chat| chat.elicitation_minimum_height(notification_width.saturating_sub(4)))
         .map(|height| height.saturating_add(4)); // Card borders, header, buttons.
     let notification_full = notification_entries.first().map_or(PANE_MINIMUM, |entry| {
         if let Some(chat) = dashboard
-            .notification_form_session()
+            .notification_form_content_session()
             .and_then(|session| chats.get(&session))
             && let Some(height) = chat.elicitation_height(notification_width.saturating_sub(4))
         {
@@ -2919,6 +2924,75 @@ mod tests {
             &lines,
         );
 
+        // Hard-won: 1f62bc101: a dismissal failure was hidden when the form replaced the card text.
+        use mj_client::runtime_feed::{CardForm, NotificationCard};
+        use mj_core::attention::{
+            EntryMessage, NotificationDismissal, NotificationKind, NotificationStackEntry,
+        };
+        inline.set_notification_cards(Some(
+            [(
+                "session-1".into(),
+                NotificationCard {
+                    since_ms: 1,
+                    badge: NotificationKind::NeedsInput,
+                    entries: vec![NotificationStackEntry {
+                        completed_at_ms: 1,
+                        completed_ordinal: 1,
+                        kind: NotificationKind::Important,
+                        message: EntryMessage::None,
+                    }],
+                    dismissal: Some(NotificationDismissal::Stack { revision: 1 }),
+                    holder: None,
+                    form: Some(CardForm {
+                        raised_at_ms: 2,
+                        request_id: "mixed-question".into(),
+                        message: "Choose a path".into(),
+                    }),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        assert!(matches!(
+            inline.handle_key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('n'),
+                crossterm::event::KeyModifiers::ALT
+            )),
+            crate::DashboardAction::DismissNotification { .. }
+        ));
+        inline.notifications_dismissed(vec![(
+            "session-1".into(),
+            NotificationDismissal::Stack { revision: 1 },
+            Err("permission denied".into()),
+        )]);
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Could not clear: permission denied"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Which deployment path should be used?"))
+        );
+        append_combined_golden(
+            &mut output,
+            "inline form keeps dismissal failure visible",
+            120,
+            44,
+            &lines,
+        );
+        inline.set_notification_cards(None);
+        inline.notifications.errors.clear();
+        inline.clear_notice();
+
         inline.notifications.size = PaneSize::Standard;
         for height in [21, 25, 31, 39] {
             let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
@@ -2962,6 +3036,61 @@ mod tests {
                 &lines,
             );
         }
+
+        // Hard-won: 1f62bc101: minimized maximize probes measured only the short published message.
+        let mut choice = crate::test_support::question("session-1");
+        choice.fields[0].title = "Choose a deployment target".into();
+        choice.fields[0].kind = mj_core::elicitation::ElicitationFieldKind::SingleSelect {
+            options: (0..20)
+                .map(|index| mj_core::elicitation::ElicitationOption {
+                    value: index.to_string(),
+                    title: format!("Deployment target {index}"),
+                    description: Some("Review this target before deploying".into()),
+                    preview: None,
+                })
+                .collect(),
+            default: None,
+        };
+        let (chat, _) = crate::notifications_pane::tests::form_chat("session-1", choice.clone());
+        chats.insert("session-1".into(), chat);
+        inline
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
+            .pending_elicitations = vec![choice];
+        inline.notifications.size = PaneSize::Minimized;
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert_eq!(inline.notifications_area.unwrap().height, 1);
+        assert!(inline.pane_maximize_enabled(SupportPane::Notifications));
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        crate::test_support::pin_spinner_glyphs(&mut lines);
+        append_combined_golden(
+            &mut output,
+            "minimized notification measures its warm expanded form",
+            120,
+            44,
+            &lines,
+        );
+        inline.set_pane_size(SupportPane::Notifications, PaneSize::Standard);
+        assert!(inline.notification_input_needs_frame());
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert!(!inline.notification_input_needs_frame());
+        let standard_height = inline.notifications_area.unwrap().height;
+        inline.set_pane_size(SupportPane::Notifications, PaneSize::Maximized);
+        terminal
+            .draw(|frame| {
+                render_combined_for_test(frame, &mut inline, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        assert!(inline.notifications_area.unwrap().height > standard_height);
 
         mj_core::golden::assert_golden(
             env!("CARGO_MANIFEST_DIR"),

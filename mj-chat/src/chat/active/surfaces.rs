@@ -71,6 +71,14 @@ impl ActiveChat {
         })
     }
 
+    /// Release a presentation that navigation stopped displaying, while
+    /// leaving capture in the other presentation untouched.
+    pub fn cancel_elicitation_pointer_in(&self, surface: super::super::ElicitationSurface) {
+        if let Some(dialog) = self.state.elicitation.as_ref() {
+            dialog.cancel_pointer_in(surface);
+        }
+    }
+
     pub fn elicitation_pointer_surface(&self) -> Option<super::super::ElicitationSurface> {
         self.state
             .elicitation

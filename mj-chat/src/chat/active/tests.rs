@@ -716,6 +716,7 @@ async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft(
     assert!(chat.state.notice().is_none());
 }
 
+// Hard-won: 1f62bc101: reviewer answer failures were invisible when only the notification form was open.
 #[tokio::test]
 async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     let fixture =
@@ -756,6 +757,84 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
             .iter()
             .any(|draft| draft.reviewer() && draft.reviewer_role() == Some("reviewer-a"))
     );
+    // Hard-won: 1f62bc101: reviewer answer refusals disappeared from notification-only forms.
+    chat.state.elicitation = None;
+    chat.state.elicitation_is_reviewers = false;
+    chat.deferred_elicitation_draft = None;
+    let request = ElicitationRequest::from_acp_params("reviewer-failure", serde_json::json!({
+        "mode": "form", "sessionId": "reviewer-a", "message": "Review answer", "requestedSchema": {
+            "type": "object", "properties": {"answer": {"type": "string"}}
+        }
+    })).unwrap();
+    chat.state
+        .show_review_role_elicitation(Some("reviewer-a".into()), request);
+    let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    chat.handle_elicitation_event(Event::Paste("kept reviewer answer".into()));
+    let draft = chat.state.elicitation_draft().unwrap();
+    chat.handle_elicitation_event(Event::Key(key(KeyCode::Enter)));
+    assert!(chat.state.reviewer_elicitation_open());
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Answer was not sent"));
+    assert!(text.contains("kept reviewer answer"));
+    chat.apply_io_update(ChatIoUpdate::ReviewerAnswered {
+        draft: Box::new(draft.clone()),
+        result: Err("reviewer lookup failed".into()),
+    });
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("reviewer lookup failed"));
+    assert!(text.contains("kept reviewer answer"));
+    let mut newer = draft.request().clone();
+    newer.id = "new-primary-question".into();
+    newer.message = "New primary question".into();
+    chat.state.elicitation = None;
+    chat.state.elicitation_is_reviewers = false;
+    chat.state.elicitation_role = None;
+    chat.state.restore_elicitation(newer);
+    chat.apply_io_update(ChatIoUpdate::ReviewerAnswered {
+        draft: Box::new(draft),
+        result: Err("old failure".into()),
+    });
+    terminal
+        .draw(|frame| {
+            chat.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("New primary question"));
+    assert!(!text.contains("old failure"));
 }
 
 #[tokio::test]

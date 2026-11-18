@@ -324,11 +324,14 @@ impl ActiveChat {
             }
             ChatAction::StartTurnReview => self.request_turn_review(),
             ChatAction::TurnReview(intent) => self.run_turn_review(intent),
-            ChatAction::RespondReviewerElicitation {
-                role,
-                elicitation_id,
-                response,
-            } => self.answer_reviewer(role, elicitation_id, response),
+            ChatAction::RespondReviewerElicitation { draft, response } => {
+                self.answer_reviewer(
+                    draft.reviewer_role.clone(),
+                    draft.request().id.clone(),
+                    response,
+                    Some(draft),
+                );
+            }
             ChatAction::RespondElicitation { request, response } => {
                 let plan_followup = self.state.plan_review_followup(&request, &response);
 

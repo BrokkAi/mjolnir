@@ -107,3 +107,14 @@ Fix all four findings. Conversation capture now has one chat-owned query coverin
 Extend the existing interaction regression through a real transcript-thumb drag into another session's form, terminal focus loss, and immediate recapture without redraw. Extend the existing notification regression through an unrelated failure surviving both failure and success of a background attach. Extend the 120x21 golden's state assertions to reject ineffective Profiles/Notifications maximize controls, update expected output deliberately, and replay it. Run targeted pointer/scrollbar tests and affected-crate clippy before committing.
 
 Eighth follow-up checks pass: extended scrollbar/focus-loss and notice regressions, both existing capture tests, 28 attachment tests, golden replay with three ineffective-control removals, all-targets five-package clippy, formatting and diff checks. Ready for required review; no push.
+
+
+## Ninth review follow-up
+
+Fix all four findings. The notification geometry slot releases capture when its card item or pane mode changes or it stops being displayed. Unrendered geometry cannot claim notification input and stale presses are cancelled before that geometry returns, while the conversation's slot remains independent. Presentation identity includes pane mode so expanding from Minimized refreshes input ownership before queued input.
+
+Reviewer responses now carry the existing logical dialog draft through the normal ChatAction dispatcher and existing reviewer response channel. Synchronous routing refusals and asynchronous lookup/answer failures restore the matching reviewer dialog with its values and inline error; unrelated/newer forms are not relabeled. Automatic reviewer plan decisions and existing late-answer notices retain their previous path. The I/O callback boxes the draft to keep ordinary messages small; no serialized format changes are needed.
+
+Cards with forms render persistent dismissal failures in their outer border without taking answer rows. The form-content-session helper owns selected-form classification independently of minimized display interest, allowing maximize probes to measure an existing warm form without warming a minimized card.
+
+Extended reviewer failure/draft, item navigation/held-click, hidden-frame capture, and simultaneous-surface regressions pass. Expanded goldens cover a failed dismissal beside a form and a minimized warm long-choice form whose Maximize gains rows. Golden replay, existing late-answer and reviewer-removal tests, normal inline input, all-targets five-package clippy, formatting and diff checks pass. Mechanical corrections were draft equality derivation, boxing the callback payload and its fixtures, and using the direct key constructor in the golden. Ready for mandatory review; no push.

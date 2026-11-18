@@ -41,13 +41,11 @@ impl ChatState {
             let request = dialog.request().clone();
             let response = dialog.handle_key_event(key);
             if let Some(response) = response {
+                let reviewer_draft = self.elicitation_is_reviewers.then(|| dialog.draft());
                 self.elicitation = None;
-                if std::mem::take(&mut self.elicitation_is_reviewers) {
-                    return ChatAction::RespondReviewerElicitation {
-                        role: self.elicitation_role.take(),
-                        elicitation_id: request.id,
-                        response,
-                    };
+                if let Some(draft) = reviewer_draft {
+                    self.elicitation_is_reviewers = false;
+                    return self.finish_reviewer_elicitation_response(draft, response);
                 }
                 return ChatAction::RespondElicitation { request, response };
             }
