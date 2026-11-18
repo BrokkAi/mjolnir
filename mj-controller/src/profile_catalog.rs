@@ -1729,6 +1729,41 @@ impl ProfileCatalog {
             .unwrap_or_default()
     }
 
+    /// The efforts profile `id` offers for `model` when a completed discovery
+    /// of that model, or of the default model it is, already holds them,
+    /// including a confirmed empty list; `None` is
+    /// unknown. Never starts a probe. Muse is always unknown: its catalogue is
+    /// read live because the service changes it, so a retained answer can be
+    /// stale.
+    pub fn cached_model_efforts(
+        &self,
+        id: &str,
+        model: &str,
+    ) -> Option<Vec<mj_core::acp::SessionConfigChoice>> {
+        let inner = self.lock();
+        let profile = inner.live.as_ref()?.named_profile(id).ok()?;
+        if profile.kind == HarnessKind::Muse {
+            return None;
+        }
+        let identity = profile.capabilities_key(id);
+        // The default entry and the default model's own entry refresh
+        // independently; the newer observation answers.
+        let ready = |key: CacheKey| match inner.entries.get(&key) {
+            Some(Entry::Ready(choices)) => Some(choices),
+            _ => None,
+        };
+        // Either entry counts only when it reports the requested model: a
+        // model-specific probe can answer with the harness's default instead.
+        let default = ready((identity.clone(), None));
+        let specific = ready((identity, Some(model.to_owned())));
+        [default, specific]
+            .into_iter()
+            .flatten()
+            .filter(|choices| choices.model.as_deref() == Some(model))
+            .max_by_key(|choices| choices.observed_at)
+            .map(|choices| choices.efforts.clone())
+    }
+
     pub fn candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         Ok(config
