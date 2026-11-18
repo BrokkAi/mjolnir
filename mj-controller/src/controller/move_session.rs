@@ -538,6 +538,24 @@ pub use mj_core::state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessio
 use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
+/// Every command a retained Move queue can resubmit, including quota continuation.
+pub(crate) fn move_queue_command_ids(
+    operation: &MoveOperation,
+    canonical: &mj_core::archive::CanonicalSessionSnapshot,
+) -> std::collections::BTreeSet<String> {
+    let mut ids = canonical
+        .queued_prompts
+        .iter()
+        .map(|queued| queued.command_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if operation.quota_stop_reason.is_some() {
+        ids.insert(
+            mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(&operation.operation_id),
+        );
+    }
+    ids
+}
+
 /// Bind automatic Move confirmation to the turn that stopped for quota.
 pub fn quota_move_fingerprint(
     base: &str,
@@ -2821,7 +2839,7 @@ impl Controller {
             );
             relay
         };
-        if operation.queue == ResumeQueueDisposition::Start {
+        if !operation.queue_admission_finished && operation.queue == ResumeQueueDisposition::Start {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
             let checkpoint = operation
@@ -2832,6 +2850,13 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            relay
+                .update_command_retention(
+                    Some(operation.operation_id.clone()),
+                    move_queue_command_ids(operation, &verified.canonical_session),
+                    false,
+                )
+                .await?;
             if operation.quota_stop_reason.is_some() && !operation.queue_admission_finished {
                 ensure!(
                     !executor.cancellation_requested(),
@@ -2887,6 +2912,13 @@ impl Controller {
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
+        relay
+            .update_command_retention(
+                Some(operation.operation_id.clone()),
+                Default::default(),
+                false,
+            )
+            .await?;
         let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
             "Queued work was discarded; ready and idle."
         } else {

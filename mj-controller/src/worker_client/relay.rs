@@ -888,6 +888,42 @@ impl RelayClient {
         }
     }
 
+    pub async fn command_retention_status(&mut self) -> Result<Option<(bool, BTreeSet<String>)>> {
+        if self.protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
+            return Ok(None);
+        }
+        match self.call(RelayRequest::CommandRetentionStatus).await? {
+            RelayResponsePayload::CommandRetentionState {
+                legacy_pending,
+                operation_ids,
+            } => Ok(Some((legacy_pending, operation_ids))),
+            _ => bail!("relay returned an unexpected command-retention status"),
+        }
+    }
+
+    pub async fn update_command_retention(
+        &mut self,
+        operation_id: Option<String>,
+        command_ids: BTreeSet<String>,
+        reconcile_legacy: bool,
+    ) -> Result<()> {
+        if self.protocol_version() < mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL {
+            // Older workers retain receipts behind their recovery floor.
+            return Ok(());
+        }
+        match self
+            .call(RelayRequest::UpdateCommandRetention {
+                operation_id,
+                command_ids,
+                reconcile_legacy,
+            })
+            .await?
+        {
+            RelayResponsePayload::CommandRetentionUpdated => Ok(()),
+            _ => bail!("relay returned an unexpected command-retention response"),
+        }
+    }
+
     pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
         match self.call(RelayRequest::ReserveIdle { command_id }).await? {
             RelayResponsePayload::IdleReservation { ordinal } => Ok(ordinal.is_some()),

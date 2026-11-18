@@ -516,6 +516,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if *resumed {
                 snapshot.native_session_used = true;
             }
+            let usage = if *resumed {
+                NativeSessionUse::Used
+            } else if let Some(evidence) =
+                snapshot.native_use_evidence.as_ref().filter(|evidence| {
+                    evidence.version == 1 && evidence.native_session_id == *native_session_id
+                })
+            {
+                evidence.usage
+            } else if snapshot.native_session_used {
+                NativeSessionUse::Unknown
+            } else {
+                NativeSessionUse::Unused
+            };
+            snapshot.record_native_use(usage);
         }
         RelayObservation::SessionConfigured { config_options } => {
             snapshot.config_options = std::sync::Arc::new(config_options.clone());
@@ -1273,6 +1287,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.native_session_id = Some(native_session_id.clone());
                     snapshot.native_session_opened_ordinal = Some(event.ordinal);
                     snapshot.native_session_used = false;
+                    snapshot.record_native_use(NativeSessionUse::Unused);
                     snapshot.native_continuity_lost = false;
                     snapshot.replaced_unused_native_session_id = None;
                     snapshot.pending_prompt_context = memory
@@ -2004,6 +2019,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     }
     apply_assessment_context(snapshot, event);
     snapshot.compact_terminal_commands()?;
+    if matches!(
+        &event.observation,
+        RelayObservation::CommandCompleted {
+            outcome: RelayCommandOutcome::Prompt { .. } | RelayCommandOutcome::Steered { .. },
+            ..
+        }
+    ) {
+        snapshot.native_session_used = true;
+        snapshot.record_native_use(NativeSessionUse::Used);
+    }
     snapshot.latest_ordinal = event.ordinal;
     snapshot.latest_digest = event.digest.clone();
     Ok(())
@@ -2038,9 +2063,8 @@ impl RelaySnapshot {
     }
 }
 
-/// Whether finishing this relay-local command can let journal GC drop history.
-/// Only a recovery-floor move does; releasing a barrier deliberately leaves the
-/// floor where an installed archive left it.
+/// Legacy archive completions also retry collection of an acknowledged prefix.
+/// Their coverage marker no longer determines current journal retention.
 pub fn releases_history(command: &RelayCommand) -> bool {
     matches!(
         command,

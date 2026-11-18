@@ -472,6 +472,11 @@ impl DurableRelay {
             if snapshot.format_version < 27 {
                 seed_legacy_notification_stack(&mut snapshot);
             }
+            if snapshot.format_version < 28 {
+                // Old Moves had no explicit pins. Keep their acceptance receipts
+                // until the daemon has reconciled its durable operation owner.
+                snapshot.legacy_command_retention = true;
+            }
             seed_missing_notification_time(&mut snapshot);
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
@@ -528,6 +533,11 @@ impl DurableRelay {
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
                 snapshot.restored_native_session_unused = restored.native_session_unused;
+                snapshot.record_native_use(if restored.native_session_unused {
+                    NativeSessionUse::Unused
+                } else {
+                    NativeSessionUse::Unknown
+                });
                 for queued in restored.queued_prompts {
                     validate_identifier(&queued.command_id, "restored queued command ID")?;
                     if queued.content.is_empty() {
@@ -605,12 +615,25 @@ impl DurableRelay {
             snapshot.store_id = Some(format!("{:032x}", u128::from_le_bytes(random)));
         }
         validate_relay_snapshot_frontiers(&snapshot)?;
-        let retained_through = snapshot.retained_through();
-        let retained_digest = snapshot.retained_digest().to_owned();
+        // Upgrade native-use evidence before discarding the old retained prefix.
+        let upgrading_native =
+            snapshot.native_session_id.is_some() && snapshot.native_use_evidence.is_none();
+        let retained_through = if upgrading_native {
+            snapshot
+                .acknowledged_through
+                .min(snapshot.recovery_floor_ordinal)
+        } else {
+            snapshot.retained_through()
+        };
+        let retained_digest = if upgrading_native
+            && snapshot.recovery_floor_ordinal < snapshot.acknowledged_through
+        {
+            snapshot.recovery_floor_digest.clone()
+        } else {
+            snapshot.retained_digest().to_owned()
+        };
         let snapshot_ordinal = snapshot.latest_ordinal;
-        let missing_native_history = snapshot.native_session_id.is_some()
-            && snapshot.native_session_opened_ordinal.is_none()
-            && !snapshot.native_session_used;
+        let missing_native_history = upgrading_native;
         let (journal_spans, hot_events) = open_relay_journal(
             &root.join(RELAY_JOURNAL_DIR),
             retained_through,
@@ -703,7 +726,7 @@ impl DurableRelay {
             )?;
         }
         let recovered_native_history =
-            missing_native_history && !checkpoint_only && relay.recover_native_history_evidence();
+            missing_native_history && relay.recover_native_history_evidence();
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
@@ -1355,6 +1378,19 @@ impl DurableRelay {
         // created here, or when its identity arrived from outside this
         // journal. Agent output alone does not set it: an adapter can send
         // text with no model turn behind it (R4-3).
+        if let Some(evidence) = &self.snapshot.native_use_evidence {
+            if evidence.version != 1
+                || Some(&evidence.native_session_id) != self.snapshot.native_session_id.as_ref()
+            {
+                return true;
+            }
+            return evidence.usage != NativeSessionUse::Unused
+                || self
+                    .snapshot
+                    .dispatches
+                    .values()
+                    .any(native_history::prompt_may_have_reached_agent);
+        }
         if self.snapshot.native_session_used {
             return true;
         }
@@ -1393,10 +1429,20 @@ impl DurableRelay {
     /// Persisted immediately: the evidence is live ACP traffic, and a worker
     /// that dies right after it must not come back believing the thread empty.
     pub fn mark_native_session_used(&mut self) -> Result<()> {
-        if self.snapshot.native_session_used {
+        if self
+            .snapshot
+            .native_use_evidence
+            .as_ref()
+            .is_some_and(|evidence| {
+                evidence.version == 1
+                    && Some(&evidence.native_session_id) == self.snapshot.native_session_id.as_ref()
+                    && evidence.usage == NativeSessionUse::Used
+            })
+        {
             return Ok(());
         }
         self.snapshot.native_session_used = true;
+        self.snapshot.record_native_use(NativeSessionUse::Used);
         self.persist_snapshot()
     }
 

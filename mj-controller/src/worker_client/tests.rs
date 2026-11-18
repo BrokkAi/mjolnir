@@ -4908,6 +4908,39 @@ sys.stdin.read()
     assert_eq!(client.next_request, before);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn command_retention_skips_protocol_71_without_writing_a_request() {
+    let script = format!(
+        r#"python3 -c '
+import json, sys
+req = json.loads(sys.stdin.readline())
+print(json.dumps({{"request_id":req["request_id"], "protocol_version":71, "result":"ok", "payload":{{"type":"hello", "data":{{"negotiated":71, "relay_version":"retention-old", "session_id":{session:?}}}}}}}), flush=True)
+sys.stdin.read()
+'"#,
+        session = SESSION_ID
+    );
+    let spec = CommandSpec::new("sh", ["-c", &script]).purpose("old retention relay fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let before = client.next_request;
+    assert_eq!(client.command_retention_status().await.unwrap(), None);
+    client
+        .update_command_retention(
+            Some("move-operation".into()),
+            ["queued-config".into()].into(),
+            false,
+        )
+        .await
+        .unwrap();
+    client
+        .update_command_retention(None, Default::default(), true)
+        .await
+        .unwrap();
+    assert_eq!(client.next_request, before);
+}
+
 // Hard-won: adc0d368: a worker whose harness preparation failed rejected
 // sub-agent polling, so its session could not sync, suspend or close.
 #[cfg(unix)]

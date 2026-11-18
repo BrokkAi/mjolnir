@@ -6,8 +6,12 @@ impl DurableRelay {
     /// native session. Recover that evidence once, without replaying historical
     /// commands over the live snapshot or changing any journal frontiers.
     pub(super) fn recover_native_history_evidence(&mut self) -> bool {
-        if self.snapshot.native_session_used {
+        if self.snapshot.native_use_evidence.is_some() {
             return false;
+        }
+        if self.snapshot.native_session_used {
+            self.snapshot.record_native_use(NativeSessionUse::Used);
+            return true;
         }
         let evidence = match self.read_native_history_evidence() {
             Ok(evidence) => evidence,
@@ -20,6 +24,7 @@ impl DurableRelay {
                     "could not recover native session history evidence: {error:#}"
                 );
                 self.snapshot.native_session_used = true;
+                self.snapshot.record_native_use(NativeSessionUse::Unknown);
                 return true;
             }
         };
@@ -31,13 +36,29 @@ impl DurableRelay {
                 .snapshot
                 .native_session_opened_ordinal
                 .is_none_or(|opened| opened <= self.snapshot.recovery_floor_ordinal);
+        self.snapshot
+            .record_native_use(if self.snapshot.native_session_used {
+                NativeSessionUse::Unknown
+            } else {
+                NativeSessionUse::Unused
+            });
+        if evidence.used {
+            self.snapshot.record_native_use(NativeSessionUse::Used);
+        }
         true
     }
 
     fn read_native_history_evidence(&self) -> Result<NativeHistoryEvidence> {
-        let plan = self.replay_plan();
-        let mut ordinal = self.snapshot.retained_through();
-        let mut digest = self.snapshot.retained_digest().to_owned();
+        let mut ordinal = self
+            .snapshot
+            .acknowledged_through
+            .min(self.snapshot.recovery_floor_ordinal);
+        let mut digest = if ordinal == self.snapshot.acknowledged_through {
+            self.snapshot.acknowledged_digest.clone()
+        } else {
+            self.snapshot.recovery_floor_digest.clone()
+        };
+        let plan = self.legacy_native_replay_plan(ordinal, &digest);
         let mut evidence = NativeHistoryEvidence::default();
         // Reuse bounded, digest-validated replay, including sealed segments.
         // This runs during worker startup, before it serves any requests.
@@ -187,6 +208,8 @@ mod tests {
         let path = root.join(RELAY_STATE_FILE);
         let mut saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved.as_object_mut().unwrap().remove("native_use_evidence");
+        saved["format_version"] = serde_json::json!(27);
         saved.as_object_mut().unwrap().remove("native_session_used");
         saved
             .as_object_mut()

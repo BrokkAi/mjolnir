@@ -183,9 +183,8 @@ pub enum RelayCommand {
         barrier_command_id: String,
     },
     /// Resume ACP dispatch for a barrier whose archive is exported but not yet
-    /// installed on the controller. The recovery floor deliberately stays put:
-    /// only [`RelayCommand::AdvanceRecoveryFloor`] may release journal history,
-    /// and only once an archive covering that history is durably installed.
+    /// installed on the controller. The archive-coverage marker stays put;
+    /// current workers retain journal history through daemon acknowledgement.
     ReleaseCheckpoint {
         barrier_command_id: String,
     },
@@ -1636,6 +1635,24 @@ pub struct HandbackChecks {
     pub context: Option<crate::assessment::ContextHistory>,
 }
 
+/// Durable native-history proof, independent of the journal's retained prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionUseEvidence {
+    pub version: u32,
+    pub native_session_id: String,
+    pub opened_ordinal: Option<u64>,
+    pub usage: NativeSessionUse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeSessionUse {
+    Unknown,
+    Unused,
+    Used,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
@@ -1731,6 +1748,14 @@ pub struct RelaySnapshot {
     /// reading the snapshots of sessions that never used their thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_used: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_use_evidence: Option<NativeSessionUseEvidence>,
+    /// Accepted command receipts retained until their durable operation finishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub command_retention: BTreeMap<String, BTreeSet<String>>,
+    /// Upgrade protection until the daemon reconciles the outstanding Move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_command_retention: bool,
     /// Ordinal of the `SessionOpened` that recorded `native_session_id`. It
     /// places the current native session relative to `recovery_floor_ordinal`:
     /// a session opened above the floor has everything about it recorded in
@@ -1888,6 +1913,9 @@ impl RelaySnapshot {
             native_continuity_lost: false,
             replaced_unused_native_session_id: None,
             native_session_used: false,
+            native_use_evidence: None,
+            command_retention: BTreeMap::new(),
+            legacy_command_retention: false,
             native_session_opened_ordinal: None,
             restored_native_session_unused: false,
             agent_capabilities: None,
@@ -2095,14 +2123,21 @@ impl RelaySnapshot {
     }
 
     pub fn retained_through(&self) -> u64 {
-        self.acknowledged_through.min(self.recovery_floor_ordinal)
+        self.acknowledged_through
     }
 
     pub fn retained_digest(&self) -> &str {
-        if self.acknowledged_through <= self.recovery_floor_ordinal {
-            &self.acknowledged_digest
-        } else {
-            &self.recovery_floor_digest
+        &self.acknowledged_digest
+    }
+
+    pub fn record_native_use(&mut self, usage: NativeSessionUse) {
+        if let Some(id) = &self.native_session_id {
+            self.native_use_evidence = Some(NativeSessionUseEvidence {
+                version: 1,
+                native_session_id: id.clone(),
+                opened_ordinal: self.native_session_opened_ordinal,
+                usage,
+            });
         }
     }
 }

@@ -1046,10 +1046,20 @@ impl DurableRelay {
     /// ids lets that retry be answered with the original acceptance instead
     /// of running the command twice.
     fn prunable_command_ids(snapshot: &RelaySnapshot, through: u64) -> Vec<String> {
+        // Protect legacy receipts in place until the daemon attributes them;
+        // copying their IDs could overflow an already full persisted snapshot.
+        if snapshot.legacy_command_retention {
+            return Vec::new();
+        }
+        let pinned: std::collections::BTreeSet<&String> =
+            snapshot.command_retention.values().flatten().collect();
         let mut terminal: Vec<(u64, &String)> = snapshot
             .handled_commands
             .iter()
             .filter_map(|(command_id, handled)| {
+                if pinned.contains(command_id) {
+                    return None;
+                }
                 handled
                     .terminal_ordinal
                     .filter(|terminal| *terminal <= through)

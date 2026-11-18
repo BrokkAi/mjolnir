@@ -284,6 +284,14 @@ pub enum RelayRequest {
         command_id: String,
         command: RelayCommand,
     },
+    CommandRetentionStatus,
+    /// Register operation-owned retry receipts before submitting any of its commands.
+    UpdateCommandRetention {
+        operation_id: Option<String>,
+        command_ids: std::collections::BTreeSet<String>,
+        /// Consume upgrade protection once; a late reconciliation cannot undo newer pins.
+        reconcile_legacy: bool,
+    },
     Status,
     /// Atomically lease pending mailbox events to a harness tool hook.
     DrainMailbox {
@@ -570,6 +578,8 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
+            Self::CommandRetentionStatus => "command_retention_status",
+            Self::UpdateCommandRetention { .. } => "update_command_retention",
             Self::Status => "status",
             Self::DrainMailbox { .. } => "drain_mailbox",
             Self::AckMailbox { .. } => "ack_mailbox",
@@ -649,6 +659,9 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
+            Self::CommandRetentionStatus | Self::UpdateCommandRetention { .. } => {
+                super::RELAY_COMMAND_RETENTION_PROTOCOL
+            }
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -887,6 +900,11 @@ pub enum RelayResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
+    CommandRetentionUpdated,
+    CommandRetentionState {
+        legacy_pending: bool,
+        operation_ids: std::collections::BTreeSet<String>,
+    },
     /// `None` means work won the race; no barrier or other mutation occurred.
     IdleReservation {
         ordinal: Option<u64>,

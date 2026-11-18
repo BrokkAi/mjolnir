@@ -1000,10 +1000,13 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     let retry_id = format!("quota-retry-{}", operation.operation_id);
     let accepted_ordinal = {
         let relay = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
-        relay.events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST).unwrap()
-            .into_iter().find(|event| matches!(&event.observation,
-                mj_core::relay::RelayObservation::CommandQueued { command_id, .. } if command_id == &retry_id))
-            .unwrap().ordinal
+        let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+            &fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        let accepted = snapshot.handled_commands[&retry_id].accepted_ordinal;
+        drop(relay);
+        accepted
     };
     // Resume from the durable intent, as a replacement daemon does.
     operation = crate::database::load_move_operation(MOVE_QUEUE_SESSION_ID)
@@ -1015,6 +1018,25 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .unwrap();
     assert!(operation.queue_admission_finished);
     assert!(!move_owns_session(MOVE_QUEUE_SESSION_ID));
+    let accepted_commands = |log: &str| {
+        log.lines()
+            .filter(|line| {
+                line.starts_with(&format!("{retry_id} "))
+                    || line.starts_with("queued-image ")
+                    || line.starts_with("queued-config ")
+            })
+            .count()
+    };
+    let before_finished_retry = fs::read_to_string(marker.with_extension("observed")).unwrap();
+    // A crash after the durable completion record may leave cleanup unfinished.
+    // Such a retry must never resubmit commands after their pins were released.
+    runtime
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
+        .unwrap();
+    assert_eq!(
+        accepted_commands(&fs::read_to_string(marker.with_extension("observed")).unwrap()),
+        accepted_commands(&before_finished_retry)
+    );
     let observed = fs::read_to_string(marker.with_extension("observed")).unwrap();
     assert!(observed.contains("queued-image"));
     assert!(observed.contains("queued-config"));
@@ -1076,16 +1098,14 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         })
     );
 
-    let accepted: Vec<_> = reopened
-        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
-        .unwrap()
-        .into_iter()
-        .filter_map(|event| match event.observation {
-            mj_core::relay::RelayObservation::CommandQueued { command_id, .. } => {
-                Some((command_id, event.ordinal))
-            }
-            _ => None,
-        })
+    let receipts: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+        &fs::read(worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    let accepted: Vec<_> = receipts
+        .handled_commands
+        .iter()
+        .map(|(id, receipt)| (id.clone(), receipt.accepted_ordinal))
         .collect();
     let retried: Vec<_> = accepted.iter().filter(|(id, _)| id == &retry_id).collect();
     assert_eq!(
@@ -1105,10 +1125,12 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .unwrap()
         .1;
     assert!(accepted_ordinal < image_ordinal && image_ordinal < config_ordinal);
-    let journal = fs::read_to_string(
-        worker_root
-            .join(mj_core::relay::RELAY_JOURNAL_DIR)
-            .join(mj_core::relay::RELAY_ACTIVE_SEGMENT),
+    // Acknowledged journal bodies may be gone; the daemon's durable projection
+    // owns the conversation and the notices it acknowledged.
+    let journal = serde_json::to_string(
+        &crate::database::load_materialized_session(MOVE_QUEUE_SESSION_ID)
+            .unwrap()
+            .unwrap(),
     )
     .unwrap();
     assert!(journal.contains("because the weekly quota is exhausted"));

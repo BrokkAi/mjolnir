@@ -109,6 +109,41 @@ impl DurableRelay {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
+            RelayRequest::CommandRetentionStatus => RelayResponsePayload::CommandRetentionState {
+                legacy_pending: self.snapshot.legacy_command_retention,
+                operation_ids: self.snapshot.command_retention.keys().cloned().collect(),
+            },
+            RelayRequest::UpdateCommandRetention {
+                operation_id,
+                command_ids,
+                reconcile_legacy,
+            } => {
+                if !reconcile_legacy || self.snapshot.legacy_command_retention {
+                    let mut next = self.snapshot.clone();
+                    if let Some(operation_id) = operation_id {
+                        super::commands::validate_identifier(
+                            operation_id,
+                            "retention operation id",
+                        )?;
+                        if command_ids.is_empty() {
+                            next.command_retention.remove(operation_id);
+                        } else {
+                            next.command_retention
+                                .insert(operation_id.clone(), command_ids.clone());
+                        }
+                    } else {
+                        anyhow::ensure!(
+                            *reconcile_legacy && command_ids.is_empty(),
+                            "retention requires an operation identity"
+                        );
+                    }
+                    // This publication precedes any following Submit on the connection.
+                    // A stale upgrade reconciliation becomes a no-op after this point.
+                    next.legacy_command_retention = false;
+                    self.commit_snapshot(next)?;
+                }
+                RelayResponsePayload::CommandRetentionUpdated
+            }
             RelayRequest::Status => {
                 let state = self.operational_state();
                 ensure_serialized_budget(

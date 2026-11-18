@@ -1350,7 +1350,7 @@ fn a_dispatched_prompt_gives_the_native_session_history() {
 }
 
 #[test]
-fn a_released_recovery_floor_gives_the_native_session_history() {
+fn a_released_recovery_floor_does_not_override_known_unused_native_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -1364,7 +1364,7 @@ fn a_released_recovery_floor_gives_the_native_session_history() {
     assert!(!relay.native_session_may_have_history());
     let cursor = ready_checkpoint(&mut relay, "checkpoint");
     submit_floor(&mut relay, "archive-installed", cursor);
-    assert!(relay.native_session_may_have_history());
+    assert!(!relay.native_session_may_have_history());
 }
 
 // Hard-won: c82d9df3: an empty Claude session opened above an archive floor was mistaken for used history.
@@ -2734,10 +2734,9 @@ fn releasing_a_checkpoint_requires_that_exact_ready_barrier() {
     );
 }
 
-/// Installing the archive is what earns the journal release, and the
-/// recovery floor is how the relay records it.
+/// Legacy archive coverage remains validated, independently of journal retention.
 #[test]
-fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
+fn legacy_recovery_floor_advances_only_forward_without_controlling_retention() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     let ready = ready_checkpoint(&mut relay, "installed-barrier");
@@ -2748,13 +2747,6 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
             barrier_command_id: "installed-barrier".into(),
         },
     );
-    // Acknowledge past the ready cursor so the recovery floor alone decides
-    // what the relay retains.
-    attach_relay(&mut relay, "attach-floor", 0);
-    let acknowledged = relay.latest_ordinal();
-    acknowledge_relay(&mut relay, "ack-floor", acknowledged);
-    assert_eq!(relay.snapshot.retained_through(), 0);
-
     let mismatched = submit_floor(
         &mut relay,
         "floor-wrong-digest",
@@ -2797,7 +2789,7 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
     );
     assert_eq!(relay.snapshot.recovery_floor_ordinal, ready.ordinal);
     assert_eq!(relay.snapshot.recovery_floor_digest, ready.digest);
-    assert_eq!(relay.snapshot.retained_through(), ready.ordinal);
+    assert_eq!(relay.snapshot.retained_through(), 0);
 
     let backwards = submit_floor(
         &mut relay,
@@ -2817,6 +2809,9 @@ fn advancing_the_recovery_floor_releases_history_only_forward_and_on_chain() {
         }
     ));
     assert_eq!(relay.snapshot.recovery_floor_ordinal, ready.ordinal);
+    let acknowledged = relay.latest_ordinal();
+    acknowledge_relay(&mut relay, "ack-floor", acknowledged);
+    assert_eq!(relay.snapshot.retained_through(), acknowledged);
 }
 
 /// The legacy one-step completion is unchanged: it both resumes dispatch
@@ -8753,4 +8748,215 @@ fn an_autonomous_harness_turn_settling_records_work_facts_and_liveness() {
     let (watched, identities) = relay.watched_work().unwrap();
     assert_eq!(watched, liveness);
     assert_eq!(identities, vec![identity]);
+}
+
+// Pinning is a durable operation boundary, independent of the journal and bounded retry tail.
+#[test]
+fn interrupted_move_receipts_survive_ack_pruning_and_worker_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    let command = set_config("model", "retained-model");
+    let accepted = submit_relay(&mut relay, "move-queued-config", command.clone());
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("move-queued-config", RelayCommandOutcome::Configured)
+        .unwrap();
+    for i in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("later-command-{i}"),
+            RelayCommand::RecordNotice {
+                text: format!("completed {i}"),
+            },
+        );
+    }
+    // Model an old worker's acknowledged snapshot: its floor still retains
+    // the journal, and its Move has not registered pins with this new protocol.
+    relay.snapshot.acknowledged_through = relay.latest_ordinal();
+    relay.snapshot.acknowledged_digest = relay.latest_digest().to_owned();
+    relay.persist_snapshot().unwrap();
+    drop(relay);
+    let path = temp.path().join(RELAY_STATE_FILE);
+    let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    old["format_version"] = serde_json::json!(27);
+    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(relay.snapshot.legacy_command_retention);
+    let update = |ids: std::collections::BTreeSet<String>, reconcile_legacy| {
+        RelayRequest::UpdateCommandRetention {
+            operation_id: Some("move-operation-1".into()),
+            command_ids: ids,
+            reconcile_legacy,
+        }
+    };
+    assert!(matches!(
+        relay
+            .handle(relay_request(
+                "reconcile",
+                update(["move-queued-config".into()].into(), true)
+            ))
+            .body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CommandRetentionUpdated
+        }
+    ));
+    let ordinal = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    assert!(matches!(
+        relay
+            .handle(relay_request(
+                "acknowledge",
+                RelayRequest::Acknowledge {
+                    through_ordinal: ordinal,
+                    through_digest: digest
+                }
+            ))
+            .body,
+        RelayResponseBody::Ok { .. }
+    ));
+    assert_eq!(relay.snapshot.retained_through(), ordinal);
+    assert_eq!(relay.snapshot.recovery_floor_ordinal, 0);
+    assert_eq!(
+        relay.snapshot.handled_commands["move-queued-config"].outcome,
+        Some(RelayCommandOutcome::Configured)
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new-again").unwrap();
+    // A retry after journal pruning returns the original acceptance, not a new dispatch.
+    assert_eq!(
+        submit_relay(&mut relay, "move-queued-config", command),
+        accepted
+    );
+    assert!(
+        !relay.snapshot.dispatches.contains_key("move-queued-config")
+            || relay.snapshot.dispatches["move-queued-config"].state
+                == RelayDispatchState::Completed
+    );
+    // A stale connector cannot undo operation pins after upgrade reconciliation.
+    relay.handle(relay_request(
+        "stale-reconcile",
+        RelayRequest::UpdateCommandRetention {
+            operation_id: None,
+            command_ids: Default::default(),
+            reconcile_legacy: true,
+        },
+    ));
+    assert!(
+        relay
+            .snapshot
+            .command_retention
+            .contains_key("move-operation-1")
+    );
+    // The daemon sends this only after queue_admission_finished is durable.
+    relay.handle(relay_request(
+        "release-operation",
+        update(Default::default(), false),
+    ));
+    relay.garbage_collect_relay_history().unwrap();
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("move-queued-config")
+    );
+}
+
+#[test]
+fn unused_native_evidence_survives_ack_pruning_and_worker_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "empty-native".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    let ordinal = relay.latest_ordinal();
+    let digest = relay.latest_digest().to_owned();
+    relay.handle(relay_request(
+        "ack-empty",
+        RelayRequest::Acknowledge {
+            through_ordinal: ordinal,
+            through_digest: digest.clone(),
+        },
+    ));
+    assert_eq!(relay.snapshot.acknowledged_through, ordinal);
+    assert!(relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).is_err());
+    assert!(
+        fs::read(
+            temp.path()
+                .join(RELAY_JOURNAL_DIR)
+                .join(RELAY_ACTIVE_SEGMENT)
+        )
+        .unwrap()
+        .is_empty()
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(!relay.native_session_may_have_history());
+    let evidence = relay.snapshot.native_use_evidence.as_ref().unwrap();
+    assert_eq!(evidence.native_session_id, "empty-native");
+    assert_eq!(evidence.opened_ordinal, Some(ordinal));
+    assert_eq!(evidence.usage, NativeSessionUse::Unused);
+    assert_eq!(evidence.version, 1);
+}
+
+#[test]
+fn uncertain_native_use_survives_terminal_receipt_pruning() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "old").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "uncertain-native".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "uncertain-prompt",
+        prompt("possibly transmitted"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "uncertain-prompt",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "lost ACP reply",
+        )
+        .unwrap();
+    for i in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        submit_relay(
+            &mut relay,
+            &format!("after-uncertain-{i}"),
+            RelayCommand::RecordNotice {
+                text: format!("later {i}"),
+            },
+        );
+    }
+    let through_ordinal = relay.latest_ordinal();
+    let through_digest = relay.latest_digest().to_owned();
+    relay.handle(relay_request(
+        "ack-uncertain",
+        RelayRequest::Acknowledge {
+            through_ordinal,
+            through_digest,
+        },
+    ));
+    assert!(!relay.snapshot.dispatches.contains_key("uncertain-prompt"));
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "new").unwrap();
+    assert!(relay.native_session_may_have_history());
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Unknown
+    );
+    relay.mark_native_session_used().unwrap();
+    assert_eq!(
+        relay.snapshot.native_use_evidence.as_ref().unwrap().usage,
+        NativeSessionUse::Used
+    );
 }

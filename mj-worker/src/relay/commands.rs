@@ -1238,6 +1238,7 @@ impl DurableRelay {
         }
         let mut claimed = Vec::with_capacity(claimable.len());
         let mut next_snapshot = self.snapshot.clone();
+        let mut claims_native_prompt = false;
         for (accepted_ordinal, command_id) in claimable {
             let steering_prompt = (self.steering_delivery_mode.uses_acp()
                 && matches!(
@@ -1259,6 +1260,7 @@ impl DurableRelay {
                 .get_mut(&command_id)
                 .expect("claimable command disappeared");
             dispatch.state = RelayDispatchState::InFlight;
+            claims_native_prompt |= dispatch.command.prompt_blocks().is_some();
             let hidden_prompt_context = mailbox_prompt_eligible(&dispatch.command)
                 .then(|| {
                     let mut contexts = Vec::new();
@@ -1296,6 +1298,17 @@ impl DurableRelay {
             });
         }
         if !claimed.is_empty() {
+            // Persist uncertainty in the same transaction as the in-flight
+            // claim, before ACP can see it. Pending queue entries remain unused.
+            if claims_native_prompt
+                && next_snapshot
+                    .native_use_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.usage == NativeSessionUse::Unused)
+            {
+                next_snapshot.native_session_used = true;
+                next_snapshot.record_native_use(NativeSessionUse::Unknown);
+            }
             // An in-flight claim is not in the journal, so it is only durable
             // once the snapshot itself is.
             self.commit_snapshot(next_snapshot)?;

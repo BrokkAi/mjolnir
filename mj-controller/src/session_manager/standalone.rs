@@ -42,6 +42,63 @@ impl StandaloneSession {
         .await
         .context("record negotiated worker protocol")??;
         let operational = client.status().await?;
+        if let Some((legacy_pending, pinned_operations)) = client.command_retention_status().await?
+            && (legacy_pending || !pinned_operations.is_empty())
+        {
+            let session = target.session_id.clone();
+            // Inspect only the owners this worker reported. A concurrent new
+            // Move has a different identity and cannot be cleared by this read.
+            let (legacy, completed) = tokio::task::spawn_blocking(move || -> Result<_> {
+                let operation = crate::database::load_move_operation(&session)?;
+                let pending = operation.as_ref().filter(|operation| {
+                    operation.queue_admission_started && !operation.queue_admission_finished
+                });
+                let completed = pinned_operations
+                    .into_iter()
+                    .filter(|id| pending.is_none_or(|operation| operation.operation_id != *id))
+                    .collect::<Vec<_>>();
+                if !legacy_pending {
+                    return Ok((None, completed));
+                }
+                let legacy = if let Some(operation) = pending.filter(|operation| {
+                    operation.queue == mj_core::state::ResumeQueueDisposition::Start
+                }) {
+                    let checkpoint = operation
+                        .restore_artifact()
+                        .context("pending Move queue archive is missing")?;
+                    let verified = verify_archive_streaming(&checkpoint.archive_path)?;
+                    anyhow::ensure!(
+                        verified.archive_sha256 == checkpoint.sha256
+                            && verified.manifest.session.id == session,
+                        "pending Move queue checkpoint verification failed"
+                    );
+                    (
+                        Some(operation.operation_id.clone()),
+                        crate::controller::move_session::move_queue_command_ids(
+                            operation,
+                            &verified.canonical_session,
+                        ),
+                    )
+                } else {
+                    (None, Default::default())
+                };
+                Ok((Some(legacy), completed))
+            })
+            .await
+            .context("reconcile command retention owners")??;
+            // Upgrade protection is replaced before an ACK can release journal
+            // history. Once consumed, stale reconcilers cannot change the pins.
+            if let Some((operation, ids)) = legacy {
+                client
+                    .update_command_retention(operation, ids, true)
+                    .await?;
+            }
+            for operation in completed {
+                client
+                    .update_command_retention(Some(operation), Default::default(), false)
+                    .await?;
+            }
+        }
         let (materialized, window) = load_projection(&target.session_id).await?;
         let mut connection = Self {
             client,
@@ -460,6 +517,17 @@ impl StandaloneSession {
         command: RelayCommand,
     ) -> Result<u64> {
         self.client.submit(command_id, command).await
+    }
+
+    pub async fn update_command_retention(
+        &mut self,
+        operation_id: Option<String>,
+        command_ids: std::collections::BTreeSet<String>,
+        reconcile_legacy: bool,
+    ) -> Result<()> {
+        self.client
+            .update_command_retention(operation_id, command_ids, reconcile_legacy)
+            .await
     }
 
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {

@@ -30,10 +30,11 @@ but new documentation should not treat the current journal as a single hash
 chain.
 
 The controller materializes journal events into its local session database and
-acknowledges a verified frontier. Acknowledgement alone does not permit the
-worker to discard history. Journal data is eligible for collection only after
-it is both durably acknowledged by the controller and covered by a verified
-checkpoint.
+acknowledges a verified frontier. Current workers can then discard the journal
+history through that acknowledgement. Move retry receipts and native-session
+use evidence have their own durable retention and do not require keeping the
+whole journal. Older workers keep their checkpoint-gated retention policy
+until they are upgraded.
 
 ## Queued work continues in order
 

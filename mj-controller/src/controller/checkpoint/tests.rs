@@ -1644,17 +1644,17 @@ async fn ending_the_checkpoint_latch_returns_the_connection_to_its_actor() {
     );
 }
 /// The archive is complete once the export returns, so the harness stops
-/// waiting there: the barrier ends, ACP dispatch resumes, and only the
-/// recovery floor waits for the installed archive.
+/// waiting there: the barrier ends and ACP dispatch resumes. ACK-only workers
+/// need no delayed archive-coverage update after installation.
 #[cfg(unix)]
 #[tokio::test]
-async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
+async fn releasing_a_checkpoint_after_capture_needs_no_floor_move_on_ack_only_workers() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in an
     // exact child test instead of racing unrelated tests in this process.
     if std::env::var_os(RELEASE_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test_name = format!(
-            "{}::releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor",
+            "{}::releasing_a_checkpoint_after_capture_needs_no_floor_move_on_ack_only_workers",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
@@ -1699,7 +1699,7 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     assert_eq!(released.operational.checkpoint_ready, None);
     assert_eq!(
         released.operational.recovery_floor_ordinal, 0,
-        "an exported archive that is not installed may not release journal history"
+        "capture release leaves the legacy archive-coverage marker alone"
     );
 
     // The transfer is still running, and the harness is already working
@@ -1725,8 +1725,7 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     }
     assert!(dispatched.is_some());
 
-    // The archive is installed, so the relay may finally forget the history
-    // it covers.
+    // Installation has no additional journal-retention work on current workers.
     latched_checkpoint(
         relay,
         barrier_command_id,
@@ -1740,9 +1739,12 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     let installed = handle
         .view()
         .snapshot
-        .expect("the actor published the advanced recovery floor");
-    assert_eq!(installed.operational.recovery_floor_ordinal, cursor.ordinal);
-    assert_eq!(installed.operational.recovery_floor_digest, cursor.digest);
+        .expect("the actor remains attached after archive installation");
+    assert_eq!(installed.operational.recovery_floor_ordinal, 0);
+    assert_eq!(
+        installed.operational.recovery_floor_digest,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST
+    );
 }
 /// A target still running a worker that predates the early release keeps
 /// its barrier through the transfer and ends it the way it always did.
@@ -2545,6 +2547,7 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
+        relay_protocol: mj_core::relay::RELAY_PROTOCOL_VERSION,
         admission: crate::controller::test_support::session_admission(LATCH_RELAY_SESSION),
         _worker_owner: crate::controller::test_support::worker_test_permit(
             LATCH_RELAY_SESSION,

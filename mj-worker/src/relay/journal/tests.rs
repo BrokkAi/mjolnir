@@ -674,7 +674,7 @@ fn restart_adopts_a_config_accepted_outside_the_durable_queue() {
 }
 
 #[test]
-fn acknowledgement_only_garbage_collects_through_a_verified_checkpoint() {
+fn acknowledgement_garbage_collects_without_a_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -705,8 +705,8 @@ fn acknowledgement_only_garbage_collects_through_a_verified_checkpoint() {
     ));
     assert_eq!(
         retained_events(&relay).len(),
-        1,
-        "ACK alone is not a recovery cut"
+        0,
+        "ACK is the durable journal retention boundary"
     );
 
     let ready = ready_checkpoint(&mut relay, "gc-barrier");
@@ -1278,7 +1278,7 @@ fn relay_journal_files_and_directories_are_owner_only() {
 }
 
 #[test]
-fn sealed_relay_segments_replay_and_are_removed_after_checkpointed_ack() {
+fn sealed_relay_segments_replay_and_are_removed_after_acknowledgement() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     relay
@@ -1314,24 +1314,6 @@ fn sealed_relay_segments_replay_and_are_removed_after_checkpointed_ack() {
     );
     let _ = attach_relay(&mut relay, "attach-sealed", 0);
     let _ = acknowledge_relay(&mut relay, "ack-sealed", 1);
-    assert!(
-        fs::read_dir(temp.path().join(RELAY_JOURNAL_DIR))
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .any(|entry| entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "gz"))
-    );
-    let ready = ready_checkpoint(&mut relay, "sealed-barrier");
-    acknowledge_relay(&mut relay, "ack-sealed-checkpoint", ready.ordinal);
-    submit_relay(
-        &mut relay,
-        "sealed-complete",
-        RelayCommand::CompleteCheckpoint {
-            barrier_command_id: "sealed-barrier".into(),
-        },
-    );
     assert!(
         !fs::read_dir(temp.path().join(RELAY_JOURNAL_DIR))
             .unwrap()
