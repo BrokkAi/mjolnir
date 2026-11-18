@@ -40,6 +40,7 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
             };
             NativeAgentView {
                 generation_ordinal: 1,
+                pending_input_times: Default::default(),
                 projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                 agent,
             }
@@ -2660,22 +2661,70 @@ fn a_stopped_notification_is_a_row_and_attention_advances() {
     );
 }
 
+// Hard-won: dc77f11c1: mark-all-read missed Important completions behind a question badge.
 #[test]
 fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
+    use mj_client::runtime_feed::NotificationCard;
+    use mj_core::attention::{
+        EntryMessage, NotificationDismissal, NotificationKind, NotificationStackEntry,
+    };
+
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
-    // Mark all read advances the read marker to the materialized transcript.
-    dashboard
-        .session_details
-        .get_mut("done")
-        .unwrap()
-        .materialized_applied_event_ordinal = Some(4);
+    dashboard.set_unread_frontiers(
+        [("asks".into(), 4), ("done".into(), 4)]
+            .into_iter()
+            .collect(),
+    );
+    dashboard.set_notification_dismissals(
+        [("asks".into(), NotificationDismissal::Stack { revision: 10 })]
+            .into_iter()
+            .collect(),
+    );
+    dashboard.set_notification_cards(Some(
+        [(
+            "asks".into(),
+            NotificationCard {
+                since_ms: 0,
+                badge: NotificationKind::NeedsInput,
+                entries: [
+                    (5, NotificationKind::Important),
+                    (6, NotificationKind::Important),
+                    (9, NotificationKind::NeedsInput),
+                ]
+                .into_iter()
+                .map(|(completed_ordinal, kind)| NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal,
+                    kind,
+                    message: EntryMessage::None,
+                })
+                .collect(),
+                dismissal: Some(NotificationDismissal::Stack { revision: 10 }),
+                holder: None,
+                form: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    ));
     assert_eq!(
         dashboard.sessions_attention_summary(),
         Some((AttentionLevel::Waiting, 1))
     );
 
-    chord(&mut dashboard, CommandId::MarkAllRead);
+    let DashboardAction::MarkAllRead { receipts } = chord(&mut dashboard, CommandId::MarkAllRead)
+    else {
+        panic!("mark all read must save receipts");
+    };
+    assert_eq!(
+        receipts.into_iter().collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([("asks".into(), 6), ("done".into(), 4)]),
+    );
+    assert_eq!(
+        dashboard.state.sessions["asks"].viewed_through_event_ordinal,
+        6
+    );
     assert_eq!(
         dashboard.attention_level("asks"),
         AttentionLevel::Waiting,
@@ -4030,6 +4079,7 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     let projection = mj_core::state::MaterializedSession::empty(&id);
     dashboard.set_native_agents(vec![NativeAgentView {
         generation_ordinal: 1,
+        pending_input_times: Default::default(),
         agent,
         projection,
     }]);
@@ -4129,6 +4179,7 @@ fn native_nested_scope_keys_preserve_filters_and_filter_editing() {
             .into_iter()
             .map(|agent| NativeAgentView {
                 generation_ordinal: 1,
+                pending_input_times: Default::default(),
                 projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                 agent,
             })
@@ -5076,6 +5127,7 @@ fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
                     };
                     NativeAgentView {
                         generation_ordinal: 1,
+                        pending_input_times: Default::default(),
                         projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
                         agent,
                     }

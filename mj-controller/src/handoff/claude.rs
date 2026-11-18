@@ -469,6 +469,7 @@ mod tests {
         CanonicalSessionSnapshot {
             command_ledger: None,
             assessment_state: None,
+            notification_stack: None,
             event_frontier: bodies.len() as u64 + 10,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {

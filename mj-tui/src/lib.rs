@@ -58,6 +58,7 @@ mod notifications_pane;
 mod notify;
 mod row_index;
 mod session_view;
+pub use notifications_pane::{NotificationReadRequest, NotificationReadSource};
 pub use notify::Notification;
 use session_view::Tracked;
 mod palette;
@@ -948,6 +949,9 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    pub(crate) notification_cards: Option<
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
+    >,
     pub(crate) form_holders: mj_core::snapshot_map::SnapshotMap<String, String>,
     pub(crate) unread_frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
     pub(crate) notification_dismissals: Tracked<
@@ -1350,6 +1354,7 @@ impl DashboardState {
             stopped_records: Default::default(),
             unread_frontiers: Default::default(),
             notification_dismissals: Default::default(),
+            notification_cards: None,
             form_holders: Default::default(),
             served_attention: Tracked::new(Default::default()),
             launch_recency,

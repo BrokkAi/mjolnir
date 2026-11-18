@@ -170,6 +170,7 @@ for line in sys.stdin:
                 serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
                     command_ledger: None,
                     assessment_state: None,
+                    notification_stack: None,
                     event_frontier: 4,
                     event_frontier_digest: "c".repeat(64),
                     queued_prompts: vec![mj_core::archive::CanonicalQueuedPrompt {

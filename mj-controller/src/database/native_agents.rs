@@ -221,9 +221,11 @@ pub(super) fn apply_native_agent_event(
                 generation_ordinal: relay.ordinal,
                 agent,
                 projection,
+                pending_input_times: Default::default(),
             }
         }
     };
+    let mut pending_elicitations = None;
     match event {
         NativeAgentEvent::State { state, .. } => {
             view.agent.state = *state;
@@ -269,6 +271,7 @@ pub(super) fn apply_native_agent_event(
             }
             let mutation =
                 mj_transcript::projection::project_native_update(&view.projection, relay, update)?;
+            pending_elicitations = mutation.pending_elicitations;
             for change in mutation.transcript {
                 match change {
                     TranscriptMutation::Upsert(item) => {
@@ -287,7 +290,7 @@ pub(super) fn apply_native_agent_event(
     view.projection
         .applied_event_digest
         .clone_from(&relay.digest);
-    view.projection.last_activity_at_ms = Some(relay.recorded_at_ms);
+    view.apply_activity(relay.recorded_at_ms, pending_elicitations);
     save(connection, &view, staging)
 }
 
@@ -391,8 +394,35 @@ mod tests {
                 apply_native_agent_event(connection, "owner", &event(1, spawn("child", None)))
             })
             .unwrap();
+        // Hard-won: bf2b4a05f: activity after loading a legacy request moved its raise time.
+        writer
+            .writer
+            .execute("load legacy pending native request", |connection| {
+                let mut view = load_native_agent_view_from(connection, "owner", "child", 0)?
+                    .context("native child was not materialized")?;
+                view.projection.pending_elicitations.push(
+                    mj_core::elicitation::ElicitationRequest {
+                        id: "approval".into(),
+                        message: "Approve?".into(),
+                        title: None,
+                        description: None,
+                        fields: vec![],
+                        tool_permission: None,
+                    },
+                );
+                save(connection, &view, 0)?;
+                apply_native_agent_event(
+                    connection,
+                    "owner",
+                    &event(2, text("child", "Still working")),
+                )
+            })
+            .unwrap();
         let held = writer.writer.committed_state().unwrap();
-        assert!(held.native_agents["owner"].contains_key("child"));
+        assert_eq!(
+            held.native_agents["owner"]["child"].pending_input_raised_at_ms,
+            Some(100),
+        );
         writer.shutdown().unwrap();
         let writer = start_database_writer_at(&path, false).unwrap();
         assert_eq!(
@@ -405,7 +435,7 @@ mod tests {
                 apply_native_agent_event(
                     connection,
                     "owner",
-                    &event(2, NativeAgentEvent::ReplayBegin),
+                    &event(3, NativeAgentEvent::ReplayBegin),
                 )
             })
             .unwrap();
@@ -417,7 +447,7 @@ mod tests {
         writer
             .writer
             .execute("stage native child", |connection| {
-                apply_native_agent_event(connection, "owner", &event(3, spawn("replacement", None)))
+                apply_native_agent_event(connection, "owner", &event(4, spawn("replacement", None)))
             })
             .unwrap();
         let staged = writer.writer.committed_state().unwrap();
@@ -429,7 +459,7 @@ mod tests {
                 apply_native_agent_event(
                     connection,
                     "owner",
-                    &event(4, NativeAgentEvent::ReplayCommit),
+                    &event(5, NativeAgentEvent::ReplayCommit),
                 )
             })
             .unwrap();

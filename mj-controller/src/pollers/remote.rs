@@ -166,6 +166,7 @@ fn runtime_state_update(
         launch_recency: metadata.launch_recency.into_inner(),
         form_holders: metadata.form_holders,
         session_attention: metadata.session_attention,
+        notification_cards: metadata.notification_cards,
         unread_frontiers: metadata.unread_frontiers,
         notification_dismissals: metadata.notification_dismissals,
         recent_launch: metadata.recent_launch,

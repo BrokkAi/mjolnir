@@ -383,22 +383,39 @@ impl DurableRelay {
         (!request.message_ids.is_empty()).then_some(request)
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
-        let Some(assessment) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
-            a.revision == revision
-                && a.current()
-                && a.action == Some(mj_core::assessment::Action::AwaitInput)
-                && a.question_message.is_none()
-        }) else {
+    #[cfg(test)]
+    fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
+        let Some(completed) = self.question_locator_completion(revision) else {
             return Ok(false);
         };
-        self.record_observation(RelayObservation::QuestionTargetUpdated {
-            question: mj_core::assessment::InferredQuestion {
-                turn_id: assessment.turn_id,
-                completed_ordinal: assessment.completed_ordinal,
-            },
-            question_message: stable_id.to_owned(),
+        self.finish_question_locator(completed, Some(stable_id.to_owned()))
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn question_locator_completion(&self, revision: u64) -> Option<u64> {
+        self.snapshot
+            .assessment
+            .as_deref()
+            .filter(|a| a.revision == revision && a.inferred_question().is_some())
+            .map(|a| a.completed_ordinal)
+    }
+
+    pub(crate) fn finish_question_locator(
+        &mut self,
+        completed_ordinal: u64,
+        question_message: Option<String>,
+    ) -> Result<bool> {
+        use mj_core::attention::EntryMessage;
+        let entries = &self.snapshot.notification_stack.entries;
+        let locating = entries
+            .binary_search_by_key(&completed_ordinal, |entry| entry.completed_ordinal)
+            .is_ok_and(|index| entries[index].message == EntryMessage::Locating);
+        if !locating {
+            return Ok(false);
+        }
+        self.record_observation(RelayObservation::QuestionLocatorFinished {
+            completed_ordinal,
+            question_message,
         })?;
         Ok(true)
     }
@@ -1464,24 +1481,13 @@ mod settled_task_tests {
                     assert_eq!(relay.snapshot.person_input_through, frontier);
                 }
                 if form_answer {
-                    // Both a late assessment and a locator may still be recorded,
-                    // but neither can publish a completion preceding the person's input.
                     relay.store_assessment(assessment).unwrap();
                     assert!(
-                        relay
+                        !relay
                             .store_question_target(revision, "agent:original")
                             .unwrap()
                     );
-                    assert_eq!(
-                        relay
-                            .snapshot
-                            .request
-                            .as_ref()
-                            .unwrap()
-                            .question_message
-                            .as_deref(),
-                        Some("agent:original")
-                    );
+                    assert!(relay.snapshot.notification_stack.entries.is_empty());
                 } else {
                     assert_eq!(
                         relay
@@ -1606,6 +1612,164 @@ mod settled_task_tests {
         let mut relay = claude_relay(dir);
         relay.set_acp_ready(true);
         relay
+    }
+
+    // Hard-won: 4206e12f7: upgrading lost Important replies with no native message ID.
+    #[test]
+    fn notification_stack_replays_after_mailbox_wakes_and_fences_stale_clear() {
+        for reply_id in [Some("retained-reply"), None] {
+            check_notification_stack_after_upgrade(reply_id);
+        }
+    }
+
+    fn check_notification_stack_after_upgrade(reply_id: Option<&str>) {
+        use crate::relay::test_support::{finish_prompt, prompt, relay_request, submit_relay};
+        use mj_core::assessment::{Action, Status};
+        use mj_core::attention::{AssessmentAttention, EntryMessage, NotificationKind};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        let run = |relay: &mut DurableRelay, id: &str, reply_id: Option<&str>| {
+            submit_relay(relay, id, prompt("Check results"));
+            relay.claim_pending_commands(true).unwrap();
+            reply_with_id(relay, reply_id, "Turn result");
+            finish_prompt(relay, id);
+            let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+            assessment.status = Status::Assessed;
+            assessment
+        };
+        let mut important = run(&mut relay, "first-person", reply_id);
+        important.attention = Some(AssessmentAttention::Important);
+        important.action = Some(Action::Finished);
+        relay.store_assessment(important.clone()).unwrap();
+        let first_revision = relay.snapshot.notification_stack.revision;
+        relay.store_assessment(important.clone()).unwrap();
+        assert_eq!(relay.snapshot.notification_stack.revision, first_revision);
+
+        let mut ordinary = important.clone();
+        ordinary.attention = None;
+        relay.store_assessment(ordinary.clone()).unwrap();
+        assert!(relay.snapshot.notification_stack.entries.is_empty());
+        let withdrawn_revision = relay.snapshot.notification_stack.revision;
+        assert_eq!(withdrawn_revision, relay.snapshot.latest_ordinal);
+        assert!(withdrawn_revision > first_revision);
+        relay.store_assessment(ordinary).unwrap();
+        assert_eq!(
+            relay.snapshot.notification_stack.revision,
+            withdrawn_revision
+        );
+        relay.store_assessment(important.clone()).unwrap();
+
+        let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+        legacy["format_version"] = serde_json::json!(26);
+        legacy.as_object_mut().unwrap().remove("notification_stack");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("notifications_read_through");
+        drop(relay);
+        std::fs::write(
+            dir.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        let expected = reply_id.map_or(EntryMessage::None, |id| {
+            EntryMessage::Found(format!("agent:{id}"))
+        });
+        assert_eq!(
+            relay.snapshot.notification_stack.entries[0].message,
+            expected
+        );
+        let generated = mj_core::continuation::GeneratedPrompt::SessionMessageTurn;
+        let mut question = run(&mut relay, &generated.command_id("first-wake"), None);
+        question.action = Some(Action::AwaitInput);
+        relay.store_assessment(question.clone()).unwrap();
+        let mut ordinary = question.clone();
+        ordinary.action = Some(Action::Finished);
+        relay.store_assessment(ordinary).unwrap();
+        assert!(relay.snapshot.open_request().is_none());
+        assert_eq!(
+            relay.snapshot.notification_stack.revision,
+            relay.snapshot.latest_ordinal
+        );
+        assert_eq!(relay.snapshot.notification_stack.entries.len(), 1);
+        assert_eq!(
+            relay.snapshot.notification_stack.entries[0].completed_ordinal,
+            important.completed_ordinal,
+        );
+        assert!(
+            !relay
+                .finish_question_locator(question.completed_ordinal, None)
+                .unwrap()
+        );
+        relay.store_assessment(question.clone()).unwrap();
+        assert!(
+            relay
+                .finish_question_locator(question.completed_ordinal, None)
+                .unwrap()
+        );
+        assert!(important.completed_at_ms > 0 && question.completed_at_ms > 0);
+        let times: Vec<_> = relay
+            .snapshot
+            .notification_stack
+            .entries
+            .iter()
+            .map(|entry| entry.completed_at_ms)
+            .collect();
+        assert_eq!(times, [important.completed_at_ms, question.completed_at_ms]);
+        let stack = relay.snapshot.notification_stack.clone();
+        assert_eq!(
+            stack
+                .entries
+                .iter()
+                .map(|entry| (entry.kind, &entry.message))
+                .collect::<Vec<_>>(),
+            [
+                (NotificationKind::Important, &expected),
+                (NotificationKind::NeedsInput, &EntryMessage::None)
+            ]
+        );
+        assert_eq!(reopen(dir.path(), relay).snapshot.notification_stack, stack);
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+
+        // Clear stays available during an automated turn, but a gesture
+        // captured before a later entry was appended cannot clear it.
+        let command_id = generated.command_id("second-wake");
+        submit_relay(&mut relay, &command_id, prompt("Continue"));
+        relay.claim_pending_commands(true).unwrap();
+        let result = relay.handle(relay_request(
+            "stale-clear",
+            RelayRequest::Submit {
+                command_id: "stale-clear".into(),
+                command: RelayCommand::ClearNotifications {
+                    revision: first_revision,
+                },
+            },
+        ));
+        assert!(matches!(result.body, RelayResponseBody::Error { .. }));
+        for (id, through) in [
+            ("new-read", question.completed_ordinal),
+            ("old-read", important.completed_ordinal),
+        ] {
+            submit_relay(&mut relay, id, RelayCommand::NotificationsRead { through });
+        }
+        assert_eq!(relay.snapshot.notification_stack.entries.len(), 1);
+        assert_eq!(
+            relay.snapshot.notifications_read_through,
+            question.completed_ordinal
+        );
+        let revision = relay.snapshot.notification_stack.revision;
+        let clear = RelayCommand::ClearNotifications { revision };
+        let accepted = submit_relay(&mut relay, "current-clear", clear.clone());
+        assert_eq!(submit_relay(&mut relay, "current-clear", clear), accepted);
+        assert!(relay.snapshot.open_request().is_none());
+        assert!(relay.snapshot.active_prompt.is_some());
+        let relay = reopen(dir.path(), relay);
+        assert!(relay.snapshot.notification_stack.entries.is_empty());
+        assert!(relay.snapshot.open_request().is_none());
     }
 
     #[test]

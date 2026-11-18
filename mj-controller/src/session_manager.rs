@@ -30,6 +30,24 @@ use crate::targets::{
 };
 use mj_core::relay::{RelayCommand, RelayCursor, RelayOperationalState};
 
+/// Build the same idempotent read consequence on receipt and relay attachment.
+pub(crate) fn notifications_read(
+    live: &RelayOperationalState,
+    through: u64,
+) -> Option<(String, RelayCommand, u64)> {
+    let through = through.min(live.latest_ordinal);
+    (live.supports_notification_stack()
+        && live.checkpoint_barrier.is_none()
+        && through > live.notifications_read_through)
+        .then(|| {
+            (
+                format!("notifications-read-{through}"),
+                RelayCommand::NotificationsRead { through },
+                through,
+            )
+        })
+}
+
 pub use mj_client::session::{
     ManagedSessionView, ReviewerAction, ReviewerOutcome, ViewError, new_command_id,
 };

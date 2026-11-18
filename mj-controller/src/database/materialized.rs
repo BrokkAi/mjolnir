@@ -334,9 +334,34 @@ pub(super) fn last_materialized_agent_message_in(
     through_position: Option<u64>,
     through_ordinal: Option<u64>,
 ) -> Result<Option<(u64, String)>> {
+    let Some(item) = last_materialized_agent_item_in(
+        connection,
+        session_id,
+        after_position,
+        through_position,
+        through_ordinal,
+    )?
+    else {
+        return Ok(None);
+    };
+    let position = item.position;
+    let TranscriptBody::Agent { chunks, .. } = item.body else {
+        return Ok(None);
+    };
+    let text = mj_core::transcript::materialized_chunks_text(&chunks);
+    Ok((!text.trim().is_empty()).then_some((position, text)))
+}
+
+fn last_materialized_agent_item_in(
+    connection: &Connection,
+    session_id: &str,
+    after_position: u64,
+    through_position: Option<u64>,
+    through_ordinal: Option<u64>,
+) -> Result<Option<TranscriptItem>> {
     let row = connection
         .query_row(
-            "SELECT position, body_json
+            "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms, last_changed_at_ms, body_json
              FROM materialized_transcript_items
              WHERE session_id = ?1
                AND position > ?2
@@ -367,19 +392,36 @@ pub(super) fn last_materialized_agent_message_in(
                 through_position,
                 through_ordinal
             ],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            )),
         )
         .optional()?;
-    let Some((position, body_json)) = row else {
-        return Ok(None);
-    };
-    let body: TranscriptBody = serde_json::from_str(&body_json)
-        .with_context(|| format!("parse materialized agent message for session {session_id}"))?;
-    let TranscriptBody::Agent { chunks, .. } = body else {
-        return Ok(None);
-    };
-    let text = mj_core::transcript::materialized_chunks_text(&chunks);
-    Ok((!text.trim().is_empty()).then_some((position, text)))
+    row.map(
+        |(
+            stable_id,
+            position,
+            latest_content_event_ordinal,
+            created_at_ms,
+            last_changed_at_ms,
+            body,
+        )| {
+            Ok(TranscriptItem {
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body: decode_transcript_body(&body, session_id)?,
+            })
+        },
+    )
+    .transpose()
 }
 
 /// Execution state, the running turn, and the last finished turn's outcome.
@@ -454,6 +496,47 @@ pub fn load_materialized_agent_message_through(
         last_materialized_agent_message_in(&connection, session_id, 0, None, Some(through))?
             .map(|(_, text)| text),
     )
+}
+
+pub fn load_materialized_agent_item_through(
+    session_id: &str,
+    through: u64,
+) -> Result<Option<TranscriptItem>> {
+    let mut reader = open_reader(&database_path())?;
+    let connection = reader.transaction()?;
+    materialized_agent_item_through(&connection, session_id, through)
+}
+
+/// The newest agent message of the turn that completed at `through`, bounded
+/// to that turn: a turn that left no text has none, never an earlier turn's.
+/// Every reader of a notification entry without a message id asks this.
+pub(crate) fn materialized_agent_item_through(
+    connection: &Connection,
+    session_id: &str,
+    through: u64,
+) -> Result<Option<TranscriptItem>> {
+    let historical_start: Option<u64> = connection
+        .query_row(
+            "SELECT turn_start_position FROM session_turn_usage
+             WHERE session_id = ?1 AND completed_ordinal = ?2",
+            params![session_id, through],
+            |row| row.get::<_, Option<u64>>(0),
+        )
+        .optional()?
+        .flatten();
+    let start = match historical_start {
+        Some(start) => Some(start),
+        // Restoring a canonical snapshot can supply a last outcome without
+        // its historical usage row. Its completion must match exactly too.
+        None => read_materialized_turn_state(connection, session_id)?
+            .and_then(|(_, _, last)| last)
+            .filter(|turn| turn.completed_ordinal == through)
+            .and_then(|turn| turn.turn_start_position),
+    };
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    last_materialized_agent_item_in(connection, session_id, start, Some(through), Some(through))
 }
 
 /// Whether the stored projection holds a transcript item with this stable id.

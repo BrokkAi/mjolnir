@@ -522,6 +522,12 @@ impl Controller {
                     turn_completion: barrier.operational.turn_completion.clone(),
                 })?);
         }
+        // An explicit empty stack prevents restore from seeding an already
+        // cleared notification from the older assessment record.
+        if barrier.operational.supports_notification_stack() {
+            canonical_session.notification_stack =
+                Some(barrier.operational.notification_stack.as_ref().clone());
+        }
         let native_session_id = barrier
             .operational
             .native_session_id

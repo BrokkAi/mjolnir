@@ -124,6 +124,17 @@ impl ViewerPublication {
         {
             self.dirty.insert(id.clone());
         }
+        let empty = Default::default();
+        for (id, _) in self
+            .runtime
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap_or(&empty)
+            .changes(next.metadata.notification_cards.as_ref().unwrap_or(&empty))
+        {
+            self.dirty.insert(id.clone());
+        }
         self.runtime = next.clone();
     }
 
@@ -226,6 +237,13 @@ impl ViewerPublication {
                 .metadata
                 .notification_dismissals
                 .get(&id)
+                .cloned();
+            row.notification_card = self
+                .runtime
+                .metadata
+                .notification_cards
+                .as_ref()
+                .and_then(|cards| cards.get(&id))
                 .cloned();
             row.form_holder = self.runtime.metadata.form_holders.get(&id).cloned();
             row.capabilities.dismiss_notification = row.notification_dismissal.is_some();

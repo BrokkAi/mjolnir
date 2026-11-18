@@ -3601,17 +3601,21 @@ fn golden_dashboard_session_render() {
 #[test]
 fn golden_dashboard_layout_render() {
     let mut output = String::new();
-    let mut notifications = crate::notifications_pane::tests::dashboard();
-    // Keep the age unknown in this golden; ordering is exercised through keys.
-    for detail in notifications.session_details.values_mut() {
-        detail.last_activity_at_ms = None;
-    }
+    let mut notifications = crate::notifications_pane::tests::published_dashboard();
+    append_dashboard_golden(
+        &mut output,
+        "older important card before a newer question",
+        120,
+        44,
+        &mut notifications,
+    );
+    notifications.notification_skip();
     for character in "I'll investigate.".chars() {
         notifications.handle_key(key(KeyCode::Char(character)));
     }
     append_dashboard_golden(
         &mut output,
-        "question notification card",
+        "multi-entry question notification card",
         120,
         44,
         &mut notifications,

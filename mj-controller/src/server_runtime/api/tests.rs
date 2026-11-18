@@ -36,6 +36,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         "child".into(),
         crate::database::CommittedTurn {
             state: (MaterializedExecutionState::Idle, None, Some(turn)),
+            pending_form_times: Default::default(),
             failed_message: Some("owned failure details".into()),
         },
     );
@@ -890,6 +891,8 @@ fn ready_view(model: &str) -> ManagedSessionView {
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
         open_request: None,
+        notification_stack: Default::default(),
+        notifications_read_through: 0,
         person_input_through: 0,
         work_liveness: None,
         undelivered_mailbox_event_keys: Vec::new(),

@@ -2,6 +2,8 @@
 use crate::{daemon::RuntimeState, database as db};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use mj_client::runtime_feed::RuntimeProjection;
+use mj_core::attention::{EntryMessage, NotificationKind, SessionAttention};
 use ring::{
     aead, agreement, hkdf,
     rand::{SecureRandom, SystemRandom},
@@ -9,7 +11,7 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -218,152 +220,107 @@ fn phone_line(text: &str, fallback: &str) -> String {
     }
 }
 
-fn eligible(attention: &mj_core::attention::SessionAttention) -> bool {
-    // Extend this policy expression when enabling another attention category.
-    matches!(
-        attention,
-        mj_core::attention::SessionAttention::NeedsInput
-            | mj_core::attention::SessionAttention::Important
-    )
+pub(crate) struct PushEntry<'a> {
+    pub session: &'a str,
+    pub completed_ordinal: Option<u64>,
+    pub paused: bool,
+    pub holder: &'a str,
+    pub kind: NotificationKind,
+    pub text: Option<&'a str>,
+    pub message_id: Option<&'a str>,
 }
 
-fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String, String, Notice)> {
-    use mj_core::attention::SessionAttention;
-    runtime
-        .metadata
-        .session_attention
-        .iter()
-        .filter_map(|(id, attention)| {
-            if !eligible(attention) {
-                return None;
-            }
-            let record = runtime.records.get(id)?;
-            // An ignored session never interrupts; its row still shows why.
-            if record.notifications_ignored {
-                return None;
-            }
-            let mut identities = Vec::new();
-            let mut question = String::new();
-            let belongs_to_session = |source: &str| {
-                let mut owner = source;
-                let mut seen = BTreeSet::new();
-                while owner != id && seen.insert(owner.to_owned()) {
-                    let Some(parent) = runtime.subagents.get(owner) else {
-                        break;
-                    };
-                    owner = &parent.parent_session_id;
-                }
-                owner == id
+pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<String, PushEntry<'_>>> {
+    let cards = runtime.metadata.notification_cards.as_ref()?;
+    // Attention supplies only worker availability. Card publication owns
+    // notification eligibility, including ignored sessions and managed children.
+    let unavailable = |id: &str| {
+        matches!(
+            runtime.metadata.session_attention.get(id),
+            Some(
+                SessionAttention::Unknown
+                    | SessionAttention::Unreachable
+                    | SessionAttention::Failed
+            )
+        )
+    };
+    let mut entries = BTreeMap::new();
+    for (session, card) in cards {
+        let holder = card.holder.as_deref().unwrap_or(session);
+        let paused = unavailable(session) || unavailable(holder);
+        for entry in &card.entries {
+            let (identity, message_id) = match &entry.message {
+                EntryMessage::Locating => continue,
+                EntryMessage::Found(id) => (
+                    serde_json::json!(["message", session, id]),
+                    Some(id.as_str()),
+                ),
+                EntryMessage::None => (
+                    serde_json::json!(["completion", session, entry.completed_ordinal]),
+                    None,
+                ),
             };
-            for (source, tail) in &runtime.transcripts {
-                if !belongs_to_session(source) {
-                    continue;
-                }
-                for form in &tail.header.pending_elicitations {
-                    identities.push(format!(
-                        "{source}:form:{}:{}",
-                        form.id,
-                        form.question_text()
-                    ));
-                    if question.is_empty() {
-                        question = form.question_text();
-                    }
-                }
-                if tail.header.pending_elicitations.is_empty() && source == id {
-                    let ordinal = runtime
-                        .sessions
-                        .get(id)
-                        .and_then(|view| view.operational.as_deref())
-                        .and_then(|live| live.open_request.as_ref())
-                        .map(|request| request.question.completed_ordinal)
-                        .or_else(|| {
-                            tail.header
-                                .last_turn_outcome
-                                .as_ref()
-                                .map(|outcome| outcome.completed_ordinal)
-                        });
-                    if let Some(ordinal) = ordinal {
-                        identities.push(format!("{source}:turn:{ordinal}"));
-                    }
-                }
-            }
-            for (source, native) in &runtime.native_agents {
-                if native.pending_input && belongs_to_session(&native.agent.owner_session_id) {
-                    identities.push(format!("{source}:native:{}", native.generation_ordinal));
-                }
-            }
-            // Reviewer questions raise NeedsInput in the attention projection
-            // too, so a new one must start a new episode.
-            for review in &runtime.metadata.reviews {
-                if !belongs_to_session(&review.session_id) {
-                    continue;
-                }
-                for asked in &review.questions {
-                    let text = asked.request.question_text();
-                    identities.push(format!(
-                        "{}:review:{}:{}:{text}",
-                        review.session_id, asked.role, asked.request.id
-                    ));
-                    if question.is_empty() {
-                        question = text;
-                    }
-                }
-            }
-            identities.sort();
-            // The database owner assigns a persistent sequence on entry or a
-            // newly added source. Removing an answered form is not a new episode.
-            let identity = serde_json::to_string(&(attention, identities))
-                .expect("serializable attention sources");
-            let mut reply = String::new();
-            if let Some(tail) = runtime.transcripts.get(id) {
-                for (_, item) in &tail.items {
-                    if let mj_core::state::TranscriptBody::Agent { chunks, .. } = &item.body {
-                        reply = mj_core::transcript::materialized_chunks_text(chunks);
-                    }
-                }
-            }
-            if question.is_empty() {
-                question = runtime
-                    .sessions
-                    .get(id)
-                    .and_then(|view| view.operational.as_deref())
-                    .and_then(|live| live.question_message())
-                    .and_then(|message| {
-                        mj_core::transcript::materialized_agent_message_text(
-                            runtime
-                                .transcripts
-                                .get(id)?
-                                .items
-                                .values()
-                                .map(AsRef::as_ref),
-                            message,
-                        )
-                    })
-                    .unwrap_or_default();
-            }
-            let body = if *attention == SessionAttention::NeedsInput {
-                phone_line(&question, "Needs your input")
-            } else {
-                phone_line(&reply, "Has a reply for you")
-            };
-            Some((
-                id.clone(),
+            // The same stable message can be classified in two completions.
+            // The card's oldest-first order gives that identity its first position.
+            entries.entry(identity.to_string()).or_insert(PushEntry {
+                session,
+                completed_ordinal: Some(entry.completed_ordinal),
+                paused,
+                holder,
+                kind: entry.kind,
+                text: None,
+                message_id,
+            });
+        }
+        if let Some(form) = &card.form {
+            let identity = serde_json::json!(["form", holder, form.request_id]).to_string();
+            entries.insert(
                 identity,
-                Notice {
-                    title: record.listed_title().to_owned(),
-                    body,
-                    session_id: Some(id.clone()),
-                    url: format!("/#conversation/{id}"),
-                    tag: id.clone(),
-                    episode: None,
-                    observed_revision: runtime.revision,
+                PushEntry {
+                    session,
+                    completed_ordinal: None,
+                    paused,
+                    holder,
+                    kind: NotificationKind::NeedsInput,
+                    text: Some(&form.message),
+                    message_id: None,
                 },
-            ))
-        })
-        .collect()
+            );
+        }
+    }
+    Some(entries)
+}
+
+impl PushEntry<'_> {
+    pub fn notice(
+        &self,
+        runtime: &RuntimeProjection,
+        identity: String,
+        message: Option<&str>,
+    ) -> Notice {
+        let fallback = match self.kind {
+            NotificationKind::NeedsInput => "Needs your input",
+            NotificationKind::Important => "Has a reply for you",
+        };
+        Notice {
+            title: runtime
+                .records
+                .get(self.session)
+                .map_or("Mjolnir", |record| record.listed_title())
+                .to_owned(),
+            body: phone_line(message.unwrap_or_default(), fallback),
+            session_id: Some(self.session.to_owned()),
+            url: format!("/#conversation/{}", self.holder),
+            tag: self.session.to_owned(),
+            episode: Some(identity),
+            observed_revision: runtime.revision,
+        }
+    }
 }
 
 pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
+    // Let the startup owner settle before the first map can consume cutover.
+    crate::upgrade::wait_for_startup_recovery().await;
     let vapid = Arc::new(blocking(Vapid::load).await?);
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -373,38 +330,20 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
     blocking(db::push_recover).await?;
     loop {
         let runtime = state.runtime_publication()?;
-        let presence = runtime.metadata.operator_presence;
-        let unavailable = runtime
-            .metadata
-            .session_attention
-            .iter()
-            .filter(|(_, attention)| {
-                !eligible(attention)
-                    && matches!(
-                        attention,
-                        mj_core::attention::SessionAttention::Unknown
-                            | mj_core::attention::SessionAttention::Unreachable
-                            | mj_core::attention::SessionAttention::Failed
-                    )
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        blocking(move || db::push_observe(presence, episodes(&runtime), unavailable)).await?;
-        let due = blocking(|| db::push_claim(chrono::Utc::now().timestamp())).await?;
+        let (due, next) = blocking(move || db::push_reconcile(runtime)).await?;
         for delivery in due {
             let client = client.clone();
             let vapid = vapid.clone();
             sends.spawn(async move { deliver(&client, &vapid, delivery).await });
         }
-        let next = blocking(db::push_next_due).await?;
         // Serialize each device/tag so an older request cannot replace a newer
         // card. Other sessions and devices continue independently.
         let deadline = next.and_then(|at| {
             let delay = Duration::from_secs(
                 at.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64,
             );
-            // A terminal rejection uses i64::MAX. If the platform cannot
-            // represent that instant, only a real state change wakes the task.
+            // A service's Retry-After can exceed this clock's range.
+            // In that case, the service waits for a state change.
             tokio::time::Instant::now().checked_add(delay)
         });
         tokio::select! {
@@ -421,7 +360,7 @@ async fn deliver(
     delivery: db::PushDelivery,
 ) -> Result<()> {
     let endpoint = delivery.subscription.endpoint.clone();
-    let episode = delivery.episode.clone();
+    let identity = delivery.identity.clone();
     let body = encrypt(&delivery.subscription, delivery.payload.as_bytes())?;
     // At-least-once: a crash after remote acceptance but before this receipt can
     // repeat a send. Stable session tags replace the card; they cannot prevent
@@ -489,7 +428,7 @@ async fn deliver(
         db::push_result(
             delivery.subscription,
             delivery.enrollment,
-            episode,
+            identity,
             service_status,
             at,
             error,
@@ -504,159 +443,6 @@ mod tests {
     fn decode(value: &str) -> Vec<u8> {
         B64.decode(value).unwrap()
     }
-    #[test]
-    fn released_open_request_uses_original_episode_and_question_after_later_turns() {
-        use mj_core::assessment::{InferredQuestion, OpenRequest};
-        use mj_core::attention::SessionAttention;
-        use mj_core::state::{
-            MaterializedSession, MaterializedTurnOutcome, ProjectionWindow, TranscriptBody,
-            TranscriptItem, TurnOutcomeKind,
-        };
-        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
-        runtime.records.insert(
-            "s".into(),
-            crate::daemon::tests::runtime_test_session(
-                "s",
-                "workspace",
-                mj_core::state::SessionState::Running,
-            ),
-        );
-        let mut live = mj_core::relay::RelaySnapshot::new("s".into()).operational_state();
-        live.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
-        live.open_request = Some(OpenRequest {
-            question: InferredQuestion {
-                turn_id: "original".into(),
-                completed_ordinal: 10,
-            },
-            question_message: Some("agent:original".into()),
-        });
-        let mut view = mj_client::daemon::RuntimeSessionView::from_managed(
-            "s".into(),
-            mj_client::session::ManagedSessionView::default(),
-        );
-        view.operational = Some(live.into());
-        runtime.sessions.insert("s".into(), view);
-        runtime
-            .metadata
-            .session_attention
-            .insert("s".into(), SessionAttention::Working);
-        assert!(episodes(&runtime).is_empty());
-        let mut materialized = MaterializedSession::empty("s");
-        materialized.transcript.push(std::sync::Arc::new(TranscriptItem {
-            stable_id: "agent:original".into(), position: 9, latest_content_event_ordinal: None,
-            created_at_ms: 9, last_changed_at_ms: 9,
-            body: TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
-        }));
-        runtime
-            .metadata
-            .session_attention
-            .insert("s".into(), SessionAttention::NeedsInput);
-        let mut identity = None;
-        for ordinal in [20, 30] {
-            materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
-                answered_through: None,
-                diagnostic: None,
-                usage: None,
-                command_id: format!("later-{ordinal}"),
-                accepted_ordinal: None,
-                turn_start_position: None,
-                completed_ordinal: ordinal,
-                completed_at_ms: ordinal as i64,
-                outcome: TurnOutcomeKind::Completed {
-                    stop_reason: "EndTurn".into(),
-                },
-                work_facts: None,
-            });
-            runtime.transcripts.insert(
-                "s".into(),
-                mj_client::runtime_feed::SessionTail::of(
-                    &materialized,
-                    &ProjectionWindow::of(&materialized),
-                    10,
-                ),
-            );
-            let notices = episodes(&runtime);
-            assert_eq!(notices.len(), 1);
-            assert_eq!(notices[0].2.body, "Keep the old format?");
-            assert!(notices[0].1.contains("s:turn:10"));
-            if let Some(identity) = &identity {
-                assert_eq!(&notices[0].1, identity);
-            }
-            identity = Some(notices[0].1.clone());
-        }
-    }
-
-    // Hard-won: e91f61f8e: a second reviewer question reused the delivered episode.
-    #[test]
-    fn a_new_review_question_starts_a_new_push_episode() {
-        use mj_core::attention::SessionAttention;
-        let question = |id: &str| mj_client::review::ReviewerQuestion {
-            role: "reviewer".into(),
-            request: mj_core::elicitation::ElicitationRequest {
-                id: id.into(),
-                message: format!("question {id}"),
-                title: None,
-                description: None,
-                fields: Vec::new(),
-                tool_permission: None,
-            },
-        };
-        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
-        runtime.records.insert(
-            "s".into(),
-            crate::daemon::tests::runtime_test_session(
-                "s",
-                "workspace",
-                mj_core::state::SessionState::Running,
-            ),
-        );
-        runtime
-            .metadata
-            .session_attention
-            .insert("s".into(), SessionAttention::NeedsInput);
-        let review = |questions| mj_client::review::RuntimeReviewView {
-            child_session_id: None,
-            session_id: "s".into(),
-            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
-            roles: Vec::new(),
-            status: String::new(),
-            verdict: None,
-            questions,
-        };
-        runtime.metadata.reviews = vec![review(vec![question("review.a")])];
-        let first = episodes(&runtime);
-        runtime.metadata.reviews = vec![review(vec![question("review.a"), question("review.b")])];
-        let second = episodes(&runtime);
-        assert_eq!(first.len(), 1);
-        assert_eq!(second.len(), 1);
-        assert!(
-            !crate::database::web_push::same_episode_for_tests(&first[0].1, &second[0].1).unwrap(),
-            "a newly added reviewer question must be a new episode"
-        );
-    }
-
-    #[test]
-    fn an_ignored_session_raises_no_push_episode() {
-        use mj_core::attention::SessionAttention;
-        let runtime = |ignored: bool| {
-            let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
-            let mut record = crate::daemon::tests::runtime_test_session(
-                "s",
-                "workspace",
-                mj_core::state::SessionState::Running,
-            );
-            record.notifications_ignored = ignored;
-            runtime.records.insert("s".into(), record);
-            runtime
-                .metadata
-                .session_attention
-                .insert("s".into(), SessionAttention::NeedsInput);
-            runtime
-        };
-        assert_eq!(episodes(&runtime(false)).len(), 1);
-        assert!(episodes(&runtime(true)).is_empty());
-    }
-
     #[test]
     fn rfc8291_published_encryption_vector_and_vapid_signature_verify() {
         // RFC 8291 Appendix A: independent, published interoperability fixture.

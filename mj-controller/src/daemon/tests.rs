@@ -4315,6 +4315,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
         open_request: None,
+        notification_stack: Default::default(),
+        notifications_read_through: 0,
         person_input_through: 0,
         work_liveness: None,
         undelivered_mailbox_event_keys: Vec::new(),
@@ -5592,6 +5594,7 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
     mj_core::archive::CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {
@@ -15141,6 +15144,10 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
 /// command lands. The attention must drop so the card glyph clears.
 #[tokio::test]
 async fn dismiss_notification_clears_the_served_question_attention() {
+    use mj_core::attention::{
+        EntryMessage, NotificationDismissal, NotificationKind, NotificationStack,
+        NotificationStackEntry,
+    };
     const CHILD: &str = "MJ_TEST_DISMISS_CLEARS_ATTENTION";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
@@ -15208,6 +15215,28 @@ async fn dismiss_notification_clears_the_served_question_attention() {
                 question: question.clone(),
                 question_message: None,
             });
+        snapshot.operational.notification_stack = NotificationStack {
+            revision: if dismissed { 10 } else { 9 },
+            entries: if dismissed {
+                vec![]
+            } else {
+                vec![
+                    NotificationStackEntry {
+                        completed_at_ms: 0,
+                        completed_ordinal: 7,
+                        kind: NotificationKind::Important,
+                        message: EntryMessage::None,
+                    },
+                    NotificationStackEntry {
+                        completed_at_ms: 0,
+                        completed_ordinal: 9,
+                        kind: NotificationKind::NeedsInput,
+                        message: EntryMessage::None,
+                    },
+                ]
+            },
+        }
+        .into();
         view
     };
     state
@@ -15225,10 +15254,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .get("session-1")
         .cloned()
         .expect("a needs-input session serves its dismissal target");
-    assert_eq!(
-        target,
-        mj_core::attention::NotificationDismissal::Question(question.clone())
-    );
+    assert_eq!(target, NotificationDismissal::Stack { revision: 9 });
 
     let answerer = tokio::spawn(async move {
         let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
@@ -15244,9 +15270,9 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         else {
             panic!("the dismissal is a submit");
         };
-        assert_eq!(command_id, "dismiss-question-9");
+        assert_eq!(command_id, "clear-notifications-9");
         assert!(
-            matches!(command, RelayCommand::DismissQuestion { .. }),
+            matches!(command, RelayCommand::ClearNotifications { revision: 9 }),
             "{command:?}"
         );
         let _ = reply.send(Ok(10));
@@ -15265,6 +15291,15 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         .await
         .unwrap();
     let cleared = state.runtime_publication().unwrap();
+    assert_eq!(cleared.records["session-1"].viewed_through_event_ordinal, 7);
+    assert!(
+        !cleared
+            .metadata
+            .notification_cards
+            .as_ref()
+            .unwrap()
+            .contains_key("session-1")
+    );
     assert_eq!(
         cleared.metadata.session_attention["session-1"],
         mj_core::attention::SessionAttention::Idle
@@ -15780,6 +15815,20 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
             body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":format!("Question {position}")}})], streaming: false },
         }));
     }
+    history.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        command_id: "first-reply".into(),
+        accepted_ordinal: None,
+        turn_start_position: Some(0),
+        completed_ordinal: 1,
+        completed_at_ms: 1,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    });
     crate::database::save_materialized_session(&history).unwrap();
     let (tail, _) = crate::database::load_materialized_projection_tail("notification-history", 512)
         .unwrap()
@@ -15841,6 +15890,15 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
         panic!("old question must be found outside the tail");
     };
     assert_eq!(*item, *history.transcript[0]);
+    let StoredTranscriptItem::Found(bounded) = client
+        .stored_agent_message_through("notification-history".into(), 1)
+        .await
+        .unwrap()
+    else {
+        panic!("completion-bound read must find the original reply outside the tail");
+    };
+    assert_eq!(bounded, item);
+
     assert!(matches!(
         client
             .stored_transcript_item("notification-history".into(), "missing".into())
@@ -15890,6 +15948,13 @@ async fn notification_item_read_crosses_the_daemon_client_boundary() {
     assert!(matches!(
         older
             .stored_transcript_item("notification-history".into(), "reply-1".into())
+            .await
+            .unwrap(),
+        StoredTranscriptItem::Unsupported
+    ));
+    assert!(matches!(
+        older
+            .stored_agent_message_through("notification-history".into(), 1)
             .await
             .unwrap(),
         StoredTranscriptItem::Unsupported

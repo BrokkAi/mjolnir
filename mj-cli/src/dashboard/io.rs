@@ -103,11 +103,10 @@ pub(crate) enum DashboardIoUpdate {
     TranscriptTailSeed {
         materialized: Box<MaterializedSession>,
     },
-    StoredTranscriptItem {
-        session_id: String,
-        stable_id: String,
+    NotificationMessageRead {
+        request: mj_tui::NotificationReadRequest,
         generation: u64,
-        result: std::result::Result<mj_client::daemon::StoredTranscriptItem, String>,
+        result: std::result::Result<Option<String>, String>,
     },
     StoredSessionSummary {
         session_id: String,
@@ -857,14 +856,19 @@ impl DashboardContext {
                 self.dashboard
                     .set_stopped_subagent_transcript(&session_id, result);
             }
-            DashboardIoUpdate::StoredTranscriptItem { session_id, stable_id, generation, result } => {
-                if !self.summary_reads.finish_item(&session_id, &stable_id, generation) { return; }
-                let item = match result {
-                    Ok(mj_client::daemon::StoredTranscriptItem::Found(item)) => Some(item),
-                    Ok(mj_client::daemon::StoredTranscriptItem::Missing | mj_client::daemon::StoredTranscriptItem::Unsupported) => None,
-                    Err(error) => { self.dashboard.set_notice(format!("Could not read notification message: {error}")); None }
+            DashboardIoUpdate::NotificationMessageRead { request, generation, result } => {
+                if !self.summary_reads.finish_item(&request, generation) {
+                    return;
+                }
+                let (text, error) = match result {
+                    Ok(text) => (text, None),
+                    Err(error) => (None, Some(error)),
                 };
-                self.dashboard.notification_message_read_finished(&session_id, &stable_id, item);
+                if self.dashboard.notification_message_read_finished(&request, text)
+                    && let Some(error) = error
+                {
+                    self.dashboard.set_notice(format!("Could not read notification message: {error}"));
+                }
             }
             DashboardIoUpdate::StoredSessionSummary { session_id, generation, result } => {
                 if !self.summary_reads.finish(&session_id, generation) {

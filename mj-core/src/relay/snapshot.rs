@@ -15,6 +15,7 @@ use agent_client_protocol::v1::schema::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::attention::NotificationStack;
 use crate::config::HarnessKind;
 use crate::elicitation::ElicitationRequest;
 use crate::mailbox::{MailboxDeliveryPath, MailboxEvent};
@@ -61,6 +62,14 @@ pub enum RelayCommand {
     /// Dismiss only the inferred question belonging to this completed turn.
     DismissQuestion {
         question: crate::assessment::InferredQuestion,
+    },
+    /// Clear the stack observed at this exact revision.
+    ClearNotifications {
+        revision: u64,
+    },
+    /// Reclaim Important entries covered by the daemon's durable read cursor.
+    NotificationsRead {
+        through: u64,
     },
     /// Start an empty native conversation, preserving the logical session.
     ClearContext,
@@ -262,6 +271,9 @@ impl RelayCommand {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::DismissQuestion { .. } => super::RELAY_DISMISS_QUESTION_PROTOCOL,
+            Self::ClearNotifications { .. } | Self::NotificationsRead { .. } => {
+                super::RELAY_NOTIFICATION_STACK_PROTOCOL
+            }
             Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
@@ -325,6 +337,8 @@ impl RelayCommand {
                 | Self::SetQuotaRecovery { .. }
                 | Self::SeedAssessmentContext { .. }
                 | Self::DismissQuestion { .. }
+                | Self::ClearNotifications { .. }
+                | Self::NotificationsRead { .. }
                 | Self::InstallPromptContext { .. }
                 | Self::DeliverMailboxEvent { .. }
         )
@@ -393,6 +407,8 @@ impl RelayCommand {
             | Self::SetQuotaRecovery { .. }
             | Self::SeedAssessmentContext { .. }
             | Self::DismissQuestion { .. }
+            | Self::ClearNotifications { .. }
+            | Self::NotificationsRead { .. }
             | Self::InstallPromptContext { .. }
             | Self::DeliverMailboxEvent { .. } => RelayCommandKind::RecordNotice,
         }
@@ -701,6 +717,10 @@ pub struct RelayOperationalState {
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_request: Option<crate::assessment::OpenRequest>,
+    #[serde(default)]
+    pub notification_stack: Arc<NotificationStack>,
+    #[serde(default)]
+    pub notifications_read_through: u64,
     /// Retained for checkpoint export; attention reads `open_request`.
     #[serde(default)]
     pub person_input_through: u64,
@@ -894,6 +914,11 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    pub fn supports_notification_stack(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_NOTIFICATION_STACK_PROTOCOL)
+    }
+
     /// Whether this worker owns a persistent open request.
     pub fn supports_open_request(&self) -> bool {
         self.relay_protocol_version
@@ -1211,6 +1236,10 @@ pub enum RelayObservation {
     QuestionTargetUpdated {
         question: crate::assessment::InferredQuestion,
         question_message: String,
+    },
+    QuestionLocatorFinished {
+        completed_ordinal: u64,
+        question_message: Option<String>,
     },
     ManagedSubagentConfigured {
         managed: bool,
@@ -1634,8 +1663,13 @@ pub struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Latest input-requiring completion, retained after the person responds.
+    /// Latest input-requiring completion that the person has yet to address.
     pub request: Option<crate::assessment::OpenRequest>,
+    #[serde(default)]
+    pub notification_stack: Arc<NotificationStack>,
+    /// Acknowledged completions stay pruned even if their assessments arrive later.
+    #[serde(default)]
+    pub notifications_read_through: u64,
     #[serde(default)]
     /// Journal ordinal of the latest person input; only snapshot apply advances it.
     pub person_input_through: u64,
@@ -1823,6 +1857,8 @@ impl RelaySnapshot {
             harness_turn_work: None,
             assessment: None,
             request: None,
+            notification_stack: Arc::default(),
+            notifications_read_through: 0,
             person_input_through: 0,
             assessment_context: Some(Default::default()),
             latest_prompt_accepted_ordinal: None,
@@ -1914,10 +1950,36 @@ impl RelaySnapshot {
         })
     }
 
+    /// Used at command admission and during journal replay.
+    pub fn validate_notification_command(
+        &self,
+        command: &RelayCommand,
+    ) -> Result<(), &'static str> {
+        match command {
+            RelayCommand::ClearNotifications { .. } | RelayCommand::NotificationsRead { .. }
+                if self.checkpoint_barrier.is_some() =>
+            {
+                Err("The session is checkpointing")
+            }
+            RelayCommand::ClearNotifications { revision }
+                if self.notification_stack.revision != *revision
+                    || self.notification_stack.entries.is_empty() =>
+            {
+                Err("The notification stack changed")
+            }
+            RelayCommand::NotificationsRead { through } if *through > self.latest_ordinal => {
+                Err("The read cursor is ahead of the relay")
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             assessment: self.assessment.clone(),
             open_request: self.open_request().cloned(),
+            notification_stack: self.notification_stack.clone(),
+            notifications_read_through: self.notifications_read_through,
             person_input_through: self.person_input_through,
             work_liveness: self.work_liveness.clone(),
             undelivered_mailbox_event_keys: self

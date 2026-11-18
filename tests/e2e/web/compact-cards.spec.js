@@ -358,12 +358,35 @@ test('golden_viewer_dashboard', async ({ context }) => {
       })(),
     })),
   })));
+  const attentionInput = compactState.snapshot.sessions.find(row => row.id === 'attention-input');
+  Object.assign(attentionInput, {
+    detail: false,
+    notification_card: {
+      badge: 'needs_input', holder: null, form: null, dismissal: { stack: { revision: 12 } },
+      since_ms: SERVER_TIME_MS - 2000,
+      entries: [
+        { completed_ordinal: 5, completed_at_ms: SERVER_TIME_MS - 2000, kind: 'important', message: 'none' },
+        { completed_ordinal: 10, completed_at_ms: SERVER_TIME_MS - 1000, kind: 'needs_input', message: { found: 'agent:10' } },
+      ],
+    },
+  });
   compactState.snapshot.launch_failures = [{ id: 'failed-launch', workspace_id: OTHER_WORKSPACE_ID }];
   await refresh(compactPage, compactState);
   await compactPage.goto('https://viewer.test/');
   await expect(compactPage).toHaveURL(/#notifications$/);
   await expect(compactPage.locator('#inbox .inbox-message')).toContainText('Second paragraph.');
+  const messageArea = compactPage.locator('#inbox .inbox-message-area');
+  await expect(messageArea).toContainText('2 of 2');
+  await expect(messageArea.getByRole('button', { name: 'Next', exact: true })).toBeDisabled();
   await captureGoldenState(output, compactPage, 'notifications screen on first visit');
+  await messageArea.getByRole('button', { name: 'Previous', exact: true }).click();
+  await expect(messageArea).toContainText('1 of 2');
+  attentionInput.notification_card.entries.push({
+    completed_ordinal: 13, completed_at_ms: SERVER_TIME_MS, kind: 'important', message: 'none',
+  });
+  attentionInput.notification_card.dismissal = { stack: { revision: 14 } };
+  await refresh(compactPage, compactState);
+  await expect(messageArea).toContainText('1 of 3');
   // The launch failure is a card of its own, after the ? and ! cards.
   await expect(compactPage.locator('#launch-failures')).toBeEmpty();
   await expect(compactPage.locator('#notifications-badge')).toBeHidden();
@@ -1099,31 +1122,36 @@ test('dismiss clears the input glyph once the daemon lowers attention; ignoring 
 test('the notifications screen clears and skips one card at a time and Clear all ! leaves questions', async ({ page }) => {
   const q = session('card-q', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const i1 = session('card-i1', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
-  const i2 = session('card-i2', 'c', 'C', { attention: 'important', activity: SERVER_TIME_MS });
+  const i2 = session('card-i2', 'c', 'C', { attention: 'working', activity: SERVER_TIME_MS });
   const broken = session('card-failed', 'd', 'D', { attention: 'failed', activity: SERVER_TIME_MS });
   const state = await mount(page, [q, i1, i2, broken]);
-  q.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
+  q.notification_card = {
+    badge: 'needs_input', holder: null, form: null, dismissal: { stack: { revision: 10 } },
+    since_ms: SERVER_TIME_MS - 1000,
+    entries: [{ completed_ordinal: 7, completed_at_ms: SERVER_TIME_MS - 1000, kind: 'needs_input', message: { found: 'agent:7' } }],
+  };
   i1.notification_dismissal = { read_through: 4 };
-  i2.notification_dismissal = { read_through: 5 };
-  broken.notification_dismissal = { failure: { generation: 1, state: 'error', last_error: 'startup failed' } };
+  i2.notification_card = {
+    badge: 'important', holder: null, form: null, dismissal: { read_through: 5 },
+    since_ms: SERVER_TIME_MS - 3000,
+    entries: [{ completed_ordinal: 5, completed_at_ms: SERVER_TIME_MS - 3000, kind: 'important', message: 'none' }],
+  };
+  broken.notification_card = null;
+  broken.notification_dismissal = { failure: { generation: 1, state: 'error', last_error: null } };
   await refresh(page, state);
   await page.locator('#notifications-badge').click();
   await expect(page).toHaveURL(/#notifications$/);
-  const header = page.locator('.inbox-header-text');
-  await expect(header).toContainText('A');
-  await expect(page.locator('.inbox-message')).toContainText('The full message from card-q.');
+  const skip = page.getByRole('button', { name: 'Skip', exact: true });
+  const message = page.locator('.inbox-message');
+  await expect(message).toContainText('card-i2');
   await expect(page.getByRole('button', { name: 'Clear all ! (2)' })).toBeVisible();
 
-  // Skip sends the card to the back; the question comes round again after the
-  // two ! cards and the failed session the screen lists after them.
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-message')).toContainText('card-i2');
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Important');
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Failed');
-  await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.locator('.inbox-message')).toContainText('card-q');
+  // The older Important card comes first, even though its session posted output more recently.
+  // Skipping rotates each card to the back.
+  for (const body of ['card-q', 'card-i1', 'Failed', 'card-i2', 'card-q']) {
+    await skip.click();
+    await expect(message).toContainText(body);
+  }
 
   // A refusal stays on the card.
   state.failAction = { action: 'dismiss-notification', error: 'notification target is stale' };
@@ -1142,12 +1170,9 @@ test('the notifications screen clears and skips one card at a time and Clear all
 
   await page.getByRole('button', { name: 'Clear & Next' }).click();
   await expect.poll(() => state.actions.filter(action => action.session_id === 'card-q' && action.action === 'dismiss-notification').length).toBe(2);
-
-  // The failed session is a card of its own, so the screen is not empty yet.
-  await expect(page.locator('.inbox-glyph')).toHaveAttribute('aria-label', 'Failed');
-  await expect(page.locator('.inbox-header-text')).toContainText('card-failed');
+  expect(state.actions.at(-1).target).toEqual({ stack: { revision: 10 } });
+  await expect(page.locator('.inbox-message')).toHaveText('Failed');
   await page.getByRole('button', { name: 'Clear & Next' }).click();
-  await expect.poll(() => state.actions.filter(action => action.session_id === 'card-failed' && action.action === 'dismiss-notification').length).toBe(1);
   await expect(page.locator('#inbox')).toContainText('No notifications.');
 });
 

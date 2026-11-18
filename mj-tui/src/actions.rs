@@ -28,6 +28,8 @@ pub enum CommandId {
     NotificationDefault,
     NotificationClear,
     NotificationSkip,
+    NotificationPreviousMessage,
+    NotificationNextMessage,
     NotificationClearImportant,
     NotificationScrollUp,
     NotificationScrollDown,
@@ -678,6 +680,34 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: notification_available,
+    },
+    CommandSpec {
+        id: CommandId::NotificationPreviousMessage,
+        label: "Previous message",
+        description: "Show the previous message on this notification card.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::PageUp, "Alt+PgUp")],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: |dashboard| {
+            notification_navigation_available(dashboard, CommandId::NotificationPreviousMessage)
+        },
+    },
+    CommandSpec {
+        id: CommandId::NotificationNextMessage,
+        label: "Next message",
+        description: "Show the next message on this notification card.",
+        scope: Scope::Notifications,
+        pane_keys: &[KeyHint::alt(KeyCode::PageDown, "Alt+PgDn")],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: |dashboard| {
+            notification_navigation_available(dashboard, CommandId::NotificationNextMessage)
+        },
     },
     CommandSpec {
         id: CommandId::NotificationClearImportant,
@@ -1738,6 +1768,17 @@ fn notification_restore_available(dashboard: &DashboardState) -> Availability {
         Availability::Hidden
     }
 }
+fn notification_navigation_available(
+    dashboard: &DashboardState,
+    command: CommandId,
+) -> Availability {
+    if dashboard.can_navigate_notification(command) {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
+
 fn notification_clear_available(dashboard: &DashboardState) -> Availability {
     match dashboard.notification_entries().first() {
         Some(entry) if entry.target.is_some() => Availability::Ready,
@@ -2089,7 +2130,9 @@ impl DashboardState {
             CommandId::NotificationOpen
             | CommandId::NotificationSend
             | CommandId::NotificationRestore
-            | CommandId::NotificationDefault => self.notification_action(id),
+            | CommandId::NotificationDefault
+            | CommandId::NotificationPreviousMessage
+            | CommandId::NotificationNextMessage => self.notification_action(id),
             CommandId::NotificationClear => self.notification_clear(),
             CommandId::NotificationSkip => self.notification_skip(),
             CommandId::NotificationClearImportant => self.notification_clear_important(),

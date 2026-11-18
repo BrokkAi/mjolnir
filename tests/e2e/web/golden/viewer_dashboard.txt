@@ -652,6 +652,9 @@ layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"Important re
 ?
 Input needed · Attention · 0s ago · 5 left
 
+Previous
+2 of 2
+Next
 The full message from attention-input.
 
 Second paragraph.

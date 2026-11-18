@@ -374,6 +374,7 @@ pub fn canonical_session_from_materialized(
     Ok(CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: materialized.applied_event_ordinal,
         event_frontier_digest: materialized.applied_event_digest.clone(),
         session: CanonicalSessionState {

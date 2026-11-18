@@ -124,6 +124,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
             canonical_session: CanonicalSessionSnapshot {
                 command_ledger: None,
                 assessment_state: None,
+                notification_stack: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
                 session: CanonicalSessionState {

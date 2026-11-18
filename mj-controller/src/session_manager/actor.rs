@@ -1822,6 +1822,16 @@ pub(super) async fn sync_actor_connection(
             );
             return Err(error.context("repair sub-agent admission on relay reconnect"));
         }
+        if fresh.operational().supports_notification_stack() {
+            let read = crate::database::committed_state()?
+                .and_then(|committed| committed.state.sessions.get(&target.session_id)
+                    .and_then(|record| notifications_read(fresh.operational(), record.viewed_through_event_ordinal)));
+            if let Some((command_id, command, _)) = read
+                && let Err(error) = fresh.submit_accepted(command_id, command).await
+            {
+                tracing::warn!(session_id = %target.session_id, %error, "could not prune read notifications on relay attachment");
+            }
+        }
         fresh.start_observing(target).await;
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;

@@ -148,6 +148,18 @@ pub struct MaterializedProjectionCache {
 }
 
 impl MaterializedProjectionCache {
+    pub(crate) fn agent_message_text(&self, stable_id: &str) -> Option<&str> {
+        self.converted_entries.iter().find_map(|entry| {
+            (entry.role == mj_core::transcript::ChatRole::Agent
+                && entry
+                    .source
+                    .0
+                    .as_ref()
+                    .is_some_and(|item| item.stable_id == stable_id))
+            .then_some(entry.text.as_str())
+        })
+    }
+
     /// How many leading items this cache and `transcript` share by pointer.
     fn unchanged_prefix(&self, transcript: &[Arc<TranscriptItem>]) -> usize {
         self.transcript
@@ -523,6 +535,38 @@ pub(crate) struct CapacityDetail {
 }
 
 impl DashboardState {
+    pub fn set_notification_cards(
+        &mut self,
+        cards: Option<
+            mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::NotificationCard>,
+        >,
+    ) {
+        if self.notification_cards == cards {
+            return;
+        }
+        if let Some(cards) = &cards {
+            for (id, detail) in self.session_details.iter_mut() {
+                if let Some(NotificationDismissalState::Accepted {
+                    target:
+                        target @ (mj_core::attention::NotificationDismissal::Stack { .. }
+                        | mj_core::attention::NotificationDismissal::Question(_)),
+                    ..
+                }) = &detail.notification_dismissal
+                    && cards.get(id).and_then(|card| card.dismissal.as_ref()) != Some(target)
+                {
+                    detail.notification_dismissal = None;
+                }
+            }
+            let previous = self.notification_cards.as_ref();
+            self.notifications
+                .errors
+                .retain(|id, _| previous.and_then(|cards| cards.get(id)) == cards.get(id));
+        }
+        self.notifications
+            .prune_published_skips(|id| cards.as_ref().is_some_and(|cards| cards.contains_key(id)));
+        self.notification_cards = cards;
+    }
+
     pub fn set_session_attention_for(
         &mut self,
         session_id: &str,
@@ -566,9 +610,11 @@ impl DashboardState {
                 detail.notification_dismissal = None;
             }
         }
-        self.notifications
-            .errors
-            .retain(|id, _| self.notification_dismissals.get(id) == targets.get(id));
+        if self.notification_cards.is_none() {
+            self.notifications
+                .errors
+                .retain(|id, _| self.notification_dismissals.get(id) == targets.get(id));
+        }
         self.notification_dismissals = targets.into();
     }
     pub fn set_session_attention(
@@ -1462,6 +1508,14 @@ impl DashboardState {
                     // read dismissal is complete now. Waiting for a worker
                     // projection would block a parked session forever.
                     detail.notification_dismissal = None;
+                } else if let Some(cards) = &self.notification_cards {
+                    // The replacement card can arrive either before or after
+                    // the acknowledgement, without its transcript being loaded.
+                    detail.notification_dismissal = (cards
+                        .get(session_id)
+                        .and_then(|card| card.dismissal.as_ref())
+                        == Some(&target))
+                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
                 } else {
                     // A question dismissal completes only once the worker's
                     // command reaches the projection.

@@ -244,6 +244,12 @@ impl RuntimeStateOwner {
             StoreState::Bootstrap | StoreState::Unavailable(_) => None,
         }
     }
+    pub(super) fn committed_snapshot(&self) -> Option<Arc<crate::database::CommittedState>> {
+        match &self.store {
+            StoreState::Current(committed) => Some(committed.clone()),
+            StoreState::Bootstrap | StoreState::Unavailable(_) => None,
+        }
+    }
     pub(super) fn controller(&self) -> &Controller {
         &self.controller
     }

@@ -438,6 +438,7 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
     CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier: transcript.len() as u64,
         event_frontier_digest: "0".repeat(64),
         session: CanonicalSessionState {

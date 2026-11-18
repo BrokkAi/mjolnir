@@ -284,6 +284,7 @@ test('SSE open does not reset retry backoff until a runtime frame applies', () =
     runtimeCursorText: () => null,
     setConnection: () => {},
     presentSnapshot: () => {},
+    reconcileNotificationDismissals: () => {},
     setTimeout: (callback, delay) => {
       timers.push({ callback, delay });
       return timers.length;
@@ -1502,6 +1503,7 @@ test('review settings action renders a button that sends its action id', () => {
   context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
   context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
   context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function publishedNotificationDismissal(', '\nfunction matchesNotificationDismissal('), context);
   vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
   vm.runInContext('renderNotificationDismissal(container, session, null)', context);
   assert.equal(controls.length, 0, 'no dismissal control without capability');
@@ -1574,15 +1576,30 @@ test('conversation receipts require a visible focused caught-up conversation and
   assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
   context.cursor = 50;
   context.session.unread_frontier = 44;
+  context.session.notification_card = { entries: [
+    { kind: 'important', completed_ordinal: 55 },
+  ] };
   const loaded = vm.runInContext('persistVisibleConversationRead()', context);
-  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
-  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
+  // Hard-won: 0341c80d6: an unseen Important reply advanced the receipt past the loaded cursor.
+  assert.equal(sent[2][1], 50, 'acknowledges the loaded cursor even when the card includes an unseen reply');
+  context.session.notification_card.entries.push({ kind: 'important', completed_ordinal: 57 });
   finish();
   await loaded;
-  context.cursor = 51;
+  assert.equal(frames.length, 0, 'publishing another Important completion does not schedule a read');
+
+  context.cursor = 57;
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 3, 'the loaded reply still needs to be visible');
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 500, bottom: 650 });
+  const viewed = vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent[3][1], 57, 'the receipt reaches the Important reply once loaded and visible');
+  finish();
+  await viewed;
+  context.cursor = 58;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 3, 'closed conversations do not read');
+  assert.equal(sent.length, 4, 'closed conversations do not read');
 });
 
 

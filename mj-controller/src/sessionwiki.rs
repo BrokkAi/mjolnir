@@ -2669,6 +2669,7 @@ fn snapshot_of(
     Ok(CanonicalSessionSnapshot {
         command_ledger: None,
         assessment_state: None,
+        notification_stack: None,
         event_frontier,
         // Not a relay frontier, so there is no recorded digest to carry. It has
         // to be a well-formed non-genesis digest, and deriving it from the
@@ -2985,6 +2986,7 @@ mod tests {
                 canonical_session: CanonicalSessionSnapshot {
                     command_ledger: None,
                     assessment_state: None,
+                    notification_stack: None,
                     event_frontier: 4,
                     event_frontier_digest: "a".repeat(64),
                     session: CanonicalSessionState {

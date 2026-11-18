@@ -88,7 +88,7 @@ pub(super) async fn run_daemon_runtime(
     // Before this daemon can start a checkpoint, so every checkpoint file older
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
-    let startup_work = crate::upgrade::activity("daemon startup recovery")?;
+    let startup_work = crate::upgrade::startup_recovery()?;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
     tokio::task::spawn_blocking(crate::controller::pin_worker_binary_sources)
@@ -421,6 +421,10 @@ pub(super) async fn run_daemon_runtime(
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
     let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
+    let notification_pruning = tokio::spawn(super::attention::prune_read_notifications(
+        state.clone(),
+        cancellation.clone(),
+    ));
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -1011,6 +1015,14 @@ pub(super) async fn run_daemon_runtime(
         observe_delivery
             .await
             .context("Brokk Observe delivery task panicked")
+            .and_then(std::convert::identity),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join notification pruning",
+        notification_pruning
+            .await
+            .context("notification pruning task panicked")
             .and_then(std::convert::identity),
     );
     if let Some(phone_task) = phone_task {

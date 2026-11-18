@@ -173,7 +173,9 @@ pub const RELAY_HELD_LOGIN_PROTOCOL: u32 = 69;
 /// (`authentication_retry_intent`), separate from whether it can submit now.
 /// It no longer sets `authentication_retry_waiting`.
 pub const RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL: u32 = 70;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL;
+/// 71 reports the notification stack and accepts exact Clear and read pruning.
+pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_NOTIFICATION_STACK_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -213,7 +215,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
 // Revision 25 is breaking: older readers reject it. Upgrading seeds `withdrawn_ordinal` from the legacy flag.
 // Revision 26 is breaking: an older writer drops `set_aside_through`, so a dismissed ask would count again.
-pub const RELAY_STATE_VERSION: u32 = 26;
+// Revision 27 is breaking: older writers cannot preserve notification entries or replay their commands.
+pub const RELAY_STATE_VERSION: u32 = 27;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -363,6 +366,9 @@ pub struct RestoredRelaySeed {
     /// Versioned worker assessment state, validated by assessment::Checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_state: Option<serde_json::Value>,
+    /// Worker-owned state outside the bounded assessment record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_stack: Option<crate::attention::NotificationStack>,
     pub event_frontier: u64,
     pub event_frontier_digest: String,
     /// Commands the archived session still had queued, already filtered by the
@@ -389,6 +395,9 @@ impl RestoredRelaySeed {
     /// The same frontier checks a canonical session snapshot carries, so a
     /// malformed seed is refused before it can become relay state.
     pub fn validate(&self) -> Result<()> {
+        if let Some(stack) = &self.notification_stack {
+            stack.validate_at(self.event_frontier)?;
+        }
         if let Some(value) = &self.assessment_state {
             crate::assessment::Checkpoint::decode(value)?;
         }

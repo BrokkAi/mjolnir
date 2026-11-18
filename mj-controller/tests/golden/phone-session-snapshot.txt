@@ -68,6 +68,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -176,6 +177,7 @@
   "row": {
     "attention": "unknown",
     "notification_dismissal": null,
+    "notification_card": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -288,6 +290,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -383,6 +386,7 @@
     "row": {
       "attention": "unknown",
       "notification_dismissal": null,
+      "notification_card": null,
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -487,6 +491,7 @@
     "row": {
       "attention": "unknown",
       "notification_dismissal": null,
+      "notification_card": null,
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -588,6 +593,7 @@
   "parent": {
     "attention": "unknown",
     "notification_dismissal": null,
+    "notification_card": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -678,6 +684,7 @@
   "child": {
     "attention": "unknown",
     "notification_dismissal": null,
+    "notification_card": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -772,6 +779,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -863,6 +871,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -964,6 +973,7 @@
   "row": {
     "attention": "unknown",
     "notification_dismissal": null,
+    "notification_card": null,
     "retry_assessment_pending": false,
     "id": "session-1",
     "publication_state": "unknown",
@@ -1025,6 +1035,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1110,6 +1121,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1193,6 +1205,7 @@
 {
   "attention": "unknown",
   "notification_dismissal": null,
+  "notification_card": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1273,6 +1286,7 @@
   "session": {
     "attention": "unknown",
     "notification_dismissal": null,
+    "notification_card": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,

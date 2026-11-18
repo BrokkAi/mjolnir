@@ -1,6 +1,8 @@
 //! Harness-owned children share their owner's worker, but not its transcript.
+use crate::elicitation::ElicitationRequest;
 use agent_client_protocol::v1::schema::SessionUpdate;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeAgentCapabilities {
@@ -184,6 +186,44 @@ pub struct NativeAgentView {
     pub generation_ordinal: u64,
     pub agent: NativeAgent,
     pub projection: crate::state::MaterializedSession,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_input_times: BTreeMap<String, i64>,
+}
+
+impl NativeAgentView {
+    /// Apply a native activity event and any change to the projected forms.
+    pub fn apply_activity(
+        &mut self,
+        recorded_at_ms: i64,
+        pending_elicitations: Option<Vec<ElicitationRequest>>,
+    ) {
+        // Older projections omitted raise times. Capture the best recorded
+        // time before applying the next activity event.
+        if self.pending_input_times.is_empty() {
+            let previous_time = self.projection.last_activity_at_ms.unwrap_or(0);
+            self.pending_input_times.extend(
+                self.projection
+                    .pending_elicitations
+                    .iter()
+                    .map(|request| (request.id.clone(), previous_time)),
+            );
+        }
+        if let Some(pending_elicitations) = pending_elicitations {
+            self.pending_input_times = pending_elicitations
+                .iter()
+                .map(|request| {
+                    let raised_at_ms = self
+                        .pending_input_times
+                        .get(&request.id)
+                        .copied()
+                        .unwrap_or(recorded_at_ms);
+                    (request.id.clone(), raised_at_ms)
+                })
+                .collect();
+            self.projection.pending_elicitations = pending_elicitations;
+        }
+        self.projection.last_activity_at_ms = Some(recorded_at_ms);
+    }
 }
 
 /// Transcript-free identity published by the controller runtime feed.
@@ -196,16 +236,33 @@ pub struct NativeAgentSummary {
     /// Native operational facts needed by the daemon attention projection.
     #[serde(default)]
     pub pending_input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_request_id: Option<String>,
+    /// When the current request first appeared in the native projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input_raised_at_ms: Option<i64>,
 }
 
 impl NativeAgentSummary {
     pub fn of(view: &NativeAgentView) -> Self {
+        let pending_input = view.projection.pending_elicitations.last();
         Self {
             generation_ordinal: view.generation_ordinal,
             agent: view.agent.clone(),
             projection_ordinal: view.projection.applied_event_ordinal,
             projection_digest: view.projection.applied_event_digest.clone(),
-            pending_input: !view.projection.pending_elicitations.is_empty(),
+            pending_input: pending_input.is_some(),
+            pending_input_message: pending_input.map(|request| request.message.clone()),
+            pending_input_request_id: pending_input.map(|request| request.id.clone()),
+            pending_input_raised_at_ms: pending_input.and_then(|request| {
+                if view.pending_input_times.is_empty() {
+                    view.projection.last_activity_at_ms
+                } else {
+                    view.pending_input_times.get(&request.id).copied()
+                }
+            }),
         }
     }
 

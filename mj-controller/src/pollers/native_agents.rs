@@ -262,6 +262,7 @@ mod tests {
         projection.applied_event_digest = format!("digest-{ordinal}");
         NativeAgentView {
             generation_ordinal: generation,
+            pending_input_times: Default::default(),
             agent,
             projection,
         }
