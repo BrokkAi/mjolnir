@@ -1,0 +1,89 @@
+{
+  "round": 2,
+  "results": {
+    "cpp-template-inherited-base-signature": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "52e3d7434a80728f1fdadbe9015dfd595c822dba5bafb3190651f3bcfc4bae64"
+    },
+    "dependency-failure-drops-independent-model-evidence": {
+      "pass": true,
+      "gate": "cause",
+      "why": "clean",
+      "verdicts_sha256": "0bef1dcc56154842d98efcfcafa1315c50255a80a40713f40fa188b0de87f99a"
+    },
+    "go-receiver-poisons-package-result-contract-discovery": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "2048db79842407429ead0b3f2d139ce7a42fe6b7bfd47f65af8c2e2d7f12c344"
+    },
+    "incompatible-semantic-bundle-late-gate": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "6be34c751d4edee0d3278ccee1b4a07b0f6ac4100bfb0c7e24da0d5f145405cf"
+    },
+    "java-static-getter-drops-incomplete-route": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "278a3b4bb097eeb24a724ada0a22bf9028699f9ba714a7cfe99856314af4d81e"
+    },
+    "js-synthetic-owner-leaks-file-summary": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "92262bbedb392400595481e78e95c25f57d39e43970ff2c741c39668c7527d66"
+    },
+    "jvm-protected-unindexed-hierarchy-denied": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "2ae37cd08dc59265fe37b78e4c52ae2054385be49da7002607f4570a6d109974"
+    },
+    "kotlin-value-class-this-loses-underlying-projection": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "2edc02528f901260496fe05f79986fcb035c2bc4c0fd63c9798eca011d4f63f8"
+    },
+    "php-indexed-write-reenters-current-rhs": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "4eb3ff83cb25dc2c112b56a61b7a2c2ec9ce03ff4cdf02b0f730e874227c0854"
+    },
+    "python-filescope-enclosing-tie": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "92cd62589ba89f1af20c1d66be544c98c60aa09d3f2f41accd6782414eaf8780"
+    },
+    "python-module-binding-representative-after-event": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "a185adc44ce250c6bdc949817001af0fb3a5a1113d3c5510e160f5efee6a9bfd"
+    },
+    "python-module-mutation-repeated-scan-budget": {
+      "pass": false,
+      "gate": "leak",
+      "why": "a missed verdict below high confidence: A=medium, B=high",
+      "verdicts_sha256": "8171d26c1a6c6313e4566a5008e5751468bc6ddb8cee6241ea2f04222ca1bf0e"
+    },
+    "retained-fill-java-memo-loses-gap": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label partial",
+      "verdicts_sha256": "aef0d2bf65727aab585cd56fe342259b29b4f91d043bf677766cecd82cb61955"
+    },
+    "unproven-override-family-certifies-empty": {
+      "pass": false,
+      "gate": "leak",
+      "why": "leak label caught",
+      "verdicts_sha256": "48691501e22c4d23edad50986d344554d3b1952515c0b161605871fda497eb3d"
+    }
+  }
+}

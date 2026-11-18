@@ -1,0 +1,72 @@
+{
+  "id": "retained-fill-java-memo-loses-gap",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "483bbb727cc16fd4617e9dd79e73e802b81d15f3b0136e3ae79f1c8765c5d853",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "a memo hit returns the stored index with no build-gap replay, and otherwise it builds an index ... and inserts it with no completion check",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it connects the now-shared retained-fill domain to JavaFileClassIndexMemo storing builds without a completion check and replaying no gap, but does not state that a second fill sees a false complete absence.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "a memo hit returns the stored index with no build-gap replay",
+          "rationale": "The output connects the newly shared retained domain to the Java memo and notes insertion without a completion check and hits without gap replay. It never identifies StructureUnavailable or an equivalent incomplete build becoming a complete absence on a later fill, so this remains partial.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "1b32147225a8bc5b1ef560d107aee0592ec243838c24b938e317da809b6fc206",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "JavaSource::unique_class_by_fqn_in_file reads and writes the request-domain JavaFileClassIndexMemo ... returns a stored index as is, with no build-gap replay step ... inserts it, with no completion check",
+          "rationale": "It notes the newly shared retained-fill domain and that the Java memo stores and replays nothing about incompleteness. It never says that a StructureUnavailable gap is lost on a later fill or that the result is a false complete absence. Boundary case, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "with no build-gap replay step",
+          "rationale": "The output identifies shared retained-domain lifetime and the Java memo's missing completion check and gap replay. It never connects a StructureUnavailable build to a later fill reporting complete absence and retaining an incomplete answer, so partial is the conservative judgment.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "6de67f9f430c0e9c26fc058510f34f3dad8d90d0de51b309371a7a9914e4e72f",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "on a memo hit the function returns the stored index directly and does not replay build-time gaps, and on a miss it builds an index from `declarations(file)` and inserts it without checking completion",
+          "rationale": "Lists JavaFileClassIndexMemo as a caller of the newly shared retained-fill domain and states that it caches builds without checking completion and replays no gap on hits, which is the match_rule mechanism. It never states the resulting false complete absence in a later fill, so confidence is medium.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "on a memo hit the function returns the stored index directly and does not replay build-time gaps",
+          "rationale": "It connects the newly shared retained-fill domain to the Java file-class memo, explicitly identifying both unchecked insertion after declarations loading and failure to replay build-time gaps on hits. This identifies the mechanism by which a subsequent fill loses the incomplete-build evidence.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "id": "python-filescope-enclosing-tie",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "29d36d6966d1eb866cee23da6f577c0daf9310a2bda75fefad7e796004768b44",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "the two byte spans are equal when the root covers the whole source",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it notes the Python module and FileScope have equal spans and that byte-based enclosing lookup takes the smallest range from the underlying set, but never names the arbitrary tie or the lost module-scope lookup.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "the two byte spans are equal when the root covers the whole source.",
+          "rationale": "The output identifies the equal Python-module/FileScope spans and the raw smallest-range lookup. It does not identify unordered tie selection or explain that selecting FileScope loses module receiver facts and definitions, so the lower label applies.",
+          "confidence": "high"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "c65802eb95c52c9ac3a87d5c33efba2dfb76589ab92e9b3278fa9f2d93fea279",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "add_file_scope records the synthetic FileScope range as bytes 0..source.len() ... which is also the root node's byte range ... byte-based lookup takes min_by_key over containing-range span length across the underlying set",
+          "rationale": "The output contains only neutral observations, with no defect claim. It does place the equal FileScope and Python-module spans next to the span-only min_by_key, but it never says that the tie is broken arbitrarily by hash order or that the synthetic owner can win and lose module-scope lookups. That is less than caught, so partial.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "which is also the root node's byte range when the root covers the whole source",
+          "rationale": "The output notes coincident module/FileScope ranges and a span-only enclosing minimum. It does not identify unordered tie selection choosing the synthetic owner or the resulting lost module-scope receiver facts, so partial is the conservative label.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

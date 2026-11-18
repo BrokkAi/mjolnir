@@ -1,0 +1,72 @@
+{
+  "id": "java-static-getter-drops-incomplete-route",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "0890678a9009a8eb6fb9361fff33947a312520e163382a042be4693f99c96543",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`found_alias` is assigned ... after the owner, static and namespace matching",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it notes that Kotlin getter aliases target the Value namespace and that found_alias is set only after the kind/namespace filter, but does not say the getter alias is skipped and turned into a false absence or unindexed owner.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "after the owner, static and namespace matching and before the status and accessibility checks",
+          "rationale": "The output identifies Getter aliases targeting Value declarations, the namespace/kind filter, and found_alias being assigned afterward. It does not explain loss of open-route evidence or the resulting false complete absence/unindexed-owner diagnosis, so the completeness defect is only partially identified.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "08f5d86405cd0cc0a5634692cd060fd326cdef050e7e227816d29101eb7027df",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "found_alias = true is at ...:2350; in the loop body the owner, static and namespace matching come before it ... The returned found_alias adds the member name to indexed_static_import_members",
+          "rationale": "It shows that Kotlin getter aliases target the Value namespace, that the reader admits only static fields and singletons for Value demands, and that namespace matching happens before found_alias is set. It does not state the result: a false unindexed-owner diagnosis or complete absence instead of incompleteness. Boundary case, so I chose the lower label.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "the owner, static and namespace matching come before it",
+          "rationale": "The output connects Value-targeting Kotlin getter aliases, namespace filtering, and found_alias tracking that controls external-static boundaries. It does not identify the lost incomplete conversion route or resulting false complete absence/unindexed-owner diagnosis, so the conservative label is partial.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "25aaf7906b32c7d6ce7937f0295cec3a16e407180fd15e942a327959b26d34eb",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "The alias loop body runs in this sequence: owner comparison, static flag and namespace kind check, `found_alias = true` ... The reader's returned `found_alias` adds the member name to `indexed_static_import_members`; the final filter removes external-static boundaries",
+          "rationale": "Together with the bullet that Kotlin emits a static Getter alias in the Value namespace while Value demands admit only static fields and singletons, this shows the kind filter skipping the getter alias before found_alias is set. The resulting false absence is implied rather than stated.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "The alias loop body runs in this sequence: owner comparison, static flag and namespace kind check, `found_alias = true`",
+          "rationale": "It identifies the static getter targeting a Value declaration, the namespace-kind filter, and its position before found_alias tracking. It does not explain that the rejected route must preserve scoped incompleteness, or identify the false complete absence/unindexed-owner outcome; the stricter match rule therefore warrants partial credit.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "id": "js-synthetic-owner-leaks-file-summary",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "caught",
+      "brief_sha256": "95f8724a8b8b2788693d9617ace7eec3c3eac773fd22b706b81d97ea6e5b6174",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "each element's extent is the maximum of the signature line count and the matching range line count ... The JS/TS registrations supply the root range and the import signature",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it names the root range feeding the summary element extent, but does not say the synthetic element now encloses or duplicates later real declarations.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "each element's extent is the maximum of the signature line count and the matching range line count",
+          "rationale": "The output connects new root-range registration to the signature-driven summary extent while explicitly preserving signature text. It also describes separate real top-level declarations, establishing that the import-signature element now spans their coverage as well.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "label": "caught",
+      "brief_sha256": "d1f69fa7ab20f7aee122ad772a421adb2d5564c3799edae88e4e98a05f074f18",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-4",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "caught",
+          "matching_finding": "`signature_elements` reads declaration ranges and computes each element's line extent as `max(signature line count, matching range line count)` ... The JS/TS module registrations pass the root node as the range source and the import signature as the signature",
+          "rationale": "Connects the newly registered whole-file root range on the synthetic module to the unchanged summary renderer, which honors that range while keeping the import signature as the element text. It does not explicitly say the element then encloses later declarations.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "caught",
+          "matching_finding": "computes each element's line extent as `max(signature line count, matching range line count)`",
+          "rationale": "It connects the newly registered JS/TS root range to the existing signature renderer, explicitly retaining the import signature as text while the root supplies the extent. This identifies the whole-file synthetic summary coverage that overlaps later real declarations, rather than incorrectly claiming full-source text or newly visible imports.",
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}

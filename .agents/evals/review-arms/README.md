@@ -1172,3 +1172,17 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
   classification turns on single diffs: Inconclusive at 9 (+18.5, 0.0 to
   +37.0) and Facts carry at 8 (+20.8, +4.2 to +41.7). Removing every
   documented concern together leaves 2 diffs, too few to classify.
+
+## Bifrost-dev strict-construction oracle arm (OS, run as OX)
+
+Registration: `brief/PLAN-bifrost-oracle-strict.md` and its amendments.
+Readout: `brief/bifrost-oracle-strict/READOUT.md`.
+
+- **Inconclusive by retention.** Only 1 of 17 diffs yielded a brief that kept the complete decisive
+  fact (blind fidelity check) and passed one Opus and one Sol leak judge, both `missed` at high
+  confidence, plus a blind cause check. Reviewers and round N were skipped as uninformative.
+- 10 of 17 were excluded at the leak gate after three rounds, and 6 as editor failures (fidelity or
+  lint). On bifrost-dev relation bugs, supplying the complete fact is close to supplying the bug, so
+  the earlier OT and ON lifts can't be credited to a non-leaking decisive fact. For the 6 editor
+  failures the question stays open.
+- Recorded cost: $23.72 at API-equivalent rates.

@@ -1,0 +1,50 @@
+{
+  "id": "incompatible-semantic-bundle-late-gate",
+  "group": "P",
+  "rounds": [
+    {
+      "round": 2,
+      "label": "partial",
+      "brief_sha256": "f3fcb3717319d01686da6297c6e314a810179144698294bbbc9ff179caa8351c",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-2",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "`verify_release_bundle` contains these steps in this order: `verify_checksums` ... decoding ... the call to `verify_generated_production`",
+          "rationale": "Output is a neutral context dump (callers/paths/value flow) with no defect claims; it lists the order (checksums and curated decode before the generated schema/cache check) but does not say an index-known incompatible bundle wastes full asset work before rejection.",
+          "confidence": "low"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "the call to `verify_generated_production`",
+          "rationale": "The output accurately lists whole-bundle checksums and curated/shard decoding before generated compatibility checks. It does not explain that an index-known incompatible bundle needlessly blocks automatic acquisition before rejection; the ordering observation alone falls short of the full match rule.",
+          "confidence": "medium"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "label": "partial",
+      "brief_sha256": "b91740193f40a8fa8cbde9a96e3f8c7e6fe5c1fabd87a92de3ede83dffda0ae4",
+      "judge_dir": "/mnt/optane/review-arms-bifrost-20261116/briefs/bifrost-oracle-strict-leak-3",
+      "verdicts": [
+        {
+          "judge": "A",
+          "label": "partial",
+          "matching_finding": "verify_release_bundle calls verify_checksums ... then decodes each curated manifest and shard ... then calls verify_generated_production ..., which checks generated schema and cache versions",
+          "rationale": "It records that the generated schema/cache check runs after the full checksum and curated decode. It does not say that the index already proves incompatibility, or that the order makes acquisition do needless work before an inevitable rejection, which the match_rule requires.",
+          "confidence": "medium"
+        },
+        {
+          "judge": "B",
+          "label": "partial",
+          "matching_finding": "then calls `verify_generated_production`",
+          "rationale": "The output explicitly traces checksumming and curated decoding before generated schema/cache validation. It does not explain that index-known incompatibility makes the preceding work unnecessary and blocks acquisition before rejection, leaving the impact required by the match rule unstated.",
+          "confidence": "medium"
+        }
+      ]
+    }
+  ]
+}
