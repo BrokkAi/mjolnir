@@ -366,26 +366,29 @@ impl RuntimeState {
             } else {
                 owner.background_policies.remove(&session_id);
             }
-            let observed_login = view
-                .connected
-                .then(|| {
-                    let record = owner.controller().state.sessions.get(&session_id)?;
-                    let fingerprint = view
-                        .snapshot
-                        .as_ref()?
-                        .operational
-                        .held_login_fingerprint
-                        .as_ref()?;
-                    Some((record.last_profile.clone(), fingerprint.clone()))
-                })
-                .flatten();
             owner.publish_view(session_id.clone(), view);
-            if let Some((profile_id, fingerprint)) = observed_login {
-                self.rejected_logins
-                    .lock()
-                    .expect("rejected logins poisoned")
-                    .observe_delivered_login(&profile_id, &session_id, &fingerprint);
-            }
+            let profile_id = &owner.controller().state.sessions[&session_id].last_profile;
+            let published = owner
+                .sessions
+                .get(&session_id)
+                .filter(|view| view.connected);
+            let operational = published.and_then(|view| view.operational.as_ref());
+            let fingerprint = operational.and_then(|state| state.held_login_fingerprint.as_deref());
+            let retry_intent =
+                operational.and_then(|state| state.authentication_retry_intent.as_deref());
+            let observed_through = published.map_or(0, |view| view.projection_ordinal);
+            // The runtime owner serializes view publication and retirement.
+            // The registry serializes this observation with delivery starts.
+            self.rejected_logins
+                .lock()
+                .expect("rejected logins poisoned")
+                .observe_held_login(
+                    profile_id,
+                    &session_id,
+                    fingerprint,
+                    retry_intent,
+                    observed_through,
+                );
             recovered_failure
         };
         if let Some(recorded_error) = recovered_failure {

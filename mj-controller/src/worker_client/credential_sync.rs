@@ -2615,18 +2615,10 @@ impl ProfileLogin {
                 .end_delivery(target, None, "profile has no current readable login".into());
             return;
         };
-        let held = runtime.and_then(|runtime| runtime.held_login_fingerprint(&target.session_id));
-        let state = if held.as_deref() == Some(&fingerprint) {
-            LoginDeliveryState::Concluded {
-                reason: "worker reports holding the current login".into(),
-            }
-        } else {
-            LoginDeliveryState::Pending
-        };
         self.rejected
             .lock()
             .expect("rejected logins poisoned")
-            .start_delivery(target, &fingerprint, state);
+            .start_delivery(target, &fingerprint);
     }
 
     fn send(&self, event: PassEvent) {

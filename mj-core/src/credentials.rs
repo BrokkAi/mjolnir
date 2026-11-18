@@ -1085,6 +1085,7 @@ pub struct RejectedLogins {
     profiles: std::collections::BTreeMap<String, (HarnessKind, PathBuf, LoginFingerprint)>,
     failures: BTreeMap<String, BTreeMap<u64, LoginFailure>>,
     deliveries: BTreeMap<String, LoginDelivery>,
+    held_logins: BTreeMap<String, HeldLogin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1119,16 +1120,6 @@ pub enum LoginFailureVerdict {
     Unrefused {
         reason: String,
     },
-}
-
-/// What a connected worker's published view says about a failed turn's retry.
-/// Taken from one published view, never assembled from separate reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerLoginRetry {
-    /// The rejected login the worker still owes a retry for, if any.
-    pub intent: Option<String>,
-    /// The login the worker reports holding.
-    pub held: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1174,6 +1165,25 @@ pub enum LoginDeliveryState {
     Concluded { reason: String },
 }
 
+impl LoginDeliveryState {
+    fn worker_holds_current_login() -> Self {
+        Self::Concluded {
+            reason: "worker reports holding the current login".into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HeldLogin {
+    profile_id: String,
+    fingerprint: String,
+    /// The rejected login the worker still owes a retry for, as published in
+    /// the same view as `fingerprint`.
+    retry_intent: Option<String>,
+    /// The relay ordinal that view had applied.
+    observed_through: u64,
+}
+
 #[derive(Debug)]
 struct LoginDelivery {
     target: CredentialSyncTarget,
@@ -1190,12 +1200,21 @@ impl RejectedLogins {
         (delivery.target.profile_id == profile_id).then(|| delivery.state.clone())
     }
 
-    pub fn start_delivery(
-        &mut self,
-        target: &CredentialSyncTarget,
-        fingerprint: &str,
-        state: LoginDeliveryState,
-    ) {
+    /// The worker's latest acknowledged login, from the same registry that
+    /// decides if delivery is pending.
+    pub fn held_login_fingerprint(&self, profile_id: &str, session_id: &str) -> Option<&str> {
+        let held = self.held_logins.get(session_id)?;
+        (held.profile_id == profile_id).then_some(held.fingerprint.as_str())
+    }
+
+    pub fn start_delivery(&mut self, target: &CredentialSyncTarget, fingerprint: &str) {
+        let state = if self.held_login_fingerprint(&target.profile_id, &target.session_id)
+            == Some(fingerprint)
+        {
+            LoginDeliveryState::worker_holds_current_login()
+        } else {
+            LoginDeliveryState::Pending
+        };
         if self
             .deliveries
             .get(&target.session_id)
@@ -1247,25 +1266,49 @@ impl RejectedLogins {
             })
     }
 
-    pub fn observe_delivered_login(
+    /// Publish and acknowledge under the same registry lock that registers
+    /// deliveries. A report that arrives first is evidence for the next one.
+    ///
+    /// The worker's retry intent and the ordinal its view had applied arrive
+    /// with the held login, from the one published view, so the hold's inputs
+    /// (held login, retry intent, delivery state) share this registry's lock.
+    pub fn observe_held_login(
         &mut self,
         profile_id: &str,
         session_id: &str,
-        fingerprint: &str,
+        fingerprint: Option<&str>,
+        retry_intent: Option<&str>,
+        observed_through: u64,
     ) {
+        let Some(fingerprint) = fingerprint else {
+            self.held_logins.remove(session_id);
+            return;
+        };
+        self.held_logins.insert(
+            session_id.to_owned(),
+            HeldLogin {
+                profile_id: profile_id.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                retry_intent: retry_intent.map(str::to_owned),
+                observed_through,
+            },
+        );
         if let Some(delivery) = self.deliveries.get_mut(session_id)
             && delivery.target.profile_id == profile_id
             && delivery.fingerprint == fingerprint
             && delivery.state == LoginDeliveryState::Pending
         {
-            delivery.state = LoginDeliveryState::Concluded {
-                reason: "worker reports holding the current login".into(),
-            };
+            delivery.state = LoginDeliveryState::worker_holds_current_login();
         }
     }
 
-    pub fn retain_deliveries(&mut self, exists: impl Fn(&str) -> bool) {
+    pub fn retain_held_logins(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.held_logins.retain(|id, _| keep(id));
+    }
+
+    pub fn retain_deliveries(&mut self, mut exists: impl FnMut(&str) -> bool) {
         self.deliveries.retain(|id, _| exists(id));
+        self.retain_held_logins(exists);
     }
 
     pub fn end_delivery(
@@ -1322,7 +1365,7 @@ impl RejectedLogins {
     /// A sync finishing after removal cannot revive a retired decision.
     pub fn retain_failures(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.failures.retain(|id, _| keep(id));
-        self.deliveries.retain(|id, _| keep(id));
+        self.retain_deliveries(keep);
     }
 
     /// Take in one finished sync of a configured profile.
@@ -1439,17 +1482,17 @@ impl RejectedLogins {
         }
     }
 
-    /// The one verdict on a failed turn. `worker` is the connected worker's
-    /// published view, or `None` when there is none (unknown, never a hold).
-    /// The caller must read it and this registry under the lock that publishes
-    /// views before it concludes deliveries, so a delivery conclusion is never
-    /// paired with an older view.
+    /// The one verdict on a failed turn. The worker's held login, its retry
+    /// intent and the delivery state are all read from this registry, which
+    /// records them under one lock, so a delivery conclusion is never paired
+    /// with an older view. No evidence for the session is unknown, never a
+    /// hold; `actor_connected` says evidence is on its way.
     pub fn failure_verdict(
         &self,
         profile_id: &str,
         cause: &CredentialSyncCause,
         current: Option<&LoginFingerprint>,
-        worker: Option<&WorkerLoginRetry>,
+        actor_connected: bool,
     ) -> LoginFailureVerdict {
         use LoginFailureVerdict::*;
         let Some(failure) = self
@@ -1466,6 +1509,18 @@ impl RejectedLogins {
         if delivery == Some(LoginDeliveryState::Pending) {
             return Deciding;
         }
+        let observed = self
+            .held_logins
+            .get(&cause.session_id)
+            .filter(|held| held.profile_id == profile_id);
+        // A view that predates the failed turn cannot say whether the worker
+        // owes its retry, and a connected actor that has published nothing yet
+        // will. Both publications follow without any worker action.
+        if observed.map_or(actor_connected, |held| {
+            held.observed_through < cause.ordinal
+        }) {
+            return Deciding;
+        }
         let Some(conclusion) = &failure.conclusion else {
             return Deciding;
         };
@@ -1473,14 +1528,14 @@ impl RejectedLogins {
             let Some(failed) = failure.fingerprint.as_deref() else {
                 return Renewed;
             };
-            let Some(worker) = worker.filter(|worker| worker.intent.as_deref() == Some(failed))
+            let Some(worker) = observed.filter(|held| held.retry_intent.as_deref() == Some(failed))
             else {
                 return Renewed;
             };
             // The delivery is no longer pending. Either the worker holds a
             // login other than the rejected one and will submit, or the
             // delivery ended without delivering and nothing else ends this.
-            match worker.held.as_deref() {
+            match Some(worker.fingerprint.as_str()) {
                 Some(held) if held != failed => RetryOwed,
                 _ => Unrefused {
                     reason: match delivery {

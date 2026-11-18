@@ -110,8 +110,8 @@ To see it working: run the tests named in `Validation and Acceptance`. The headl
   Rationale: gate terms clear by themselves; intent terms wait on a person or end the session.
   Date/Author: 2026-11-17, Milestone 3 implementation.
 
-- Decision: the daemon reads the worker's published view and the refusal registry together inside `RuntimeState::login_failure_verdict`, under the owner lock that `publish_session` holds while publishing a view and then concluding the delivery. `failure_verdict` takes the worker view as a parameter, and `ApiBackend` reaches it only through `ExportRuntime`, so a caller cannot pair a conclusion with an older view. A published view older than the failed turn, or an actor connected with no publication yet, is `Deciding`; no view is unknown (never a hold).
-  Rationale: one snapshot, one owner; mixing cannot be expressed.
+- Decision: the hold's three inputs (the worker's held login, its retry intent, and the delivery state) all live in the refusal registry. `publish_session` records the held login, `authentication_retry_intent` and the view's applied ordinal with one `observe_held_login` call under the registry lock (lock order runtime owner, then registry), and `failure_verdict` reads all three from the registry under one guard, so a delivery conclusion cannot be paired with an older view. A view that applied fewer events than the failed turn's ordinal, or a connected actor that has published nothing yet, is `Deciding`; no evidence at all (disconnect, old worker) is unknown and never a hold.
+  Rationale: one decision point; mixing cannot be expressed. Suggested by the planning session.
   Date/Author: 2026-11-17, Milestone 3 implementation.
 
 ## Outcomes & Retrospective

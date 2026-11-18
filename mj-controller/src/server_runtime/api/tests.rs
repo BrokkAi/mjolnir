@@ -2242,11 +2242,11 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
     fixture.conclude_failure();
     let backend = fixture.backend();
     let renewed = fixture.renewed_token();
-    fixture.rejected.lock().unwrap().start_delivery(
-        &fixture.target(),
-        &renewed,
-        mj_core::credentials::LoginDeliveryState::Pending,
-    );
+    fixture
+        .rejected
+        .lock()
+        .unwrap()
+        .start_delivery(&fixture.target(), &renewed);
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
@@ -2254,11 +2254,13 @@ async fn renewed_child_login_without_a_worker_hold_is_reported_as_retryable() {
             .unwrap(),
         ChildReport::NotFinished
     ));
-    fixture
-        .rejected
-        .lock()
-        .unwrap()
-        .observe_delivered_login("helper", "child-1", &renewed);
+    fixture.rejected.lock().unwrap().observe_held_login(
+        "helper",
+        "child-1",
+        Some(&renewed),
+        None,
+        9,
+    );
     assert!(matches!(
         backend
             .reconcile_child_report("parent-1", "child-1", 9)
@@ -2306,20 +2308,22 @@ async fn a_login_renewed_during_a_checkpoint_barrier_never_reports_the_child() {
         );
     };
     // The turn failed on the old token and the renewed login is on its way.
-    fixture.rejected.lock().unwrap().start_delivery(
-        &fixture.target(),
-        &renewed,
-        mj_core::credentials::LoginDeliveryState::Pending,
-    );
-    fixture.publish_worker(Some(&failed), Some(&failed));
-    not_told().await;
-    // The checkpoint barrier begins and the new login is installed during it.
-    // The worker keeps publishing its intent; only its submit waits.
     fixture
         .rejected
         .lock()
         .unwrap()
-        .observe_delivered_login("helper", "child-1", &renewed);
+        .start_delivery(&fixture.target(), &renewed);
+    fixture.publish_worker(Some(&failed), Some(&failed));
+    not_told().await;
+    // The checkpoint barrier begins and the new login is installed during it.
+    // The worker keeps publishing its intent; only its submit waits.
+    fixture.rejected.lock().unwrap().observe_held_login(
+        "helper",
+        "child-1",
+        Some(&renewed),
+        None,
+        9,
+    );
     fixture.publish_worker(Some(&failed), Some(&renewed));
     not_told().await;
     // Releasing the barrier lets the worker submit its retry, which starts a
@@ -2685,16 +2689,27 @@ impl ChildLoginReportFixture {
         }
     }
 
-    /// What the connected worker's published view says about the retry.
+    /// What the connected worker's published view says about the retry,
+    /// recorded as the daemon records it when it publishes the view.
     fn publish_worker(&self, intent: Option<&str>, held: Option<&str>) {
-        *self.exports.published_worker.lock().unwrap() =
-            Some(mj_core::credentials::WorkerLoginRetry {
-                intent: intent.map(str::to_owned),
-                held: held.map(str::to_owned),
-            });
+        self.rejected
+            .lock()
+            .unwrap()
+            .observe_held_login("helper", "child-1", held, intent, 9);
     }
 
     fn backend(&self) -> ApiBackend {
+        // The connected worker's first publication: it still holds the failed
+        // login and owes no retry. Tests change it with `publish_worker`.
+        if self
+            .rejected
+            .lock()
+            .unwrap()
+            .held_login_fingerprint("helper", "child-1")
+            .is_none()
+        {
+            self.publish_worker(None, Some(&self.failed_token()));
+        }
         let mut view = ready_view("m");
         view.snapshot.as_mut().unwrap().materialized = self.conversation.clone();
         self.backend_with_view(Some(view))
@@ -2829,9 +2844,6 @@ struct ParkingExports {
     defer_unpark: std::sync::atomic::AtomicBool,
     /// What the review host would answer for the child.
     awaiting_review: std::sync::atomic::AtomicBool,
-    /// The retry state the worker's published view carries, or none when no
-    /// view is published. The daemon reads it together with the registry.
-    published_worker: std::sync::Mutex<Option<mj_core::credentials::WorkerLoginRetry>>,
     protocol: u32,
 }
 
@@ -2858,7 +2870,6 @@ impl ParkingExports {
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
             awaiting_review: Default::default(),
-            published_worker: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
@@ -2890,21 +2901,6 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
-    fn login_failure_verdict(
-        &self,
-        rejected: &Mutex<mj_core::credentials::RejectedLogins>,
-        profile_id: &str,
-        cause: &mj_core::credentials::CredentialSyncCause,
-        current: Option<&mj_core::credentials::LoginFingerprint>,
-        _actor_connected: bool,
-    ) -> Result<mj_core::credentials::LoginFailureVerdict> {
-        let worker = self.published_worker.lock().unwrap().clone();
-        Ok(rejected
-            .lock()
-            .unwrap()
-            .failure_verdict(profile_id, cause, current, worker.as_ref()))
-    }
-
     fn child_awaits_review(&self, _: String) -> BoxFuture<'_, bool> {
         Box::pin(async {
             self.awaiting_review
