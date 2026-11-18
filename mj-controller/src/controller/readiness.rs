@@ -55,23 +55,7 @@ pub(super) enum NativeSessionReadiness {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HarnessPreparationFailure {
-    pub step: String,
-    pub error: String,
-}
-
-impl std::fmt::Display for HarnessPreparationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "harness preparation failed at {}: {}",
-            self.step, self.error
-        )
-    }
-}
-
-impl std::error::Error for HarnessPreparationFailure {}
+pub use mj_session_types::HarnessPreparationFailure;
 
 pub(super) trait NativeSessionProbe {
     fn protocol_version(&self) -> u32 {

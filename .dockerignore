@@ -20,6 +20,7 @@
 !mj-worker-bin/
 !mj-client/
 !mj-targets/
+!mj-session-types/
 !mj-store/
 !mj-accounts/
 !mj-import/

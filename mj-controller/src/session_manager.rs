@@ -25,8 +25,8 @@ use mj_transcript::projection::{
 };
 
 use crate::targets::{
-    CancellableProcessExecutor, CommandExecutor, CommandPlan, CommandSpec, TargetLocator,
-    TargetRecoveryOutcome, TargetRecoveryPlan, ensure_recovery_target_running,
+    CancellableProcessExecutor, CommandExecutor, CommandSpec, TargetRecoveryOutcome,
+    ensure_recovery_target_running,
 };
 use mj_core::relay::{RelayCommand, RelayCursor, RelayOperationalState};
 
@@ -72,7 +72,11 @@ const WORKER_RESTART_COOLDOWN: Duration = Duration::from_secs(60);
 const SESSION_MANAGER_SHUTDOWN_GRACE: Duration = Duration::from_millis(750);
 
 mod types;
-pub use types::*;
+pub use mj_session_types::{
+    DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, RelaySessionTarget, WorkerBinaryRefresh,
+    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
+};
+use types::*;
 mod recovery;
 pub use recovery::*;
 mod delegation;

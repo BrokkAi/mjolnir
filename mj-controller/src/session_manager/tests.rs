@@ -2,6 +2,7 @@ pub(crate) use super::stand_in::*;
 use super::*;
 #[cfg(unix)]
 use crate::controller::test_support::{IsolatedTest, test_name};
+use crate::targets::{CommandPlan, TargetRecoveryPlan};
 use mj_core::hex::lower_hex;
 
 /// I1-12: a relay's final rejection reaches the user as the relay's reason

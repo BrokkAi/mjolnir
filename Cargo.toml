@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-session-types", "mj-store", "mj-accounts", "mj-import", "mj-sessionwiki", "mj-build-cache", "mj-github-relevance", "mj-controller", "mj-setup", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -39,6 +39,7 @@ mj-build-id = { path = "mj-build-id", package = "brokk-mj-build-id", version = "
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker-runtime", version = "2.71.0" }
 mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.71.0" }
 mj-targets = { path = "mj-targets", package = "brokk-mj-targets", version = "2.71.0" }
+mj-session-types = { path = "mj-session-types", package = "brokk-mj-session-types", version = "2.71.0" }
 mj-store = { path = "mj-store", package = "brokk-mj-store", version = "2.71.0" }
 mj-accounts = { path = "mj-accounts", package = "brokk-mj-accounts", version = "2.71.0" }
 mj-github-relevance = { path = "mj-github-relevance", package = "brokk-mj-github-relevance", version = "2.71.0" }

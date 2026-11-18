@@ -37,6 +37,7 @@ COPY mj-worker/ mj-worker/
 COPY mj-worker-bin/ mj-worker-bin/
 COPY mj-client/ mj-client/
 COPY mj-targets/ mj-targets/
+COPY mj-session-types/ mj-session-types/
 COPY mj-store/ mj-store/
 COPY mj-accounts/ mj-accounts/
 COPY mj-import/ mj-import/

@@ -126,6 +126,11 @@ it or introduce a dependency between sibling branches.
   the foundation and client branches and knows nothing of the store or of
   session lifecycle. `mj_controller` re-exports its modules under their old
   names.
+- `brokk-mj-session-types` (`mj-session-types/`, library `mj_session_types`)
+  holds types that two crates which must not depend on each other both name:
+  today the plan for recovering a worker, which staging fills in and the
+  session runtime follows, and the harness preparation failure. Add a type
+  here for that reason only, and keep behaviour out of it.
 - `brokk-mj-store` (`mj-store/`, library `mj_store`) is the daemon's
   database: the SQLite schema and migrations, the session, environment and
   event records, the single writer, and the gates that order recovery and

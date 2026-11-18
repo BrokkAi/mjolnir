@@ -770,6 +770,7 @@ dependencies = [
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-import",
+ "brokk-mj-session-types",
  "brokk-mj-sessionwiki",
  "brokk-mj-store",
  "brokk-mj-targets",
@@ -987,6 +988,14 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "brokk-mj-session-types"
+version = "2.71.0"
+dependencies = [
+ "brokk-mj-core",
+ "brokk-mj-targets",
 ]
 
 [[package]]
