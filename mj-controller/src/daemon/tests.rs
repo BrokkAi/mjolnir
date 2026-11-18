@@ -15221,11 +15221,13 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             } else {
                 vec![
                     NotificationStackEntry {
+                        completed_at_ms: 0,
                         completed_ordinal: 7,
                         kind: NotificationKind::Important,
                         message: EntryMessage::None,
                     },
                     NotificationStackEntry {
+                        completed_at_ms: 0,
                         completed_ordinal: 9,
                         kind: NotificationKind::NeedsInput,
                         message: EntryMessage::None,

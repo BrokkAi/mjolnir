@@ -35,6 +35,8 @@ pub enum NotificationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationStackEntry {
     pub completed_ordinal: u64,
+    #[serde(default)]
+    pub completed_at_ms: i64,
     pub kind: NotificationKind,
     pub message: EntryMessage,
 }

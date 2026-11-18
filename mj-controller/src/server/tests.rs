@@ -5758,19 +5758,23 @@ async fn notification_message_reads_only_entries_on_the_current_card() {
     crate::database::save_materialized_session(&history).unwrap();
     let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
         snapshot.sessions[0].notification_card = Some(NotificationCard {
+            since_ms: 0,
             badge: NotificationKind::Important,
             entries: vec![
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 2,
                     kind: NotificationKind::Important,
                     message: EntryMessage::Found("agent:1".into()),
                 },
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 5,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 9,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,

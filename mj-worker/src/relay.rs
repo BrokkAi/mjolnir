@@ -2024,6 +2024,7 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
     let mut entries = Vec::new();
     if let Some(request) = snapshot.open_request() {
         entries.push(NotificationStackEntry {
+            completed_at_ms: 0,
             completed_ordinal: request.question.completed_ordinal,
             kind: NotificationKind::NeedsInput,
             message: request
@@ -2045,6 +2046,7 @@ fn seed_legacy_notification_stack(snapshot: &mut RelaySnapshot) {
             .any(|entry| entry.completed_ordinal == assessment.completed_ordinal)
     {
         entries.push(NotificationStackEntry {
+            completed_at_ms: 0,
             completed_ordinal: assessment.completed_ordinal,
             kind: NotificationKind::Important,
             message: snapshot

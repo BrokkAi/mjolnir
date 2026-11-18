@@ -86,6 +86,7 @@ fn record_notification(
     ordinal: u64,
 ) {
     let entry = NotificationStackEntry {
+        completed_at_ms: 0,
         completed_ordinal,
         kind,
         message,

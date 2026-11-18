@@ -2684,6 +2684,7 @@ fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
         [(
             "asks".into(),
             NotificationCard {
+                since_ms: 0,
                 badge: NotificationKind::NeedsInput,
                 entries: [
                     (5, NotificationKind::Important),
@@ -2692,6 +2693,7 @@ fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
                 ]
                 .into_iter()
                 .map(|(completed_ordinal, kind)| NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal,
                     kind,
                     message: EntryMessage::None,

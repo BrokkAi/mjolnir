@@ -323,6 +323,9 @@ pub struct RuntimeContainerCapacity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationCard {
+    /// Time of the oldest visible item.
+    #[serde(default)]
+    pub since_ms: i64,
     pub badge: mj_core::attention::NotificationKind,
     /// Visible entries, oldest first.
     pub entries: Vec<mj_core::attention::NotificationStackEntry>,
@@ -333,6 +336,8 @@ pub struct NotificationCard {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardForm {
+    #[serde(default)]
+    pub raised_at_ms: i64,
     pub request_id: String,
     pub message: String,
 }

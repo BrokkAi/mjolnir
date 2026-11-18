@@ -8557,6 +8557,7 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
             stack.entries.insert(
                 0,
                 mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 5,
                     kind: mj_core::attention::NotificationKind::Important,
                     message: mj_core::attention::EntryMessage::Found(

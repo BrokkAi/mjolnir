@@ -1483,8 +1483,10 @@ pub(crate) mod tests {
         let mut dashboard = dashboard();
         dashboard.set_notification_cards(Some([
             ("q1".into(), NotificationCard {
+                since_ms: 0,
                 badge: NotificationKind::NeedsInput,
                 entries: vec![NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 4,
                     kind: NotificationKind::Important,
                     message: EntryMessage::Found("outside-tail".into()),
@@ -1492,13 +1494,16 @@ pub(crate) mod tests {
                 dismissal: Some(NotificationDismissal::Stack { revision: 50 }),
                 holder: Some("q2".into()),
                 form: Some(CardForm {
+                    raised_at_ms: 0,
                     request_id: "request".into(),
                     message: "Which approach should we take?\nThe question stays here until you answer or clear it.".into(),
                 }),
             }),
             ("i1".into(), NotificationCard {
+                since_ms: 0,
                 badge: NotificationKind::Important,
                 entries: vec![NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 7,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,

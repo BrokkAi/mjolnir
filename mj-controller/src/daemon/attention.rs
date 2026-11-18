@@ -707,6 +707,7 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
                 // several reviewer roles contributed findings.
                 card.holder = Some(review.session_id.clone());
                 card.form = Some(CardForm {
+                    raised_at_ms: 0,
                     request_id: format!("review-verdict.{reviewer}.findings"),
                     message: review.status.clone(),
                 });
@@ -870,6 +871,7 @@ fn notification_card(
                     legacy_completed_reply(runtime, id, question.completed_ordinal)
                 };
                 Some(NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: question.completed_ordinal,
                     kind: NotificationKind::NeedsInput,
                     message,
@@ -877,6 +879,7 @@ fn notification_card(
             } else if attention == SessionAttention::Important {
                 live.and_then(|live| live.assessment.as_ref())
                     .map(|assessment| NotificationStackEntry {
+                        completed_at_ms: 0,
                         completed_ordinal: assessment.completed_ordinal,
                         kind: NotificationKind::Important,
                         message: legacy_completed_reply(runtime, id, assessment.completed_ordinal),
@@ -909,6 +912,7 @@ fn notification_card(
                         !runtime.subagents.contains_key(holder) || !request.goes_to_parent()
                     })
                     .map(|request| CardForm {
+                        raised_at_ms: 0,
                         request_id: request.id.clone(),
                         message: request.message.clone(),
                     })
@@ -924,6 +928,7 @@ fn notification_card(
                     .map(|question| {
                         let request = question.session_request();
                         CardForm {
+                            raised_at_ms: 0,
                             request_id: request.id,
                             message: request.message,
                         }
@@ -947,6 +952,7 @@ fn notification_card(
         (
             Some(native.agent.owner_session_id.clone()),
             Some(CardForm {
+                raised_at_ms: 0,
                 request_id: format!(
                     "native.{}:{source}.{}.{request}",
                     source.len(),
@@ -959,6 +965,7 @@ fn notification_card(
         (holder.cloned(), None)
     };
     Some(NotificationCard {
+        since_ms: 0,
         badge,
         entries,
         dismissal,
@@ -1020,11 +1027,13 @@ mod tests {
             revision: 11,
             entries: vec![
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 7,
                     kind: NotificationKind::Important,
                     message: EntryMessage::None,
                 },
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 10,
                     kind: NotificationKind::NeedsInput,
                     message: EntryMessage::None,
@@ -1306,11 +1315,13 @@ mod tests {
             revision: 14,
             entries: vec![
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 10,
                     kind: NotificationKind::Important,
                     message: EntryMessage::Found("agent:earlier".into()),
                 },
                 NotificationStackEntry {
+                    completed_at_ms: 0,
                     completed_ordinal: 11,
                     kind: NotificationKind::NeedsInput,
                     message: EntryMessage::Found("agent:question".into()),

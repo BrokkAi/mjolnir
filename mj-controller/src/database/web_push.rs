@@ -460,6 +460,7 @@ mod tests {
             .insert(
                 session.into(),
                 NotificationCard {
+                    since_ms: 0,
                     badge: NotificationKind::NeedsInput,
                     entries,
                     dismissal: None,
@@ -471,6 +472,7 @@ mod tests {
 
     fn completion(ordinal: u64, message: EntryMessage) -> NotificationStackEntry {
         NotificationStackEntry {
+            completed_at_ms: 0,
             completed_ordinal: ordinal,
             kind: NotificationKind::NeedsInput,
             message,
@@ -677,6 +679,7 @@ mod tests {
             .unwrap();
         card.holder = Some("child".into());
         card.form = Some(CardForm {
+            raised_at_ms: 0,
             request_id: "form:1".into(),
             message: "Accept changes?".into(),
         });
