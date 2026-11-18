@@ -1538,20 +1538,20 @@ impl RejectedLogins {
         if delivery == Some(LoginDeliveryState::Pending) {
             return Deciding;
         }
-        let observed = self
-            .held_logins
-            .get(&cause.session_id)
-            .filter(|view| view.profile_id == profile_id);
         // A view that predates the failed turn cannot say whether the worker
         // owes its retry, and a connected actor that has published nothing
         // since it connected will. The first publication follows without any
-        // worker action. A publication that carries no login is still a
+        // worker action. A publication that carries no login, or one under
+        // another profile (the session moved after the failure), is still a
         // publication: it resolves below, never here.
-        if observed.map_or(actor_connected, |view| {
+        let published = self.held_logins.get(&cause.session_id);
+        if published.map_or(actor_connected, |view| {
             view.observed_through < cause.ordinal
         }) {
             return Deciding;
         }
+        // Only a view under the failed turn's profile speaks for its retry.
+        let observed = published.filter(|view| view.profile_id == profile_id);
         let Some(conclusion) = &failure.conclusion else {
             return Deciding;
         };

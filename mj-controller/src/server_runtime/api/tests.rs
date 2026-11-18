@@ -2396,6 +2396,43 @@ async fn a_connected_worker_publishing_no_login_is_reported_once_reconciled() {
     assert_eq!(report.promptable, Some(true));
 }
 
+// Hard-won: c8d6236b7: a child moved to another profile after its failure was held as Deciding forever
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn a_child_moved_to_another_profile_is_reported_once_reconciled() {
+    if !isolated_parked_test("a_child_moved_to_another_profile_is_reported_once_reconciled") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = ChildLoginReportFixture::new("renewed", "revoked").await;
+    fixture.conclude_failure();
+    // The failed turn ran on `helper`; the session then moved to another
+    // profile, so its worker publishes under that one.
+    fixture
+        .published
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.rejected.lock().unwrap().observe_worker(
+        "other",
+        "child-1",
+        Some(mj_core::credentials::WorkerPublication::new(
+            Some("other-login"),
+            None,
+            9,
+        )),
+    );
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 9)
+            .await
+            .unwrap(),
+        ChildReport::Told
+    ));
+    let report = child_login_mailbox_report();
+    assert_eq!(report.state, "failed");
+    assert_eq!(report.promptable, Some(true));
+}
+
 // Hard-won: #1581: a worker that withdrew its retry (a question or paused goal waits on a person) still looked busy to the parent.
 #[cfg(not(target_os = "macos"))]
 #[tokio::test]
