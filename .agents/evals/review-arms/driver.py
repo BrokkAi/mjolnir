@@ -220,14 +220,17 @@ def image_pin_mismatch(place):
     if IMAGE_PIN is None:
         return None
     with IMAGE_PIN_LOCK:
-        # O_EXCL makes the first writer the only one, across threads and driver processes alike.
+        # Write a complete temporary file, then hard-link it into place: link fails if a pin exists,
+        # so the first writer wins across processes and a visible pin is never partial.
+        tmp = IMAGE_PIN.with_name(f"{IMAGE_PIN.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps({"image": place["image"], "time_ns": time.time_ns()}) + "\n")
         try:
-            fd = os.open(IMAGE_PIN, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            os.link(tmp, IMAGE_PIN)
         except FileExistsError:
             pinned = json.loads(IMAGE_PIN.read_text())["image"]
             return None if place["image"] == pinned else pinned
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps({"image": place["image"], "time_ns": time.time_ns()}) + "\n")
+        finally:
+            tmp.unlink()
         return None
 
 
@@ -266,21 +269,50 @@ def finish_set_aside(d):
     marker.rename(d / f"{tag}-image.json")
 
 
+RUNTIME_PROBES = {}  # (job dir, child) -> its probe thread
+RUNTIME_PROBES_LOCK = threading.Lock()
+
+
+def probe_runtime(d, child, carrier):
+    """Samples one reviewer's runtime on its own thread, so a slow podman or mj call never delays the
+    status polls that observe the other reviewers. Retries until it records the runtime or the
+    reviewer is gone; every failed attempt is written to runtime-errors.jsonl."""
+    path = d / "reviewers" / child[:12] / "runtime.json"
+    while not path.exists():
+        try:
+            runtime = reviewer_runtime(child, carrier)
+        except Exception as e:  # noqa: BLE001 - a probe failure loses evidence, never fails a review
+            with (d / "runtime-errors.jsonl").open("a") as f:
+                f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
+            runtime = None
+        if runtime:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            save(path, runtime)
+            return
+        try:
+            if session(child).get("lifecycle") != "live":
+                return  # finished or gone: collect() records it as unobserved
+        except Exception:  # noqa: BLE001 - a destroyed reviewer has no session to read
+            return
+        time.sleep(5)
+
+
 def record_runtimes(d, children):
     carrier = json.loads((d / "placement.json").read_text())["container"]
-    for child in children:
-        path = d / "reviewers" / child[:12] / "runtime.json"
-        if not path.exists():
-            try:
-                runtime = reviewer_runtime(child, carrier)
-            except Exception as e:  # noqa: BLE001 - any probe failure (podman, mj sessions, a reviewer
-                # already destroyed) is evidence lost, never a failed review: record it, retry next poll.
-                with (d / "runtime-errors.jsonl").open("a") as f:
-                    f.write(json.dumps({"child": child, "error": repr(e), "time_ns": time.time_ns()}) + "\n")
-                continue
-            if runtime:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                save(path, runtime)
+    with RUNTIME_PROBES_LOCK:
+        for child in children:
+            if (d, child) not in RUNTIME_PROBES and not (d / "reviewers" / child[:12] / "runtime.json").exists():
+                t = threading.Thread(target=probe_runtime, args=(d, child, carrier), daemon=True)
+                RUNTIME_PROBES[(d, child)] = t
+                t.start()
+
+
+def join_runtime_probes(d):
+    """collect() waits for this job's probes so runtime.json is final before it reads them."""
+    with RUNTIME_PROBES_LOCK:
+        threads = [t for (jd, _), t in RUNTIME_PROBES.items() if jd == d]
+    for t in threads:
+        t.join()
 
 
 def inventory(place, mode, base):
@@ -602,6 +634,7 @@ def collect(d, bug, identity, sid, place, before):
         reviewers = json.loads((d / "reviewers.json").read_text())
     else:
         children, verdict = await_review(d, sid)
+        join_runtime_probes(d)
         save(d / "verdict.json", verdict or {"kind": "cleared", "note": "review finished and cleared between polls"})
         if verdict and verdict.get("kind") == "failed":
             raise RuntimeError("review failed: " + json.dumps(verdict)[:800])
