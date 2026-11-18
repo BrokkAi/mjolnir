@@ -748,7 +748,7 @@ fn child_effort(
     }
 }
 
-/// "profile codex2 is rate-limited until 14:05:00 UTC (...)" when the
+/// "profile codex2 is rate-limited until 2026-10-25 14:05:00 UTC (...)" when the
 /// candidate's sessions just failed running `model`.
 fn unhealthy_note(candidate: &SubagentCandidate, model: &str) -> Option<String> {
     candidate
@@ -2426,7 +2426,7 @@ mod tests {
         .unwrap_err();
         assert!(
             refused.message.contains(
-                "profile best is rate-limited until 14:05:00 UTC (exceeded retry limit, last status: 429)"
+                "profile best is rate-limited until 2026-10-25 14:05:00 UTC (exceeded retry limit, last status: 429)"
             ),
             "{}",
             refused.message
