@@ -194,12 +194,18 @@ def reviewer_runtime(child, carrier):
         return None
     info = json.loads(subprocess.check_output(["podman", "inspect", ids[0]], timeout=60))[0]
     image = json.loads(subprocess.check_output(["podman", "image", "inspect", info["Image"]], timeout=60))[0]
-    version = subprocess.check_output([str(MJX), "--version"], timeout=60).decode().strip()
+    # Once the image is known it is kept; the auxiliary probes below record their own failures.
+    try:
+        version = subprocess.check_output([str(MJX), "--version"], timeout=60).decode().strip()
+    except Exception as e:  # noqa: BLE001
+        version = {"error": repr(e)}
     # The installed CLI can change during a run; the container's live processes name the worker and
     # harness binaries actually serving this review.
-    # check=True: a failed probe raises, is logged by record_runtimes and retried at the next poll.
-    processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
-                               text=True, timeout=60, check=True).stdout.splitlines()
+    try:
+        processes = subprocess.run(["podman", "exec", ids[0], "ps", "-eo", "args"], capture_output=True,
+                                   text=True, timeout=60, check=True).stdout.splitlines()
+    except Exception as e:  # noqa: BLE001
+        processes = {"error": repr(e)}
     # The process list is evidence of the reviewer's worker and harness only while its session is
     # live, so its state at the probe is recorded beside it.
     return {"container": ids[0], "container_source": source, "image": info["Image"],
@@ -252,7 +258,14 @@ def finish_set_aside(d):
     # Suspend is accepted asynchronously and can fail after acceptance; request it again whenever the
     # carrier is not yet suspended, and retire the launch records only once it has taken effect.
     # Otherwise the marker stays and the next start retries.
-    state = session(sid).get("lifecycle")
+    try:
+        state = session(sid).get("lifecycle")
+    except RuntimeError as e:
+        # A carrier destroyed meanwhile is gone, which is what the set-aside needs; any other
+        # lookup failure is raised so the next start retries.
+        if "404" not in str(e) and "not found" not in str(e).lower():
+            raise
+        state = "closed"
     if state not in ("suspended", "closed"):
         with (d / f"{tag}-suspend.jsonl").open("a") as f:
             f.write(json.dumps({"time_ns": time.time_ns(), "state": state,
