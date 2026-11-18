@@ -25,6 +25,7 @@ judges are told not to open.
 import argparse
 import collections
 import json
+import pathlib
 import random
 import secrets
 import statistics
@@ -36,7 +37,9 @@ from driver import ARMS, CORPUS, BRIEF_ARMS, QUERY_ARMS, ROOT, SCRIPTS, save
 
 # The condition each judged arm stands for: its brief kind, or "site-tool" for the query arms
 # (brief/PLAN-oz.md), which carry no brief but a site_context tool.
-CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS}}
+CONDITION = {**BRIEF_ARMS, **{a: "site-tool" for a in QUERY_ARMS},
+             # A fresh no-brief cohort is its own condition, never pooled with the stored no-brief arms.
+             "AF": "no-brief-fresh"}
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
@@ -49,6 +52,7 @@ EXACT_BASELINE = False
 ROUND_SETS = None
 READING = None
 REFERENCE_ROUND = None
+IMAGE_CHECK = {}  # the no-leak build's single-image evidence, saved in the round key
 
 
 def scoped_sets():
@@ -151,12 +155,47 @@ def build(arms, per_batch):
     corpus = CORPUS
     rows = sessions(arms)
     require_complete(rows, arms)
+    if READING == "bifrost-oracle-noleak":
+        # ON - AF reads a brief effect only if both arms ran on one image (the AF amendment).
+        # Carriers, and every reviewer whose runtime was observed (its own container or the carrier's).
+        images = {json.loads((ROOT / "runs" / r["bug"] / r["arm"] / "placement.json").read_text())["image"]
+                  for r in rows if r["arm"] in ("ON", "AF")}
+        unobserved = 0
+        for r in rows:
+            if r["arm"] not in ("ON", "AF"):
+                continue
+            runtime = pathlib.Path(r["dir"]) / "runtime.json"
+            image = json.loads(runtime.read_text()).get("image") if runtime.exists() else None
+            if image:
+                images.add(image)
+            else:
+                unobserved += 1
+        if len(images) != 1:
+            raise SystemExit(f"ON and AF ran on more than one image: {sorted(images)}")
+        # Each arm's review activity, from review start to its last status poll, for the readout's
+        # overlap caveat (provisioning and carrier teardown are excluded).
+        window = {}
+        for arm in ("ON", "AF"):
+            spans = []
+            for b in {r["bug"] for r in rows if r["arm"] == arm}:
+                run = ROOT / "runs" / b / arm
+                # The last poll that still showed the review: a later poll (after a resumed driver)
+                # would stretch the window past the review's end.
+                polls = [p["time_ns"] for p in (json.loads(line) for line in
+                         (run / "review-status.jsonl").read_text().splitlines() if line.strip())
+                         if (p.get("status") or {}).get("review")]
+                spans.append((json.loads((run / "review-start-intent.json").read_text())["time_ns"], max(polls)))
+            window[arm] = {"first_review_start_ns": min(s for s, _ in spans), "last_status_poll_ns": max(e for _, e in spans)}
+        IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved,
+                            "review_window": window})
     if REFERENCE_ROUND:
         # Check the reference before freezing the round: score compares the same sessions, and
         # finding a mismatch only then would orphan completed verdicts.
         ref_path = ROOT / "private" / f"key-{REFERENCE_ROUND}.json"
-        if not ref_path.exists() or not (ROOT / REFERENCE_ROUND / "merged.jsonl").exists():
-            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key or merged verdicts")
+        if not ref_path.exists():
+            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key")
+        import brief_writer_terra
+        brief_writer_terra.judged_round(REFERENCE_ROUND)  # final, hand-checked labels must already exist
         ref = json.loads(ref_path.read_text())["outputs"].values()
         ref_arms = READINGS[READING]["reference_arms"]
         bugs = {r["bug"] for r in rows}
@@ -191,6 +230,7 @@ def build(arms, per_batch):
     save(KEY, {"arms": list(arms), "outputs": key, "sets": scoped_sets(),
                "models": list(SELECTED_MODELS), "exact_baseline": EXACT_BASELINE,
                **({"reading": READING, "reference_round": REFERENCE_ROUND} if READING else {}),
+               **({"image_check": IMAGE_CHECK} if IMAGE_CHECK else {}),
                **({"bugs": sorted(BUGS)} if BUGS is not None else {})})
     print(json.dumps({"dir": str(J), "batches": batches}))
     print(json.dumps({"outputs": len(key), "by_condition_model": collections.Counter(
@@ -343,12 +383,14 @@ def boot_exact(diff_values, n=10000):
 READINGS = {
     # brief/PLAN-bifrost-oracle.md: OT against A and BT on all 17 relation diffs; reference round is
     # the stored A/BT judging.
-    "bifrost-oracle": {"subject": "OT", "arms": ("OT", "BT"), "others": ("A", "BT"), "diffs": 17,
+    "bifrost-oracle": {"subject": "OT", "arms": ("OT", "BT"), "others": ("A", "BT"), "primary": "A", "diffs": 17,
                        "diffs_rule": "exactly 17", "min_diffs": 0, "report_key": "bifrost_oracle",
                        "reference_arms": ("A", "BT")},
-    # brief/PLAN-bifrost-oracle-noleak.md: ON against A and OT on the retained diffs; fewer than 8
-    # retained reads Inconclusive; the reference is round L's A/OT labels.
-    "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "OT"), "others": ("A", "OT"), "diffs": None,
+    # brief/PLAN-bifrost-oracle-noleak.md and its AF amendment: ON against the same-image fresh
+    # no-brief AF (primary), stored A and OT; AF - A is the image/cohort effect. Fewer than 8
+    # retained diffs reads Inconclusive; the reference is round L's A/OT labels.
+    "bifrost-oracle-noleak": {"subject": "ON", "arms": ("ON", "AF", "OT"), "others": ("AF", "A", "OT"),
+                              "primary": "AF", "extra": (("AF", "A"),), "diffs": None,
                               "diffs_rule": "1 to 17", "min_diffs": 8,
                               "report_key": "bifrost_oracle_noleak", "reference_arms": ("A", "OT")},
 }
@@ -443,21 +485,21 @@ def score():
                 per_diff[bug][arm] = {"sessions": 3, "caught": labels.count("caught"),
                                       "partial": labels.count("partial"), "catch_rate": labels.count("caught") / 3,
                                       "partial_rate": labels.count("partial") / 3}
-        effects = {arm: [Fraction(per_diff[b][subject]["caught"], 3) -
-                         Fraction(per_diff[b][arm]["caught"], 3) for b in bugs]
-                   for arm in others}
+        pairs = [(subject, arm) for arm in others] + list(reading.get("extra", ()))
         contrasts, raw_contrasts = {}, {}
-        for arm, values in effects.items():
+        for x, y in pairs:
+            values = [Fraction(per_diff[b][x]["caught"], 3) - Fraction(per_diff[b][y]["caught"], 3) for b in bugs]
             estimate = sum(values, Fraction()) / len(values)
             low, high = boot_exact(values)
-            raw_contrasts[arm] = (estimate, low, high)
-            contrasts[f"{subject}_minus_{arm}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
-        estimate, low, high = raw_contrasts["A"]
+            raw_contrasts[(x, y)] = (estimate, low, high)
+            contrasts[f"{x}_minus_{y}"] = {"difference": float(estimate), "ci95": [float(low), float(high)]}
+        estimate, low, high = raw_contrasts[(subject, reading["primary"])]
         outcome = oracle_outcome(estimate, low, high)
         if len(bugs) < reading["min_diffs"]:
             outcome = "Inconclusive"  # registered: too few retained diffs to read
         report["expected_catches_per_reviewer"] = report.pop("expected_catches_of_30")
         report[reading["report_key"]] = {"outcome": outcome, "diffs": len(bugs),
+                                         "primary": f"{subject}_minus_{reading['primary']}",
                                          "bootstrap": {"seed": 1, "draws": 10000, "unit": "paired diff",
                                                        "classification_uses_unrounded_rational_bounds": True},
                                          **contrasts, "per_diff": per_diff}
