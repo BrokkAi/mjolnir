@@ -47,6 +47,7 @@ What this shows and what it doesn't: when the decisive fact is stated neutrally,
 - **Strict subsets are fragile.** Excluding the six low-confidence passes and the scope deviations leaves very few diffs, and the classification then turns on single diffs:
   - Excluding the three deviations first identified (java-static and the two Python edits) leaves 9 diffs: +18.5 points (0.0 to +37.0), Inconclusive.
   - Also excluding mcp-default leaves 8 diffs: +20.8 (+4.2 to +41.7), Facts carry. Its edit names the `on_inconclusive` constructor default but no longer gives its value, `Pass`. It caught nothing in either arm, so removing it raises the estimate.
+  - Excluding the six low-confidence passes and all seven relation-dropping edits (the five listed above plus go-receiver and jvm-protected) leaves 6 diffs: +16.7 (0.0 to +38.9), below the 8-diff minimum.
   - Also excluding the three inferred fact checks leaves 5 diffs: +26.7 (0.0 to +53.3), Inconclusive. Those 5 still include go-receiver, jvm-protected and late-gate. Applying every concern in this readout together (the low-confidence passes, all construction deviations, and the strict fact-check standard) leaves 2 diffs, far too few to classify.
 
   The registered reading covers the briefs that actually ran, and it reads Facts carry. Removing every documented concern, including the narrow leak passes the registered rule accepts, leaves 2 diffs, too few to classify, so the positive result depends materially on briefs that passed the leak rule narrowly or that dropped a stated relation.
