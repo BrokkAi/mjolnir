@@ -367,6 +367,19 @@ impl RuntimeState {
                 owner.background_policies.remove(&session_id);
             }
             owner.publish_view(session_id.clone(), view);
+            let profile_id = &owner.controller().state.sessions[&session_id].last_profile;
+            let fingerprint = owner
+                .sessions
+                .get(&session_id)
+                .filter(|view| view.connected)
+                .and_then(|view| view.operational.as_ref())
+                .and_then(|state| state.held_login_fingerprint.as_deref());
+            // The runtime owner serializes view publication and retirement.
+            // The registry serializes this observation with delivery starts.
+            self.rejected_logins
+                .lock()
+                .expect("rejected logins poisoned")
+                .observe_held_login(profile_id, &session_id, fingerprint);
             recovered_failure
         };
         if let Some(recorded_error) = recovered_failure {

@@ -1594,6 +1594,7 @@ mod tests {
                 capacity_retry: None,
                 retry_assessment_pending: false,
                 authentication_retry_waiting: None,
+                held_login_fingerprint: None,
                 store_id: None,
                 idle_since_ms: None,
                 session_id: "observed".to_owned(),

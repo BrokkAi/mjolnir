@@ -1102,15 +1102,16 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
             .unwrap();
         assert_eq!(changed.profile_id, "work");
         assert!(changed.trigger.is_none());
-        assert_eq!(changed.outcomes.len(), 2);
+        assert_eq!(changed.outcomes.len(), 1);
+        assert_eq!(changed.outcomes[0].session_id, child.session_id);
 
-        // This explicit pass is a completion barrier for the other profile.
-        // Its per-profile serialization means any unintended automatic pass
-        // must complete before this one, regardless of subprocess timing.
+        // Verify that the explicit authentication trigger still reaches the
+        // untouched profile.
         handle.sync_profile_now(
             "other",
             Some(mj_core::credentials::CredentialSyncCause {
                 session_id: other.session_id.clone(),
+                ordinal: 1,
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: None,
             }),
@@ -1508,6 +1509,13 @@ for line in sys.stdin:
     elif method == "subagent_requests" and os.environ.get("MJ_TEST_CREDENTIAL_ACTOR_STATE"):
         payload = {"type": "subagent_requests", "data": {"requests": [], "results": []}}
     elif method == "credential_state":
+        if os.environ.get("MJ_TEST_CREDENTIAL_WAITING"):
+            import time
+            waiting = os.environ["MJ_TEST_CREDENTIAL_WAITING"]
+            release = os.environ["MJ_TEST_CREDENTIAL_RELEASE"]
+            open(waiting, "w").close()
+            while os.path.isdir(os.path.dirname(release)) and not os.path.exists(release):
+                time.sleep(0.01)
         if os.path.exists(received):
             data = open(received, "rb").read()
             login = json.loads(data)
@@ -1542,6 +1550,9 @@ for line in sys.stdin:
         payload = {"type": "credential_state", "data": {"present": False, "fingerprint": "", "freshness_epoch_ms": None}}
     elif method in ("install_credentials", "install_aws_credentials"):
         data = base64.b64decode(req["request"]["params"]["data"])
+        if method == "install_credentials" and os.environ.get("MJ_TEST_CREDENTIAL_INSTALLS"):
+            with open(os.environ["MJ_TEST_CREDENTIAL_INSTALLS"], "a") as attempts:
+                attempts.write("install\n")
         if method == "install_credentials" and worker_refresh_path:
             data = open(worker_refresh_path, "rb").read()
             worker_refresh_path = ""
@@ -3197,6 +3208,7 @@ async fn credential_sync_reconciles_newer_destinations_before_reporting_auth_rec
             profile_id: "codex".into(),
             trigger: Some(mj_core::credentials::CredentialSyncCause {
                 session_id: "login-race".into(),
+                ordinal: 1,
                 reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
                 login_fingerprint: None,
             }),
@@ -3570,6 +3582,7 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "stalled".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -3896,6 +3909,7 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "replaced".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -4772,6 +4786,7 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
         &target.profile_id,
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "auth-session".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -4959,6 +4974,7 @@ async fn the_coordinator_runs_a_trigger_for_a_held_session_once_it_is_free() {
         "work",
         Some(mj_core::credentials::CredentialSyncCause {
             session_id: "held-session".into(),
+            ordinal: 1,
             reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
             login_fingerprint: None,
         }),
@@ -5904,12 +5920,16 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
         )
         .unwrap();
     let lease = handle.lease_connection(&copy).await.unwrap();
-    let sync = CredentialSyncCoordinator::spawn_inner(
+    let registry = Arc::new(std::sync::Mutex::new(
+        mj_core::credentials::RejectedLogins::default(),
+    ));
+    let sync = CredentialSyncCoordinator::spawn_with_registry(
         SessionRelays::Actors(channels.control.clone()),
         Some(gate.clone()),
         None,
         credential_sync::unknown_slopcop_login,
         mj_core::credentials::SYNC_INTERVAL,
+        registry.clone(),
     );
     let sync_handle = sync.handle();
     sync_handle.set_targets(vec![target]);
@@ -5921,6 +5941,13 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     .await
     .expect("the actor must defer the initial pass while capture holds its connection");
     assert!(!received.exists());
+    assert_eq!(
+        registry
+            .lock()
+            .unwrap()
+            .delivery_state("codex4", SESSION_ID),
+        Some(mj_core::credentials::LoginDeliveryState::Pending),
+    );
     assert!(!copy.load(Ordering::Acquire));
     let released = tokio::time::Instant::now();
     lease.release();
@@ -5935,6 +5962,19 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     .expect("lease return must wake the profile pass immediately");
     assert!(released.elapsed() < mj_core::credentials::SYNC_INTERVAL);
     assert_eq!(std::fs::read(&received).unwrap(), login);
+    let mut sync = sync;
+    let result = tokio::time::timeout(Duration::from_secs(5), sync.result())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.pushed_to(SESSION_ID));
+    assert!(matches!(
+        registry
+            .lock()
+            .unwrap()
+            .delivery_state("codex4", SESSION_ID),
+        Some(mj_core::credentials::LoginDeliveryState::Concluded { .. }),
+    ));
     assert!(
         !copy.load(Ordering::Acquire),
         "credential wake must not preempt the copy"
@@ -5944,4 +5984,122 @@ async fn a_login_deferred_by_an_actor_lease_is_pushed_when_the_lease_returns() {
     drop(sync);
     drop(copy);
     channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1581: a slow credential RPC delayed delivery to all later sessions.
+#[cfg(unix)]
+#[tokio::test]
+async fn credential_fanout_pushes_to_a_peer_before_the_blocked_worker_replies() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let waiting = scratch.path().join("waiting");
+    let release = scratch.path().join("release");
+    let slow_copy = scratch.path().join("slow-copy");
+    let fast_copy = scratch.path().join("fast-copy");
+    let old = "2026-09-25T20:00:00Z";
+    let login = codex_login("2026-09-25T21:00:00Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+    let mut slow = codex_sync_target(home.path(), "a-slow", old, &slow_copy);
+    slow.spec.env.extend([
+        (
+            "MJ_TEST_CREDENTIAL_WAITING".into(),
+            waiting.to_string_lossy().into_owned(),
+        ),
+        (
+            "MJ_TEST_CREDENTIAL_RELEASE".into(),
+            release.to_string_lossy().into_owned(),
+        ),
+    ]);
+    let fast = codex_sync_target(home.path(), "b-fast", old, &fast_copy);
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![slow, fast]);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !waiting.exists() || !fast_copy.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the peer received the current login while the first relay was blocked");
+    assert!(!slow_copy.exists());
+    std::fs::write(release, "").unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.pushed_to("a-slow"));
+    assert!(result.pushed_to("b-fast"));
+    assert_eq!(std::fs::read(fast_copy).unwrap(), login);
+    assert_eq!(std::fs::read(slow_copy).unwrap(), login);
+}
+
+// Hard-won: #1581: a credential read-back mismatch could cause repeated installs.
+#[cfg(unix)]
+#[tokio::test]
+async fn credential_install_readback_mismatch_concludes_the_delivery() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("held");
+    let attempts = scratch.path().join("attempts");
+    let mismatch = scratch.path().join("mismatch");
+    let old = "2026-09-25T20:00:00Z";
+    let unexpected = codex_login("2026-09-25T20:30:00Z");
+    std::fs::write(&mismatch, &unexpected).unwrap();
+    std::fs::write(
+        home.path().join("auth.json"),
+        codex_login("2026-09-25T21:00:00Z"),
+    )
+    .unwrap();
+    let mut target = codex_sync_target(home.path(), "readback", old, &received);
+    target.spec.args.extend([
+        String::new(),
+        String::new(),
+        String::new(),
+        mismatch.to_string_lossy().into_owned(),
+    ]);
+    target.spec.env.insert(
+        "MJ_TEST_CREDENTIAL_INSTALLS".into(),
+        attempts.to_string_lossy().into_owned(),
+    );
+    let registry = Arc::new(std::sync::Mutex::new(
+        mj_core::credentials::RejectedLogins::default(),
+    ));
+    let mut coordinator = CredentialSyncCoordinator::spawn_with_registry(
+        SessionRelays::Direct,
+        None,
+        None,
+        credential_sync::unknown_slopcop_login,
+        SYNC_INTERVAL,
+        registry.clone(),
+    );
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    let failed = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        failed
+            .failures()
+            .any(|(_, _, detail)| detail.contains("did not retain"))
+    );
+    assert!(matches!(
+        registry
+            .lock()
+            .unwrap()
+            .delivery_state(&target.profile_id, &target.session_id),
+        Some(mj_core::credentials::LoginDeliveryState::Concluded { .. }),
+    ));
+    handle.sync_profile_now(&target.profile_id, None);
+    tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(&received).unwrap(), unexpected);
+    assert_eq!(
+        std::fs::read_to_string(attempts).unwrap().lines().count(),
+        1
+    );
 }

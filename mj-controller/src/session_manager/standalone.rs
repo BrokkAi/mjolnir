@@ -760,15 +760,52 @@ impl StandaloneSession {
     /// boundary. Normal relay attachment and polling must never perform this
     /// filesystem work: a degraded target could otherwise turn reconnects
     /// into an unbounded queue of timed-out snapshot writes.
+    ///
+    /// The whole transaction runs on its own relay connection, opened from
+    /// `memory_relay` (the bulk lane, see
+    /// `targets::project_memory_relay_command`), and closed when the
+    /// transaction ends. Paged snapshots are owned by their connection, so
+    /// one connection carries all of it, and its frames of up to 8 MiB never
+    /// queue ahead of other sessions' relay RPCs on the shared control
+    /// connection. The checkpoint barrier stays on this session's own
+    /// connection. A failure to open the connection is reported, not retried
+    /// over the control connection.
     pub async fn sync_project_memory(
         &mut self,
+        memory_relay: &CommandSpec,
         config: &mj_core::config::Config,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let Some(target) = self.project_memory.clone() else {
             return Ok(());
         };
-        if !self.client.supports_project_memory_sync() {
+        let mut client = tokio::select! {
+            biased;
+            () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
+            client = RelayClient::connect(memory_relay, &self.materialized.session_id) => client
+                .context("open the project-memory relay connection")?,
+        };
+        let result = self
+            .sync_project_memory_on(&mut client, &target, config, cancel)
+            .await;
+        if let Err(error) = client.detach().await {
+            tracing::warn!(
+                session_id = self.materialized.session_id,
+                error = format!("{error:#}"),
+                "could not close the project-memory relay connection"
+            );
+        }
+        result
+    }
+
+    async fn sync_project_memory_on(
+        &mut self,
+        client: &mut RelayClient,
+        target: &ProjectMemorySyncTarget,
+        config: &mj_core::config::Config,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        if !client.supports_project_memory_sync() {
             tracing::warn!(
                 session_id = self.materialized.session_id,
                 "worker protocol predates project-memory synchronization; preserving memory through checkpoints only"
@@ -779,14 +816,14 @@ impl StandaloneSession {
         let snapshot = tokio::select! {
             biased;
             () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
-            result = self.client.project_memory_snapshot() => result,
+            result = client.project_memory_snapshot() => result,
         };
         let (baseline, replica) = match snapshot {
             Ok(snapshot) => snapshot,
             // Upgraded workers receive the current matching memory launch config.
             // Transfer-state errors on their new transport must remain visible.
             Err(error)
-                if self.client.protocol_version()
+                if client.protocol_version()
                     < mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL
                     && error
                         .downcast_ref::<RelayRejected>()
@@ -844,7 +881,7 @@ impl StandaloneSession {
             biased;
             () = cancel.cancelled() => anyhow::bail!("project-memory synchronization for checkpoint was cancelled"),
             result = crate::project_memory_merge::install_merged_tree(
-                &mut self.client,
+                client,
                 &baseline,
                 &replica,
                 sync.tree,

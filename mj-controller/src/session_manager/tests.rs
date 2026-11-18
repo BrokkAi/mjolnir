@@ -991,6 +991,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 capacity_retry: None,
                 retry_assessment_pending: false,
                 authentication_retry_waiting: None,
+                held_login_fingerprint: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -1434,6 +1435,11 @@ fn leased_relay_child_serves_stdio() {
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
             if PathBuf::from(&root).join("worker-unreachable").exists() {
+                return;
+            }
+            if request.request.method_name() == "project_memory_transfer"
+                && PathBuf::from(&root).join("drop-project-memory").exists()
+            {
                 return;
             }
             if matches!(
@@ -2073,6 +2079,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
 
     let result = connection
         .sync_project_memory(
+            &target.spec,
             &mj_core::config::Config::default(),
             tokio_util::sync::CancellationToken::new(),
         )
@@ -2104,6 +2111,21 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
                 .filter(|method| method.contains("project_memory"))
                 .collect::<Vec<_>>(),
             ["project_memory_transfer"]
+        );
+
+        // Hard-won: #1580: closing an abandoned memory connection panicked the checkpoint
+        std::fs::write(relay_root.path().join("drop-project-memory"), b"").unwrap();
+        connection
+            .sync_project_memory(
+                &target.spec,
+                &mj_core::config::Config::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("a memory connection lost mid-transfer is reported");
+        assert!(
+            connection.project_memory.is_some(),
+            "a lost memory connection must not disable memory"
         );
     }
 }

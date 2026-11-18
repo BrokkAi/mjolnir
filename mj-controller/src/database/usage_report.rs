@@ -1,8 +1,9 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery,
-    SessionUsageReport, UnknownCost, UsageAgentRole, UsageScope, add_cost, descending_cost,
+    AgentUsageEstimate, HOUR_MS, HourlyUsage, ModelUsageEstimate, SessionUsageEstimate,
+    SessionUsageQuery, SessionUsageReport, USAGE_GRAPH_HOURS, UnknownCost, UsageAgentRole,
+    UsageScope, add_cost, descending_cost, graph_start_ms, hour_start_ms,
 };
 
 use mj_core::usage::model_catalog;
@@ -55,10 +56,25 @@ fn load_with(
 ) -> Result<SessionUsageReport> {
     let mut connection = open_reader(path)?;
     let tx = connection.transaction()?;
-    let since_ms = now_ms.saturating_sub(query.period.duration_ms());
+    // The graph always spans the same hours; the rows cover one of them when
+    // the query names it.
+    let graph_start = graph_start_ms(now_ms);
+    let (since_ms, until_ms) = match query.hour_start_ms {
+        Some(hour) => {
+            let hour = hour_start_ms(hour);
+            (hour, now_ms.min(hour.saturating_add(HOUR_MS - 1)))
+        }
+        None => (graph_start, now_ms),
+    };
+    let mut hours = (0..USAGE_GRAPH_HOURS)
+        .map(|n| HourlyUsage {
+            start_ms: graph_start + n * HOUR_MS,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
     let mut report = SessionUsageReport {
         since_ms,
-        until_ms: now_ms,
+        until_ms,
         ..Default::default()
     };
     let mut roots = tx.prepare("SELECT session_id, title, session_title_override, acp_session_title, last_profile, state
@@ -135,7 +151,7 @@ fn load_with(
     let mut roles = BTreeMap::new();
     let mut kinds = tx.prepare("SELECT kind FROM subagent_accounting WHERE child_session_id=?1")?;
     let mut turns = tx.prepare(REPORT_TURNS_SQL)?;
-    let rows = turns.query_map(params![since_ms, now_ms, wanted], |row| {
+    let rows = turns.query_map(params![since_ms.min(graph_start), now_ms, wanted], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -153,14 +169,23 @@ fn load_with(
         };
         let entry = &mut entries[index];
         let turn = deserialize_turn_outcome(&body)?;
-        entry.estimate.coverage.recorded_turns += 1;
+        let in_rows = (since_ms..=until_ms).contains(&turn.completed_at_ms);
+        let bar = usize::try_from((turn.completed_at_ms - graph_start).div_euclid(HOUR_MS))
+            .ok()
+            .filter(|bar| *bar < hours.len());
+        if in_rows {
+            entry.estimate.coverage.recorded_turns += 1;
+        }
         match turn.usage {
             Some(usage) if usage.scope == UsageScope::Turn => {
-                entry.estimate.coverage.full_turn_reports += 1;
+                if in_rows {
+                    entry.estimate.coverage.full_turn_reports += 1;
+                }
                 // Launch records can contain large prompts. Only contributing
                 // members need their role, and each is read once.
                 let role = match roles.get(&member) {
-                    Some(&role) => role,
+                    _ if !in_rows => None,
+                    Some(&role) => Some(role),
                     None => {
                         let role = if member == entry.estimate.session_id {
                             UsageAgentRole::Primary
@@ -177,7 +202,7 @@ fn load_with(
                             }
                         };
                         roles.insert(member, role);
-                        role
+                        Some(role)
                     }
                 };
                 let mut attributed = BTreeMap::new();
@@ -191,6 +216,19 @@ fn load_with(
                         selection.model.as_deref(),
                         &totals,
                     )?;
+                    if let Some(bar) = bar {
+                        let hour = &mut hours[bar];
+                        match cost {
+                            Some(cost) => {
+                                hour.known_cost_usd_ticks = hour
+                                    .known_cost_usd_ticks
+                                    .checked_add(cost)
+                                    .context("hour cost overflow")?
+                            }
+                            None => hour.has_unknown_cost = true,
+                        }
+                    }
+                    let Some(role) = role else { continue };
                     for groups in [&mut entry.models, role_groups.entry(role).or_default()] {
                         let group = groups.entry(selection.model.clone()).or_insert_with(|| {
                             ModelUsageEstimate {
@@ -206,19 +244,30 @@ fn load_with(
                 }
             }
             Some(usage) if usage.scope == UsageScope::LastRequest => {
-                entry.estimate.coverage.last_request_reports += 1
+                if in_rows {
+                    entry.estimate.coverage.last_request_reports += 1
+                }
             }
-            Some(_) => entry.estimate.coverage.unspecified_reports += 1,
-            None => entry.estimate.coverage.missing_reports += 1,
+            Some(_) => {
+                if in_rows {
+                    entry.estimate.coverage.unspecified_reports += 1
+                }
+            }
+            None => {
+                if in_rows {
+                    entry.estimate.coverage.missing_reports += 1
+                }
+            }
         }
     }
     // A turn already running at the start of the window can still consume in it.
     let mut active = tx.prepare(REPORT_ACTIVE_SQL)?;
-    for member in active.query_map(params![now_ms, wanted], |row| row.get::<_, String>(0))? {
+    for member in active.query_map(params![until_ms, wanted], |row| row.get::<_, String>(0))? {
         if let Some(&index) = owners.get(&member?) {
             entries[index].estimate.coverage.unfinished_turns += 1;
         }
     }
+    report.hours = hours;
     for entry in entries {
         let mut estimate = entry.estimate;
         // A profile selects its own parents and any parent whose tree ran a
@@ -269,7 +318,6 @@ fn load_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::usage::UsagePeriod;
 
     // Hard-won: 1f8ff4afc: an hourly read scanned every historical turn body.
     #[test]
@@ -541,11 +589,17 @@ mod tests {
         insert(
             "root",
             1,
-            now - 3_600_000,
+            now - 23 * 3_600_000,
             "global.openai.gpt-6-luna",
             inclusive.clone(),
         )?;
-        insert("root", 2, now - 3_600_001, "gpt-6-sol", inclusive.clone())?;
+        insert(
+            "root",
+            2,
+            now - 23 * 3_600_000 - 1,
+            "gpt-6-sol",
+            inclusive.clone(),
+        )?;
         insert("root", 3, now + 1, "gpt-6-astra", inclusive.clone())?;
         insert(
             "child",
@@ -705,18 +759,18 @@ mod tests {
 
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.
-        let on = |profile: &str, period| {
+        let on = |profile: &str, hour_start_ms| {
             load_from(
                 &path,
                 &SessionUsageQuery {
                     profile: Some(profile.into()),
-                    period,
+                    hour_start_ms,
                     include_suspended: true,
                 },
                 now,
             )
         };
-        let codex2 = on("codex2", UsagePeriod::Hourly)?;
+        let codex2 = on("codex2", None)?;
         assert_eq!(codex2.sessions.len(), 1);
         let tree = &codex2.sessions[0];
         assert_eq!(
@@ -728,67 +782,123 @@ mod tests {
         assert_eq!(priced(tree), 71_000_000_000);
         assert_eq!(tree.coverage.recorded_turns, 2);
         assert_eq!(tree.coverage.unfinished_turns, 0);
-        let codex = on("codex", UsagePeriod::Hourly)?;
+        let codex = on("codex", None)?;
         assert_eq!(priced(&codex.sessions[0]) + priced(tree), priced(root));
         assert_eq!(codex.sessions[0].coverage.recorded_turns, 4);
         assert_eq!(codex.sessions[0].coverage.unfinished_turns, 1);
 
-        let daily = load_from(
+        // The default span is the graph's 24 clock hours; its first hour
+        // starts inclusively, and an older or later turn stays out.
+        assert_eq!(hourly.since_ms, now - 23 * HOUR_MS);
+        assert_eq!(hourly.until_ms, now);
+        let with_suspended = load_from(
             &path,
             &SessionUsageQuery {
-                period: UsagePeriod::Daily,
                 include_suspended: true,
                 ..Default::default()
             },
             now,
         )?;
-        assert_eq!(daily.since_ms, now - 86_400_000);
-        assert_eq!(daily.sessions.len(), 2);
+        assert_eq!(with_suspended.sessions.len(), 2);
         // An unknown cost sorts after every known one, even $0.
-        assert_eq!(daily.sessions[0].session_id, "suspended");
-        assert_eq!(daily.sessions[0].coverage.recorded_turns, 0);
-        assert_eq!(daily.sessions[0].cost_usd_ticks, Ok(0));
-        assert_eq!(daily.sessions[1].session_id, "root");
-        assert_eq!(priced(&daily.sessions[1]), 93_050_000_000);
-        assert_eq!(daily.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(with_suspended.sessions[0].session_id, "suspended");
+        assert_eq!(with_suspended.sessions[0].coverage.recorded_turns, 0);
+        assert_eq!(with_suspended.sessions[0].cost_usd_ticks, Ok(0));
+        assert_eq!(with_suspended.sessions[1], *root);
+        assert_eq!(with_suspended.cost_usd_ticks, Err(UnknownCost));
 
-        let weekly_query = SessionUsageQuery {
-            period: UsagePeriod::Weekly,
-            include_suspended: true,
-            profile: None,
+        // One bar per hour; each holds the known cost of the turns that
+        // completed in it, and together they match the default rows.
+        let bar = |report: &SessionUsageReport, n: usize| report.hours[n];
+        assert_eq!(hourly.hours.len(), 24);
+        assert_eq!(bar(&hourly, 0).start_ms, now - 23 * HOUR_MS);
+        assert_eq!(bar(&hourly, 23).start_ms, now);
+        assert_eq!(
+            hourly
+                .hours
+                .iter()
+                .map(|hour| hour.known_cost_usd_ticks)
+                .sum::<u64>(),
+            priced(root)
+        );
+        assert!(bar(&hourly, 23).has_unknown_cost);
+        assert!(!bar(&hourly, 0).has_unknown_cost);
+        assert!(bar(&hourly, 0).known_cost_usd_ticks > 0);
+        assert!(hourly.hours[1..23].iter().all(|hour| *hour
+            == HourlyUsage {
+                start_ms: hour.start_ms,
+                ..Default::default()
+            }));
+
+        // Naming an hour narrows the rows to the turns completed in it, while
+        // the bars keep showing the whole graph.
+        let in_hour = |hour: i64| {
+            load_from(
+                &path,
+                &SessionUsageQuery {
+                    hour_start_ms: Some(hour),
+                    ..Default::default()
+                },
+                now,
+            )
         };
-        let weekly = load_from(&path, &weekly_query, now)?;
-        assert_eq!(weekly.sessions.len(), 2);
-        // Cache-discounted Astra: $5 + $0.50 + $5 = $10.50, greater than root.
-        assert_eq!(weekly.sessions[0].session_id, "suspended");
-        assert_eq!(weekly.sessions[0].cost_usd_ticks, Ok(105_000_000_000));
-        assert!(weekly.sessions[0].suspended);
-        assert_eq!(priced(&weekly.sessions[1]), 93_050_000_000);
-        assert_eq!(weekly.cost_usd_ticks, Err(UnknownCost));
-        let filtered = on("codex", UsagePeriod::Weekly)?;
-        assert_eq!(filtered.sessions.len(), 1);
-        assert_eq!(priced(&filtered.sessions[0]), 22_050_000_000);
-        let monthly = load_from(
+        let first = in_hour(now - 23 * HOUR_MS)?;
+        assert_eq!(first.hours, hourly.hours);
+        assert_eq!(
+            (first.since_ms, first.until_ms),
+            (now - 23 * HOUR_MS, now - 22 * HOUR_MS - 1)
+        );
+        assert_eq!(first.sessions.len(), 1);
+        assert_eq!(first.sessions[0].coverage.recorded_turns, 1);
+        assert_eq!(
+            first.sessions[0].cost_usd_ticks,
+            Ok(bar(&hourly, 0).known_cost_usd_ticks)
+        );
+        // The running turn started in the current hour, after this one ended.
+        assert_eq!(first.sessions[0].coverage.unfinished_turns, 0);
+        let last = in_hour(now)?;
+        assert_eq!(last.until_ms, now);
+        assert_eq!(last.sessions[0].coverage.unfinished_turns, 1);
+        assert_eq!(last.sessions[0].coverage.recorded_turns, 5);
+        assert_eq!(
+            priced(&last.sessions[0]) + priced(&first.sessions[0]),
+            priced(root)
+        );
+        assert!(
+            in_hour(now + HOUR_MS)?
+                .sessions
+                .iter()
+                .all(|s| s.coverage.recorded_turns == 0)
+        );
+        // Hours older than the graph are still readable, with no bar.
+        let before_graph = in_hour(now - 24 * HOUR_MS)?;
+        assert_eq!(before_graph.sessions[0].coverage.recorded_turns, 1);
+        assert_eq!(priced(&before_graph.sessions[0]), 21_000_000_000);
+        let two_days = load_from(
             &path,
             &SessionUsageQuery {
-                period: UsagePeriod::Monthly,
                 profile: Some("claude".into()),
-                ..weekly_query
+                hour_start_ms: Some(now - 2 * 86_400_000),
+                include_suspended: true,
             },
             now,
         )?;
         // Root ran no turns on claude, so only the claude parent remains.
-        assert_eq!(monthly.sessions.len(), 1);
-        assert_eq!(monthly.sessions[0].cost_usd_ticks, Ok(126_000_000_000));
-        assert_eq!(monthly.cost_usd_ticks, Ok(126_000_000_000));
-        assert_eq!(monthly.sessions[0].coverage.recorded_turns, 2);
+        // Cache-discounted Astra: $5 + $0.50 + $5.
+        assert_eq!(two_days.sessions.len(), 1);
+        assert_eq!(two_days.sessions[0].cost_usd_ticks, Ok(105_000_000_000));
+        assert_eq!(two_days.sessions[0].coverage.recorded_turns, 1);
+        assert!(two_days.sessions[0].suspended);
+        assert!(
+            two_days
+                .hours
+                .iter()
+                .all(|hour| hour.known_cost_usd_ticks == 0)
+        );
 
         // Renaming a profile carries destroyed children's turns with it.
         super::super::sessions::rename_profile_references_at(&path, "codex2", "codex-two")?;
-        assert_eq!(
-            on("codex-two", UsagePeriod::Hourly)?.sessions,
-            codex2.sessions
-        );
+        assert_eq!(on("codex-two", None)?.sessions, codex2.sessions);
         // A child destroyed before kind retention cannot be classified from
         // its task name. Keep its usage without guessing that it was a worker.
         open(&path)?.execute(

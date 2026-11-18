@@ -1198,7 +1198,7 @@ impl Controller {
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        let launch = self.stage_worker_files_for(
+        let (launch, _) = self.stage_worker_files_for(
             session_id,
             &backend,
             &worker_root,
