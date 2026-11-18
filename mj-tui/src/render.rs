@@ -1,6 +1,7 @@
 //! Dashboard rendering: pane layout, session tables, capacity, quotas, footer.
 mod capacity;
 mod footer;
+pub(crate) mod quota_pools;
 mod quotas;
 pub(crate) mod sessions;
 pub(crate) use capacity::*;
@@ -25,7 +26,7 @@ use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind, State};
 use mj_chat::chat::render_agent_message_head;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};
 use mj_chat::theme;
-use mj_client::quota::{NOT_REPORTED_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::quota::{ProfileQuota, QuotaWindow};
 use mj_client::review::RuntimeReviewView;
 use mj_core::targets::DeploymentCapacityKind;
 

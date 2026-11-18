@@ -799,15 +799,13 @@ fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     );
 }
 
-/// A-11: Enter on the Profiles pane opens the profile-ID rename, so the hint
-/// says rename rather than promising a profile editor.
-// Hard-won: 4592b7de: The Quota footer said Enter edits a profile although the action only renames its configuration ID.
+/// The quota footer follows the action registered for Enter.
 #[test]
-fn the_quota_footer_says_enter_renames_the_profile() {
+fn the_quota_footer_says_enter_expands_the_pool() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus = Focus::Quota;
     let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.starts_with("Enter rename profile"), "{footer}");
+    assert!(footer.starts_with("Enter expand/collapse"), "{footer}");
     assert!(!footer.contains("edit profile"), "{footer}");
 }
 
@@ -1376,9 +1374,9 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         cycles: 1,
     });
     let row = profiles_row(&mut dashboard);
-    assert!(row.contains("claude-1 63%, codex-1 10%"), "{row:?}");
+    assert!(row.contains("Anthropic 63%, OpenAI 10%"), "{row:?}");
 
-    // The daemon is asking about one profile: only that row says so.
+    // Refreshing preserves the last pool reading and marks the affected pool.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
         reports: BTreeMap::from([
             ("claude-1".to_owned(), weekly_quota("claude-1", 63)),
@@ -1388,8 +1386,8 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
         cycles: 1,
     });
     let row = profiles_row(&mut dashboard);
-    assert!(row.contains("claude-1 63%"), "{row:?}");
-    assert!(row.contains("codex-1 refreshing"), "{row:?}");
+    assert!(row.contains("Anthropic 63%"), "{row:?}");
+    assert!(row.contains("OpenAI 10% (refreshing)"), "{row:?}");
 
     // The snapshot replaces what the dashboard held; it does not add to it.
     dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
@@ -1398,7 +1396,7 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     });
     let row = profiles_row(&mut dashboard);
     assert!(!row.contains("63%"), "{row:?}");
-    assert!(row.contains("codex-1 12%"), "{row:?}");
+    assert!(row.contains("OpenAI 12%"), "{row:?}");
 }
 
 #[test]
@@ -1438,7 +1436,7 @@ fn a_refused_quota_check_reads_the_next_check_time_not_unavailable() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(row.contains("claude-1 63%"), "{row:?}");
+    assert!(row.contains("Anthropic 63%"), "{row:?}");
     assert!(row.contains("codex-1 check refused"), "{row:?}");
 }
 
@@ -1455,8 +1453,8 @@ fn an_exhausted_quota_reads_zero_in_the_minimized_row() {
         .into_iter()
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
-    assert!(quota.contains("claude-1 0%"), "{quota:?}");
-    assert!(!quota.contains("claude-1 100%"), "{quota:?}");
+    assert!(quota.contains("Anthropic 0%"), "{quota:?}");
+    assert!(!quota.contains("Anthropic 100%"), "{quota:?}");
 }
 
 #[test]
@@ -1472,8 +1470,8 @@ fn a_rolling_only_quota_keeps_its_percentage_visible() {
         .find(|line| line.contains("─ Profiles ──"))
         .expect("the minimized Profiles row");
 
-    assert!(quota.contains("claude-1 40%"), "{quota:?}");
-    assert!(!quota.contains("claude-1 unavailable"), "{quota:?}");
+    assert!(quota.contains("Anthropic 40%"), "{quota:?}");
+    assert!(!quota.contains("Anthropic unavailable"), "{quota:?}");
 }
 
 /// A reading that cannot be trusted has to say so. A number that is
@@ -2310,41 +2308,6 @@ fn focused_panes_use_quiet_rounded_borders_and_accent_titles_without_focus_label
             theme::palette().accent,
         );
     }
-}
-
-#[test]
-fn quota_bars_show_fractional_remaining_capacity_and_blank_missing_windows() {
-    let window = QuotaWindow {
-        label: "Week".into(),
-        remaining_percent: Some(73),
-        duration_seconds: None,
-        model_scope: None,
-        used: None,
-        limit: None,
-        resets: None,
-        resets_at_epoch_seconds: None,
-    };
-
-    let bar = quota_bar(Some(&window));
-    assert_eq!(
-        bar.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>(),
-        "███████▎  ▏73%"
-    );
-    assert_eq!(bar.spans[0].style.fg, Some(theme::palette().success));
-    assert_eq!(bar.spans[2].style.fg, None);
-    assert!(
-        bar.spans[..4]
-            .iter()
-            .all(|span| span.style.bg == Some(theme::palette().background))
-    );
-    assert_eq!(bar.spans[3].style.fg, Some(theme::palette().muted));
-    let chart = quota_chart(bar, true);
-    assert_eq!(chart.to_string(), "▕███████▎  ▏73%");
-    assert_eq!(chart.spans[0].style, quota_chart_border_style());
-    assert!(quota_bar(None).spans.is_empty());
 }
 
 /// One session whose title is `title`, measured at `recent` permille.

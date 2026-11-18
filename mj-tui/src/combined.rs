@@ -21,7 +21,7 @@ use crate::render::{
     MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, SessionsLayout,
     TerminalSizeRequirement, capacity_table_lines, capacity_table_width,
     minimized_pane_size_controls, minimized_quota_line, minimized_targets_line,
-    pane_size_control_areas, pane_title_content_width, quota_table_width, render_capacity,
+    pane_size_control_areas, pane_title_content_width, quota_pane_width, render_capacity,
     render_footer, render_modal, render_quotas, render_sessions, render_terminal_too_small,
 };
 use crate::resume::resume_sessions_pane;
@@ -322,7 +322,7 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
 }
 
 fn support_panes_fit(content_width: u16, dashboard: &DashboardState) -> bool {
-    capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= content_width
+    capacity_table_width(dashboard).max(quota_pane_width(dashboard)) <= content_width
 }
 
 /// Draws the whole combined surface: Sessions, the conversation, Prompt,
@@ -365,6 +365,7 @@ pub(crate) fn render_combined_for_test(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
+    dashboard.quota_providers.settle();
     // Golden output defaults to Unicode; cases can request ASCII in config.
     let symbols = dashboard
         .config
@@ -416,6 +417,9 @@ fn render_combined_with_theme_and_symbols(
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
 ) -> Vec<String> {
+    if let Some(error) = dashboard.quota_providers.poll(&dashboard.config) {
+        dashboard.notices.set(error);
+    }
     dashboard.rendered_failure_dismissals.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
@@ -691,7 +695,8 @@ fn render_combined_themed(
             SupportPane::Quota,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.quota_profile_rows().len()),
+                full: (crate::render::quota_content_height(dashboard) + 2).min(u16::MAX as usize)
+                    as u16,
                 standard_cap: proportional_support_height.min(STANDARD_SUPPORT_PANE_HEIGHT),
             },
         ),
@@ -2300,7 +2305,7 @@ mod tests {
         for side in [SessionsSide::Left, SessionsSide::Right] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.config.sessions_side = side;
-            let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+            let required = capacity_table_width(&dashboard).max(quota_pane_width(&dashboard));
             let width = (MINIMUM_TERMINAL_WIDTH..=480)
                 .find(|&width| {
                     width - sessions_sidebar_width(width, PaneSize::Minimized) >= required
@@ -2614,7 +2619,7 @@ mod tests {
                 let mut dashboard = dashboard_with_session(running_session());
                 dashboard.config.sessions_side = side;
                 dashboard.set_pane_size(SupportPane::Sessions, size);
-                let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+                let required = capacity_table_width(&dashboard).max(quota_pane_width(&dashboard));
                 let threshold = (MINIMUM_TERMINAL_WIDTH..=480)
                     .find(|&width| width - sessions_sidebar_width(width, size) >= required)
                     .expect("support panes fit in a wide terminal");

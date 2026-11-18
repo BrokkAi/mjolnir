@@ -76,6 +76,7 @@ pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str)
 /// The whole dashboard surface drawn into a terminal of the given size, as one
 /// string per row.
 pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
+    dashboard.quota_providers.settle();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
         .expect("terminal");
     terminal
@@ -522,6 +523,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         },
         BTreeMap::new(),
     );
+    dashboard.quota_providers.settle();
     // This fixture represents a conversation already opened by the host.
     serve_attention(
         &mut dashboard,

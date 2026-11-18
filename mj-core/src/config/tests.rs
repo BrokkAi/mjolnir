@@ -3705,3 +3705,45 @@ fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() 
     assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
     profile.ensure_ready("claude").unwrap();
 }
+
+/// A profile's real Codex overlay and OpenCode JSONC select the metering
+/// provider, even when the local table id names a different company.
+#[test]
+fn quota_provider_reads_harness_configuration() {
+    let home = tempfile::tempdir().expect("profile home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = 'openai'\n",
+    )
+    .unwrap();
+    std::fs::write(home.path().join("deep.config.toml"), "model_provider = 'openai-compatible'\n[model_providers.openai-compatible]\nname = 'Proxy'\nbase_url = 'https://api.deepseek.com/v1'\nwire_api = 'responses'\nenv_key = 'DEEPSEEK_API_KEY'\n").unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Codex, home.path());
+    profile.codex_profile = Some("deep".into());
+    assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+    profile.codex_profile = None;
+    assert_eq!(profile.quota_provider(), QuotaProvider::OpenAI);
+    profile.environment.insert(
+        "OPENAI_BASE_URL".into(),
+        "https://api.deepseek.com/v1".into(),
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+
+    std::fs::write(
+        home.path().join("opencode.jsonc"),
+        r#"{
+        // OpenCode allows comments and trailing commas.
+        "model": "local-table/some-model",
+        "provider": {"local-table": {"options": {"baseURL": "https://api.moonshot.ai/v1"}}},
+    }"#,
+    )
+    .unwrap();
+    let profile = HarnessProfile::new(HarnessKind::OpenCode, home.path());
+    assert_eq!(profile.quota_provider(), QuotaProvider::Moonshot);
+
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.environment.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        "https://api.deepseek.com/anthropic".into(),
+    );
+    assert_eq!(profile.quota_provider(), QuotaProvider::DeepSeek);
+}

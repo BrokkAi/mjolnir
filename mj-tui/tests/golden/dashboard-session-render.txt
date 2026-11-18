@@ -2,14 +2,13 @@
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ✓1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
-│hel ──────────────────────────────────││                                                                              │
-│› ✓ ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                               ✦  M J O L N I R                               │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                  Select a session to open its conversation.                  │
+│› ✓ ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle [Q 1]  podman  codex-1         ││                                                                              │
 │  │ answer 1                          ││                                                                              │
 │  │                                   ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
@@ -20,10 +19,11 @@
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -38,9 +38,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -61,10 +60,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -79,10 +79,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│  Outside filter                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
+│  Outside filter                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -102,10 +101,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -120,10 +120,9 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────────────────────────────────────────────││                                                                                                                                                              │
 │› · ACP pretty name                                                       ◇ ⋯ ││                                                                                                                                                              │
 │  Idle  podman  codex-1                                                       ││                                                                                                                                                              │
-│  │ No messages yet                                                           ││                                                                                                                                                              │
-│  │                                                                           ││                                                                       ✦  M J O L N I R                                                                       │
-│  Outside filter                                                              ││                                                                                                                                                              │
-│                                                                              ││                                                          Select a session to open its conversation.                                                          │
+│  │ No messages yet                                                           ││                                                                       ✦  M J O L N I R                                                                       │
+│  │                                                                           ││                                                                                                                                                              │
+│  Outside filter                                                              ││                                                          Select a session to open its conversation.                                                          │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
 │                                                                              ││                                                                                                                                                              │
@@ -143,10 +142,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              ││  Host / fleet  Targets  CPU  RAM                                                                                                                             │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                                              ││            Harness      Weekly      Resets  5H Resets                                                                                                        │
-│                                                                              ││  claude-1  Claude Code  refreshing…                                                                                                                          │
-│                                                                              ││  codex-1   Codex        refreshing…                                                                                                                          │
-│                                                                              ││  codex-2   Codex        refreshing…                                                                                                                          │
+│                                                                              ││ANTHROPIC                                                                                                                                                     │
+│                                                                              ││  claude-1: unavailable                                                                                                                                       │
+│                                                                              ││OPENAI                                                                                                                                                        │
+│                                                                              ││  codex-1: unavailable                                                                                                                                        │
+│                                                                              ││  codex-2: unavailable                                                                                                                                        │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                              ││Nothing needs you                                                                                                                                             │
@@ -161,9 +161,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -184,10 +183,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -203,9 +203,8 @@ Unicode title markers: ('×', '·')
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  | No messages yet                   ||                               *  M J O L N I R                               |
+|  |                                   ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -226,10 +225,11 @@ Unicode title markers: ('×', '·')
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: unavailable                                                       |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: unavailable                                                        |
+|                                      ||  codex-2: unavailable                                                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -244,10 +244,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|  Outside filter                      ||                                                                              |
-|                                      ||                  Select a session to open its conversation.                  |
+|  | No messages yet                   ||                               *  M J O L N I R                               |
+|  |                                   ||                                                                              |
+|  Outside filter                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -267,10 +266,11 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: unavailable                                                       |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: unavailable                                                        |
+|                                      ||  codex-2: unavailable                                                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -285,10 +285,9 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel --------------------------------------------------------------------------||                                                                                                                                                              |
 |> . ACP pretty name                                                       + . ||                                                                                                                                                              |
 |  Idle  podman  codex-1                                                       ||                                                                                                                                                              |
-|  | No messages yet                                                           ||                                                                                                                                                              |
-|  |                                                                           ||                                                                       *  M J O L N I R                                                                       |
-|  Outside filter                                                              ||                                                                                                                                                              |
-|                                                                              ||                                                          Select a session to open its conversation.                                                          |
+|  | No messages yet                                                           ||                                                                       *  M J O L N I R                                                                       |
+|  |                                                                           ||                                                                                                                                                              |
+|  Outside filter                                                              ||                                                          Select a session to open its conversation.                                                          |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
 |                                                                              ||                                                                                                                                                              |
@@ -308,10 +307,11 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              ||  Host / fleet  Targets  CPU  RAM                                                                                                                             |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Profiles v (not refreshed)---------------------------------------------------------------------------------------------------------------------------- -   = +
-|                                                                              ||            Harness      Weekly       Resets  5H Resets                                                                                                       |
-|                                                                              ||  claude-1  Claude Code  refreshing..                                                                                                                         |
-|                                                                              ||  codex-1   Codex        refreshing..                                                                                                                         |
-|                                                                              ||  codex-2   Codex        refreshing..                                                                                                                         |
+|                                                                              ||ANTHROPIC                                                                                                                                                     |
+|                                                                              ||  claude-1: unavailable                                                                                                                                       |
+|                                                                              ||OPENAI                                                                                                                                                        |
+|                                                                              ||  codex-1: unavailable                                                                                                                                        |
+|                                                                              ||  codex-2: unavailable                                                                                                                                        |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Notifications (0) ------------------------------------------------------------------------------------------------------------------------------------ -   = +
 |                                                                              ||Nothing needs you                                                                                                                                             |
@@ -326,9 +326,8 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |hel ----------------------------------||                                                                              |
 |> . ACP pretty name               + . ||                                                                              |
 |  Idle  podman  codex-1               ||                                                                              |
-|  | No messages yet                   ||                                                                              |
-|  |                                   ||                               *  M J O L N I R                               |
-|                                      ||                                                                              |
+|  | No messages yet                   ||                               *  M J O L N I R                               |
+|  |                                   ||                                                                              |
 |                                      ||                  Select a session to open its conversation.                  |
 |                                      ||                                                                              |
 |                                      ||                                                                              |
@@ -349,10 +348,11 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
-|                                      ||            Harness      Weekly       Resets  5H Resets                       |
-|                                      ||  claude-1  Claude Code  refreshing..                                         |
-|                                      ||  codex-1   Codex        refreshing..                                         |
-|                                      ||  codex-2   Codex        refreshing..                                         |
+|                                      ||ANTHROPIC                                                                     |
+|                                      ||  claude-1: unavailable                                                       |
+|                                      ||OPENAI                                                                        |
+|                                      ||  codex-1: unavailable                                                        |
+|                                      ||  codex-2: unavailable                                                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Notifications (0) ---------------------------------------------------- -   = +
 |                                      ||Nothing needs you                                                             |
@@ -368,9 +368,8 @@ ASCII title markers: ('x', '-')
 │hel ──────────────────────────────────││                                      │
 │› · ACP pretty name               ◇ ⋯ ││                                      │
 │  Idle [Q 1]  podman  codex-1         ││                                      │
-│  │ No messages yet                   ││                                      │
-│  │                                   ││           ✦  M J O L N I R           │
-│                                      ││                                      │
+│  │ No messages yet                   ││           ✦  M J O L N I R           │
+│  │                                   ││                                      │
 │                                      ││Select a session to open its conversat│
 │                                      ││                                      │
 │                                      ││                                      │
@@ -391,10 +390,11 @@ ASCII title markers: ('x', '-')
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                        │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        refreshing…                                          │
-│  codex-2   Codex        refreshing…                                          │
+│ANTHROPIC                                                                     │
+│  claude-1: unavailable                                                       │
+│OPENAI                                                                        │
+│  codex-1: unavailable                                                        │
+│  codex-2: unavailable                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -409,9 +409,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      ││hel ──────────────────────────────────│
 │                                      ││› · ACP pretty name               ◇ ⋯ │
 │                                      ││  Idle [Q 1]  podman  codex-1         │
-│                                      ││  │ No messages yet                   │
-│           ✦  M J O L N I R           ││  │                                   │
-│                                      ││                                      │
+│           ✦  M J O L N I R           ││  │ No messages yet                   │
+│                                      ││  │                                   │
 │Select a session to open its conversat││                                      │
 │                                      ││                                      │
 │                                      ││                                      │
@@ -432,10 +431,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                        │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        refreshing…                                          │
-│  codex-2   Codex        refreshing…                                          │
+│ANTHROPIC                                                                     │
+│  claude-1: unavailable                                                       │
+│OPENAI                                                                        │
+│  codex-1: unavailable                                                        │
+│  codex-2: unavailable                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -450,9 +450,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle [Q 1]  podman  codex-1         ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -473,10 +472,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -491,9 +491,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              ││hel ──────────────────────────────────│
 │                                                                              ││› · ACP pretty name               ◇ ⋯ │
 │                                                                              ││  Idle [Q 1]  podman  codex-1         │
-│                                                                              ││  │ No messages yet                   │
-│                               ✦  M J O L N I R                               ││  │                                   │
-│                                                                              ││                                      │
+│                               ✦  M J O L N I R                               ││  │ No messages yet                   │
+│                                                                              ││  │                                   │
 │                  Select a session to open its conversation.                  ││                                      │
 │                                                                              ││                                      │
 │                                                                              ││                                      │
@@ -514,10 +513,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Host / fleet  Targets  CPU  RAM                                             ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮│                                      │
-│            Harness      Weekly      Resets  5H Resets                        ││                                      │
-│  claude-1  Claude Code  refreshing…                                          ││                                      │
-│  codex-1   Codex        refreshing…                                          ││                                      │
-│  codex-2   Codex        refreshing…                                          ││                                      │
+│ANTHROPIC                                                                     ││                                      │
+│  claude-1: unavailable                                                       ││                                      │
+│OPENAI                                                                        ││                                      │
+│  codex-1: unavailable                                                        ││                                      │
+│  codex-2: unavailable                                                        ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮│                                      │
 │Nothing needs you                                                             ││                                      │
@@ -532,9 +532,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────────────────────────────────────────────││                                                                                                                      │
 │› · ACP pretty name                                   ◇ ⋯ ││                                                                                                                      │
 │  Idle [Q 1]  podman  codex-1                             ││                                                                                                                      │
-│  │ No messages yet                                       ││                                                                                                                      │
-│  │                                                       ││                                                   ✦  M J O L N I R                                                   │
-│                                                          ││                                                                                                                      │
+│  │ No messages yet                                       ││                                                   ✦  M J O L N I R                                                   │
+│  │                                                       ││                                                                                                                      │
 │                                                          ││                                      Select a session to open its conversation.                                      │
 │                                                          ││                                                                                                                      │
 │                                                          ││                                                                                                                      │
@@ -555,10 +554,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          ││  Host / fleet  Targets  CPU  RAM                                                                                     │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                          ││            Harness      Weekly      Resets  5H Resets                                                                │
-│                                                          ││  claude-1  Claude Code  refreshing…                                                                                  │
-│                                                          ││  codex-1   Codex        refreshing…                                                                                  │
-│                                                          ││  codex-2   Codex        refreshing…                                                                                  │
+│                                                          ││ANTHROPIC                                                                                                             │
+│                                                          ││  claude-1: unavailable                                                                                               │
+│                                                          ││OPENAI                                                                                                                │
+│                                                          ││  codex-1: unavailable                                                                                                │
+│                                                          ││  codex-2: unavailable                                                                                                │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                          ││Nothing needs you                                                                                                     │
@@ -573,9 +573,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                                                                      ││hel ──────────────────────────────────────────────────────│
 │                                                                                                                      ││› · ACP pretty name                                   ◇ ⋯ │
 │                                                                                                                      ││  Idle [Q 1]  podman  codex-1                             │
-│                                                                                                                      ││  │ No messages yet                                       │
-│                                                   ✦  M J O L N I R                                                   ││  │                                                       │
-│                                                                                                                      ││                                                          │
+│                                                   ✦  M J O L N I R                                                   ││  │ No messages yet                                       │
+│                                                                                                                      ││  │                                                       │
 │                                      Select a session to open its conversation.                                      ││                                                          │
 │                                                                                                                      ││                                                          │
 │                                                                                                                      ││                                                          │
@@ -596,10 +595,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Host / fleet  Targets  CPU  RAM                                                                                     ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
-│            Harness      Weekly      Resets  5H Resets                                                                ││                                                          │
-│  claude-1  Claude Code  refreshing…                                                                                  ││                                                          │
-│  codex-1   Codex        refreshing…                                                                                  ││                                                          │
-│  codex-2   Codex        refreshing…                                                                                  ││                                                          │
+│ANTHROPIC                                                                                                             ││                                                          │
+│  claude-1: unavailable                                                                                               ││                                                          │
+│OPENAI                                                                                                                ││                                                          │
+│  codex-1: unavailable                                                                                                ││                                                          │
+│  codex-2: unavailable                                                                                                ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮│                                                          │
 │Nothing needs you                                                                                                     ││                                                          │
@@ -614,7 +614,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ──────────────││                                                          │
 │› · ACP pretty…◇  ││                                                          │
 │  Idle            ││                                                          │
-│                  ││                                                          │
 │                  ││                     ✦  M J O L N I R                     │
 │                  ││                                                          │
 │                  ││        Select a session to open its conversation.        │
@@ -632,19 +631,20 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  │╭ No conversation open ────────────────────────────────────╮
 │                  ││No conversation open.                                     │
 │                  ││Press Tab for Sessions, then Enter on the one to open.    │
-│                  │╰──────────────────────────────────────────────────────────╯
-│                  │╭ Targets ▾ ──────────────────────────────────────── ▁   ▄ ╮
-│                  ││  Host / fleet  Targets  CPU  RAM                         │
-│                  │╰──────────────────────────────────────────────────────────╯
-│                  │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│                  ││            Harness      Weekly      Resets  5H Resets    │
-│                  ││  claude-1  Claude Code  refreshing…                      │
-│                  ││  codex-1   Codex        refreshing…                      │
-│                  ││  codex-2   Codex        refreshing…                      │
-│                  │╰──────────────────────────────────────────────────────────╯
-│                  │╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
-│                  ││Nothing needs you                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│  Host / fleet  Targets  CPU  RAM                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│ANTHROPIC                                                                     │
+│  claude-1: unavailable                                                       │
+│OPENAI                                                                        │
+│  codex-1: unavailable                                                        │
+│  codex-2: unavailable                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
+│Nothing needs you                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? palette
 === expanded session row (120x44) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
@@ -657,7 +657,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │  Idle  podman  codex-1               ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
-│                                      ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │                                      ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
@@ -682,10 +681,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -776,7 +776,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── local 42% ───────────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── claude-1 63%, codex-1 unavailable, codex-2 unavailable ─────────────────────── ▁   ▄ ─
+│                  │─ Profiles ── Anthropic 63%, codex-1 unavailable, codex-2 unavailable ────────────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                 │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -821,7 +821,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││Press Tab for Sessions, then Enter on the one to open.                                                                                    │
 │                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
-│                  │─ Profiles ── claude-1 96%/40%, codex-1 100%, codex-2 63% ────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
+│                  │─ Profiles ── Anthropic 96%, OpenAI 82% ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ─
 │                  │╭ Notifications (0) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                  ││Nothing needs you                                                                                                                         │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

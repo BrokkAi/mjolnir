@@ -759,11 +759,12 @@ impl DashboardState {
 
     pub(crate) fn begin_profile_rename(&mut self) {
         let Some(old_id) = self
-            .quota_profile_rows()
+            .quota_pool_rows()
             .get(self.quota_index)
-            .map(|row| row.id.to_owned())
+            .filter(|pool| pool.members.len() == 1)
+            .map(|pool| pool.members[0].id.clone())
         else {
-            self.notices.set("No profile is selected.");
+            self.begin_settings_section("profiles", None);
             return;
         };
         self.mode = Mode::ConfigId(ConfigIdEditor {

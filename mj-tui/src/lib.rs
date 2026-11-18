@@ -1079,9 +1079,12 @@ pub struct DashboardState {
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_index: usize,
+    pub(crate) quota_expanded: BTreeSet<render::quota_pools::PoolKey>,
+    pub(crate) quota_providers: render::quota_pools::ProviderDiscovery,
     /// Last rendered Quota row bounds, by profile id, for the row's
     /// right-click menu.
     pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
+    pub(crate) quota_pool_areas: RefCell<Vec<(usize, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
@@ -1339,6 +1342,7 @@ impl DashboardState {
             profile_hydration_requests: Default::default(),
             profile_hydration_errors: Default::default(),
             profile_hydration_sent: None,
+            quota_providers: render::quota_pools::ProviderDiscovery::start(&config),
             config: config.into(),
             state: state.into(),
             quotas,
@@ -1377,6 +1381,7 @@ impl DashboardState {
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
             quota_row_areas: RefCell::new(Vec::new()),
+            quota_pool_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {
@@ -1398,6 +1403,7 @@ impl DashboardState {
             sessions_wheel_scrolled_from: RefCell::new(None),
             capacity_index: 0,
             quota_index: 0,
+            quota_expanded: Default::default(),
             focus: Focus::Sessions,
             pane_sizes: PaneSizes {
                 sessions: sidebar_size,

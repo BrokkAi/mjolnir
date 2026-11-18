@@ -81,6 +81,7 @@ pub enum CommandId {
     TargetActions,
     TargetDisks,
     EditProfile,
+    ToggleQuotaPool,
     Refresh,
     OpenConfig,
     ManageProfiles,
@@ -1379,14 +1380,23 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: targets_visible,
     },
     CommandSpec {
+        id: CommandId::ToggleQuotaPool,
+        label: "Expand quota pool",
+        description: "Expand or collapse the selected provider pool's next 24 hours.",
+        scope: Scope::Quota,
+        pane_keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
+        action: None,
+        footer: footer_word!("expand/collapse"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: profiles_present,
+    },
+    CommandSpec {
         id: CommandId::EditProfile,
         label: "Rename profile",
         description: "Rename the selected profile's configuration id.",
         scope: Scope::Quota,
-        pane_keys: &[
-            KeyHint::plain(KeyCode::Enter, "Enter"),
-            KeyHint::plain(KeyCode::Char('e'), "e"),
-        ],
+        pane_keys: &[KeyHint::plain(KeyCode::Char('e'), "e")],
         action: None,
         footer: footer_word!("rename profile"),
         footer_group: FooterGroup::Pane,
@@ -2288,6 +2298,12 @@ impl DashboardState {
                 self.begin_capacity_disks_menu(self.capacity_index);
                 DashboardAction::None
             }
+            CommandId::ToggleQuotaPool => {
+                if self.pane_size(crate::SupportPane::Quota) != crate::PaneSize::Minimized {
+                    self.toggle_quota_pool();
+                }
+                DashboardAction::None
+            }
             CommandId::EditProfile => {
                 if self.pane_size(crate::SupportPane::Quota) == crate::PaneSize::Minimized {
                     return DashboardAction::None;
@@ -2296,6 +2312,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => {
+                self.quota_providers.request_refresh();
                 // Refreshing checks again what is available. It is allowed
                 // through an open modal (see `command_allowed_now`), so an
                 // open picker gets fresh answers.

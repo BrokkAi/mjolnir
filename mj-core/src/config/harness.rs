@@ -1323,6 +1323,67 @@ impl std::str::FromStr for HarnessKind {
     }
 }
 
+/// The company that meters a profile's allowance, independent of its harness.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QuotaProvider {
+    Anthropic,
+    OpenAI,
+    Google,
+    XAI,
+    Moonshot,
+    DeepSeek,
+    Other(String),
+}
+
+impl QuotaProvider {
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAI => "OpenAI",
+            Self::Google => "Google",
+            Self::XAI => "xAI",
+            Self::Moonshot => "Moonshot",
+            Self::DeepSeek => "DeepSeek",
+            Self::Other(name) => name,
+        }
+    }
+
+    fn from_endpoint(id: &str, endpoint: Option<&str>) -> Self {
+        let host = endpoint
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        // The endpoint wins over an arbitrary local provider-table name.
+        for value in host.as_deref().into_iter().chain(std::iter::once(id)) {
+            let value = value.to_ascii_lowercase();
+            let domain = |suffix: &str| value == suffix || value.ends_with(&format!(".{suffix}"));
+            if domain("deepseek.com") || value == "deepseek" {
+                return Self::DeepSeek;
+            }
+            if domain("anthropic.com") || value == "anthropic" {
+                return Self::Anthropic;
+            }
+            if domain("openai.com") || value == "openai" {
+                return Self::OpenAI;
+            }
+            if domain("googleapis.com")
+                || matches!(value.as_str(), "google" | "gemini" | "google-vertex")
+            {
+                return Self::Google;
+            }
+            if domain("x.ai") || matches!(value.as_str(), "xai" | "grok") {
+                return Self::XAI;
+            }
+            if domain("moonshot.ai")
+                || domain("moonshot.cn")
+                || matches!(value.as_str(), "moonshot" | "kimi" | "kimi-for-coding")
+            {
+                return Self::Moonshot;
+            }
+        }
+        Self::Other(id.to_owned())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HarnessProfile {
     /// Whether Mjolnir may select this profile for new work or probe it.
@@ -1462,6 +1523,78 @@ fn installation_home(path: &Path) -> PathBuf {
 }
 
 impl HarnessProfile {
+    /// Reads the harness's own provider configuration. Call on a background
+    /// task, never from a UI event or render loop.
+    pub fn quota_provider(&self) -> QuotaProvider {
+        match self.kind {
+            // Bedrock and Vertex still serve Anthropic's models; a base URL can
+            // point Claude Code at another vendor's Anthropic-compatible API.
+            HarnessKind::Claude => QuotaProvider::from_endpoint(
+                "anthropic",
+                self.environment
+                    .get("ANTHROPIC_BASE_URL")
+                    .map(String::as_str),
+            ),
+            HarnessKind::Antigravity => QuotaProvider::Google,
+            HarnessKind::Grok => QuotaProvider::XAI,
+            HarnessKind::Kimi => QuotaProvider::Moonshot,
+            HarnessKind::Dsh => QuotaProvider::DeepSeek,
+            HarnessKind::Codex => match self.codex_provider() {
+                Ok(Some(provider)) => {
+                    let endpoint = provider
+                        .custom()
+                        .map(|custom| custom.base_url.as_str())
+                        .or_else(|| {
+                            (provider.built_in() == Some(BuiltInCodexProvider::OpenAi))
+                                .then(|| {
+                                    self.environment.get("OPENAI_BASE_URL").map(String::as_str)
+                                })
+                                .flatten()
+                        });
+                    QuotaProvider::from_endpoint(provider.id(), endpoint)
+                }
+                Ok(None) => QuotaProvider::from_endpoint(
+                    "openai",
+                    self.environment.get("OPENAI_BASE_URL").map(String::as_str),
+                ),
+                Err(error) => {
+                    tracing::warn!(home = %self.home.display(), %error, "read quota provider");
+                    QuotaProvider::Other("Codex (provider unavailable)".into())
+                }
+            },
+            HarnessKind::OpenCode => {
+                let mut configuration = serde_json::json!({});
+                for name in ["opencode.json", "opencode.jsonc"] {
+                    if let Ok(text) = std::fs::read_to_string(self.home.join(name))
+                        && let Some(value) = opencode_configuration(&text)
+                        && let Some(object) = value.as_object()
+                    {
+                        configuration
+                            .as_object_mut()
+                            .expect("configuration object")
+                            .extend(object.clone());
+                    }
+                }
+                let Some(id) = configuration
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|model| model.split_once('/'))
+                    .map(|(id, _)| id)
+                else {
+                    return QuotaProvider::Other("OpenCode".into());
+                };
+                let endpoint = configuration
+                    .get("provider")
+                    .and_then(|providers| providers.get(id))
+                    .and_then(|provider| provider.get("options"))
+                    .and_then(|options| options.get("baseURL"))
+                    .and_then(serde_json::Value::as_str);
+                QuotaProvider::from_endpoint(id, endpoint)
+            }
+            kind => QuotaProvider::Other(kind.display_name().to_owned()),
+        }
+    }
+
     /// Creates an enabled profile with all optional settings unset.
     pub fn new(kind: HarnessKind, home: impl Into<PathBuf>) -> Self {
         Self {
@@ -2155,6 +2288,23 @@ struct OpenCodeEnvironment {
     references: BTreeSet<String>,
 }
 
+// OpenCode uses JSONC with comments and trailing commas, not JavaScript.
+fn opencode_configuration(text: &str) -> Option<serde_json::Value> {
+    let options = jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
+    };
+    jsonc_parser::parse_to_serde_value(text, &options).ok()
+}
+
 impl OpenCodeEnvironment {
     fn read(home: &Path) -> Self {
         let mut environment = Self {
@@ -2174,23 +2324,7 @@ impl OpenCodeEnvironment {
     }
 
     fn add_configuration(&mut self, text: &str) {
-        // OpenCode parses with Microsoft's jsonc-parser, which accepts
-        // comments and trailing commas and nothing else beyond JSON.
-        let options = jsonc_parser::ParseOptions {
-            allow_comments: true,
-            allow_trailing_commas: true,
-            allow_loose_object_property_names: false,
-            allow_missing_commas: false,
-            allow_single_quoted_strings: false,
-            allow_hexadecimal_numbers: false,
-            allow_unary_plus_numbers: false,
-            allow_bare_decimal_point_numbers: false,
-            allow_non_finite_numbers: false,
-            allow_extended_string_escapes: false,
-        };
-        let Ok(configuration) =
-            jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &options)
-        else {
+        let Some(configuration) = opencode_configuration(text) else {
             return;
         };
         static REFERENCE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

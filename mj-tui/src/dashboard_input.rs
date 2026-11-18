@@ -387,6 +387,21 @@ impl DashboardState {
             self.scroll_workspaces(delta);
             return DashboardAction::None;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let hit = self
+                .quota_pool_areas
+                .borrow()
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(index, _)| *index);
+            if let Some(index) = hit {
+                self.focus = Focus::Quota;
+                self.set_selection_for(Focus::Quota, index);
+                self.toggle_quota_pool();
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+        }
         let hovered = self.pane_areas.and_then(|areas| {
             areas
                 .into_iter()

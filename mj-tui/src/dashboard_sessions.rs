@@ -8,21 +8,6 @@ use mj_client::quota::AntigravityQuotaPool;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
 
-pub(crate) struct QuotaProfileRow<'a> {
-    pub id: &'a str,
-    pub harness: HarnessKind,
-    pub pool: Option<AntigravityQuotaPool>,
-}
-
-impl QuotaProfileRow<'_> {
-    pub fn label(&self) -> String {
-        self.pool.map_or_else(
-            || self.id.to_owned(),
-            |pool| format!("{} ({})", self.id, pool.label()),
-        )
-    }
-}
-
 /// How much a session needs a person right now, from least to most.
 ///
 /// The order is the order a person wants to be interrupted in: a failure
@@ -1449,31 +1434,36 @@ impl DashboardState {
         self.rebuild_resume_rows();
     }
 
-    /// The same ordered rows drive drawing, pointer/keyboard selection and
-    /// profile actions. Both Antigravity pools still act on one profile.
-    pub(crate) fn quota_profile_rows(&self) -> Vec<QuotaProfileRow<'_>> {
-        self.config
-            .enabled_profiles()
-            .flat_map(|(id, profile)| {
-                let pools = if profile.kind == HarnessKind::Antigravity {
-                    AntigravityQuotaPool::ALL.map(Some).to_vec()
-                } else {
-                    vec![None]
-                };
-                pools.into_iter().map(move |pool| QuotaProfileRow {
-                    id,
-                    harness: profile.kind,
-                    pool,
-                })
-            })
+    pub(crate) fn quota_pools(&self) -> Vec<crate::render::quota_pools::ProviderQuota> {
+        crate::render::quota_pools::provider_pools(
+            &self.config,
+            &self.quotas,
+            &self.quota_providers,
+            crate::render_changes::epoch_seconds(),
+        )
+    }
+
+    pub(crate) fn quota_pool_rows(&self) -> Vec<crate::render::quota_pools::QuotaPool> {
+        self.quota_pools()
+            .into_iter()
+            .flat_map(|provider| provider.pools)
             .collect()
+    }
+
+    pub(crate) fn toggle_quota_pool(&mut self) {
+        if let Some(pool) = self.quota_pool_rows().get(self.quota_index) {
+            if !self.quota_expanded.remove(&pool.key) {
+                self.quota_expanded.insert(pool.key.clone());
+            }
+            self.recenter_on_selection.set(Some(Focus::Quota));
+        }
     }
 
     pub(crate) fn focus_len_for(&self, focus: Focus) -> usize {
         match focus {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
-            Focus::Quota => self.quota_profile_rows().len(),
+            Focus::Quota => self.quota_pool_rows().len(),
             Focus::Notifications | Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -1575,7 +1565,7 @@ impl DashboardState {
             .retain(|key| project_keys.contains(key));
         self.quota_index = self
             .quota_index
-            .min(self.quota_profile_rows().len().saturating_sub(1));
+            .min(self.quota_pool_rows().len().saturating_sub(1));
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));

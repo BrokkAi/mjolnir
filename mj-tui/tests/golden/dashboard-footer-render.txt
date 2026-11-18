@@ -13,11 +13,11 @@
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││ANTHROPIC                                                                     ▐
+│                                      ││  claude-1: unavailable                                                       ▐
+│                                      ││OPENAI                                                                        ▐
+│                                      ││  codex-1: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -38,11 +38,11 @@ Transient dashboard message
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄   □ ╮
+│                                      ││ANTHROPIC                                                                     ▐
+│                                      ││  claude-1: unavailable                                                       ▐
+│                                      ││OPENAI                                                                        ▐
+│                                      ││  codex-1: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -63,11 +63,11 @@ Transient dashboard message
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
-│                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
-│                                                                ││  codex-1   Codex        refreshing…                                                                                                │
-│                                                                ││  codex-2   Codex        refreshing…                                                                                                │
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                                ││ANTHROPIC                                                                                                                           ▐
+│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││OPENAI                                                                                                                              ▐
+│                                                                ││  codex-1: unavailable                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -88,11 +88,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││› local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
-│                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
-│                                                                ││  codex-1   Codex        refreshing…                                                                                                │
-│                                                                ││  codex-2   Codex        refreshing…                                                                                                │
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                                ││ANTHROPIC                                                                                                                           ▐
+│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││OPENAI                                                                                                                              ▐
+│                                                                ││  codex-1: unavailable                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -113,16 +113,16 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
-│                                                                ││› claude-1  Claude Code  refreshing…                                                                                                │
-│                                                                ││  codex-1   Codex        refreshing…                                                                                                │
-│                                                                ││  codex-2   Codex        refreshing…                                                                                                │
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                                ││ANTHROPIC                                                                                                                           ▐
+│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││OPENAI                                                                                                                              ▐
+│                                                                ││  codex-1: unavailable                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Enter expand/collapse · e rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 === footer at Prompt focus (200x24) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ≡ ││                                                                                                                                    │
@@ -138,11 +138,11 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                                                ││  Host / fleet  Targets  CPU          RAM                                                                                           │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
-│                                                                ││  claude-1  Claude Code  refreshing…                                                                                                │
-│                                                                ││  codex-1   Codex        refreshing…                                                                                                │
-│                                                                ││  codex-2   Codex        refreshing…                                                                                                │
+│                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                                                ││ANTHROPIC                                                                                                                           ▐
+│                                                                ││  claude-1: unavailable                                                                                                             ▐
+│                                                                ││OPENAI                                                                                                                              ▐
+│                                                                ││  codex-1: unavailable                                                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Notifications (0) ────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                                ││Nothing needs you                                                                                                                   │
@@ -2030,10 +2030,10 @@ Need at least 60 columns.
 │  local         podman   unavailable                      │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets    │
-│  claude-1  Claude Code  refreshing…                      │
-│  codex-1   Codex        refreshing…                      │
-│  codex-2   Codex        refreshing…                      │
+│ANTHROPIC                                                 ▐
+│  claude-1: unavailable                                   ▐
+│OPENAI                                                    ▐
+│  codex-1: unavailable                                    │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                         │
@@ -2061,10 +2061,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                       │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets     │
-│  claude-1  Claude Code  refreshing…                       │
-│  codex-1   Codex        refreshing…                       │
-│  codex-2   Codex        refreshing…                       │
+│ANTHROPIC                                                  ▐
+│  claude-1: unavailable                                    ▐
+│OPENAI                                                     ▐
+│  codex-1: unavailable                                     │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                          │
@@ -2092,10 +2092,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                        │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets      │
-│  claude-1  Claude Code  refreshing…                        │
-│  codex-1   Codex        refreshing…                        │
-│  codex-2   Codex        refreshing…                        │
+│ANTHROPIC                                                   ▐
+│  claude-1: unavailable                                     ▐
+│OPENAI                                                      ▐
+│  codex-1: unavailable                                      │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                           │
@@ -2123,10 +2123,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                         │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets       │
-│  claude-1  Claude Code  refreshing…                         │
-│  codex-1   Codex        refreshing…                         │
-│  codex-2   Codex        refreshing…                         │
+│ANTHROPIC                                                    ▐
+│  claude-1: unavailable                                      ▐
+│OPENAI                                                       ▐
+│  codex-1: unavailable                                       │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                            │
@@ -2154,10 +2154,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                          │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets        │
-│  claude-1  Claude Code  refreshing…                          │
-│  codex-1   Codex        refreshing…                          │
-│  codex-2   Codex        refreshing…                          │
+│ANTHROPIC                                                     ▐
+│  claude-1: unavailable                                       ▐
+│OPENAI                                                        ▐
+│  codex-1: unavailable                                        │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                             │
@@ -2185,10 +2185,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                           │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets         │
-│  claude-1  Claude Code  refreshing…                           │
-│  codex-1   Codex        refreshing…                           │
-│  codex-2   Codex        refreshing…                           │
+│ANTHROPIC                                                      ▐
+│  claude-1: unavailable                                        ▐
+│OPENAI                                                         ▐
+│  codex-1: unavailable                                         │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                              │
@@ -2216,10 +2216,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                            │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets          │
-│  claude-1  Claude Code  refreshing…                            │
-│  codex-1   Codex        refreshing…                            │
-│  codex-2   Codex        refreshing…                            │
+│ANTHROPIC                                                       ▐
+│  claude-1: unavailable                                         ▐
+│OPENAI                                                          ▐
+│  codex-1: unavailable                                          │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                               │
@@ -2247,10 +2247,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                             │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets           │
-│  claude-1  Claude Code  refreshing…                             │
-│  codex-1   Codex        refreshing…                             │
-│  codex-2   Codex        refreshing…                             │
+│ANTHROPIC                                                        ▐
+│  claude-1: unavailable                                          ▐
+│OPENAI                                                           ▐
+│  codex-1: unavailable                                           │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                │
@@ -2278,10 +2278,10 @@ Enter open │ ctrl+b then : / ? palette
 │  local         podman   unavailable                              │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets            │
-│  claude-1  Claude Code  refreshing…                              │
-│  codex-1   Codex        refreshing…                              │
-│  codex-2   Codex        refreshing…                              │
+│ANTHROPIC                                                         ▐
+│  claude-1: unavailable                                           ▐
+│OPENAI                                                            ▐
+│  codex-1: unavailable                                            │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                 │
@@ -2309,10 +2309,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                               │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets             │
-│  claude-1  Claude Code  refreshing…                               │
-│  codex-1   Codex        refreshing…                               │
-│  codex-2   Codex        refreshing…                               │
+│ANTHROPIC                                                          ▐
+│  claude-1: unavailable                                            ▐
+│OPENAI                                                             ▐
+│  codex-1: unavailable                                             │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                  │
@@ -2340,10 +2340,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets              │
-│  claude-1  Claude Code  refreshing…                                │
-│  codex-1   Codex        refreshing…                                │
-│  codex-2   Codex        refreshing…                                │
+│ANTHROPIC                                                           ▐
+│  claude-1: unavailable                                             ▐
+│OPENAI                                                              ▐
+│  codex-1: unavailable                                              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                   │
@@ -2371,10 +2371,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                 │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets               │
-│  claude-1  Claude Code  refreshing…                                 │
-│  codex-1   Codex        refreshing…                                 │
-│  codex-2   Codex        refreshing…                                 │
+│ANTHROPIC                                                            ▐
+│  claude-1: unavailable                                              ▐
+│OPENAI                                                               ▐
+│  codex-1: unavailable                                               │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                    │
@@ -2402,10 +2402,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                  │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                │
-│  claude-1  Claude Code  refreshing…                                  │
-│  codex-1   Codex        refreshing…                                  │
-│  codex-2   Codex        refreshing…                                  │
+│ANTHROPIC                                                             ▐
+│  claude-1: unavailable                                               ▐
+│OPENAI                                                                ▐
+│  codex-1: unavailable                                                │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                     │
@@ -2433,10 +2433,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                   │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                 │
-│  claude-1  Claude Code  refreshing…                                   │
-│  codex-1   Codex        refreshing…                                   │
-│  codex-2   Codex        refreshing…                                   │
+│ANTHROPIC                                                              ▐
+│  claude-1: unavailable                                                ▐
+│OPENAI                                                                 ▐
+│  codex-1: unavailable                                                 │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                      │
@@ -2464,10 +2464,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                    │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                  │
-│  claude-1  Claude Code  refreshing…                                    │
-│  codex-1   Codex        refreshing…                                    │
-│  codex-2   Codex        refreshing…                                    │
+│ANTHROPIC                                                               ▐
+│  claude-1: unavailable                                                 ▐
+│OPENAI                                                                  ▐
+│  codex-1: unavailable                                                  │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                       │
@@ -2495,10 +2495,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                   │
-│  claude-1  Claude Code  refreshing…                                     │
-│  codex-1   Codex        refreshing…                                     │
-│  codex-2   Codex        refreshing…                                     │
+│ANTHROPIC                                                                ▐
+│  claude-1: unavailable                                                  ▐
+│OPENAI                                                                   ▐
+│  codex-1: unavailable                                                   │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                        │
@@ -2526,10 +2526,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                      │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                    │
-│  claude-1  Claude Code  refreshing…                                      │
-│  codex-1   Codex        refreshing…                                      │
-│  codex-2   Codex        refreshing…                                      │
+│ANTHROPIC                                                                 ▐
+│  claude-1: unavailable                                                   ▐
+│OPENAI                                                                    ▐
+│  codex-1: unavailable                                                    │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                         │
@@ -2557,10 +2557,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                       │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                     │
-│  claude-1  Claude Code  refreshing…                                       │
-│  codex-1   Codex        refreshing…                                       │
-│  codex-2   Codex        refreshing…                                       │
+│ANTHROPIC                                                                  ▐
+│  claude-1: unavailable                                                    ▐
+│OPENAI                                                                     ▐
+│  codex-1: unavailable                                                     │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ───────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                          │
@@ -2588,10 +2588,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                        │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                      │
-│  claude-1  Claude Code  refreshing…                                        │
-│  codex-1   Codex        refreshing…                                        │
-│  codex-2   Codex        refreshing…                                        │
+│ANTHROPIC                                                                   ▐
+│  claude-1: unavailable                                                     ▐
+│OPENAI                                                                      ▐
+│  codex-1: unavailable                                                      │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                           │
@@ -2619,10 +2619,10 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : / ? palette
 │  local         podman   unavailable                                         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                       │
-│  claude-1  Claude Code  refreshing…                                         │
-│  codex-1   Codex        refreshing…                                         │
-│  codex-2   Codex        refreshing…                                         │
+│ANTHROPIC                                                                    ▐
+│  claude-1: unavailable                                                      ▐
+│OPENAI                                                                       ▐
+│  codex-1: unavailable                                                       │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ─────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                            │
@@ -2639,7 +2639,6 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │  Idle  podman  codex-1               ││                                      │
 │  │ No messages yet                   ││                                      │
 │  │                                   ││                                      │
-│                                      ││                                      │
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭ No conversation open ────────────────╮
 │                                      ││No conversation open.                 │
@@ -2650,10 +2649,11 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : / ? pale
 │  local         podman   unavailable                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                        │
-│  claude-1  Claude Code  refreshing…                                          │
-│  codex-1   Codex        refreshing…                                          │
-│  codex-2   Codex        refreshing…                                          │
+│ANTHROPIC                                                                     │
+│  claude-1: unavailable                                                       │
+│OPENAI                                                                        │
+│  codex-1: unavailable                                                        │
+│  codex-2: unavailable                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │Nothing needs you                                                             │
@@ -2669,9 +2669,8 @@ Sessions prefix action: Consumed
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -2692,10 +2691,11 @@ Sessions prefix action: Consumed
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2710,9 +2710,8 @@ Sessions prefix action: Consumed
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -2733,10 +2732,11 @@ Sessions prefix action: Consumed
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2752,9 +2752,8 @@ Prompt prefix action: Consumed
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -2775,10 +2774,11 @@ Prompt prefix action: Consumed
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
@@ -2793,9 +2793,8 @@ Prompt prefix action: Consumed
 │hel ──────────────────────────────────││                                                                              │
 │› · ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
 │                                      ││                  Select a session to open its conversation.                  │
 │                                      ││                                                                              │
 │                                      ││                                                                              │
@@ -2816,10 +2815,11 @@ Prompt prefix action: Consumed
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
-│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││ANTHROPIC                                                                     │
+│                                      ││  claude-1: unavailable                                                       │
+│                                      ││OPENAI                                                                        │
+│                                      ││  codex-1: unavailable                                                        │
+│                                      ││  codex-2: unavailable                                                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (0) ──────────────────────────────────────────────────── ▁   ▄ ╮
 │                                      ││Nothing needs you                                                             │
