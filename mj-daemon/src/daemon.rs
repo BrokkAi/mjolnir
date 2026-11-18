@@ -829,7 +829,12 @@ impl LifecycleFailure {
     }
 
     fn public_message(&self, prefix: &str, reference: &str) -> String {
-        crate::server::lifecycle_failure_message(prefix, self.refusal.as_ref(), self.reason, reference)
+        crate::server::lifecycle_failure_message(
+            prefix,
+            self.refusal.as_ref(),
+            self.reason,
+            reference,
+        )
     }
 }
 

@@ -36,7 +36,7 @@ pub(crate) type EngineProbe = Arc<dyn Fn(&str) -> Option<LocalEngineReadiness> +
 /// Local engine readiness for the options route, cached with the same
 /// lifetimes the dashboard's new-session wizard uses, so repeated reads do not
 /// run `docker version` every time.
-pub(crate) struct LocalEngineChecks {
+pub struct LocalEngineChecks {
     probe: EngineProbe,
     cache: std::sync::Mutex<BTreeMap<String, (Instant, LocalEngineReadiness)>>,
 }
@@ -201,10 +201,10 @@ fn launch_target(
 }
 
 /// What is known about whether one target can run a session right now.
-pub(crate) struct TargetStatus {
-    pub(crate) availability: LaunchAvailability,
-    pub(crate) unavailable_reason: Option<String>,
-    pub(crate) runtime_missing: bool,
+pub struct TargetStatus {
+    pub availability: LaunchAvailability,
+    pub unavailable_reason: Option<String>,
+    pub runtime_missing: bool,
 }
 
 /// The one classifier behind a target's availability and reason. The launch
@@ -212,7 +212,7 @@ pub(crate) struct TargetStatus {
 /// with `None`, since the probe runs on the request path and not in the
 /// publication, so the web pickers see the host reading and the missing
 /// runtime, and `/api/v1/options` adds the engine's own check.
-pub(crate) fn target_availability(
+pub fn target_availability(
     target: &ViewerTarget,
     hosts: &[ViewerTargetCapacity],
     engine: Option<&LocalEngineReadiness>,

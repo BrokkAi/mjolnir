@@ -1,19 +1,19 @@
 use super::*;
 use std::collections::BTreeSet;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static VIEWER_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static VIEWER_SESSION_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
-pub(crate) fn take_viewer_row_visits() -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_viewer_row_visits() -> usize {
     VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
 }
 
-#[cfg(test)]
-pub(crate) fn take_viewer_session_scan_visits() -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_viewer_session_scan_visits() -> usize {
     VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.replace(0))
 }
 
@@ -82,7 +82,7 @@ pub struct ViewerSnapshot {
 /// The public wire shape remains an array; in-process publications share rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "Vec<ViewerSession>", into = "Vec<ViewerSession>")]
-pub struct ViewerSessions(pub(crate) mj_core::snapshot_map::SnapshotMap<String, ViewerSession>);
+pub struct ViewerSessions(pub mj_core::snapshot_map::SnapshotMap<String, ViewerSession>);
 
 impl ViewerSessions {
     pub fn get(&self, id: &str) -> Option<&ViewerSession> {
@@ -95,7 +95,7 @@ impl ViewerSessions {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ViewerSession> + ExactSizeIterator {
         self.0.values().inspect(|_| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             VIEWER_SESSION_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
         })
     }
@@ -153,7 +153,7 @@ impl std::ops::IndexMut<usize> for ViewerSessions {
 
 /// Each parent's direct children with their durable kind, so the projection
 /// can tell reviewers from workers without loading the child records.
-pub(crate) type ViewerChildren = mj_core::snapshot_map::SnapshotMap<
+pub type ViewerChildren = mj_core::snapshot_map::SnapshotMap<
     String,
     mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentKind>,
 >;
@@ -199,7 +199,7 @@ impl ViewerSnapshot {
         )
     }
 
-    pub(crate) fn from_config_records<'a>(
+    pub fn from_config_records<'a>(
         config: &Config,
         state: &AppState,
         revision: u64,
@@ -225,7 +225,7 @@ impl ViewerSnapshot {
         };
         let sessions = records
             .map(|session| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
                 let checkout = state
                     .checkout(&session.id)
@@ -589,7 +589,7 @@ fn resume_source_available(
 
 impl ViewerSession {
     /// Recorded repair/restore candidates; the environment owner proves existence.
-    pub(crate) fn has_resume_source(&self) -> bool {
+    pub fn has_resume_source(&self) -> bool {
         resume_source_available(
             &self.state,
             self.has_checkpoint,
@@ -599,7 +599,7 @@ impl ViewerSession {
     }
 
     /// One interpretation for both current-state persistence and live API delivery.
-    pub(crate) fn api_activity(&self) -> mj_core::storage::ApiActivityState {
+    pub fn api_activity(&self) -> mj_core::storage::ApiActivityState {
         mj_core::storage::ApiActivityState {
             state: self.state.clone(),
             details: self.activity_details.clone(),
@@ -648,7 +648,7 @@ pub struct ViewerSession {
     /// protocol 64 and later). In-process only, like `is_subagent_session`:
     /// the notification message rule needs it, the JSON contract does not.
     #[serde(skip, default)]
-    pub(crate) supports_open_request: bool,
+    pub supports_open_request: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

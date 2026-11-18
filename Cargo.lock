@@ -804,6 +804,7 @@ dependencies = [
  "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-review",
+ "brokk-mj-server",
  "brokk-mj-transcript",
  "brokk-mj-worker",
  "brokk-sessionwiki",
@@ -838,6 +839,44 @@ version = "2.71.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
+]
+
+[[package]]
+name = "brokk-mj-server"
+version = "2.71.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "brokk-mj-checkpoint",
+ "brokk-mj-client",
+ "brokk-mj-controller",
+ "brokk-mj-core",
+ "brokk-mj-review",
+ "brokk-mj-transcript",
+ "brokk-mj-worker",
+ "brokk-sessionwiki",
+ "chrono",
+ "futures",
+ "getrandom 0.3.4",
+ "hmac",
+ "http-body-util",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "url",
 ]
 
 [[package]]

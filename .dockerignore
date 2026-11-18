@@ -18,6 +18,7 @@
 !mj-worker/
 !mj-client/
 !mj-controller/
+!mj-server/
 !mj-daemon/
 !mj-chat/
 !mj-tui/

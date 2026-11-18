@@ -40,7 +40,7 @@ pub struct SessionMessageResponse {
     /// Internal routing detail used to preserve the shipped child-tool result
     /// shape. It is not part of the HTTP response contract.
     #[serde(skip)]
-    pub(crate) managed_child: bool,
+    pub managed_child: bool,
 }
 
 /// A message sent by the CLI or another authenticated API client.

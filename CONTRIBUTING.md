@@ -114,11 +114,17 @@ it or introduce a dependency between sibling branches.
   daemon side below the daemon process itself. It owns the database,
   provisions targets, and manages sessions. It uses the foundation and client
   branches.
+- `brokk-mj-server` (`mj-server/`, library `mj_server`) is the daemon's HTTP
+  API and web viewer server: routes, request and response types,
+  authentication, and the embedded viewer assets. It builds on the controller
+  and knows nothing of the daemon's live state; the daemon implements its
+  backend traits.
 - `brokk-mj-daemon` (`mj-daemon/`, library `mj_daemon`) is the daemon process
-  (`mj daemon-run`): its runtime state, the HTTP API, the web viewer, and the
-  daemon-owned services and pollers. It builds on the controller. It is a
-  separate crate so an edit to the daemon or server does not recompile the
-  controller.
+  (`mj daemon-run`): its runtime state, the implementation of the HTTP API
+  over that state, and the daemon-owned services and pollers. It builds on the
+  controller and the server and re-exports the server as `mj_daemon::server`.
+  It is a separate crate so an edit to the daemon does not recompile the
+  controller or the server.
 - `brokk-mj-chat` (`mj-chat/`, library `mj_chat`) holds the conversation view
   state that the terminal and web surfaces render. It uses the foundation and
   client branches, in parallel with the controller.

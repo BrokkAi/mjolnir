@@ -78,7 +78,7 @@ pub(super) async fn spawn_subagent(
 
 /// The profile, model and effort a spawn runs its child with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubagentSelection {
+pub struct SubagentSelection {
     pub profile_id: String,
     pub model: String,
     pub effort: Option<String>,
@@ -105,7 +105,7 @@ impl std::ops::Deref for ModelCandidate {
 }
 
 /// Resolve the session override or global task choice, drawing a profile by quota.
-pub(crate) async fn resolve_subagent_policy_selection(
+pub async fn resolve_subagent_policy_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
@@ -183,7 +183,7 @@ pub(crate) async fn resolve_subagent_policy_selection(
 
 /// The profile and effort for the oracle's model. Like a spawn, it ranks the
 /// enabled profiles that offer the model by quota.
-pub(crate) async fn resolve_oracle_selection(
+pub async fn resolve_oracle_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     choice: &mj_core::config::SubagentChoice,
@@ -256,7 +256,7 @@ enum EffortRequirement<'a> {
 }
 
 /// A reviewer uses the same enabled-profile chooser and effort validation as spawn.
-pub(crate) async fn resolve_reviewer_model_profile_selection(
+pub async fn resolve_reviewer_model_profile_selection(
     backend: &Arc<dyn SubagentBackend>,
     model: &str,
     effort: Option<&str>,
@@ -329,7 +329,7 @@ pub(crate) async fn resolve_reviewer_model_profile_selection(
     })?
 }
 
-pub(crate) async fn resolve_pinned_reviewer_model_profile_selection(
+pub async fn resolve_pinned_reviewer_model_profile_selection(
     backend: &Arc<dyn SubagentBackend>,
     profile: &str,
     model: &str,
@@ -921,13 +921,13 @@ pub(crate) fn build_subagent_prompt(instructions: &str) -> Result<String, ApiFai
 }
 
 /// Compatibility for accepted requests from workers running an older build.
-pub(crate) struct LegacySubagentSourceRange {
+pub struct LegacySubagentSourceRange {
     pub file: PathBuf,
     pub start: u64,
     pub end: u64,
 }
 
-pub(crate) async fn build_legacy_subagent_prompt(
+pub async fn build_legacy_subagent_prompt(
     backend: &Arc<dyn SubagentBackend>,
     parent_session_id: &str,
     instructions: &str,

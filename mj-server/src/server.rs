@@ -142,7 +142,7 @@ pub struct ServerOptions {
     /// task does not occupy the controller's action admission slot.
     background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
-    pub(crate) image_builds: mj_controller::session_images::ImageBuilds,
+    pub image_builds: mj_controller::session_images::ImageBuilds,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
     /// disabled only for an explicitly trusted HTTP development endpoint.
@@ -385,14 +385,14 @@ pub async fn run_server_on_listener(
 
 mod viewer_feed;
 mod viewer_types;
-pub(crate) mod viewer_wire;
+pub mod viewer_wire;
 pub use viewer_types::*;
 mod actions;
 pub use actions::*;
 mod routes;
 use routes::*;
 mod handlers;
-pub(crate) use handlers::validate_new_preflight;
+pub use handlers::validate_new_preflight;
 use handlers::*;
 mod validation;
 pub use validation::phone_prompt_blocks;

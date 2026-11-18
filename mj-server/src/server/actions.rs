@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) -> bool {
+pub fn is_turn_control_command(command: &mj_core::relay::RelayCommand) -> bool {
     matches!(
         command,
         mj_core::relay::RelayCommand::Steer { .. }

@@ -13,7 +13,8 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [x] (2026-11-18) Measured module sizes and the references between modules in every crate over the budget (see Context and Surprises).
 - [x] (2026-11-18) `scripts/register-crate.py` registers a new crate on crates.io (placeholder, owners, Trusted Publishing), so adding a crate needs no hand work.
 - [x] (2026-11-18) `scripts/check-crate-size.py` reports every crate against the budget and stops a crate under it from growing past it.
-- [ ] Milestone 1: the HTTP server leaves `mj-daemon` as `mj-server` (`brokk-mj-server`).
+- [x] (2026-11-18) Milestone 1: the HTTP server is `mj-server` (`brokk-mj-server`), 29,241 lines; `mj-daemon` is 104,360. The 964 tests are the same 964, 279 of them now in `mj-server`.
+- [ ] Measure what the `mj-daemon` test unit generates code for (see the code generation entry in Surprises) before choosing Milestone 2's cuts.
 - [ ] Milestone 2: the review host and the pollers leave `mj-daemon`.
 - [ ] Milestone 3: `mj-daemon`'s `daemon` and `server_runtime` modules are separated and the crate is under the budget.
 - [ ] Milestone 4: `mj-controller` fans out above the store (accounts, import, worker staging, session runtime); starts when the storage layer is its own crate.
@@ -32,6 +33,13 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
   Evidence: a pass that maps each uniquely named public type and path-qualified function to the module defining it and counts uses elsewhere. It over-counts common names (`session`, `result`, `ensure`), so the compiler is the real check once files move.
 - Observation: the mbx compiler cache already serves rustc in session clones. A cold `cargo test --no-run -p brokk-mj-daemon` in a fresh clone reported `753 hits, 191 misses`, so third-party crates are mostly reused and the workspace's own crates are what a fresh clone pays for.
   Evidence: the `mbx[progress]` line in that build's output.
+
+- Observation: lines moved out do not buy time in proportion, because code generation, not parsing or type checking, is most of a test build. Moving 22% of `mj-daemon`'s lines out took its test unit from 63.4 s to 56.7 s, about 10%. Of those 56.7 s on an idle 32-thread machine, type checking is 9.0 s, borrow checking 6.6 s and coherence checking 5.5 s, while collecting generic instantiations is 12.1 s, generating LLVM input 19.3 s and LLVM itself 19.1 s (in parallel with the previous step). The server's own test unit is 12.8 s. So the remaining cost is concentrated in what the daemon's code and its 16,238-line `daemon/tests.rs` instantiate, and the next cut should be chosen by generated code, not by line count.
+  Evidence: `RUSTC_BOOTSTRAP=1 CARGO_INCREMENTAL=0 cargo rustc -p brokk-mj-daemon --lib --profile test -- -Ztime-passes`, and `cargo test --no-run -p brokk-mj-daemon --timings` before and after the move.
+- Observation: a new commit rebuilds every workspace crate. `mj-core/build.rs` passes the commit time to the compiler as `MJ_BUILD_COMMIT_TIME`, and `mj-core/src/worker_build.rs` reads it with `env!`, so `mj-core` and everything above it is stale after each commit even when no source changed.
+  Evidence: `mbx[warning]: incremental state was not reused: compiler environment input changed: MJ_BUILD_COMMIT_TIME` on the first build after a commit.
+- Observation: making the server a crate needed 30 items widened from `pub(crate)` to `pub` and one feature. The daemon's tests read two counters in `server/viewer_types.rs` that existed only under `cfg(test)`; they are now behind `mj-server`'s `test-support` feature, which `mj-daemon` enables in its dev-dependencies.
+  Evidence: the errors from `cargo check -p brokk-mj-daemon --all-targets` after the move.
 
 ## Decision Log
 
@@ -122,7 +130,17 @@ Each cut is its own commit and leaves the workspace building, so the work can st
 
 ## Artifacts and Notes
 
-Baseline timings are recorded here when Milestone 1 lands, from `cargo test --no-run -p brokk-mj-daemon --timings` in a fresh clone before and after.
+Milestone 1, `cargo test --no-run --timings` in a fresh clone on a 32-thread machine, third-party crates served by the mbx cache. Seconds per unit:
+
+                                        before    after
+    brokk-mj-core (lib)                   19.6     21.5
+    brokk-mj-controller (lib)             24.1     28.9
+    brokk-mj-server (lib)                    -      8.2
+    brokk-mj-server (lib test)               -     12.8
+    brokk-mj-daemon (lib test)            63.4     64.4   (56.7 when nothing else compiles beside it)
+    whole build                            114      118
+
+The whole build did not get shorter: the daemon's test unit is still the last and longest step, and it now waits for the server library first. The gain so far is that a daemon edit no longer recompiles 29,000 lines of server and its tests.
 
 ## Interfaces and Dependencies
 

@@ -103,9 +103,9 @@ const SUMMARY_FIELDS: &[&str] = &[
 ];
 
 #[derive(Debug)]
-pub(crate) struct WireRow {
-    pub(crate) row: Value,
-    pub(crate) interned: BTreeMap<String, Value>,
+pub struct WireRow {
+    pub row: Value,
+    pub interned: BTreeMap<String, Value>,
 }
 
 #[derive(Serialize)]
@@ -205,7 +205,7 @@ pub(super) fn metadata_digests(snapshot: &ViewerSnapshot) -> Result<MetadataDige
     Ok(MetadataDigests(digests))
 }
 
-pub(crate) fn row(session: &ViewerSession) -> Result<WireRow> {
+pub fn row(session: &ViewerSession) -> Result<WireRow> {
     project_row(session, is_summary(session))
 }
 

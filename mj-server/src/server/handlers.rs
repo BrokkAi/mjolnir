@@ -1396,7 +1396,7 @@ pub(super) async fn ask_container_upgrade_preview(
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
 }
 
-pub(crate) fn validate_new_preflight(
+pub fn validate_new_preflight(
     request: &mj_client::daemon::NewSessionPreflightRequest,
     snapshot: &ViewerSnapshot,
 ) -> Result<(), String> {

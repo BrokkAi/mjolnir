@@ -49,7 +49,7 @@ pub(super) async fn subagent_options(
     Ok(Json(options))
 }
 
-pub(crate) fn validate_selectors(
+pub fn validate_selectors(
     choices: &mj_core::worker_launch::ProfileConfig,
     model: Option<&str>,
     effort: Option<&str>,

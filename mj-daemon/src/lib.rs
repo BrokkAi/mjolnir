@@ -7,7 +7,7 @@ pub mod observe;
 pub mod pollers;
 pub mod recovery;
 pub mod review_host;
-pub mod server;
+pub use mj_server::server;
 pub mod server_runtime;
 pub mod web_viewer;
 pub mod worker_upgrade;
