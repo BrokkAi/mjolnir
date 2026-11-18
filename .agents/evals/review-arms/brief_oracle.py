@@ -791,6 +791,10 @@ def strict_fidelity_decision(r, e):
             "fact_inferred": r["fact_inferred"]}
 
 
+# Judge A on Claude Opus (claude7), judge B on GPT Sol (codex), as brief/PLAN-bifrost-oracle-strict.md registers.
+STRICT_JUDGE_MODELS = {"A": "opus", "B": "gpt-6.1-sol"}
+
+
 def verdicts_fingerprint(leak_round):
     """Binds a gate result to the exact leak verdicts it judged."""
     return hashlib.sha256(json.dumps(leak_round["verdicts"], sort_keys=True).encode()).hexdigest()
@@ -809,6 +813,12 @@ def noleak_gate_build(n):
     checks = json.loads((W / f"round-{n}" / "check-results.json").read_text())["decisions"]
     pending = 0
     keymap = {}
+    # The registered leak rule pairs one Opus and one Sol judge; check the sessions that judged.
+    sessions = ROOT / "briefs" / f"{TASK_NAME}-leak-{n}" / "sessions"
+    models = {j: (json.loads((sessions / f"batch-0-{j}.json").read_text()).get("config") or {}).get("model")
+              for j in ("A", "B")}
+    if models != STRICT_JUDGE_MODELS:
+        raise SystemExit(f"round {n} leak judges ran on {models}, not {STRICT_JUDGE_MODELS}")
     for bug, d in checks.items():
         if d["decision"] != "carries":
             continue
@@ -891,7 +901,12 @@ def noleak_publish(jobs_out):
         elif done < NOLEAK_ROUNDS:
             raise SystemExit(f"{bug}: not passed after round {done}; run the remaining rounds first")
         else:
-            excluded.append({"bug": bug, "after_round": done, "last_check": previous})
+            # Say why: a diff that never reached a clean leak check failed construction, which is
+            # not evidence that its complete fact cannot be stated without leaking.
+            kind = (previous or {}).get("kind", "")
+            cause = ("construction: fidelity check" if "fidelity" in kind or "fact check" in kind
+                     else "leak: strict gate or leak judges")
+            excluded.append({"bug": bug, "after_round": done, "cause": cause, "last_check": previous})
     for r in retained:
         d = ROOT / "briefs" / ("oracle-strict" if STRICT else "oracle-noleak") / r["bug"]
         text = (W / "texts" / r["bug"] / f"round-{r['round']}.md").read_text()

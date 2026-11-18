@@ -326,15 +326,11 @@ if a.kind == "judge" and not failed and all((V / "out" / f"verdicts-{b.stem.spli
     # written by whichever invocation completes the last of both judges' verdicts.
     verdicts = [{**v, "judge": j} for b, j in both
                 for v in json.loads((V / "out" / f"verdicts-{b.stem.split('-')[1]}-{j}.json").read_text())["verdicts"]]
-    # Two invocations (judges A and B) can both get here; write a private temporary file and
-    # hard-link it into place, so exactly one complete aggregate is published.
+    # Two invocations (judges A and B) can both get here: each writes a private temporary file and
+    # atomically replaces the aggregate, so readers never see a partial file, and a rerun after a
+    # rejudge refreshes it from the current verdict files.
     target = V / "workflow-out.json"
     tmp = target.with_name(f"workflow-out.{os.getpid()}.tmp")
     tmp.write_text(json.dumps({"verdicts": verdicts, "missing": []}, indent=2) + "\n")
-    try:
-        os.link(tmp, target)
-    except FileExistsError:
-        pass  # the other invocation published the same verdict files
-    finally:
-        tmp.unlink()
+    os.replace(tmp, target)
 raise SystemExit(1 if failed else 0)
