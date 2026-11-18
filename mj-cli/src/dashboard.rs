@@ -52,8 +52,7 @@ use mj_core::workspace::{ConversationLayout, PaneSizes};
 use mj_tui::tile_layout::PaneId;
 use mj_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption, KeyRoute,
-    PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
-    resume_profile_placeholders,
+    PreparedMaterializedSessionDetail, SessionOperationKind, resume_profile_placeholders,
 };
 use ratatui::layout::Direction;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
@@ -1553,10 +1552,9 @@ impl DashboardContext {
         }
         self.opening_chat_sessions.remove(&pane);
 
-        if let Some(session_id) = self.dashboard.close_pane(pane) {
-            self.park_chat_composer(&session_id);
-            self.record_chat_detach(&session_id);
-            self.chats.remove(&session_id);
+        self.cancel_chat_open_in(pane);
+        if self.dashboard.close_pane(pane).is_some() {
+            self.retire_chats_outside_the_layout();
             self.selection.clear();
         }
         self.sync_opening_session();

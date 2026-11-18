@@ -630,7 +630,8 @@ impl DashboardState {
             .published
             .as_ref()
             .map_or(entry.target.is_none(), |card| {
-                card.form.is_some() && self.selected_notification_item(entry) == card.entries.len()
+                card.form.as_ref().is_some_and(|form| !form.is_native())
+                    && self.selected_notification_item(entry) == card.entries.len()
             });
         (entry.level == AttentionLevel::Waiting
             && form_selected
@@ -1307,19 +1308,21 @@ pub(crate) fn render(
     }
     if form_requested && !inline_form {
         if let Some(error) = dashboard.notifications.form_errors.get(&session_id) {
-            text.push_str(&format!("\nCould not load form: {error}"));
+            text = format!("Could not load form: {error}\n{text}");
         } else if chat.is_none() {
-            text.push_str("\nLoading form…");
+            text = format!("Loading form…\n{text}");
         } else {
-            text.push_str("\nWaiting for the session's form update…");
+            text = format!("Waiting for the session's form update…\n{text}");
         }
     }
     // Header, top text margin, bottom margin, blank separator, reply and buttons.
     let body = Rect::new(
         inner.x + 1,
-        inner.y + if inline_form { 1 } else { 2 },
+        inner.y + if form_requested { 1 } else { 2 },
         inner.width.saturating_sub(2),
-        inner.height.saturating_sub(if inline_form { 2 } else { 6 }),
+        inner
+            .height
+            .saturating_sub(if form_requested { 2 } else { 6 }),
     );
     if inline_form {
         dashboard.notifications.form_area = (body.width > 0 && body.height > 0).then_some(body);
@@ -2175,6 +2178,45 @@ pub(crate) mod tests {
         dashboard.set_notification_cards(Some(Default::default()));
         assert!(dashboard.notification_entries().is_empty());
         assert!(dashboard.notifications.skipped.is_empty());
+
+        // Hard-won: b817d9202: a native child's projected form suppressed its owner's quick reply forever.
+        use mj_client::runtime_feed::{CardForm, NotificationCard};
+        dashboard.set_notification_cards(Some(
+            [(
+                "q1".into(),
+                NotificationCard {
+                    since_ms: 1,
+                    badge: NotificationKind::NeedsInput,
+                    entries: Vec::new(),
+                    dismissal: None,
+                    holder: Some("q1".into()),
+                    form: Some(CardForm::native(
+                        "child",
+                        1,
+                        "native-request",
+                        1,
+                        "Approve native action?".into(),
+                    )),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        assert!(dashboard.notification_form_session().is_none());
+        assert!(
+            drawn(&mut dashboard, 120, 44)
+                .iter()
+                .any(|line| line.contains("Quick reply:"))
+        );
+        dashboard.handle_key(key(KeyCode::Char('y')));
+        let DashboardAction::NotificationReply {
+            session_id, prompt, ..
+        } = dashboard.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("native forms keep the existing quick reply dispatcher");
+        };
+        assert_eq!(session_id, "q1");
+        assert_eq!(prompt.payload.text, "y");
     }
 
     // Hard-won: 6597a0761: a new card from the same session kept the old scroll offset.

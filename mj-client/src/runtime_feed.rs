@@ -342,6 +342,29 @@ pub struct CardForm {
     pub message: String,
 }
 
+impl CardForm {
+    /// Native requests use a reserved identity namespace, since their owner
+    /// chat cannot answer a form projected from a harness-native child.
+    pub fn native(
+        source: &str,
+        generation: u64,
+        request: &str,
+        raised_at_ms: i64,
+        message: String,
+    ) -> Self {
+        Self {
+            raised_at_ms,
+            request_id: format!("native.{}:{source}.{generation}.{request}", source.len()),
+            message,
+        }
+    }
+
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.request_id.starts_with("native.")
+    }
+}
+
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {

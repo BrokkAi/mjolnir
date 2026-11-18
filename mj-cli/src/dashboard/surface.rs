@@ -186,6 +186,7 @@ impl DashboardContext {
             dashboard,
             chats,
             opening_chat_sessions,
+            attachments,
             selection,
             selection_text,
             login,
@@ -199,13 +200,24 @@ impl DashboardContext {
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
+        let pane_access: BTreeMap<_, _> = dashboard
+            .pane_sessions()
+            .into_iter()
+            .map(|(pane, session)| {
+                let allowed = attachments
+                    .get(&session)
+                    .is_none_or(|attachment| attachment.pane_can_show(dashboard, pane));
+                (pane, allowed)
+            })
+            .collect();
         terminal.draw(|frame| {
-            drawn = render_combined(
+            drawn = mj_tui::render_combined_with_chat_access(
                 frame,
                 dashboard,
                 chats,
                 opening_chat_sessions,
                 transcript_selected,
+                &|pane, _| pane_access.get(&pane).copied().unwrap_or(true),
             );
             *selection_text = if login_open {
                 None

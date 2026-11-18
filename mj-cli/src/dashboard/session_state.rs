@@ -203,11 +203,7 @@ impl DashboardContext {
     }
 
     pub(super) fn wanted_chat_sessions(&self) -> BTreeSet<String> {
-        let mut sessions = self.dashboard.pane_session_ids();
-        if let Some(session) = self.dashboard.notification_form_session() {
-            sessions.insert(session);
-        }
-        sessions
+        attachment::wanted_chat_sessions(&self.dashboard, &self.attachments)
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays
@@ -259,9 +255,18 @@ impl DashboardContext {
         let Self {
             chats,
             opening_chat_sessions,
+            attachments,
             dashboard,
             ..
         } = self;
+        if attachments
+            .get(dashboard.current_session_id()?)
+            .is_some_and(|attachment| {
+                !attachment.pane_can_show(dashboard, dashboard.focused_pane())
+            })
+        {
+            return None;
+        }
         let opening = opening_chat_sessions
             .get(&dashboard.focused_pane())
             .map(String::as_str);
@@ -288,11 +293,18 @@ impl DashboardContext {
         let Self {
             chats,
             opening_chat_sessions,
+            attachments,
             dashboard,
             ..
         } = self;
         let opening = opening_chat_sessions.get(&pane).map(String::as_str);
         let session_id = dashboard.pane_session(pane)?;
+        if attachments
+            .get(session_id)
+            .is_some_and(|attachment| !attachment.pane_can_show(dashboard, pane))
+        {
+            return None;
+        }
         if !chat_is_visible(opening, session_id)
             || dashboard.transition_kind(session_id).is_some()
             || dashboard.transition_failure_kind(session_id).is_some()

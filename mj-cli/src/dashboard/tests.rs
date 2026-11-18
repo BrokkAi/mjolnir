@@ -8,6 +8,7 @@ fn detaching_hidden_chat_preserves_unread_background_events() {
 use super::*;
 use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
 use mj_core::state::State;
+use mj_tui::render_combined;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
@@ -351,6 +352,40 @@ async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
     assert!(attachment.accepts_surface_result(generation, &dashboard, "session-1"));
     assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
     attachment.finish();
+    // Hard-won: b817d9202: a notification completion made the cancelled conversation visible again.
+    let mut chats = BTreeMap::from([("session-1".into(), open_test_chat("session-1"))]);
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let allowed = attachment.pane_can_show(&dashboard, pane);
+    assert!(!allowed);
+    terminal
+        .draw(|frame| {
+            let drawn = mj_tui::render_combined_with_chat_access(
+                frame,
+                &mut dashboard,
+                &mut chats,
+                &BTreeMap::new(),
+                false,
+                &|_, _| allowed,
+            );
+            assert!(drawn.is_empty());
+        })
+        .unwrap();
+    // The notification still owns this chat after its pane closes. Retirement
+    // consults this same owner instead of removing the session unconditionally.
+    attachment.request_pane(pane, assignment);
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    dashboard.close_pane(pane);
+    let attachments = BTreeMap::from([("session-1".into(), attachment)]);
+    assert!(attachment::wanted_chat_sessions(&dashboard, &attachments).contains("session-1"));
+    let mut attachment = attachments.into_values().next().unwrap();
+    // Restore the original assignment to continue the cancellation transitions.
+    dashboard.set_pane_session(dashboard.focused_pane(), Some("session-1"));
+    let pane = dashboard.focused_pane();
+    let assignment = dashboard.pane_assignment(pane).unwrap();
+    attachment.bind(pane, assignment);
+    attachment.select("session-1");
     // Without the notification, Esc really cancels. A later notification
     // request or explicit pane retry can still start its own accepted work.
     dashboard.set_notification_cards(Some(Default::default()));

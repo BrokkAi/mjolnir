@@ -360,17 +360,44 @@ pub fn render_combined(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    // NO_COLOR wins over the configured theme; the symbol set follows the
-    // configuration or, unset, the terminal.
-    let theme = theme::effective_theme(dashboard.config.theme);
-    render_combined_with_theme(
+    render_combined_with_chat_access(
         frame,
         dashboard,
         chats,
         opening_panes,
         transcript_selected,
-        theme,
+        &|_, _| true,
     )
+}
+
+/// Draws conversations only when their attachment owner grants the pane access.
+/// Warm chats can still serve Notifications while a conversation is cancelled.
+pub fn render_combined_with_chat_access(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+    can_show: &dyn Fn(PaneId, &str) -> bool,
+) -> Vec<String> {
+    render_combined_with_theme_and_symbols(
+        frame,
+        dashboard,
+        chats,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show,
+        },
+        transcript_selected,
+        theme::effective_theme(dashboard.config.theme),
+        theme::symbols_for(dashboard.config.advanced.symbols),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ConversationAccess<'a> {
+    opening: &'a BTreeMap<PaneId, String>,
+    can_show: &'a dyn Fn(PaneId, &str) -> bool,
 }
 
 #[cfg(test)]
@@ -391,7 +418,10 @@ pub(crate) fn render_combined_for_test(
         frame,
         dashboard,
         chats,
-        opening_panes,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show: &|_, _| true,
+        },
         transcript_selected,
         // Golden output is independent of NO_COLOR and of the terminal.
         theme::resolve(dashboard.config.theme, false, None).theme,
@@ -416,7 +446,10 @@ pub fn render_combined_with_theme(
         frame,
         dashboard,
         chats,
-        opening_panes,
+        ConversationAccess {
+            opening: opening_panes,
+            can_show: &|_, _| true,
+        },
         transcript_selected,
         selected_theme,
         symbols,
@@ -427,7 +460,7 @@ fn render_combined_with_theme_and_symbols(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     chats: &mut BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
     transcript_selected: bool,
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
@@ -436,7 +469,7 @@ fn render_combined_with_theme_and_symbols(
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
-                render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected);
+                render_combined_themed(frame, dashboard, chats, access, transcript_selected);
             // Dialog titles, hints and notices spell marks like `·` and `…`
             // as literal text; ASCII mode folds whatever the glyph table did
             // not already draw.
@@ -452,7 +485,7 @@ fn render_combined_themed(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     chats: &mut BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
     transcript_selected: bool,
 ) -> Vec<String> {
     dashboard.rebuild_palette_entries();
@@ -580,7 +613,7 @@ fn render_combined_themed(
         .get(&focused_pane)
         .copied()
         .unwrap_or(content_area.width);
-    let focused_chat_session = focused_chat_on_screen(dashboard, chats, opening_panes);
+    let focused_chat_session = focused_chat_on_screen(dashboard, chats, access);
     let standby_drawn = match &selected_transition {
         Some((_, kind, failed)) => !failed && DashboardState::transition_accepts_prompts(*kind),
         None => {
@@ -623,8 +656,10 @@ fn render_combined_themed(
         let parked = dashboard
             .transition_kind(&session_id)
             .is_some_and(DashboardState::transition_accepts_prompts)
-            || opening_panes.get(&pane) == Some(&session_id);
-        let height = if parked {
+            || access.opening.get(&pane) == Some(&session_id);
+        let height = if !(access.can_show)(pane, &session_id) {
+            EMPTY_PROMPT_HEIGHT
+        } else if parked {
             dashboard
                 .standby_prompt_mut(&session_id)
                 .desired_prompt_height(*width)
@@ -1060,11 +1095,13 @@ fn render_combined_themed(
                             .map(|kind| (session_id.to_owned(), kind, true))
                     })
             });
-            let opening = opening_panes.get(&pane_id).map(String::as_str);
+            let opening = access.opening.get(&pane_id).map(String::as_str);
             let chat = pane_session
                 .as_deref()
                 .filter(|session_id| {
-                    pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
+                    pane_transition.is_none()
+                        && (access.can_show)(pane_id, session_id)
+                        && chat_shows_in_pane(opening, session_id)
                 })
                 .and_then(|session_id| chats.get_mut(session_id))
                 .filter(|chat| chat.has_live_composer());
@@ -1428,14 +1465,15 @@ fn chat_shows_in_pane(opening: Option<&str>, session_id: &str) -> bool {
 fn focused_chat_on_screen(
     dashboard: &DashboardState,
     chats: &BTreeMap<String, ActiveChat>,
-    opening_panes: &BTreeMap<PaneId, String>,
+    access: ConversationAccess<'_>,
 ) -> Option<String> {
     let pane = dashboard.focused_pane();
     let session_id = dashboard.pane_session(pane)?;
-    let opening = opening_panes.get(&pane).map(String::as_str);
+    let opening = access.opening.get(&pane).map(String::as_str);
     (chats
         .get(session_id)
         .is_some_and(|chat| chat.has_live_composer())
+        && (access.can_show)(pane, session_id)
         && chat_shows_in_pane(opening, session_id)
         && dashboard.transition_kind(session_id).is_none()
         && dashboard.transition_failure_kind(session_id).is_none())
@@ -2820,9 +2858,38 @@ mod tests {
                 Some("Worker unavailable".to_owned()),
             ),
         ] {
-            inline.set_notification_form_error("session-1", error);
+            inline.set_notification_form_error("session-1", error.clone());
             let lines = render_combined_golden(&mut inline, 120, 44);
             append_combined_golden(&mut output, label, 120, 44, &lines);
+            // Hard-won: b817d9202: compact loading/error cards reserved a hidden reply row and lost their status.
+            let entries = inline.notification_entries();
+            let text = inline.selected_notification_text(&entries[0]);
+            let mut terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    crate::notifications_pane::render(
+                        frame,
+                        frame.area(),
+                        &mut inline,
+                        &entries,
+                        text,
+                        None,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            assert!(lines.iter().any(|line| line.contains(if error.is_some() {
+                "Could not load form"
+            } else {
+                "Loading form"
+            })));
+            append_combined_golden(
+                &mut output,
+                "compact form attachment status",
+                120,
+                8,
+                &lines,
+            );
         }
         inline.set_notification_form_error("session-1", None);
         let (chat, _answers) = crate::notifications_pane::tests::form_chat("session-1", request);

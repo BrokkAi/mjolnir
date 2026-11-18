@@ -91,6 +91,27 @@ impl ChatRetirement {
     }
 }
 
+/// The sessions retained by live conversation or notification interests.
+pub(super) fn wanted_chat_sessions(
+    dashboard: &mj_tui::DashboardState,
+    attachments: &BTreeMap<String, SessionAttachment>,
+) -> std::collections::BTreeSet<String> {
+    let mut sessions = dashboard
+        .pane_sessions()
+        .into_iter()
+        .filter(|(pane, session)| {
+            attachments
+                .get(session)
+                .is_none_or(|attachment| attachment.pane_can_show(dashboard, *pane))
+        })
+        .map(|(_, session)| session)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(session) = dashboard.notification_form_session() {
+        sessions.insert(session);
+    }
+    sessions
+}
+
 impl SessionAttachment {
     /// Observe navigation before permitting an old task to join its new
     /// assignment. Work survives reassignment only through another live lease.
@@ -168,13 +189,21 @@ impl SessionAttachment {
         }
     }
 
+    /// Access follows this assignment's interest, even if another surface
+    /// completed the session's shared attach after this pane cancelled.
+    pub(super) fn pane_can_show(&self, dashboard: &mj_tui::DashboardState, pane: PaneId) -> bool {
+        self.assignments.get(&pane).is_none_or(|interest| {
+            matches!(interest, PaneInterest::Requested(assignment)
+                if dashboard.pane_assignment(pane) == Some(*assignment))
+        })
+    }
+
     fn has_surface_interest(&self, dashboard: &mj_tui::DashboardState, session: &str) -> bool {
         dashboard.notification_form_session().as_deref() == Some(session)
-            || self.assignments.iter().any(|(pane, interest)| {
-                matches!(interest, PaneInterest::Requested(assignment)
-                    if dashboard.pane_assignment(*pane) == Some(*assignment)
-                    && dashboard.pane_session(*pane) == Some(session))
-            })
+            || dashboard
+                .pane_sessions()
+                .into_iter()
+                .any(|(pane, held)| held == session && self.pane_can_show(dashboard, pane))
     }
 
     #[cfg(test)]

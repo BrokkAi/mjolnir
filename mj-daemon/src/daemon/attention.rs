@@ -1011,15 +1011,13 @@ fn notification_card(
     } else if let Some((source, native, request)) = native {
         (
             Some(native.agent.owner_session_id.clone()),
-            Some(CardForm {
-                raised_at_ms: native.pending_input_raised_at_ms.unwrap_or(0),
-                request_id: format!(
-                    "native.{}:{source}.{}.{request}",
-                    source.len(),
-                    native.generation_ordinal
-                ),
-                message: native.pending_input_message.clone().unwrap_or_default(),
-            }),
+            Some(CardForm::native(
+                source,
+                native.generation_ordinal,
+                request,
+                native.pending_input_raised_at_ms.unwrap_or(0),
+                native.pending_input_message.clone().unwrap_or_default(),
+            )),
         )
     } else {
         (holder.cloned(), None)
@@ -1315,6 +1313,7 @@ mod tests {
         let form = card.form.as_ref().unwrap();
         let first_request = format!("native.{}:{id}.1.first-request", id.len());
         assert_eq!(form.request_id, first_request);
+        assert!(form.is_native());
         assert_eq!(form.message, "Approve the native action?");
         assert_eq!(form.raised_at_ms, 42);
         assert_eq!(card.since_ms, 42);

@@ -121,7 +121,9 @@ pub use crate::actions::CommandId;
 pub use crate::availability::{
     AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
 };
-pub use crate::combined::{render_combined, render_combined_with_theme};
+pub use crate::combined::{
+    render_combined, render_combined_with_chat_access, render_combined_with_theme,
+};
 pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;
