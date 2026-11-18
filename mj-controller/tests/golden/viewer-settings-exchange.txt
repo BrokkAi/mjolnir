@@ -180,7 +180,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn text to Jev, a hosted classifier (Fastino's GLiDE via a Brokk proxy); quota recovery needs it. Off stops both; sessions follow on resume or restart.",
+                "help": "Turn text and quota recovery go to Jev, a hosted classifier; off stops both. Sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }
@@ -579,7 +579,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn text to Jev, a hosted classifier (Fastino's GLiDE via a Brokk proxy); quota recovery needs it. Off stops both; sessions follow on resume or restart.",
+                "help": "Turn text and quota recovery go to Jev, a hosted classifier; off stops both. Sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }
@@ -1037,7 +1037,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn text to Jev, a hosted classifier (Fastino's GLiDE via a Brokk proxy); quota recovery needs it. Off stops both; sessions follow on resume or restart.",
+                "help": "Turn text and quota recovery go to Jev, a hosted classifier; off stops both. Sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }
