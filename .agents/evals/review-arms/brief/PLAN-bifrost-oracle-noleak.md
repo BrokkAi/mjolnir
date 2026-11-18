@@ -39,3 +39,5 @@ A positive result shows that reviewers benefit when the decisive fact is supplie
 ## Models and quota
 
 Editor, fact checker, leak judges and round M judges are Claude Opus/high on claude7. Reviewers are Terra/high on whichever Codex profile mj review selects. Every profile keeps the 25% weekly floor, checked before each launch.
+
+Clarification, 2026-11-18, before any edit: wording-only edits may touch any item the leak judges cite as the source of the leak, not only the carrying items. No item is deleted, no relation or anchor changes, and the carrying items must still carry the decisive fact by the blind fact check.
