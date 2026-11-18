@@ -69,6 +69,184 @@
    "readysettech__readyset"
   ]
  ],
+ "group_of": {
+  "Geal__nom": [
+   "Geal__nom",
+   "rust-bakery__nom"
+  ],
+  "rust-bakery__nom": [
+   "Geal__nom",
+   "rust-bakery__nom"
+  ],
+  "Hmbown__CodeWhale": [
+   "Hmbown__CodeWhale",
+   "Hmbown__DeepSeek-TUI"
+  ],
+  "Hmbown__DeepSeek-TUI": [
+   "Hmbown__CodeWhale",
+   "Hmbown__DeepSeek-TUI"
+  ],
+  "SaladDay__cc-switch-cli": [
+   "SaladDay__cc-switch-cli",
+   "farion1231__cc-switch"
+  ],
+  "farion1231__cc-switch": [
+   "SaladDay__cc-switch-cli",
+   "farion1231__cc-switch"
+  ],
+  "TeXitoi__structopt": [
+   "TeXitoi__structopt",
+   "clap-rs__clap",
+   "ordian__toml_edit",
+   "rust-cli__config-rs"
+  ],
+  "clap-rs__clap": [
+   "TeXitoi__structopt",
+   "clap-rs__clap",
+   "ordian__toml_edit",
+   "rust-cli__config-rs"
+  ],
+  "ordian__toml_edit": [
+   "TeXitoi__structopt",
+   "clap-rs__clap",
+   "ordian__toml_edit",
+   "rust-cli__config-rs"
+  ],
+  "rust-cli__config-rs": [
+   "TeXitoi__structopt",
+   "clap-rs__clap",
+   "ordian__toml_edit",
+   "rust-cli__config-rs"
+  ],
+  "apache__arrow-rs": [
+   "apache__arrow-rs",
+   "apache__datafusion"
+  ],
+  "apache__datafusion": [
+   "apache__arrow-rs",
+   "apache__datafusion"
+  ],
+  "apache__incubator-opendal": [
+   "apache__incubator-opendal",
+   "apache__opendal"
+  ],
+  "apache__opendal": [
+   "apache__incubator-opendal",
+   "apache__opendal"
+  ],
+  "biomejs__biome": [
+   "biomejs__biome",
+   "rome__tools"
+  ],
+  "rome__tools": [
+   "biomejs__biome",
+   "rome__tools"
+  ],
+  "crablang__crab": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "rust-lang__miri": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "rust-lang__rust-analyzer": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "rust-lang__rust-clippy": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "rust-lang__rust": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "rust-lang__rustfmt": [
+   "crablang__crab",
+   "rust-lang__miri",
+   "rust-lang__rust",
+   "rust-lang__rust-analyzer",
+   "rust-lang__rust-clippy",
+   "rust-lang__rustfmt"
+  ],
+  "databendlabs__databend": [
+   "databendlabs__databend",
+   "datafuselabs__databend"
+  ],
+  "datafuselabs__databend": [
+   "databendlabs__databend",
+   "datafuselabs__databend"
+  ],
+  "dathere__qsv": [
+   "dathere__qsv",
+   "medialab__xan"
+  ],
+  "medialab__xan": [
+   "dathere__qsv",
+   "medialab__xan"
+  ],
+  "diem__diem": [
+   "diem__diem",
+   "libra__libra"
+  ],
+  "libra__libra": [
+   "diem__diem",
+   "libra__libra"
+  ],
+  "eza-community__eza": [
+   "eza-community__eza",
+   "ogham__exa"
+  ],
+  "ogham__exa": [
+   "eza-community__eza",
+   "ogham__exa"
+  ],
+  "gfx-rs__naga": [
+   "gfx-rs__naga",
+   "gfx-rs__wgpu"
+  ],
+  "gfx-rs__wgpu": [
+   "gfx-rs__naga",
+   "gfx-rs__wgpu"
+  ],
+  "kreuzberg-dev__kreuzberg": [
+   "kreuzberg-dev__kreuzberg",
+   "xberg-io__xberg"
+  ],
+  "xberg-io__xberg": [
+   "kreuzberg-dev__kreuzberg",
+   "xberg-io__xberg"
+  ],
+  "mit-pdos__noria": [
+   "mit-pdos__noria",
+   "readysettech__readyset"
+  ],
+  "readysettech__readyset": [
+   "mit-pdos__noria",
+   "readysettech__readyset"
+  ]
+ },
  "blame_errors": 0,
  "incomplete_traces": 0,
  "bug_precision": 0.85,
@@ -76,13 +254,14 @@
  "windows": {
   "wide_2025": {
    "upper_bound_total": 1690.7,
-   "realistic_total": 651.9,
+   "realistic_total": 664.9,
    "repos_realistic_ge": {
     "5": 25,
     "10": 8,
     "15": 6,
     "25": 3
    },
+   "realistic_total_one_per_group": 651.9,
    "per_repo_realistic": {
     "sinelaw__fresh": 41.1,
     "1jehuang__jcode": 40.7,
@@ -113,23 +292,25 @@
     "prefix-dev__pixi": 5.0,
     "salsa-rs__salsa": 4.7,
     "vortex-data__vortex": 4.7,
-    "farion1231__cc-switch": 4.6,
     "aaif-goose__goose": 4.6,
     "dekobon__big-code-analysis": 4.6,
+    "farion1231__cc-switch": 4.6,
     "hahwul__dalfox": 4.4,
     "pgdogdev__pgdog": 4.3,
     "tursodatabase__turso": 4.2,
     "agent-of-empires__agent-of-empires": 4.1,
     "openai__codex": 4.1,
     "boa-dev__boa": 4.0,
+    "Hmbown__DeepSeek-TUI": 3.9,
+    "SaladDay__cc-switch-cli": 3.9,
     "godot-rust__gdext": 3.9,
     "t8y2__dbx": 3.9,
     "matter-labs__zksync-era": 3.5,
     "verus-lang__verus": 3.5,
     "lance-format__lance": 3.4,
     "GreptimeTeam__greptimedb": 3.3,
-    "ordian__toml_edit": 3.3,
     "nearai__ironclaw": 3.3,
+    "ordian__toml_edit": 3.3,
     "wasmerio__wasmer": 3.2,
     "HelixDB__helix-db": 3.1,
     "Project-Navi__ordvec": 3.1,
@@ -169,6 +350,7 @@
     "Eventual-Inc__Daft": 1.9,
     "s0undt3ch__ToolR": 1.9,
     "cocoindex-io__cocoindex": 1.8,
+    "rust-lang__rust-clippy": 1.7,
     "withcoral__coral": 1.7,
     "Ataraxy-Labs__sem": 1.6,
     "assura-lang__assura": 1.6,
@@ -223,6 +405,7 @@
     "PyO3__maturin": 0.8,
     "TraceMachina__nativelink": 0.8,
     "apache__arrow-rs": 0.8,
+    "apache__incubator-opendal": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
     "biomejs__biome": 0.8,
@@ -230,6 +413,7 @@
     "cberner__redb": 0.8,
     "cloudflare__workers-rs": 0.8,
     "cmakefmt__cmakefmt": 0.8,
+    "databendlabs__databend": 0.8,
     "datafuselabs__databend": 0.8,
     "diesel-rs__diesel": 0.8,
     "eclipse-zenoh__zenoh": 0.8,
@@ -253,6 +437,7 @@
     "rivet-dev__agentos": 0.8,
     "rizsotto__Bear": 0.8,
     "rust-bitcoin__rust-bitcoin": 0.8,
+    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "scanopy__scanopy": 0.8,
     "sebastienrousseau__hsh": 0.8,
@@ -296,6 +481,7 @@
     "Y2Z__monolith": 0.4,
     "altsem__gitu": 0.4,
     "anulum__sc-neurocore": 0.4,
+    "apache__datafusion": 0.4,
     "ariel-os__ariel-os": 0.4,
     "astral-sh__uv": 0.4,
     "benfred__py-spy": 0.4,
@@ -330,6 +516,7 @@
     "lucasgelfond__zerobrew": 0.4,
     "maciejhirsz__logos": 0.4,
     "maplibre__martin": 0.4,
+    "medialab__xan": 0.4,
     "microsoft__windows-rs": 0.4,
     "mierak__rmpc": 0.4,
     "mikeyobrien__ralph-orchestrator": 0.4,
@@ -372,6 +559,7 @@
     "vercel__turborepo": 0.4,
     "vv-bogdanov__jscpd-rs": 0.4,
     "warp-tech__warpgate": 0.4,
+    "xberg-io__xberg": 0.4,
     "xingkongliang__skills-manager": 0.4,
     "youki-dev__youki": 0.4,
     "zellij-org__zellij": 0.4,
@@ -423,6 +611,7 @@
     "build-trust__ockam": 0.0,
     "bytecodealliance__javy": 0.0,
     "ccusage__ccusage": 0.0,
+    "clap-rs__clap": 0.0,
     "cloudflare__quiche": 0.0,
     "commit3296__adler": 0.0,
     "confidential-containers__td-shim": 0.0,
@@ -488,9 +677,12 @@
     "rhaiscript__rhai": 0.0,
     "ron-rs__ron": 0.0,
     "run-llama__liteparse": 0.0,
+    "rust-cli__config-rs": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
+    "rust-lang__miri": 0.0,
     "rust-lang__regex": 0.0,
+    "rust-lang__rustfmt": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
     "safetensors__safetensors": 0.0,
@@ -532,13 +724,14 @@
   },
   "ext_2024": {
    "upper_bound_total": 2250.1,
-   "realistic_total": 868.2,
+   "realistic_total": 884.9,
    "repos_realistic_ge": {
     "5": 33,
     "10": 14,
     "15": 9,
     "25": 4
    },
+   "realistic_total_one_per_group": 868.2,
    "per_repo_realistic": {
     "web-infra-dev__rspack": 44.9,
     "sinelaw__fresh": 41.1,
@@ -577,16 +770,18 @@
     "vortex-data__vortex": 4.7,
     "wasmCloud__wasmCloud": 4.7,
     "GreptimeTeam__greptimedb": 4.6,
-    "farion1231__cc-switch": 4.6,
     "aaif-goose__goose": 4.6,
     "dekobon__big-code-analysis": 4.6,
+    "farion1231__cc-switch": 4.6,
     "hahwul__dalfox": 4.4,
     "paradigmxyz__reth": 4.3,
     "pgdogdev__pgdog": 4.3,
     "agent-of-empires__agent-of-empires": 4.1,
-    "ordian__toml_edit": 4.1,
     "openai__codex": 4.1,
+    "ordian__toml_edit": 4.1,
     "wasmerio__wasmer": 4.0,
+    "Hmbown__DeepSeek-TUI": 3.9,
+    "SaladDay__cc-switch-cli": 3.9,
     "t8y2__dbx": 3.9,
     "wild-linker__wild": 3.9,
     "chroma-core__chroma": 3.8,
@@ -596,6 +791,7 @@
     "tokio-rs__tokio": 3.5,
     "verus-lang__verus": 3.5,
     "lance-format__lance": 3.4,
+    "rust-lang__rust-clippy": 3.4,
     "meilisearch__meilisearch": 3.3,
     "nearai__ironclaw": 3.3,
     "DioxusLabs__dioxus": 3.2,
@@ -694,6 +890,7 @@
     "FyroxEngine__Fyrox": 1.2,
     "apache__arrow-rs": 1.2,
     "cberner__redb": 1.2,
+    "clap-rs__clap": 1.2,
     "deuxfleurs-org__garage": 1.2,
     "dora-rs__dora": 1.2,
     "fish-shell__fish-shell": 1.2,
@@ -729,6 +926,7 @@
     "ProvableHQ__leo": 0.8,
     "PyO3__maturin": 0.8,
     "altsem__gitu": 0.8,
+    "apache__incubator-opendal": 0.8,
     "apache__opendal": 0.8,
     "aya-rs__aya": 0.8,
     "biomejs__biome": 0.8,
@@ -737,6 +935,7 @@
     "bytecodealliance__javy": 0.8,
     "cloudflare__workers-rs": 0.8,
     "cmakefmt__cmakefmt": 0.8,
+    "databendlabs__databend": 0.8,
     "datafuselabs__databend": 0.8,
     "emmett-framework__granian": 0.8,
     "ferrumio__pydynox": 0.8,
@@ -762,6 +961,7 @@
     "risingwavelabs__risingwave": 0.8,
     "rivet-dev__agentos": 0.8,
     "rust-bitcoin__rust-bitcoin": 0.8,
+    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "scanopy__scanopy": 0.8,
     "seanmonstar__reqwest": 0.8,
@@ -805,6 +1005,7 @@
     "agersant__polaris": 0.4,
     "anulum__sc-neurocore": 0.4,
     "apache__datafusion-sqlparser-rs": 0.4,
+    "apache__datafusion": 0.4,
     "ariel-os__ariel-os": 0.4,
     "benfred__py-spy": 0.4,
     "bgreenwell__doxx": 0.4,
@@ -836,6 +1037,7 @@
     "linebender__resvg": 0.4,
     "lucasgelfond__zerobrew": 0.4,
     "maplibre__martin": 0.4,
+    "medialab__xan": 0.4,
     "mikaelmello__inquire": 0.4,
     "mikeyobrien__ralph-orchestrator": 0.4,
     "mimblewimble__grin": 0.4,
@@ -862,7 +1064,9 @@
     "rkyv__rkyv": 0.4,
     "rusqlite__rusqlite": 0.4,
     "rust-bakery__nom": 0.4,
+    "rust-cli__config-rs": 0.4,
     "rust-lang__mdBook": 0.4,
+    "rust-lang__rustfmt": 0.4,
     "rust-lang__rustup": 0.4,
     "rustls__rustls": 0.4,
     "rustviz__rustviz": 0.4,
@@ -888,6 +1092,7 @@
     "unicity-astrid__astrid": 0.4,
     "vv-bogdanov__jscpd-rs": 0.4,
     "warp-tech__warpgate": 0.4,
+    "xberg-io__xberg": 0.4,
     "xingkongliang__skills-manager": 0.4,
     "zellij-org__zellij": 0.4,
     "zesterer__flume": 0.4,
@@ -1000,6 +1205,7 @@
     "run-llama__liteparse": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
+    "rust-lang__miri": 0.0,
     "rust-lang__regex": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
@@ -1043,13 +1249,14 @@
   },
   "mid_2026": {
    "upper_bound_total": 882.6,
-   "realistic_total": 338.8,
+   "realistic_total": 347.1,
    "repos_realistic_ge": {
     "5": 10,
     "10": 4,
     "15": 2,
     "25": 2
    },
+   "realistic_total_one_per_group": 338.8,
    "per_repo_realistic": {
     "1jehuang__jcode": 40.7,
     "sinelaw__fresh": 26.2,
@@ -1066,6 +1273,7 @@
     "dekobon__big-code-analysis": 4.6,
     "rustfs__rustfs": 4.2,
     "agent-of-empires__agent-of-empires": 4.1,
+    "Hmbown__DeepSeek-TUI": 3.9,
     "t8y2__dbx": 3.9,
     "openai__codex": 3.5,
     "uutils__coreutils": 3.4,
@@ -1081,6 +1289,7 @@
     "moltis-org__moltis": 2.6,
     "web-infra-dev__rspack": 2.6,
     "dbt-labs__dbt-core": 2.5,
+    "farion1231__cc-switch": 2.4,
     "paradigmxyz__reth": 2.4,
     "registrystack__registry-stack": 2.4,
     "vortex-data__vortex": 2.2,
@@ -1154,6 +1363,7 @@
     "rivet-dev__agentos": 0.8,
     "rizsotto__Bear": 0.8,
     "rolldown__rolldown": 0.8,
+    "rust-lang__rust": 0.8,
     "ruvnet__RuView": 0.8,
     "sebastienrousseau__hsh": 0.8,
     "servo__servo": 0.8,
@@ -1184,6 +1394,7 @@
     "TheDan64__inkwell": 0.4,
     "anulum__sc-neurocore": 0.4,
     "apache__datafusion": 0.4,
+    "apache__incubator-opendal": 0.4,
     "apache__opendal": 0.4,
     "ariel-os__ariel-os": 0.4,
     "astral-sh__ruff": 0.4,
@@ -1224,6 +1435,7 @@
     "probe-rs__probe-rs": 0.4,
     "redbadger__crux": 0.4,
     "rusqlite__rusqlite": 0.4,
+    "rust-lang__rust-clippy": 0.4,
     "rustls__rustls": 0.4,
     "rustviz__rustviz": 0.4,
     "sbom-tool__sbom-tools": 0.4,
@@ -1241,6 +1453,7 @@
     "verus-lang__verus": 0.4,
     "vv-bogdanov__jscpd-rs": 0.4,
     "warp-tech__warpgate": 0.4,
+    "xberg-io__xberg": 0.4,
     "xingkongliang__skills-manager": 0.4,
     "yewstack__yew": 0.4,
     "zed-industries__zed": 0.4,
@@ -1279,6 +1492,7 @@
     "anulum__scpn-mif-core": 0.0,
     "anulum__scpn-phase-orchestrator": 0.0,
     "anulum__scpn-quantum-control": 0.0,
+    "apache__arrow-rs": 0.0,
     "apache__iggy": 0.0,
     "apache__thrift": 0.0,
     "arxanas__git-branchless": 0.0,
@@ -1292,12 +1506,13 @@
     "bytecodealliance__javy": 0.0,
     "carthage-software__mago": 0.0,
     "ccusage__ccusage": 0.0,
-    "ordian__toml_edit": 0.0,
+    "clap-rs__clap": 0.0,
     "cloudflare__quiche": 0.0,
     "cloudflare__workers-rs": 0.0,
     "commit3296__adler": 0.0,
     "console-rs__indicatif": 0.0,
     "cube-js__cube": 0.0,
+    "databendlabs__databend": 0.0,
     "datafuselabs__databend": 0.0,
     "denoland__deno": 0.0,
     "deuxfleurs-org__garage": 0.0,
@@ -1337,6 +1552,7 @@
     "loro-dev__loro": 0.0,
     "maciejhirsz__logos": 0.0,
     "makepad__makepad": 0.0,
+    "medialab__xan": 0.0,
     "meilisearch__meilisearch": 0.0,
     "microsoft__windows-rs": 0.0,
     "mitsuhiko__insta": 0.0,
@@ -1354,6 +1570,7 @@
     "numaproj__numaflow": 0.0,
     "open-telemetry__opentelemetry-rust": 0.0,
     "open-telemetry__weaver": 0.0,
+    "ordian__toml_edit": 0.0,
     "oss-review-toolkit__ort": 0.0,
     "ouch-org__ouch": 0.0,
     "oven-sh__bun": 0.0,
@@ -1376,6 +1593,8 @@
     "rust-bitcoin__rust-bitcoin": 0.0,
     "rust-lang__flate2-rs": 0.0,
     "rust-lang__futures-rs": 0.0,
+    "rust-lang__miri": 0.0,
+    "rust-lang__rustfmt": 0.0,
     "rust-lang__rustup": 0.0,
     "rust-postgres__rust-postgres": 0.0,
     "ruvnet__RuVector": 0.0,
@@ -1427,6 +1646,7 @@
     "15": 0,
     "25": 0
    },
+   "realistic_total_one_per_group": 5.8,
    "per_repo_realistic": {
     "1jehuang__jcode": 0.7,
     "BigPizzaV3__CodexPlusPlus": 0.4,
@@ -1466,6 +1686,7 @@
     "delta-io__delta-rs": 0.0,
     "facebook__pyrefly": 0.0,
     "facebook__relay": 0.0,
+    "farion1231__cc-switch": 0.0,
     "foundry-rs__foundry": 0.0,
     "freenet__freenet-core": 0.0,
     "gitbutlerapp__gitbutler": 0.0,
@@ -1490,6 +1711,7 @@
     "registrystack__registry-stack": 0.0,
     "rivet-dev__agentos": 0.0,
     "rust-lang__cargo": 0.0,
+    "rust-lang__rust-analyzer": 0.0,
     "rustfs__rustfs": 0.0,
     "salsa-rs__salsa": 0.0,
     "sbom-tool__sbom-tools": 0.0,

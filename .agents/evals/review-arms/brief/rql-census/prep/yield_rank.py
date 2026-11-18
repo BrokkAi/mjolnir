@@ -89,8 +89,8 @@ def main():
         sample[(r["repo"], r["window"])].append(r)
 
     # Clones that share history (forks, renames, subtrees) are one repository: group repos whose
-    # candidate fix commits or root commits overlap; each window keeps the member with the most
-    # eligible yield.
+    # candidate fix commits or root commits overlap. All members stay ranked; selection takes
+    # at most one per group.
     by_hash = collections.defaultdict(set)
     for c in cands:
         by_hash[c["hash"]].add(c["repo"])
@@ -125,7 +125,8 @@ def main():
     group_of = {repo: tuple(sorted(members)) for members in groups.values() for repo in members}
     shared = [sorted(m) for m in groups.values() if len(m) > 1]
 
-    out = {"undated_candidates": undated, "undatable": undatable, "shared_history_groups": shared, "blame_errors": errors,
+    out = {"undated_candidates": undated, "undatable": undatable, "shared_history_groups": shared,
+           "group_of": {r: list(g) for r, g in group_of.items() if len(g) > 1}, "blame_errors": errors,
            "incomplete_traces": sum(1 for rs in sample.values() for r in rs if r.get("trace_complete") is False),
            "bug_precision": BUG_PRECISION, "admission": ADMISSION, "windows": {}}
     for label, (start, wins) in WINDOWS.items():
@@ -138,18 +139,19 @@ def main():
                        and r.get("trace_complete") is True
                        and r.get("intro_ct") and r["intro_ct"] >= start.timestamp())
             per[repo] += count * good / len(s)
-        # One repository per shared-history group: keep the member with the most eligible yield
-        # in this window (an old predecessor mustn't displace its active successor).
+        # Every clone keeps its own estimate, so a related clone stays eligible when the yield
+        # leader turns out costly to index. Cohort selection takes at most one repo per
+        # shared-history group; the counts below count each group once, at its best member.
+        realistic = {r: v * BUG_PRECISION * ADMISSION for r, v in per.items()}
         best = {}
-        for repo, v in per.items():
+        for repo, v in realistic.items():
             g = group_of.get(repo, (repo,))
-            if g not in best or (v, repo) > (per[best[g]], best[g]):
-                best[g] = repo
-        realistic = {r: per[r] * BUG_PRECISION * ADMISSION for r in best.values()}
+            best[g] = max(best.get(g, 0), v)
         out["windows"][label] = {
             "upper_bound_total": round(sum(per.values()), 1),
             "realistic_total": round(sum(realistic.values()), 1),
-            "repos_realistic_ge": {k: sum(v >= k for v in realistic.values()) for k in (5, 10, 15, 25)},
+            "repos_realistic_ge": {k: sum(v >= k for v in best.values()) for k in (5, 10, 15, 25)},
+            "realistic_total_one_per_group": round(sum(best.values()), 1),
             "per_repo_realistic": dict(sorted(((r, round(v, 1)) for r, v in realistic.items()),
                                               key=lambda x: -x[1])),
         }
