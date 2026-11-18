@@ -1921,51 +1921,6 @@ pub fn host_container_capacity<'a>(
     }
 }
 
-/// Which resources one more owning container would commit beyond what is
-/// left on its host. Launch surfaces show this as a warning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ContainerOvercommit {
-    pub cpus: bool,
-    pub memory: bool,
-}
-
-impl ContainerOvercommit {
-    pub fn any(self) -> bool {
-        self.cpus || self.memory
-    }
-
-    /// The warning a launch surface shows, or `None` when nothing is
-    /// overcommitted. `capacity` is the budget this was computed from.
-    pub fn warning(self, capacity: &HostContainerCapacity) -> Option<String> {
-        if !self.any() {
-            return None;
-        }
-        if !capacity.complete {
-            return Some(
-                "A live container on this host has no recorded size, so Mjolnir cannot tell how much CPU and RAM is left. The session will still start."
-                    .into(),
-            );
-        }
-        let mut parts = Vec::new();
-        if self.cpus {
-            parts.push(format!(
-                "more CPUs than the {} left, so busy sessions may run slower",
-                capacity.remaining.cpus
-            ));
-        }
-        if self.memory {
-            parts.push(format!(
-                "more RAM than the {} GiB left, so the host may stop processes if sessions use all their RAM",
-                floor_gib_tenths(capacity.remaining.memory_bytes)
-            ));
-        }
-        Some(format!(
-            "This session asks for {}. It will still start.",
-            parts.join(", and ")
-        ))
-    }
-}
-
 impl HostContainerCapacity {
     /// Whether admission must refuse this allocation. CPU is always allowed
     /// to overcommit. RAM refuses only where `memory_is_hard_limit` (see
@@ -1999,17 +1954,27 @@ impl HostContainerCapacity {
         )
     }
 
-    /// Which resources this allocation would overcommit. An incomplete budget
-    /// has nothing left, so it reports both; surfaces should say the usage is
-    /// unknown when `complete` is false.
-    pub fn overcommit(&self, allocation: &SessionResourceAllocation) -> ContainerOvercommit {
-        let SessionResourceAllocation::Container { cpus, memory_bytes } = allocation else {
-            return ContainerOvercommit::default();
+    /// The one-sentence warning a launch surface shows when this allocation
+    /// asks for more RAM than is left, or `None` when it fits. CPU never
+    /// warns: it is shared by design and always overcommits. An incomplete
+    /// budget has nothing left, so it warns that the RAM left is unknown;
+    /// a surface that already says so itself skips it.
+    pub fn overcommit_warning(&self, allocation: &SessionResourceAllocation) -> Option<String> {
+        let SessionResourceAllocation::Container { memory_bytes, .. } = allocation else {
+            return None;
         };
-        ContainerOvercommit {
-            cpus: self.remaining.cpus < *cpus,
-            memory: self.remaining.memory_bytes < *memory_bytes,
+        if self.remaining.memory_bytes >= *memory_bytes {
+            return None;
         }
+        Some(if self.complete {
+            format!(
+                "Asks for more RAM than the {} GiB left on this host; it will still start.",
+                floor_gib_tenths(self.remaining.memory_bytes)
+            )
+        } else {
+            "A live container on this host has no recorded size, so the RAM left is unknown; it will still start."
+                .into()
+        })
     }
 }
 

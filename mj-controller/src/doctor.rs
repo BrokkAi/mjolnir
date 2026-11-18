@@ -1883,7 +1883,11 @@ fn docker_image_check(
 /// later probe fail with a misleading message.
 pub(crate) enum SshConnectivity {
     Reachable,
-    Failed { detail: String, remediation: String },
+    Failed {
+        detail: String,
+        remediation: String,
+        answered_nothing: bool,
+    },
 }
 
 /// Probe `ssh <destination> true` and map any failure to a copy-paste fix.
@@ -1900,12 +1904,15 @@ pub(crate) fn ssh_connectivity(
         Err(error) => SshConnectivity::Failed {
             detail: format!("Could not run `ssh {destination} true`: {error:#}"),
             remediation: ssh_launch_failure_remediation(&error, ssh),
+            answered_nothing: error.downcast_ref::<CommandTimedOut>().is_some(),
         },
         Ok(output) if output.status != 0 => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let failure = classify_ssh_stderr(&stderr);
             SshConnectivity::Failed {
                 detail: format!("`ssh {destination} true` failed: {stderr}"),
-                remediation: ssh_failure_remediation(&stderr, ssh),
+                remediation: ssh_failure_remediation(failure, &stderr, ssh),
+                answered_nothing: failure == SshFailure::Unreachable,
             }
         }
         Ok(_) => SshConnectivity::Reachable,
@@ -1942,8 +1949,10 @@ fn classify_ssh_stderr(stderr: &str) -> SshFailure {
         "Authentication failed",
     ];
     const CLIENT_MISSING: [&str; 2] = ["ssh: command not found", "No such file or directory"];
-    const UNREACHABLE: [&str; 3] = [
+    // macOS's OpenSSH reports a dropped connect as "Operation timed out".
+    const UNREACHABLE: [&str; 4] = [
         "Connection timed out",
+        "Operation timed out",
         "No route to host",
         "Network is unreachable",
     ];
@@ -1993,9 +2002,9 @@ fn ssh_unreachable_remediation(ssh: &RuntimeSshTarget) -> String {
 }
 
 /// Map `ssh -o BatchMode=yes` stderr to the command that fixes it.
-fn ssh_failure_remediation(stderr: &str, ssh: &RuntimeSshTarget) -> String {
+fn ssh_failure_remediation(failure: SshFailure, stderr: &str, ssh: &RuntimeSshTarget) -> String {
     let destination = &ssh.destination;
-    match classify_ssh_stderr(stderr) {
+    match failure {
         SshFailure::UntrustedHostKey => {
             let host = ssh_host_only(destination);
             format!(
@@ -2112,6 +2121,7 @@ fn ssh_bare_check(
         SshConnectivity::Failed {
             detail,
             remediation,
+            ..
         } => (
             DoctorCheck::fixable(check_id, title, detail, remediation),
             false,
@@ -2185,6 +2195,7 @@ fn ssh_podman_check(
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        ..
     } = ssh_connectivity(ssh, executor)
     {
         return (
@@ -2669,10 +2680,18 @@ fn machine_runtime_check(probe: &crate::setup::MachineProbe) -> DoctorCheck {
         MachineProbeOutcome::Unreachable {
             detail,
             remediation,
+            answered_nothing,
         } => DoctorCheck::fixable(
             check_id,
             title,
-            format!("{missing}, and it did not answer: {detail}"),
+            format!(
+                "{missing}, and {}: {detail}",
+                if *answered_nothing {
+                    "it did not answer"
+                } else {
+                    "its SSH check failed"
+                }
+            ),
             remediation.clone(),
         ),
         MachineProbeOutcome::Answered(_) => {
@@ -2754,6 +2773,7 @@ fn ssh_docker_check(
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        ..
     } = ssh_connectivity(ssh, executor)
     {
         return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -2890,6 +2910,7 @@ fn ssh_apple_container_check(
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        ..
     } = ssh_connectivity(ssh, executor)
     {
         return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -3029,6 +3050,7 @@ fn ssh_nitro_check(
     if let SshConnectivity::Failed {
         detail,
         remediation,
+        ..
     } = ssh_connectivity(ssh, executor)
     {
         return DoctorCheck::fixable(check_id, title, detail, remediation);
