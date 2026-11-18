@@ -1227,11 +1227,19 @@ fn delivery_registration_consumes_a_matching_held_login_in_either_order() {
         let mut rejected = RejectedLogins::default();
         let profile = &target.profile_id;
         let session = &target.session_id;
-        rejected.observe_held_login(profile, session, Some("old"));
+        rejected.observe_worker(
+            profile,
+            session,
+            Some(WorkerPublication::new(Some("old"), None, 0)),
+        );
         if report_first {
             // Reproduce the order in which publication won the old race.
             // There is no second worker report to undo registration.
-            rejected.observe_held_login(profile, session, Some(current));
+            rejected.observe_worker(
+                profile,
+                session,
+                Some(WorkerPublication::new(Some(current), None, 0)),
+            );
         }
         rejected.start_delivery(&target, current);
         if !report_first {
@@ -1239,7 +1247,11 @@ fn delivery_registration_consumes_a_matching_held_login_in_either_order() {
                 rejected.delivery_state(profile, session),
                 Some(LoginDeliveryState::Pending)
             );
-            rejected.observe_held_login(profile, session, Some(current));
+            rejected.observe_worker(
+                profile,
+                session,
+                Some(WorkerPublication::new(Some(current), None, 0)),
+            );
         }
         assert_eq!(
             rejected.held_login_fingerprint(profile, session),

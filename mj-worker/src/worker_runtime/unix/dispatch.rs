@@ -576,7 +576,7 @@ fn run_relay_coordinator(
 /// supplemental evidence; neither dispatch nor recovery waits on filesystem I/O.
 fn recover_authentication(relay: &Arc<RelayCell>) -> Result<()> {
     let mut state = relay.lock().expect("relay state lock poisoned");
-    if let Some((ordinal, _)) = state.authentication_retry_identity()
+    if let Some((ordinal, _)) = state.authentication_retry_intent()
         && let Some(login) = state.login_identity.snapshot().1
     {
         state.submit_authentication_retry(ordinal, &login)?;
