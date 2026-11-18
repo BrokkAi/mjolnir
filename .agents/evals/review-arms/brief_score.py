@@ -172,13 +172,17 @@ def build(arms, per_batch):
                 unobserved += 1
         if len(images) != 1:
             raise SystemExit(f"ON and AF ran on more than one image: {sorted(images)}")
-        # The review window of each arm, from launch intent to finish, for the readout to report.
+        # Each arm's review activity, from review start to its last status poll, for the readout's
+        # overlap caveat (provisioning and carrier teardown are excluded).
         window = {}
         for arm in ("ON", "AF"):
-            spans = [(json.loads((ROOT / "runs" / b / arm / "launch-intent.json").read_text())["time_ns"],
-                      json.loads((ROOT / "runs" / b / arm / "done.json").read_text())["finished_ns"])
-                     for b in {r["bug"] for r in rows if r["arm"] == arm}]
-            window[arm] = {"first_launch_ns": min(s for s, _ in spans), "last_finish_ns": max(e for _, e in spans)}
+            spans = []
+            for b in {r["bug"] for r in rows if r["arm"] == arm}:
+                run = ROOT / "runs" / b / arm
+                polls = [json.loads(line)["time_ns"] for line in
+                         (run / "review-status.jsonl").read_text().splitlines() if line.strip()]
+                spans.append((json.loads((run / "review-start-intent.json").read_text())["time_ns"], max(polls)))
+            window[arm] = {"first_review_start_ns": min(s for s, _ in spans), "last_status_poll_ns": max(e for _, e in spans)}
         IMAGE_CHECK.update({"image": next(iter(images)), "reviewers_without_observed_image": unobserved,
                             "review_window": window})
     if REFERENCE_ROUND:

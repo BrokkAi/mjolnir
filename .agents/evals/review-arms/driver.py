@@ -272,6 +272,7 @@ def finish_set_aside(d):
 
 
 RUNTIME_PROBES = {}  # (job dir, child) -> its probe thread
+RUNTIME_STOP = {}  # job dir -> Event set when the review settles; probes then stop retrying
 RUNTIME_PROBES_LOCK = threading.Lock()
 
 
@@ -280,7 +281,8 @@ def probe_runtime(d, child, carrier):
     status polls that observe the other reviewers. Retries until it records the runtime or the
     reviewer is gone; every failed attempt is written to runtime-errors.jsonl."""
     path = d / "reviewers" / child[:12] / "runtime.json"
-    while not path.exists():
+    stop = RUNTIME_STOP[d]
+    while not path.exists() and not stop.is_set():
         try:
             runtime = reviewer_runtime(child, carrier)
         except Exception as e:  # noqa: BLE001 - a probe failure loses evidence, never fails a review
@@ -296,12 +298,13 @@ def probe_runtime(d, child, carrier):
                 return  # ended: collect() records it as unobserved; starting reviewers keep being probed
         except Exception:  # noqa: BLE001 - a destroyed reviewer has no session to read
             return
-        time.sleep(5)
+        stop.wait(5)
 
 
 def record_runtimes(d, children):
     carrier = json.loads((d / "placement.json").read_text())["container"]
     with RUNTIME_PROBES_LOCK:
+        RUNTIME_STOP.setdefault(d, threading.Event())
         for child in children:
             if (d, child) not in RUNTIME_PROBES and not (d / "reviewers" / child[:12] / "runtime.json").exists():
                 t = threading.Thread(target=probe_runtime, args=(d, child, carrier), daemon=True)
@@ -310,8 +313,10 @@ def record_runtimes(d, children):
 
 
 def join_runtime_probes(d):
-    """collect() waits for this job's probes so runtime.json is final before it reads them."""
+    """Once the review has settled, probes stop retrying; collect() waits for any attempt in flight
+    (each command is bounded) so runtime.json is final before it reads them."""
     with RUNTIME_PROBES_LOCK:
+        RUNTIME_STOP.setdefault(d, threading.Event()).set()
         threads = [t for (jd, _), t in RUNTIME_PROBES.items() if jd == d]
     for t in threads:
         t.join()
