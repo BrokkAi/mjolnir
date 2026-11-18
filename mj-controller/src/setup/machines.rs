@@ -325,10 +325,10 @@ fn record_machine(target: &SshTarget, executor: &impl CommandExecutor) -> Record
 fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> MachineProbeOutcome {
     let target = SshTarget::from(ssh);
     let recorded = record_machine(&target, executor);
-    // The batch runs under `ssh_validation_command`'s short `ConnectTimeout`
-    // and `ServerAlive` keepalive, so SSH itself reports a host that answers
-    // nothing. The batch's deadline expiring means a check stalled on a host
-    // that answered, which the `ssh true` replay below would misread.
+    // The batch's deadline expiring says only that the check did not finish:
+    // SSH may still have been connecting (a configured `ConnectTimeout` beats
+    // the probe's) or a runtime command may have hung. Replayed as the
+    // `ssh true` result it would read as a host that answered nothing.
     if let Some(timed_out) = recorded
         .failure
         .borrow()
@@ -338,11 +338,11 @@ fn probe_ssh_machine(ssh: &SshConnection, executor: &impl CommandExecutor) -> Ma
         let destination = &target.destination;
         return MachineProbeOutcome::Unreachable {
             detail: format!(
-                "{destination} answered over SSH, but checking what it can run did not finish within {} seconds.",
+                "Checking what {destination} can run did not finish within {} seconds.",
                 timed_out.timeout.as_secs()
             ),
             remediation: format!(
-                "Run `ssh {destination} podman info` and `ssh {destination} docker version` to find the command that hangs, fix or restart that engine, then check again."
+                "Run `ssh {destination} true`. If it hangs or fails, fix the connection; if it succeeds, a runtime command on {destination} is hanging."
             ),
             answered_nothing: false,
         };
