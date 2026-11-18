@@ -819,20 +819,19 @@ async fn suspend_all_sessions(acknowledge_unpublished_work: bool) -> Result<usiz
         // A suspension answers when it has ended, which takes as long as its
         // recovery copy, so each one has its own connection.
         jobs.spawn(async move {
-            let result = if session.lifecycle
-                == mj_daemon::server::ViewerLifecycleCategory::Suspending
-            {
-                await_stopping_session(&id).await
-            } else {
-                async {
-                    daemon::connect_existing()
-                        .await?
-                        .suspend_session_with_ack(id, acknowledge_unpublished_work)
-                        .await
-                }
-                .await
-                .map(|()| "Suspended")
-            };
+            let result =
+                if session.lifecycle == mj_daemon::server::ViewerLifecycleCategory::Suspending {
+                    await_stopping_session(&id).await
+                } else {
+                    async {
+                        daemon::connect_existing()
+                            .await?
+                            .suspend_session_with_ack(id, acknowledge_unpublished_work)
+                            .await
+                    }
+                    .await
+                    .map(|()| "Suspended")
+                };
             (name, result)
         });
     }

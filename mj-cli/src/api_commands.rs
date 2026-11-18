@@ -16,9 +16,9 @@ use mj_daemon::server::api::{
 };
 
 use mj_client::daemon::WikiSessionStatus;
-use mj_daemon::server::ViewerLifecycleCategory;
 use mj_controller::sessionwiki::WikiContinuation;
 use mj_core::transcript::sanitize_terminal_text;
+use mj_daemon::server::ViewerLifecycleCategory;
 
 use crate::api_client::{ApiClient, ExportResult};
 
@@ -2412,9 +2412,7 @@ fn review_lines(review: Option<&mj_daemon::server::ViewerTurnReview>) -> Vec<Str
 
 /// A finished review as plain lines, including each reviewer's full handback
 /// and the usage its deleted child session still accounts for.
-fn finished_review_lines(
-    response: &mj_daemon::server::api::FinishedReviewResponse,
-) -> Vec<String> {
+fn finished_review_lines(response: &mj_daemon::server::api::FinishedReviewResponse) -> Vec<String> {
     let Some(review) = &response.review else {
         return vec![format!(
             "no finished review is recorded for {}",
@@ -3486,14 +3484,12 @@ mod tests {
             ("terminal:two", true),
         ]
         .into_iter()
-        .map(
-            |(id, can_stop)| mj_daemon::server::ViewerBackgroundTask {
-                id: id.into(),
-                command: "sleep 60".into(),
-                started_at_ms: 0,
-                can_stop,
-            },
-        )
+        .map(|(id, can_stop)| mj_daemon::server::ViewerBackgroundTask {
+            id: id.into(),
+            command: "sleep 60".into(),
+            started_at_ms: 0,
+            can_stop,
+        })
         .collect();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let requests = seen.clone();

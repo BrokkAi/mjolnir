@@ -1566,9 +1566,8 @@ mod tests {
         }
         let key = rcgen::KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
-        let pin =
-            mj_daemon::server::api::served_certificate_sha256(certificate.pem().as_bytes())
-                .unwrap();
+        let pin = mj_daemon::server::api::served_certificate_sha256(certificate.pem().as_bytes())
+            .unwrap();
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
             certificate.pem().into_bytes(),
             key.serialize_pem().into_bytes(),
