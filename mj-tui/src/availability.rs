@@ -58,12 +58,15 @@ impl Default for Availability {
 /// An entry the pickers leave out, and the line that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Missing {
-    /// Named under the list, by the detail alone; the fix lives in Settings
-    /// and `mj doctor`.
-    Named(String),
+    /// The picker shows `reason`; blocking notices show `reason` and `fix`.
+    Named { reason: String, fix: Option<String> },
     /// Its machine did not answer. Routine (a sleeping laptop), so the list
     /// names the machine once, however many runtimes it hides.
-    Unreachable { machine: String },
+    Unreachable {
+        machine: String,
+        detail: String,
+        remediation: String,
+    },
     /// A standard runtime whose engine was never installed here.
     Silent,
 }
@@ -73,6 +76,7 @@ pub(crate) enum Missing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MissingTargetLine {
     pub(crate) text: String,
+    pub(crate) full: String,
     pub(crate) routine: bool,
 }
 
@@ -224,33 +228,53 @@ impl DashboardState {
     /// runtime it hides; then one for each machine that runs nothing yet.
     pub(crate) fn missing_target_lines(&self) -> Vec<MissingTargetLine> {
         let mut lines = Vec::new();
-        let mut unreachable_machines: Vec<(String, Vec<&str>)> = Vec::new();
+        let mut unreachable_machines: Vec<(String, Vec<&str>, String, String)> = Vec::new();
         for id in self.config.targets.keys() {
             if self.config.enabled_target(id).is_none() {
                 continue;
             }
             match self.target_missing(id) {
-                Some(Missing::Named(reason)) => lines.push(MissingTargetLine {
+                Some(Missing::Named { reason, fix }) => lines.push(MissingTargetLine {
                     text: format!("{id}: {reason}"),
+                    full: format!(
+                        "{id}: {}",
+                        sentence(&reason, fix.as_deref().unwrap_or_default())
+                    ),
                     routine: false,
                 }),
-                Some(Missing::Unreachable { machine }) => {
-                    match unreachable_machines.iter_mut().find(|(m, _)| *m == machine) {
-                        Some((_, ids)) => ids.push(id),
-                        None => unreachable_machines.push((machine, vec![id])),
+                Some(Missing::Unreachable {
+                    machine,
+                    detail,
+                    remediation,
+                }) => {
+                    match unreachable_machines
+                        .iter_mut()
+                        .find(|(m, _, _, _)| *m == machine)
+                    {
+                        Some((_, ids, _, _)) => ids.push(id),
+                        None => unreachable_machines.push((machine, vec![id], detail, remediation)),
                     }
                 }
                 Some(Missing::Silent) | None => {}
             }
         }
-        lines.extend(
-            unreachable_machines
-                .into_iter()
-                .map(|(machine, ids)| MissingTargetLine {
+        lines.extend(unreachable_machines.into_iter().map(
+            |(machine, ids, detail, remediation)| {
+                let full = sentence(
+                    &format!(
+                        "{machine} did not answer; not listing {}. {}",
+                        ids.join(", "),
+                        detail.trim()
+                    ),
+                    &remediation,
+                );
+                MissingTargetLine {
                     text: format!("{machine} did not answer; not listing {}.", ids.join(", ")),
+                    full,
                     routine: true,
-                }),
-        );
+                }
+            },
+        ));
         lines.extend(self.machines_without_runtime_lines());
         lines
     }
@@ -296,7 +320,10 @@ impl DashboardState {
                 Some(if !engine.installed && self.config.is_default_target(id) {
                     Missing::Silent
                 } else {
-                    Missing::Named(reason.clone())
+                    Missing::Named {
+                        reason: reason.clone(),
+                        fix: None,
+                    }
                 })
             }
             TargetTemplate::SshBare { .. }
@@ -311,8 +338,13 @@ impl DashboardState {
                         self.config.machines.get(machine_id) == Some(&probe.machine)
                     })?;
                 match &probe.finding {
-                    MachineFinding::Unreachable { .. } => Some(Missing::Unreachable {
+                    MachineFinding::Unreachable {
+                        detail,
+                        remediation,
+                    } => Some(Missing::Unreachable {
                         machine: machine_id.to_owned(),
+                        detail: detail.clone(),
+                        remediation: remediation.clone(),
                     }),
                     MachineFinding::Answered { runtimes, rejected } => {
                         if runtimes
@@ -322,7 +354,10 @@ impl DashboardState {
                             return None;
                         }
                         let rejected = rejected.iter().find(|runtime| runtime.kind == kind)?;
-                        Some(Missing::Named(sentence(&rejected.detail, "")))
+                        Some(Missing::Named {
+                            reason: rejected.detail.clone(),
+                            fix: rejected.remediation.clone(),
+                        })
                     }
                 }
             }
@@ -335,8 +370,17 @@ impl DashboardState {
     pub(crate) fn target_missing_line(&self, id: &str) -> Option<String> {
         self.config.enabled_target(id)?;
         match self.target_missing(id)? {
-            Missing::Named(reason) => Some(reason),
-            Missing::Unreachable { machine } => Some(format!("{machine} did not answer.")),
+            Missing::Named { reason, fix } => {
+                Some(sentence(&reason, fix.as_deref().unwrap_or_default()))
+            }
+            Missing::Unreachable {
+                machine,
+                detail,
+                remediation,
+            } => Some(sentence(
+                &format!("{machine} did not answer. {}", detail.trim()),
+                &remediation,
+            )),
             Missing::Silent => None,
         }
     }
@@ -480,10 +524,12 @@ impl DashboardState {
                 Some(match &probe.finding {
                     MachineFinding::Unreachable { .. } => MissingTargetLine {
                         text: format!("{id} did not answer."),
+                        full: format!("{id}: {}", finding_reason(&probe.finding)),
                         routine: true,
                     },
                     finding => MissingTargetLine {
                         text: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
+                        full: format!("Machine {id} has no runtime: {}", finding_reason(finding)),
                         routine: false,
                     },
                 })

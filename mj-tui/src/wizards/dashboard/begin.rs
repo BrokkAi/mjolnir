@@ -64,7 +64,7 @@ impl DashboardState {
             let missing: Vec<String> = self
                 .missing_target_lines()
                 .into_iter()
-                .map(|line| line.text)
+                .map(|line| line.full)
                 .collect();
             if !missing.is_empty() {
                 self.notices.set(format!(

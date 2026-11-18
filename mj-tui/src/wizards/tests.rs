@@ -4143,6 +4143,24 @@ fn a_machine_without_a_runtime_keeps_the_target_step_and_says_why() {
     );
 }
 
+// Hard-won: 2c467ecc9: shortened picker reasons dropped the recovery steps from blocking notices
+#[test]
+fn unreachable_only_target_blocking_notice_keeps_remediation() {
+    let mut config = config();
+    config.targets.clear();
+    config.targets.insert("machine".into(), bare_ssh_target());
+    config.default_targets = ["machine".to_owned()].into();
+    config.machines.insert("machine".into(), bare_ssh_machine());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    crate::test_support::answer_availability(&mut dashboard, |dashboard| {
+        crate::test_support::availability_answer(dashboard, &[], &["machine"])
+    });
+    dashboard.begin_new_wizard();
+    let notice = dashboard.notices.current().unwrap_or_default();
+    assert!(notice.contains("Check that machine is up."), "{notice}");
+}
+
 /// On a host without Podman or Docker, localhost is the only target the
 /// target step offers, so the wizard chooses it and goes from the profile
 /// step to the project step. The titles count three steps, Back skips the
