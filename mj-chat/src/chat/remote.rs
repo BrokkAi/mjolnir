@@ -25,6 +25,29 @@ fn reviewer_answer_key(role: Option<&str>, request: &ElicitationRequest) -> Stri
 }
 
 impl ChatState {
+    pub(super) fn deferred_form_result_drafts(&self) -> Vec<ChatElicitationDraft> {
+        self.deferred_form_results
+            .iter()
+            .filter_map(|result| {
+                let ChatRemoteResult::ReviewerAnswer {
+                    draft: Some(draft),
+                    result: Err(error),
+                } = result
+                else {
+                    return None;
+                };
+                if error.contains("is no longer pending") {
+                    return None;
+                }
+                let mut draft = (**draft).clone();
+                draft
+                    .form
+                    .set_response_error(format!("Answer was not sent: {error}"));
+                Some(draft)
+            })
+            .collect()
+    }
+
     pub(super) fn apply_deferred_form_results(&mut self) {
         // One pass: a result waiting for another visible form is requeued.
         for result in std::mem::take(&mut self.deferred_form_results) {
@@ -1579,7 +1602,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::RespondElicitation {
-                request: old,
+                request: old.clone(),
                 desired_plan_active: None,
                 answered: false,
                 result: Err("late rejection".into()),
@@ -1602,6 +1625,28 @@ mod tests {
             &mut chat,
             "Answer was not sent: late rejection"
         ));
+        // Hard-won: 5dc2084: a parked primary rejection revived a request removed by the refreshed projection.
+        let config: mj_core::config::Config = serde_json::from_str(r#"{"version":0}"#).unwrap();
+        let mut parked = ChatState::standby(
+            "parked-primary",
+            &config,
+            Default::default(),
+            Default::default(),
+        );
+        parked.adopt_live_composer(chat.take_live_composer().unwrap());
+        apply_chat_remote_result(
+            &mut parked,
+            ChatRemoteResult::RespondElicitation {
+                request: old,
+                desired_plan_active: None,
+                answered: false,
+                result: Err("ended request".into()),
+            },
+        );
+        chat.apply_materialized(&MaterializedSession::empty("parked-primary"), &[], &[]);
+        chat.adopt_live_composer(parked.take_live_composer().unwrap());
+        chat.apply_deferred_form_results();
+        assert!(chat.elicitation.is_none());
     }
 
     #[test]

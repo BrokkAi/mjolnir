@@ -748,7 +748,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     // form yet. A session switch must retain both local snapshots so the
     // reviewer answer is restored when its stream catches up.
     chat.state.restore_elicitation(request);
-    chat.deferred_elicitation_draft = Some(reviewer_draft);
+    chat.deferred_elicitation_drafts = vec![reviewer_draft];
     let drafts = chat.elicitation_drafts();
     assert_eq!(drafts.len(), 2);
     assert!(drafts.iter().any(|draft| !draft.reviewer()));
@@ -760,7 +760,7 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     // Hard-won: 1f62bc101: reviewer answer refusals disappeared from notification-only forms.
     chat.state.elicitation = None;
     chat.state.elicitation_is_reviewers = false;
-    chat.deferred_elicitation_draft = None;
+    chat.deferred_elicitation_drafts.clear();
     let request = ElicitationRequest::from_acp_params("reviewer-failure", serde_json::json!({
         "mode": "form", "sessionId": "reviewer-a", "message": "Review answer", "requestedSchema": {
             "type": "object", "properties": {"answer": {"type": "string"}}
@@ -829,6 +829,25 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         &question_b
     );
     assert_eq!(chat.state.deferred_form_results.len(), 1);
+    // Hard-won: 5dc2084: upgrade snapshots omitted a rejected draft waiting behind another form.
+    let saved = serde_json::to_value(chat.elicitation_drafts()).unwrap();
+    let mut upgraded = clipboard_test_chat();
+    upgraded.apply_review_view(Some(review_a.clone()));
+    upgraded.restore_elicitation_drafts(serde_json::from_value(saved).unwrap());
+    terminal
+        .draw(|frame| {
+            upgraded.draw_elicitation_in(frame, frame.area(), true);
+        })
+        .unwrap();
+    let recovered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(recovered.contains("kept reviewer answer"));
+    assert!(recovered.contains("reviewer lookup failed"));
     // B is resolved elsewhere; the authoritative refresh reveals A again.
     chat.apply_review_view(Some(review_a.clone()));
     assert!(chat.state.deferred_form_results.is_empty());
@@ -2546,6 +2565,31 @@ async fn stale_clipboard_results_do_not_cross_capability_or_input_context_change
         assert_eq!(chat.state.draft_payload(), before);
         assert!(chat.state.composer_runtime.attachment_queue.is_empty());
         assert!(!chat.state.composer_runtime.paste_in_flight);
+    }
+    // Hard-won: 5dc2084: reused IDs delivered clipboard text to a replacement request or reviewer role.
+    for changed_role in [false, true] {
+        let mut chat = clipboard_test_chat();
+        let request = ElicitationRequest::from_acp_params("reused", serde_json::json!({"mode":"form", "sessionId":"clipboard", "message":"Original", "requestedSchema":{"type":"object","properties":{"answer":{"type":"string"}}}})).unwrap();
+        if changed_role {
+            chat.state
+                .show_review_role_elicitation(Some("first-reviewer".into()), request.clone());
+        } else {
+            chat.state.restore_elicitation(request.clone());
+        }
+        chat.select_elicitation_surface(super::super::ElicitationSurface::Notification);
+        let pending = clipboard_result(&chat, ClipboardContent::Text("stale answer".into()));
+        chat.state.elicitation = None;
+        if changed_role {
+            chat.state
+                .show_review_role_elicitation(Some("other-reviewer".into()), request);
+        } else {
+            let mut replacement = request;
+            replacement.message = "Replacement".into();
+            chat.state.restore_elicitation(replacement);
+        }
+        chat.state.apply_composer_update(pending);
+        let saved = serde_json::to_string(&chat.state.elicitation_draft()).unwrap();
+        assert!(!saved.contains("stale answer"));
     }
     // A second presentation is the same answer target, even if its
     // conversation redraws the earlier-message reader during the read.

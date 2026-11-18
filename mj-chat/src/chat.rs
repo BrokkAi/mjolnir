@@ -204,7 +204,22 @@ pub struct ChatElicitationDraft {
     reviewer_role: Option<String>,
 }
 
+/// A logical form target, independent of presentation and editable values.
+#[derive(Debug, Clone, PartialEq)]
+struct ElicitationIdentity {
+    request: ElicitationRequest,
+    reviewer: bool,
+    reviewer_role: Option<String>,
+}
+
 impl ChatElicitationDraft {
+    fn identity(&self) -> ElicitationIdentity {
+        ElicitationIdentity {
+            request: self.request().clone(),
+            reviewer: self.reviewer,
+            reviewer_role: self.reviewer_role.clone(),
+        }
+    }
     #[must_use]
     pub fn matches(&self, request: &ElicitationRequest) -> bool {
         self.form.matches(request)
@@ -1264,6 +1279,14 @@ impl ChatState {
         self.elicitation_is_reviewers && self.elicitation.is_some()
     }
 
+    fn elicitation_identity(&self) -> Option<ElicitationIdentity> {
+        Some(ElicitationIdentity {
+            request: self.elicitation.as_ref()?.request().clone(),
+            reviewer: self.elicitation_is_reviewers,
+            reviewer_role: self.elicitation_role.clone(),
+        })
+    }
+
     pub(super) fn elicitation_source(&self) -> (bool, Option<&str>) {
         (
             self.elicitation_is_reviewers,
@@ -1329,11 +1352,7 @@ impl ChatState {
         if !self.pending_reviewer_matches(&draft) {
             return true;
         }
-        let matches = self.elicitation_source() == (true, draft.reviewer_role.as_deref())
-            && self
-                .elicitation
-                .as_ref()
-                .is_some_and(|dialog| dialog.request() == draft.request());
+        let matches = self.elicitation_identity() == Some(draft.identity());
         if self.elicitation.is_some() && !matches {
             // Another form owns focus. Keep the whole result with its draft,
             // rather than losing it or replacing the visible question.
@@ -1355,6 +1374,9 @@ impl ChatState {
     }
 
     fn restore_failed_elicitation(&mut self, request: ElicitationRequest, error: String) {
+        if !self.pending_elicitations.contains(&request) {
+            return;
+        }
         self.restore_elicitation(request.clone());
         if let Some(dialog) = self.elicitation.as_mut()
             && dialog.request() == &request

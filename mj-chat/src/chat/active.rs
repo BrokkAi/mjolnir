@@ -401,7 +401,7 @@ pub struct ActiveChat {
     /// A cached question may arrive in the newly attached review stream a few
     /// ticks after the chat itself opens. Keep it here until that exact source
     /// form surfaces, instead of dropping it or applying it to the primary.
-    deferred_elicitation_draft: Option<ChatElicitationDraft>,
+    deferred_elicitation_drafts: Vec<ChatElicitationDraft>,
     earlier_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -664,7 +664,7 @@ impl ActiveChat {
             session_retiring: false,
             reconnect_notice_pending_sync: false,
             persistence,
-            deferred_elicitation_draft: None,
+            deferred_elicitation_drafts: Vec::new(),
             earlier_task: None,
         };
         chat.refresh_voice_availability();
@@ -720,9 +720,8 @@ impl ActiveChat {
             .elicitation_draft()
             .into_iter()
             .collect::<Vec<_>>();
-        if let Some(draft) = self.deferred_elicitation_draft.clone() {
-            drafts.push(draft);
-        }
+        drafts.extend(self.deferred_elicitation_drafts.iter().cloned());
+        drafts.extend(self.state.deferred_form_result_drafts());
         drafts
     }
 
@@ -738,12 +737,17 @@ impl ActiveChat {
     /// Restore a draft only when the newly attached projection is already
     /// showing the exact same pending request.
     pub fn restore_elicitation_draft(&mut self, draft: ChatElicitationDraft) -> bool {
+        if draft.reviewer && !self.state.pending_reviewer_matches(&draft) {
+            return false;
+        }
         if self.state.restore_elicitation_draft(draft.clone()) {
             true
         } else if self.state.pending_reviewer_matches(&draft) {
             // The review projection is present, but its native form has not
             // yet been surfaced by `surface_reviewer_elicitations`.
-            self.deferred_elicitation_draft = Some(draft);
+            self.deferred_elicitation_drafts
+                .retain(|saved| saved.identity() != draft.identity());
+            self.deferred_elicitation_drafts.push(draft);
             true
         } else {
             false
@@ -751,16 +755,10 @@ impl ActiveChat {
     }
 
     fn apply_deferred_elicitation_draft(&mut self) {
-        let Some(draft) = self.deferred_elicitation_draft.take() else {
-            return;
-        };
-        if !self.state.restore_elicitation_draft(draft.clone()) {
-            // Keep it only while the review projection still names this exact
-            // request. An answer, removal, or changed request invalidates it
-            // immediately, including when the primary currently has no form.
-            if self.state.pending_reviewer_matches(&draft) {
-                self.deferred_elicitation_draft = Some(draft);
-            }
+        for draft in std::mem::take(&mut self.deferred_elicitation_drafts) {
+            // Matching reviewer drafts wait behind the current form; ended
+            // requests are discarded by the same restoration decision.
+            self.restore_elicitation_draft(draft);
         }
     }
 

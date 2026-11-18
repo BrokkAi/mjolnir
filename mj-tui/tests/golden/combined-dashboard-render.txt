@@ -1765,7 +1765,7 @@ Could not dismiss 1 notification: permission denied
 │ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────── ▁   ▄   □ ╮╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
-│ Create   Open   Filter: _____________││>                                                                             │
+│ Create   Open   Filter: _____________││Which deployment path should be used?  >                                      │
 │hel ──────────────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
 │› ? ACP pretty name               ◇ ⋯ │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Question  podman  codex-1           ││  Host / fleet  Targets  CPU  RAM                                             │
@@ -1788,7 +1788,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │ default ?1                         ≡ ││ No messages yet — send a prompt to begin.                                   ▐│
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────── ▁   ▄   □ ╮╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────╮
-│ Create   Open   Filter: _____________││>                                                                             │
+│ Create   Open   Filter: _____________││Which deployment path should be used?  >                                      │
 │hel ──────────────────────────────────│╰──────────────────────────────────────────────────────────────────────────────╯
 │› ? ACP pretty name               ◇ ⋯ │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
 │  Question  podman  codex-1           ││  Host / fleet  Targets  CPU  RAM                                             │

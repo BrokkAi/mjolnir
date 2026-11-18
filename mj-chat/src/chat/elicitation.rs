@@ -132,6 +132,10 @@ impl ElicitationDraft {
     pub(super) fn request(&self) -> &ElicitationRequest {
         &self.request
     }
+
+    pub(super) fn set_response_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -743,11 +747,14 @@ impl ElicitationDialog {
         } else {
             &self.other_view
         };
-        // One interior row can show the answer control without a message.
-        // Border-only and never-rendered dialogs must still reject input.
+        // Answer controls always share the rendered body with the request.
         view.rendered_area
             .get()
             .is_some_and(|area| area.width > 2 && area.height > 2)
+            && view
+                .message_area
+                .get()
+                .is_some_and(|area| area.width > 0 && area.height > 0)
     }
 
     pub(super) fn component_handles_mouse_in(
@@ -1677,10 +1684,23 @@ fn render_elicitation_body(
         Constraint::Length(buttons_height),
         Constraint::Length(footer_height),
     ];
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
+    let chunks = if inner.height == 1 {
+        // A single row still needs both the request and its answer. Put the
+        // independently scrolling message beside the control/action row.
+        let columns = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner);
+        let empty = Rect { height: 0, ..inner };
+        if dialog.confirming_unanswered || dialog.display_fields.is_empty() {
+            vec![columns[0], empty, columns[1], empty]
+        } else {
+            vec![columns[0], columns[1], empty, empty]
+        }
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner)
+            .to_vec()
+    };
     let message = Paragraph::new(prompt.as_str()).wrap(Wrap { trim: true });
     let total_lines = u16::try_from(message.line_count(chunks[0].width)).unwrap_or(u16::MAX);
     let maximum_scroll = total_lines.saturating_sub(chunks[0].height);

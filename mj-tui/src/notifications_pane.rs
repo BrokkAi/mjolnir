@@ -2137,6 +2137,20 @@ pub(crate) mod tests {
                 .unwrap();
             let area = dashboard.notifications.form_area.unwrap();
             assert_eq!(area.height, 3, "one row inside the form border");
+            // Hard-won: 5dc2084: compact controls accepted answers while the request had no visible row.
+            let message = dashboard
+                .frame_surfaces
+                .surface(mj_chat::selection::SurfaceId::NotificationText(
+                    dashboard.notifications.text_generation,
+                ))
+                .unwrap();
+            assert!(message.rect.width > 0 && message.rect.height > 0);
+            assert!(
+                buffer_lines(compact.backend().buffer())
+                    .iter()
+                    .any(|line| line.contains("path"))
+            );
+
             // Hard-won: c9867384e: inline focus left a prefix armed, so q detached instead of entering the answer.
             dashboard.route_bound_key(&crossterm::event::KeyEvent::new(
                 KeyCode::Char('b'),
@@ -2150,7 +2164,7 @@ pub(crate) mod tests {
             ] {
                 let mouse = crossterm::event::MouseEvent {
                     kind,
-                    column: area.x + 4,
+                    column: area.x + area.width / 2 + 4,
                     row: area.y + 1,
                     modifiers: KeyModifiers::NONE,
                 };

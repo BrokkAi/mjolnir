@@ -558,10 +558,9 @@ impl ChatState {
                 // An accepted form paste belongs to its request, even when
                 // the other presentation (or its history reader) redraws.
                 let target_matches = match &target {
-                    input_state::ClipboardTarget::Answer(id) => self
-                        .elicitation
-                        .as_ref()
-                        .is_some_and(|dialog| dialog.request().id == *id),
+                    input_state::ClipboardTarget::Answer(_) => {
+                        target == self.elicitation_clipboard_target()
+                    }
                     _ => target == self.clipboard_target(),
                 };
                 if generation != self.input_generation() || !target_matches {
