@@ -342,18 +342,19 @@ async fn persist_shown_question(
             .get(&id)
             .copied();
         let Some(through) = through else { return id };
-        let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
-        else {
-            continue;
-        };
         let write_id = id.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let Ok(admission) = crate::upgrade::activity_unless_draining("question shown cursor")
+            else {
+                return Ok(None);
+            };
             let _admission = admission;
-            write(&write_id, through)
+            write(&write_id, through).map(Some)
         })
         .await;
         match result {
-            Ok(Ok(receipt)) => {
+            Ok(Ok(None)) => continue,
+            Ok(Ok(Some(receipt))) => {
                 let mut history = state
                     .feed
                     .lock()

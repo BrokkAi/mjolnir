@@ -33,8 +33,8 @@ pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
     /// The open forms this episode covers.
     forms: std::collections::BTreeSet<String>,
-    /// The newest completed question shown on the notification card.
-    shown_question_ordinal: Option<u64>,
+    /// Question ordinal whose alert delay is currently running.
+    pending_question_ordinal: Option<u64>,
     since_ms: u64,
     reported: bool,
 }
@@ -82,6 +82,8 @@ impl DashboardState {
         let mut episodes = std::mem::take(&mut self.attention_episodes);
         let mut due = Vec::new();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
+        self.alerted_question_ordinals
+            .retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
             // An ignored session's attention still renders in its row; it
             // simply never starts or keeps an episode that interrupts.
@@ -136,18 +138,23 @@ impl DashboardState {
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
                 forms: Default::default(),
-                shown_question_ordinal,
+                pending_question_ordinal: shown_question_ordinal,
                 since_ms: now_ms,
                 reported: false,
             });
-            if episode.level != level
-                || !forms.is_subset(&episode.forms)
-                || shown_question_ordinal != episode.shown_question_ordinal
-            {
+            let new_shown_question = shown_question_ordinal.is_some_and(|ordinal| {
+                self.alerted_question_ordinals
+                    .get(id)
+                    .is_none_or(|alerted| ordinal > *alerted)
+                    && episode.pending_question_ordinal != Some(ordinal)
+            });
+            if episode.level != level || !forms.is_subset(&episode.forms) || new_shown_question {
+                let pending_question_ordinal =
+                    shown_question_ordinal.or(episode.pending_question_ordinal);
                 *episode = AttentionEpisode {
                     level,
                     forms,
-                    shown_question_ordinal,
+                    pending_question_ordinal,
                     since_ms: now_ms,
                     reported: false,
                 };
@@ -159,16 +166,38 @@ impl DashboardState {
             if episode.reported {
                 continue;
             }
+            if episode.forms.is_empty()
+                && shown_question_ordinal.is_some_and(|ordinal| {
+                    self.alerted_question_ordinals
+                        .get(id)
+                        .is_some_and(|alerted| ordinal <= *alerted)
+                })
+            {
+                episode.reported = true;
+                continue;
+            }
             // An open conversation shows only its first form, so being on
             // screen sees an episode only when it covers one form.
             if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
                 episode.reported = true;
+                if let Some(ordinal) = shown_question_ordinal {
+                    self.alerted_question_ordinals
+                        .entry(id.clone())
+                        .and_modify(|alerted| *alerted = (*alerted).max(ordinal))
+                        .or_insert(ordinal);
+                }
                 continue;
             }
             if now_ms.saturating_sub(episode.since_ms) < delay_ms {
                 continue;
             }
             episode.reported = true;
+            if let Some(ordinal) = shown_question_ordinal {
+                self.alerted_question_ordinals
+                    .entry(id.clone())
+                    .and_modify(|alerted| *alerted = (*alerted).max(ordinal))
+                    .or_insert(ordinal);
+            }
             if !enabled {
                 continue;
             }
@@ -724,9 +753,46 @@ mod tests {
             },
         )])));
         assert!(dashboard.notification_events(60_001).is_empty());
-        let later = dashboard.notification_events(62_001);
-        assert_eq!(later.len(), 1, "only the newly shown question starts an episode");
+        assert_eq!(dashboard.attention_episodes["asks"].since_ms, 60_001);
+        let later = dashboard.notification_events(62_002);
+        assert_eq!(
+            later.len(),
+            1,
+            "only the newly shown question starts an episode"
+        );
         assert_eq!(later[0].session_id, "asks");
+
+        let mut card = dashboard.notification_cards.as_ref().unwrap()["asks"].clone();
+        card.form = Some(mj_client::runtime_feed::CardForm {
+            raised_at_ms: 62_002,
+            request_id: "masked-form".into(),
+            message: "Another approval".into(),
+        });
+        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "asks".into(),
+            card.clone(),
+        )])));
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .pending_elicitations = vec![question("masked-form")];
+        assert!(dashboard.notification_events(64_001).is_empty());
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .pending_elicitations
+            .clear();
+        card.form = None;
+        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "asks".into(),
+            card,
+        )])));
+        assert!(
+            dashboard.notification_events(66_001).is_empty(),
+            "cancelling the masking form must not alert the already reported question again"
+        );
 
         // Answering and asking again starts a new episode.
         dashboard

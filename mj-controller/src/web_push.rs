@@ -247,7 +247,6 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
     let mut entries = BTreeMap::new();
     for (session, card) in cards {
         let holder = card.holder.as_deref().unwrap_or(session);
-        let paused = unavailable(session) || unavailable(holder);
         for entry in &card.entries {
             let (identity, message_id) = match &entry.message {
                 EntryMessage::Locating => continue,
@@ -265,8 +264,8 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
             entries.entry(identity.to_string()).or_insert(PushEntry {
                 session,
                 completed_ordinal: Some(entry.completed_ordinal),
-                paused,
-                holder,
+                paused: unavailable(session),
+                holder: session,
                 kind: entry.kind,
                 text: None,
                 message_id,
@@ -279,7 +278,7 @@ pub(crate) fn card_entries(runtime: &RuntimeProjection) -> Option<BTreeMap<Strin
                 PushEntry {
                     session,
                     completed_ordinal: None,
-                    paused,
+                    paused: unavailable(session) || unavailable(holder),
                     holder,
                     kind: NotificationKind::NeedsInput,
                     text: Some(&form.message),
@@ -440,6 +439,52 @@ async fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_client::runtime_feed::{CardForm, NotificationCard};
+
+    #[test]
+    fn each_card_item_push_targets_its_own_session_or_form_holder() {
+        let mut runtime = RuntimeProjection::default();
+        runtime.metadata.notification_cards = Some(mj_core::snapshot_map::SnapshotMap::from([(
+            "parent".into(),
+            NotificationCard {
+                since_ms: 1,
+                badge: NotificationKind::NeedsInput,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 1,
+                    completed_ordinal: 4,
+                    kind: NotificationKind::NeedsInput,
+                    message: EntryMessage::None,
+                }],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 1 }),
+                holder: Some("child".into()),
+                form: Some(CardForm {
+                    raised_at_ms: 2,
+                    request_id: "r1".into(),
+                    message: "form".into(),
+                }),
+            },
+        )]));
+        let entries = card_entries(&runtime).unwrap();
+        let question = entries
+            .values()
+            .find(|entry| entry.completed_ordinal == Some(4))
+            .unwrap();
+        let form = entries
+            .values()
+            .find(|entry| entry.completed_ordinal.is_none())
+            .unwrap();
+        assert_eq!(question.holder, "parent");
+        assert_eq!(
+            question.notice(&runtime, "question".into(), None).url,
+            "/#conversation/parent"
+        );
+        assert_eq!(form.holder, "child");
+        assert_eq!(
+            form.notice(&runtime, "form".into(), None).url,
+            "/#conversation/child"
+        );
+    }
+
     fn decode(value: &str) -> Vec<u8> {
         B64.decode(value).unwrap()
     }

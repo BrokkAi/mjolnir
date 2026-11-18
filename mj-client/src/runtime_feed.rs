@@ -335,14 +335,12 @@ pub struct NotificationCard {
 }
 
 impl NotificationCard {
-    /// The newest shown stack question; forms and legacy cards own other paths.
+    /// The newest shown stack question, even when a live form shares the card.
     pub fn shown_question(&self) -> Option<&mj_core::attention::NotificationStackEntry> {
-        if self.form.is_some()
-            || !matches!(
-                self.dismissal,
-                Some(mj_core::attention::NotificationDismissal::Stack { .. })
-            )
-        {
+        if !matches!(
+            self.dismissal,
+            Some(mj_core::attention::NotificationDismissal::Stack { .. })
+        ) {
             return None;
         }
         self.entries
@@ -953,6 +951,29 @@ pub(crate) fn serialize_client_projection<T: Serialize, S: serde::Serializer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shown_question_survives_a_live_form_on_the_same_card() {
+        let question = mj_core::attention::NotificationStackEntry {
+            completed_at_ms: 1,
+            completed_ordinal: 7,
+            kind: mj_core::attention::NotificationKind::NeedsInput,
+            message: mj_core::attention::EntryMessage::None,
+        };
+        let card = NotificationCard {
+            since_ms: 1,
+            badge: mj_core::attention::NotificationKind::NeedsInput,
+            entries: vec![question.clone()],
+            dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 1 }),
+            holder: Some("child".into()),
+            form: Some(CardForm {
+                raised_at_ms: 2,
+                request_id: "request".into(),
+                message: "child form".into(),
+            }),
+        };
+        assert_eq!(card.shown_question(), Some(&question));
+    }
 
     fn cursor(incarnation: &str, sequence: u64) -> RuntimeCursor {
         RuntimeCursor {

@@ -700,11 +700,13 @@ mod tests {
             .metadata
             .session_attention
             .insert("child".into(), SessionAttention::Unreachable);
-        assert!(claim(&mut db, &runtime, 10).is_empty());
+        let retry = claim(&mut db, &runtime, 10);
+        assert_eq!(
+            retry[0].identity, first[0].identity,
+            "stack entry delivery is independent of the form holder"
+        );
         runtime.metadata.session_attention.remove("child");
         assert!(claim(&mut db, &runtime, 9).is_empty());
-        let retry = claim(&mut db, &runtime, 10);
-        assert_eq!(retry[0].identity, first[0].identity);
         result(&db, &retry[0], Some(201), 10);
 
         let second = claim(&mut db, &runtime, 10);
