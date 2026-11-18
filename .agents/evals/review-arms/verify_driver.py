@@ -379,6 +379,18 @@ def run_unit(batch_path, judge=None):
     # move a session to another profile after launch.
     out = {**out, "producer": {"session_id": sid, "profile": s.get("profile_id") or rec.get("profile"),
                                "launch_profile": rec.get("profile"), "config": rec.get("config")}}
+    made_on, made_by = out["producer"]["profile"], (rec.get("config") or {}).get("model")
+    if made_on not in PROFILES or made_by != a.model:
+        # The turn finished outside the requested profiles (quota recovery moved it) or without a
+        # recorded model: never publish it as this invocation's result.
+        import fcntl
+        with open(V / "workflow-out.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            save(V / "out" / f"invalid-{tag}.json", {"problems": {"producer": [made_on, made_by],
+                                                                  "requested": [PROFILES, a.model]},
+                                                     "session_id": sid})
+            (V / "workflow-out.json").unlink(missing_ok=True)
+        raise RuntimeError(f"unit {tag} finished on {made_on}/{made_by}, not {','.join(PROFILES)}/{a.model}")
     save(out_path, out)
     # A valid replacement makes the unit eligible again.
     (V / "out" / f"invalid-{tag}.json").unlink(missing_ok=True)

@@ -546,7 +546,11 @@ def noleak_state(bug, upto):
                 else (previous or {}).get("leak")
             previous = {"kind": ("fidelity check failed the last edit" if STRICT else
                                  "fact check rejected the last edit"), "why": decision["why"],
-                        **({"elements_not_kept": decision.get("elements_not_kept")} if STRICT else {}),
+                        **({"elements_not_kept": decision.get("elements_not_kept"),
+                            "fact_inferred": decision.get("fact_inferred"),
+                            **({"note": "the decisive fact needed inference or more than one line: state it "
+                                        "explicitly in one item"} if decision.get("fact_inferred") else {})}
+                           if STRICT else {}),
                         "leak": leak_reasons}
             continue
         text = (W / "texts" / bug / f"round-{n}.md").read_text()
@@ -693,7 +697,17 @@ def noleak_edit_collect(n):
         bug = u["id"]
         item = json.loads((base / bug / "item.json").read_text())
         raw = json.loads((base / bug / "edit.json").read_text())
-        validated = noleak_validate(bug, item, raw)
+        try:
+            validated = noleak_validate(bug, item, raw)
+        except SystemExit as e:
+            # In strict mode a well-formed edit that breaks the wording-only rules (lines, anchors,
+            # undeclared changes) is that diff's failed attempt; malformed output still stops collection.
+            if not STRICT or "schema" in str(e) or "non-empty items list" in str(e):
+                raise
+            recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
+                         "brief": item["brief"], "brief_sha256": "structural-failure",
+                         "lint_problems": [f"structural: {e}"]})
+            continue
         text, lint_problems = validated if STRICT else (validated, [])
         recs.append({"id": bug, "source_sha256": u["source_sha256"], "edited_items": len(raw["items"]),
                      "brief": text, "brief_sha256": hashlib.sha256(text.encode()).hexdigest(),
