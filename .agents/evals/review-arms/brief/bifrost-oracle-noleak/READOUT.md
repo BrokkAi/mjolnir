@@ -65,6 +65,7 @@ The lift is concentrated in 8 diffs; 9 do not move. Seven of those nine catch no
 The round has 204 blind outputs: ON, AF, stored A and stored OT, 51 each. The A and OT outputs match round L's frozen hashes. There were three mixed batches, each read by two Opus/high judges on claude7, who agreed on all 204 (137 missed, 66 caught, 1 partial). One Opus/high assessor hand-checked the 67 caught or partial rows and confirmed every judge label. Before joining arms, the parent applied the same stored-round precedent as round L to seven retained-fill rows, changing them from caught to partial. The rule: a finding that confines the cached failed index build to a transient or store failure is partial. Identical texts keep their earlier labels. The seven turned out to be 3 ON, 2 A, 1 AF and 1 OT (`round-m-stage/handcheck-parent-decisions.json`).
 
 - Round M against round L on the same sessions: A and OT each differ by 0.0 points, with 0 changed labels. As in round L, part of this agreement comes from applying the precedent.
+- One sealed decision is arguable: AF output 0b81aa10 names "an incomplete read or store error", and the parent labeled it partial under the lower-label rule. Counted as caught instead, AF would be 9.8% and ON − AF +35.3, still Facts carry. The sealed label stands.
 - Sensitivity, using the assessor's labels unchanged: ON 51.0%, AF 9.8%, A 21.6%, OT 47.1%. ON − AF is +41.2 (+21.6 to +60.8), still **Facts carry**. ON − OT is +3.9 (−3.9 to +13.7), and AF − A is −11.8 (−23.5 to −2.0).
 
 ## Image, window and profiles
