@@ -1118,7 +1118,9 @@ Registration: `brief/PLAN-bifrost-oracle.md`, with its 2026-11-18 amendment
   partial-leak diffs +23.8. The two missed-leak diffs don't move.
 - The lift is on 8 diffs; 9 don't move. It shows only that reviewers benefit
   when the fact is supplied, not that Bifrost queries can find it.
-- Round L's A and BT labels equal the stored Sol labels exactly. With the
-  hand-check assessor's labels instead of the parent's three overrides,
-  OT − A is +25.5 (+9.8 to +43.1), still Facts carry. New spend is about
+- Round L's final A and BT labels equal the stored Sol labels. That is partly
+  by construction: the parent applied the stored round's transient-failure
+  precedent to three retained-fill rows. The assessor's unadjusted labels
+  differ by 3.9 points on A, still under the 10-point caveat, and give
+  OT − A of +25.5 (+9.8 to +43.1), still Facts carry. New spend is about
   $10.56 at API-equivalent rates.

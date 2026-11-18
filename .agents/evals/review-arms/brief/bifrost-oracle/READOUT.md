@@ -62,7 +62,7 @@ The round has 153 blind outputs: 51 each for A, BT and OT. All 153 match their a
 
 The parent overrode the assessor on three rows, all in retained-fill-java-memo-loses-gap, changing caught to partial. The reason is the stored round's accepted hand-check standard: a finding that attributes the cached failed Java index build only to a transient store or read failure, rather than StructureUnavailable or equivalent stable incompleteness, is partial. Two of the three rows are byte-identical to stored outputs labeled partial under that rule. After the join, the three rows turned out to be 2 A and 1 OT. Details are in `round-l-stage/handcheck-parent-decisions.json`.
 
-- Round L against the stored Sol/high labels on the same sessions: A differs by 0.0 points and BT by 0.0, with 0 changed labels in each. There is no >10-point caveat.
+- Round L against the stored Sol/high labels on the same sessions: A differs by 0.0 points and BT by 0.0, with 0 changed labels in each. There is no >10-point caveat. This agreement is not fully independent. The two A rows the parent moved to partial were decided with the stored texts and their stored labels in view, so the stored standard was applied deliberately. The independent comparison is the assessor's unadjusted labels: A differs from the stored labels by +3.9 points (2 changed labels) and BT by 0.0. That is still under the 10-point caveat.
 - Sensitivity, using the assessor's labels unchanged: A is 21.6%, BT 7.8% and OT 47.1%. OT − A is +25.5 (+9.8 to +43.1), still **Facts carry**. A would then differ from the stored labels by 3.9 points.
 
 ## Cost
@@ -84,5 +84,5 @@ claude7 had 93% of its week left before round L. A and BT reused stored outputs,
 
 - 15 of 17 briefs leak, so the result is an upper bound. With only 2 missed-leak diffs, the data can't separate supplied relations from named defects.
 - With 17 diffs the interval is wide: the lower bound is +11.8 points.
-- Round L used Opus judges, not the registered Sol, because of the amendment. Agreement with the stored Sol labels is exact on A and BT, so the change of judge didn't move the comparison arms.
+- Round L used Opus judges, not the registered Sol, because of the amendment. The two Opus judges reproduced the stored judges' raw A and BT labels. After hand check, the Opus assessor alone differs from the stored final labels by 3.9 points on A, through two retained-fill rows, and the parent's precedent-based decisions remove that difference. Either way it is below the 10-point caveat, and the outcome is unchanged.
 - Reviewer tool audits and latency are unavailable, because reviewer sessions are destroyed at role end (#1554/#1559).
