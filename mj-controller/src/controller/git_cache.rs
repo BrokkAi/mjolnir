@@ -249,7 +249,7 @@ fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathB
 }
 
 fn repository_cache_key(source: &str) -> Result<String> {
-    let repository = crate::setup::github_repository_from_origin(source)
+    let repository = crate::import::github_repository_from_origin(source)
         .context("repository is not a recognized GitHub URL")?;
     let identity = format!(
         "github.com/{}/{}",

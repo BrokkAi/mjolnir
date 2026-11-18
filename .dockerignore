@@ -22,6 +22,7 @@
 !mj-targets/
 !mj-store/
 !mj-accounts/
+!mj-import/
 !mj-github-relevance/
 !mj-controller/
 !mj-server/

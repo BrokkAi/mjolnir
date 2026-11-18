@@ -100,7 +100,7 @@ pub(super) fn stage_claude_keychain_login(
         return Ok(());
     }
     let path = destination.join(profile.kind.credential_file_name());
-    match crate::setup::claude_keychain_credentials(executor)? {
+    match crate::harness_auth::claude_keychain_credentials(executor)? {
         Some(credentials) => {
             let copy =
                 mj_core::credentials::credential_copy_for_harness(profile.kind, &credentials);

@@ -1273,7 +1273,7 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
         );
         (None, Some(mj_core::local_git::canonical_repository(path)?))
     } else {
-        let github = crate::setup::github_repository_from_origin(replacement)
+        let github = crate::import::github_repository_from_origin(replacement)
             .context("origin must be a GitHub repository or an absolute local repository path")?;
         (
             Some(format!("{}/{}", github.owner, github.repository)),
@@ -1393,7 +1393,7 @@ fn fetch_source_commit(
             .github
             .as_deref()
             .context("repository source is missing")?;
-        let github = crate::setup::github_repository_from_origin(source)
+        let github = crate::import::github_repository_from_origin(source)
             .context("configured repository is not a GitHub source")?;
         if github_token.is_some() {
             token_auth = true;

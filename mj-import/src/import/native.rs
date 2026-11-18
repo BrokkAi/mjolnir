@@ -41,7 +41,7 @@ impl NativeScanCache {
     }
 
     /// The cache shared by index discovery and Mjolnir's SessionWiki reads.
-    pub(crate) fn shared() -> Self {
+    pub fn shared() -> Self {
         static CACHE: std::sync::OnceLock<NativeScanCache> = std::sync::OnceLock::new();
         CACHE.get_or_init(Self::new).clone()
     }
@@ -53,7 +53,7 @@ impl NativeScanCache {
 
     /// Index discovery excludes identified children, preserving parents even
     /// when their entrypoint or missing working directory prevents importing.
-    pub(crate) fn index_eligible(&self, kind: HarnessKind, path: &Path) -> Result<bool> {
+    pub fn index_eligible(&self, kind: HarnessKind, path: &Path) -> Result<bool> {
         if kind == HarnessKind::Claude
             && path
                 .components()

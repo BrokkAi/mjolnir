@@ -33,7 +33,6 @@ half = "2"
 libloading = "0.9"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-23", "directml", "coreml", "cuda", "half"] }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
-ring.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

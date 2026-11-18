@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) use crate::database::setup_style_id;
-pub(crate) use mj_core::repository::RepositoryIdentity;
+pub use crate::database::setup_style_id;
+pub use mj_core::repository::RepositoryIdentity;
 
 /// Local Git reads with no network or prompt, so no deadline: a fixed one
 /// failed imports on a loaded host while Git was still answering.
@@ -9,7 +9,7 @@ pub(super) fn root_identity(root: &Path) -> Result<RepositoryIdentity> {
     mj_core::repository::local_identity(root, &mj_core::targets::ProcessExecutor)
 }
 
-pub(crate) fn configured_repository_identity(
+pub fn configured_repository_identity(
     repository: &ProjectRepository,
 ) -> Result<Option<RepositoryIdentity>> {
     if let Some(source) = repository.github.as_deref() {
@@ -21,7 +21,7 @@ pub(crate) fn configured_repository_identity(
 /// Read an identity while searching configured bundles. A stale local source
 /// makes its bundle ineligible for reuse, but must not prevent unrelated
 /// bundles from being considered.
-pub(crate) fn configured_repository_identity_for_lookup(
+pub fn configured_repository_identity_for_lookup(
     bundle_id: &str,
     repository: &ProjectRepository,
 ) -> Option<RepositoryIdentity> {
@@ -133,7 +133,7 @@ pub fn resolve_bundle(
     })
 }
 
-pub(crate) fn bundle_matches(
+pub fn bundle_matches(
     bundle_id: &str,
     bundle: &ProjectBundle,
     detected: &BTreeSet<RepositoryIdentity>,
@@ -191,7 +191,7 @@ pub(super) fn same_github_repository(left: &GithubRepository, right: &GithubRepo
         && left.repository.eq_ignore_ascii_case(&right.repository)
 }
 
-pub(crate) fn unique_bundle_id(config: &Config, base: &str) -> String {
+pub fn unique_bundle_id(config: &Config, base: &str) -> String {
     if !config.bundles.contains_key(base) {
         return base.into();
     }

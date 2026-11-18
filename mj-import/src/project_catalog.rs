@@ -13,7 +13,7 @@ use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity, ResolvedDir
 use mj_core::targets::{CancellableProcessExecutor, CommandExecutor};
 use tokio_util::sync::CancellationToken;
 
-use crate::{controller::RemoteGitExecutor, database};
+use crate::{database, targets::RemoteGitExecutor};
 
 pub fn snapshot(
     bundle: &ProjectBundle,
@@ -59,7 +59,7 @@ fn has_no_recorded_checkout_directory(
         .is_ok_and(|checkout| checkout.project_directory().is_none())
 }
 
-pub(crate) fn resolve_directory(
+pub fn resolve_directory(
     target: &TargetTemplate,
     path: &Path,
     executor: &impl CommandExecutor,
@@ -87,7 +87,7 @@ pub(crate) fn resolve_directory(
     }
 }
 
-pub(crate) fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
+pub fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleSnapshot {
     let id = crate::import::setup_style_id(&resolved.identity.name());
     ProjectBundleSnapshot {
         bundle: ProjectBundle {
@@ -110,7 +110,7 @@ pub(crate) fn directory_snapshot(resolved: &ResolvedDirectory) -> ProjectBundleS
     }
 }
 
-pub(crate) fn accept_directory(
+pub fn accept_directory(
     target: &TargetTemplate,
     directory: &Path,
     executor: &impl CommandExecutor,
@@ -119,7 +119,7 @@ pub(crate) fn accept_directory(
     accept_resolved_directory(host, directory, resolved)
 }
 
-pub(crate) fn accept_resolved_directory(
+pub fn accept_resolved_directory(
     host: String,
     directory: &Path,
     resolved: ResolvedDirectory,

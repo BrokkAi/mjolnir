@@ -1024,7 +1024,7 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
             .iter_mut()
             .chain(repository.push_urls.iter_mut())
         {
-            if let Some(github) = crate::setup::github_repository_from_origin(source) {
+            if let Some(github) = crate::import::github_repository_from_origin(source) {
                 *source = format!(
                     "https://github.com/{}/{}.git",
                     github.owner, github.repository

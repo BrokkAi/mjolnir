@@ -2771,8 +2771,8 @@ async fn mac_sync_pass(
     let received = scratch.path().join("session-login");
     let target = claude_sync_target(home.path(), "claude-session", session_login, &received);
     let skills = Arc::new(CanonicalSkills::collect(&target));
-    let read = match crate::setup::read_claude_keychain_login(&**keychain).unwrap() {
-        crate::setup::KeychainLogin::Present(bytes) => {
+    let read = match crate::harness_auth::read_claude_keychain_login(&**keychain).unwrap() {
+        crate::harness_auth::KeychainLogin::Present(bytes) => {
             (CredentialSnapshot::of(kind, &bytes), bytes)
         }
         _ => (CredentialSnapshot::absent(), Vec::new()),

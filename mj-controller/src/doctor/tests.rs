@@ -320,7 +320,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         .collect(),
         ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
     };
-    assert!(crate::setup::harness_is_authenticated_with_executor(
+    assert!(crate::harness_auth::harness_is_authenticated_with_executor(
         &claude,
         &FakeExecutor::new([]),
     ));

@@ -136,6 +136,11 @@ it or introduce a dependency between sibling branches.
   each provider's quota and usage reader with the scheduling and health built
   on them. It builds on the targets and store crates. `mj_controller`
   re-exports its modules under their old names.
+- `brokk-mj-import` (`mj-import/`, library `mj_import`) brings work into
+  Mjolnir and carries it between sessions: importing another tool's sessions,
+  the project catalog, transcript compaction with the utility model, and
+  handoff. It builds on the targets, store and accounts crates.
+  `mj_controller` re-exports its modules under their old names.
 - `brokk-mj-github-relevance` (`mj-github-relevance/`, library
   `mj_github_relevance`) is the on-device classifier that decides which GitHub
   events matter to a session, with the download of its weights and runtime.

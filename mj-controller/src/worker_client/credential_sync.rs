@@ -2425,7 +2425,7 @@ impl LoginAccess {
         Self::new(
             store,
             Arc::new(crate::targets::BoundedProcessExecutor::new(
-                crate::setup::KEYCHAIN_READ_TIMEOUT,
+                crate::harness_auth::KEYCHAIN_READ_TIMEOUT,
             )),
         )
     }
@@ -2444,14 +2444,14 @@ impl LoginAccess {
                 // A locked Keychain is an error here: treating it as "no
                 // login" would let the sync act on a login that merely could
                 // not be read.
-                match crate::setup::read_claude_keychain_login(&*self.security)? {
-                    crate::setup::KeychainLogin::Present(bytes) => {
+                match crate::harness_auth::read_claude_keychain_login(&*self.security)? {
+                    crate::harness_auth::KeychainLogin::Present(bytes) => {
                         Ok((CredentialSnapshot::of(kind, &bytes), bytes))
                     }
-                    crate::setup::KeychainLogin::Missing => {
+                    crate::harness_auth::KeychainLogin::Missing => {
                         Ok((CredentialSnapshot::absent(), Vec::new()))
                     }
-                    crate::setup::KeychainLogin::Unreadable { status } => Err(anyhow!(
+                    crate::harness_auth::KeychainLogin::Unreadable { status } => Err(anyhow!(
                         "the macOS Keychain could not be read (security exited with status {status})"
                     )),
                 }

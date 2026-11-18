@@ -44,7 +44,6 @@ pub mod update;
 mod worker_binary;
 mod worker_restart;
 mod worktree;
-pub(crate) use worktree::RemoteGitExecutor;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -58,8 +57,8 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
+use crate::import::github_repository_from_origin;
 use crate::import::{RepositoryIdentity, setup_style_id};
-use crate::setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -433,7 +432,7 @@ pub fn create_bundle_from_sources_in_config(
 
 #[derive(Debug, Clone)]
 enum RepositorySourceKind {
-    Github(crate::setup::GithubRepository),
+    Github(crate::import::GithubRepository),
     Local(PathBuf),
 }
 

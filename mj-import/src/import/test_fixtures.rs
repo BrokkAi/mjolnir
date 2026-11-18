@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-pub(crate) const MUSE_ID: &str = "01a08120-6536-7721-8ddf-e0df0e921c2c";
+pub const MUSE_ID: &str = "01a08120-6536-7721-8ddf-e0df0e921c2c";
 
 /// `posix`, an absolute path such as `/work/app`, as a native harness on this
 /// machine records it. Import requires a working directory absolute here, and
 /// on Windows that takes a drive; `C:/` needs no escaping inside JSON.
-pub(crate) fn native_cwd(posix: &str) -> String {
+pub fn native_cwd(posix: &str) -> String {
     if cfg!(windows) {
         format!("C:{posix}")
     } else {
@@ -21,7 +21,7 @@ pub(crate) fn native_cwd(posix: &str) -> String {
 }
 
 /// `fixture` with every quoted `/work/...` path made native, as [`native_cwd`].
-pub(crate) fn native_fixture(fixture: &str) -> String {
+pub fn native_fixture(fixture: &str) -> String {
     if cfg!(windows) {
         fixture.replace("\"/work/", "\"C:/work/")
     } else {
@@ -33,7 +33,7 @@ pub(crate) fn native_fixture(fixture: &str) -> String {
 /// internally tagged items, user content as typed parts, reasoning
 /// summaries beside the assistant turn, and `search_replace` tool calls
 /// paired with their results.
-pub(crate) fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBuf {
+pub fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBuf {
     // Join components so the seeded index key matches native directory discovery.
     let session = directory
         .join("sessions")
@@ -58,7 +58,7 @@ pub(crate) fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBu
 
 /// A Kimi Code session directory with the `session_index.jsonl` entry that
 /// makes it visible, its `state.json` metadata and one agent wire log.
-pub(crate) fn kimi_session(home: &Path, id: &str, cwd: &str, title: &str, wire: &str) -> PathBuf {
+pub fn kimi_session(home: &Path, id: &str, cwd: &str, title: &str, wire: &str) -> PathBuf {
     let session = home.join("sessions").join("project").join(id);
     fs::create_dir_all(session.join("agents").join("main")).unwrap();
     fs::write(
@@ -75,7 +75,7 @@ pub(crate) fn kimi_session(home: &Path, id: &str, cwd: &str, title: &str, wire: 
     session
 }
 
-pub(crate) fn muse_record(id: &str, sequence: u64, payload_type: &str, payload: Value) -> Value {
+pub fn muse_record(id: &str, sequence: u64, payload_type: &str, payload: Value) -> Value {
     json!({
         "schema_version": 1,
         "id": id,
@@ -90,7 +90,7 @@ pub(crate) fn muse_record(id: &str, sequence: u64, payload_type: &str, payload: 
     })
 }
 
-pub(crate) fn write_muse_session(path: &Path, id: &str, cwd: &Path) {
+pub fn write_muse_session(path: &Path, id: &str, cwd: &Path) {
     let records = [
         muse_record(
             "metadata-1",

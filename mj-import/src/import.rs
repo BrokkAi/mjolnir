@@ -5,7 +5,7 @@ mod muse;
 #[cfg(test)]
 mod native_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_fixtures;
+pub mod test_fixtures;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -20,12 +20,12 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use crate::setup::{GithubRepository, github_repository_from_origin};
 use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, GitSnapshotProgress,
     SystemGit, TargetManifest, collect_git_snapshot_with_progress, write_archive_atomic,
 };
 use mj_checkpoint::checkpoint::collect_import_native_artifacts;
+use mj_core::remote_git::{Shorthand, parse_github_remote};
 
 use mj_core::config::{
     Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate, validate_id,
@@ -53,7 +53,7 @@ mod codex;
 pub use codex::*;
 mod kimi;
 pub use kimi::*;
-pub(crate) mod claude;
+pub mod claude;
 pub use claude::*;
 mod transcripts;
 pub use transcripts::*;
@@ -70,17 +70,42 @@ mod grok;
 use grok::grok_decode_cwd_dirname;
 pub use grok::{list_grok_sessions, locate_grok_session, read_grok_transcript, scan_grok_sessions};
 
+/// A repository on GitHub, as its owner and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubRepository {
+    pub owner: String,
+    pub repository: String,
+}
+
+impl GithubRepository {
+    pub fn source(&self) -> String {
+        format!("{}/{}", self.owner, self.repository)
+    }
+}
+
+pub fn github_repository_from_origin(origin: &str) -> Option<GithubRepository> {
+    github_repository(origin, Shorthand::Allowed)
+}
+
+pub fn github_repository(origin: &str, shorthand: Shorthand) -> Option<GithubRepository> {
+    let remote = parse_github_remote(origin, shorthand)?;
+    Some(GithubRepository {
+        owner: remote.owner,
+        repository: remote.repository,
+    })
+}
+
 #[cfg(test)]
 mod tests;
 
 /// Read only project metadata from the newest native sessions. Never imports
 /// conversations, computes checkout sizes, or probes Git for this seed.
-pub(crate) struct NativeProjectSeed {
+pub struct NativeProjectSeed {
     pub directories: Vec<PathBuf>,
     pub errors: Vec<(PathBuf, String)>,
 }
 
-pub(crate) fn recent_project_directories(
+pub fn recent_project_directories(
     harness: HarnessKind,
     home: &Path,
     limit: usize,
@@ -163,7 +188,7 @@ pub(crate) fn recent_project_directories(
 
 /// Project metadata lives near the start of each log. Bound the read and stop
 /// as soon as it is found, without parsing the conversation after it.
-pub(crate) fn native_project_directory(
+pub fn native_project_directory(
     path: &Path,
     harness: HarnessKind,
     executor: &impl crate::targets::CommandExecutor,

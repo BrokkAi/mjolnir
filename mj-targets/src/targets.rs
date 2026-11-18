@@ -47,6 +47,8 @@ mod worker_daemon;
 pub use worker_daemon::*;
 mod cleanup;
 pub use cleanup::*;
+mod remote_git;
+pub use remote_git::*;
 mod bootstrap;
 pub use bootstrap::*;
 mod container;

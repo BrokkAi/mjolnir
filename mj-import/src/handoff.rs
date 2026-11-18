@@ -15,11 +15,11 @@ use tokio_util::sync::CancellationToken;
 use mj_checkpoint::archive::CanonicalSessionSnapshot;
 use mj_core::config::{Config, HarnessProfile};
 
-pub(crate) mod claude;
+pub mod claude;
 
 /// Checkpoint native history is optional evidence for a cross-harness handoff.
 /// A missing or unusable native summary leaves the canonical handoff intact.
-pub(crate) async fn native_prior_from_archive(
+pub async fn native_prior_from_archive(
     session_id: &str,
     archive_path: &std::path::Path,
     manifest: &mj_checkpoint::archive::ArchiveManifest,
@@ -79,7 +79,7 @@ pub async fn build_handoff_context(
         .await
 }
 
-pub(crate) async fn build_handoff_context_with_prior(
+pub async fn build_handoff_context_with_prior(
     session_id: &str,
     config: &Config,
     snapshot: &CanonicalSessionSnapshot,

@@ -12,9 +12,11 @@ use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate, unique_config_id as unique_id,
 };
-use mj_core::remote_git::{Shorthand, parse_github_remote};
+use mj_core::remote_git::Shorthand;
 
 pub(crate) use crate::harness_auth::*;
+pub(crate) use crate::import::github_repository;
+pub use crate::import::{GithubRepository, github_repository_from_origin};
 
 mod availability;
 pub use availability::{AvailabilityReport, check_availability, profile_presence};
@@ -45,18 +47,6 @@ pub struct DiscoveredHome {
     /// Every overlay is offered as a profile of its own beside the home.
     pub codex_profile: Option<String>,
     pub authenticated: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GithubRepository {
-    pub owner: String,
-    pub repository: String,
-}
-
-impl GithubRepository {
-    fn source(&self) -> String {
-        format!("{}/{}", self.owner, self.repository)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,18 +387,6 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
     };
     profile.inherit_provider_key();
     profile
-}
-
-pub fn github_repository_from_origin(origin: &str) -> Option<GithubRepository> {
-    github_repository(origin, Shorthand::Allowed)
-}
-
-fn github_repository(origin: &str, shorthand: Shorthand) -> Option<GithubRepository> {
-    let remote = parse_github_remote(origin, shorthand)?;
-    Some(GithubRepository {
-        owner: remote.owner,
-        repository: remote.repository,
-    })
 }
 
 /// Read the current directory's GitHub origin, through the same executor every

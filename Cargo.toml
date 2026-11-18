@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-github-relevance", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
-default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-github-relevance", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-import", "mj-github-relevance", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli", "voice-worker"]
+default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-build-id", "mj-worker", "mj-worker-bin", "mj-client", "mj-targets", "mj-store", "mj-accounts", "mj-import", "mj-github-relevance", "mj-controller", "mj-server", "mj-daemon", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so all package versions
@@ -42,6 +42,7 @@ mj-targets = { path = "mj-targets", package = "brokk-mj-targets", version = "2.7
 mj-store = { path = "mj-store", package = "brokk-mj-store", version = "2.71.0" }
 mj-accounts = { path = "mj-accounts", package = "brokk-mj-accounts", version = "2.71.0" }
 mj-github-relevance = { path = "mj-github-relevance", package = "brokk-mj-github-relevance", version = "2.71.0" }
+mj-import = { path = "mj-import", package = "brokk-mj-import", version = "2.71.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.71.0" }
 mj-server = { path = "mj-server", package = "brokk-mj-server", version = "2.71.0" }
 mj-daemon = { path = "mj-daemon", package = "brokk-mj-daemon", version = "2.71.0" }

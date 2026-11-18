@@ -194,7 +194,7 @@ impl UtilityLlmRuntime {
         Ok(backend)
     }
 
-    pub(crate) async fn quotas(
+    pub async fn quotas(
         &self,
         profiles: &[(&str, &HarnessProfile)],
     ) -> BTreeMap<String, ProfileQuota> {
@@ -282,7 +282,7 @@ impl UtilityCompactionBackend {
 /// Make one structured text request with an already selected utility model.
 /// Callers that need a hard operation deadline own the timeout and cancellation
 /// token; this helper only builds and sends the request.
-pub(crate) async fn infer_text_once(
+pub async fn infer_text_once(
     candidate: &UtilityCandidate,
     system_prompt: &str,
     user_prompt: String,
@@ -494,7 +494,7 @@ fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequ
     )
 }
 
-pub(crate) fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
+pub fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     if report.is_usage_priced() {
         return Some((UtilityQuotaClass::UsagePriced, 100));
     }
@@ -828,12 +828,10 @@ mod tests {
         const CHILD: &str = "MJ_UTILITY_QUOTA_STORED_REPORT_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "utility_quota_uses_only_fresh_stored_reports",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "utility_quota_uses_only_fresh_stored_reports",
+            ))
             .env(CHILD, "1")
             .isolated_store(root.path())
             .run();

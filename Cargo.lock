@@ -741,11 +741,11 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "brokk-anvil-client",
  "brokk-mj-accounts",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
+ "brokk-mj-import",
  "brokk-mj-store",
  "brokk-mj-targets",
  "brokk-mj-transcript",
@@ -878,7 +878,6 @@ dependencies = [
  "libloading 0.9.0",
  "ort",
  "reqwest",
- "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -891,6 +890,34 @@ dependencies = [
  "tokio-util",
  "tracing",
  "zip",
+]
+
+[[package]]
+name = "brokk-mj-import"
+version = "2.71.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "brokk-anvil-client",
+ "brokk-mj-accounts",
+ "brokk-mj-checkpoint",
+ "brokk-mj-core",
+ "brokk-mj-store",
+ "brokk-mj-targets",
+ "brokk-mj-transcript",
+ "chrono",
+ "futures",
+ "rayon",
+ "reqwest",
+ "rusqlite",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]

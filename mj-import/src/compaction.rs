@@ -162,7 +162,7 @@ pub struct CompactionBudget {
 
 /// A complete earlier state, through the canonical item at this position.
 #[derive(Debug, Clone)]
-pub(crate) struct PriorCompaction {
+pub struct PriorCompaction {
     pub through_position: u64,
     pub summary: String,
     /// Materialized rows whose coverage by a native summary is unproven.
@@ -191,7 +191,7 @@ pub async fn compact_snapshot(
     compact_snapshot_since(snapshot, budget, backend, None).await
 }
 
-pub(crate) async fn compact_snapshot_since(
+pub async fn compact_snapshot_since(
     snapshot: &CanonicalSessionSnapshot,
     budget: CompactionBudget,
     backend: &impl CompactionBackend,
