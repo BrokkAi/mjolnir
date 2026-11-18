@@ -1317,6 +1317,9 @@ impl ChatState {
     }
 
     fn restore_failed_reviewer_elicitation(&mut self, draft: ChatElicitationDraft, error: String) {
+        if !self.pending_reviewer_matches(&draft) {
+            return;
+        }
         let request = draft.request().clone();
         if self.elicitation.is_none() {
             self.show_review_role_elicitation(draft.reviewer_role.clone(), request.clone());

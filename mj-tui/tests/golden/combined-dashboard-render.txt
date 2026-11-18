@@ -89,13 +89,13 @@
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Notifications (1) ─────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                   ││? ACP pretty name · hel · <age>                                                                          │
-│                                                   ││ Loading form…                                                                                           │
+│                                                   ││                                                                                                         │
 │                                                   ││ Question line 1                                                                                         │
 │                                                   ││ Question line 2                                                                                         │
 │                                                   ││ Question line 3                                                                                         │
-│                                                   ││ Question line 4                                                                                         │
-│                                                   ││ Question line 5                                                                                         │
-│                                                   ││ Question line 6                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││Quick reply:                                                                                        Send │
 │                                                   ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                   │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
@@ -125,11 +125,11 @@ layout: sessions=Rect { x: 0, y: 3, width: 53, height: 96 }; transcript=Rect { x
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Notifications (1) ─────────────────────────────────────────────────────────────────────────── ▁   ▄   □ ╮
 │                                                   ││? ACP pretty name · hel · <age>                                                                          │
-│                                                   ││ Loading form…                                                                                           │
+│                                                   ││                                                                                                         │
 │                                                   ││ Question line 1                                                                                         │
-│                                                   ││ Question line 2                                                                                         │
-│                                                   ││ Question line 3                                                                                         │
-│                                                   ││ Question line 4                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││Quick reply:                                                                                        Send │
 │                                                   ││ Go to Session   Clear & Next   Skip   Clear all ! (0)                                                   │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (?1) · b panes · q detach · : / ? palette
@@ -1591,7 +1591,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ Loading form…                                                                │
 │                                      ││ Choose a path                                                                │
 │                                      ││                                                                              │
@@ -1604,7 +1604,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 
 === compact form attachment status (120x8) ===
 ╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│? ACP pretty name · hel · <age>                                                                                       │
+│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │ Loading form…                                                                                                        │
 │ Choose a path                                                                                                        │
 │                                                                                                                      │
@@ -1647,7 +1647,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ Could not load form: Worker unavailable                                      │
 │                                      ││ Choose a path                                                                │
 │                                      ││                                                                              │
@@ -1660,7 +1660,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 
 === compact form attachment status (120x8) ===
 ╭ Notifications (1) ──────────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│? ACP pretty name · hel · <age>                                                                                       │
+│? ACP pretty name · hel · age unknown                                         1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │ Could not load form: Worker unavailable                                                                              │
 │ Choose a path                                                                                                        │
 │                                                                                                                      │
@@ -1698,7 +1698,7 @@ Alt+g session · Alt+s skip · Alt+↑ scroll · Tab pane │ ctrl+b then g sess
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │Keep the question visible on short terminals.                             │ │
@@ -1774,7 +1774,7 @@ Could not dismiss 1 notification: permission denied
 │                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │>                                                                         │ │
@@ -1797,7 +1797,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││            Harness      Weekly      Resets  5H Resets                        ▐
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │
@@ -1830,7 +1830,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │
@@ -1871,7 +1871,7 @@ Alt+g session · Alt+s skip │ ctrl+b then g sessions · o next (?1) · b panes
 │                                      ││  codex-2   Codex        refreshing…                                          │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Notifications (1) ──────────────────────────────────────────────── ▁   ▄   □ ╮
-│                                      ││? ACP pretty name · hel · <age>                                               │
+│                                      ││? ACP pretty name · hel · age unknown 1 of 1 Previous Alt+PgUp  Next Alt+PgDn │
 │                                      ││ ╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────╮ │
 │                                      ││ │Which deployment path should be used?                                     │ │
 │                                      ││ │                                                                          │ │

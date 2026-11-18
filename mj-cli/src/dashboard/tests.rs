@@ -340,6 +340,7 @@ async fn cancelling_a_pane_attachment_preserves_the_notification_lease() {
         dismissal: None,
         holder: None,
         form: Some(CardForm {
+            source: mj_client::runtime_feed::CardFormSource::Elicitation,
             raised_at_ms: 1,
             request_id: "form".into(),
             message: "Answer".into(),

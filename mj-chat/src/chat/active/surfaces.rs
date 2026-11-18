@@ -41,9 +41,10 @@ impl ActiveChat {
         }
     }
 
-    /// Accepted clipboard work remains with its logical form until delivered.
+    /// Accepted form input and answer delivery retain their result owner.
     pub fn has_pending_elicitation_input(&self) -> bool {
-        self.state.elicitation.is_some() && self.state.composer_runtime.paste_in_flight
+        (self.state.elicitation.is_some() && self.state.composer_runtime.paste_in_flight)
+            || self.state.has_pending_reviewer_answers()
     }
 
     pub fn has_elicitation(&self) -> bool {

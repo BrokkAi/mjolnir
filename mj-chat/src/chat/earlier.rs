@@ -30,6 +30,7 @@ impl ChatState {
     }
 
     pub(super) fn open_earlier_messages(&mut self) {
+        self.cancel_conversation_pointer();
         self.earlier_generation += 1;
         self.earlier = Some(EarlierMessages {
             generation: self.earlier_generation,

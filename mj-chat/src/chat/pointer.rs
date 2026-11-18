@@ -162,6 +162,9 @@ impl ChatState {
     /// Captured controls and scrollbars keep their conversation as owner even
     /// when the pointer crosses another session's notification form.
     pub fn conversation_pointer_captured(&self) -> bool {
+        if self.earlier.is_some() {
+            return false;
+        }
         let scrollbar = self.transcript_scrollbar_dragging();
         if let Some(dialog) = self.elicitation.as_ref() {
             return scrollbar
@@ -177,14 +180,21 @@ impl ChatState {
     }
 
     /// Cancels any pointer gesture owned by a chat component.
-    pub fn cancel_component_pointer(&mut self) {
+    pub fn cancel_conversation_pointer(&mut self) {
         self.cancel_transcript_scrollbar_pointer();
         self.turn_control_dialog.cancel_pointer();
         self.task_dialog_form.cancel_pointer();
         self.voice_form.cancel_pointer();
         self.cancel_config_picker_pointer();
         if let Some(dialog) = self.elicitation.as_ref() {
-            dialog.cancel_component_pointer();
+            dialog.cancel_pointer_in(super::ElicitationSurface::Conversation);
+        }
+    }
+
+    pub fn cancel_component_pointer(&mut self) {
+        self.cancel_conversation_pointer();
+        if let Some(dialog) = self.elicitation.as_ref() {
+            dialog.cancel_pointer_in(super::ElicitationSurface::Notification);
         }
     }
 

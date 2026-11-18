@@ -104,14 +104,6 @@ enum ChatIoUpdate {
         result: std::result::Result<Vec<String>, String>,
     },
     SessionReconnected(std::result::Result<ManagedSessionHandle, String>),
-    /// The chosen reviewer is running and the review can begin.
-    ReviewerStarted(std::result::Result<(), String>),
-    /// A sentence about a reviewer form answer, for the conversation.
-    ReviewerNotice(String),
-    ReviewerAnswered {
-        draft: Box<ChatElicitationDraft>,
-        result: std::result::Result<(), String>,
-    },
     /// The system browser could not be started for a clicked link.
     LinkOpenFailed {
         url: String,
@@ -259,11 +251,6 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
             tracing::warn!(%url, %error, "browser launch for a transcript link failed");
             chat.set_notice(format!("Could not open {url}: {error}"));
         }
-        // Reviewer updates are handled where the session handle is, because
-        // acting on one starts more reviewer work.
-        ChatIoUpdate::ReviewerStarted(_)
-        | ChatIoUpdate::ReviewerNotice(_)
-        | ChatIoUpdate::ReviewerAnswered { .. } => {}
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }

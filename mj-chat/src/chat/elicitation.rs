@@ -783,13 +783,6 @@ impl ElicitationDialog {
         view.last_option_click.set(None);
     }
 
-    pub(super) fn cancel_component_pointer(&self) {
-        for view in [&self.view, &self.other_view] {
-            view.form.borrow_mut().cancel_pointer();
-            view.last_option_click.set(None);
-        }
-    }
-
     pub(super) fn reset_component_geometry(&self) {
         for surface in [
             ElicitationSurface::Conversation,

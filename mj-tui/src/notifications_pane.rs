@@ -632,15 +632,12 @@ impl DashboardState {
     pub(crate) fn notification_form_content_session(&self) -> Option<String> {
         let entries = self.notification_entries();
         let entry = entries.first()?;
-        let form_selected = entry
-            .published
-            .as_ref()
-            .map_or(entry.target.is_none(), |card| {
-                card.form
-                    .as_ref()
-                    .is_some_and(|form| form.requires_elicitation())
-                    && self.selected_notification_item(entry) == card.entries.len()
-            });
+        let form_selected = entry.published.as_ref().is_some_and(|card| {
+            card.form
+                .as_ref()
+                .is_some_and(|form| form.requires_elicitation())
+                && self.selected_notification_item(entry) == card.entries.len()
+        });
         (entry.level == AttentionLevel::Waiting && form_selected)
             .then(|| self.notification_destination(entry))
     }
@@ -1901,6 +1898,7 @@ pub(crate) mod tests {
                 .get_mut("session-1")
                 .unwrap()
                 .pending_elicitations = vec![request.clone()];
+            crate::test_support::serve_form_card(&mut dashboard, "session-1", None, &request);
             dashboard.set_current_session(if conversation_visible {
                 Some("session-1")
             } else {
@@ -2217,6 +2215,7 @@ pub(crate) mod tests {
             .get_mut("session-1")
             .unwrap()
             .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut dashboard, "session-1", None, &request);
         dashboard.set_current_session(Some("session-2"));
         dashboard.notifications.size = PaneSize::Maximized;
         let (first, _) = form_chat("session-1", request.clone());
@@ -2510,10 +2509,20 @@ pub(crate) mod tests {
             chats["session-2"].transcript_scrollbar_dragging(),
             "focus loss disarms capture without deleting the displayed hitbox"
         );
+        // Hard-won: 56747ef: the earlier-message reader left a hidden transcript thumb captured.
         chats
             .get_mut("session-2")
             .unwrap()
-            .handle_event_result(Event::Mouse(release));
+            .handle_event_result(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::PageUp,
+                KeyModifiers::CONTROL,
+            )));
+        assert!(!chats["session-2"].transcript_scrollbar_dragging());
+        assert!(dashboard.conversation_pointer_session(&chats).is_none());
+        assert_eq!(
+            dashboard.notification_form_mouse_ownership(&chats, release),
+            Some(true)
+        );
     }
 
     pub(crate) fn dashboard() -> DashboardState {
@@ -2582,6 +2591,7 @@ pub(crate) mod tests {
                 dismissal: Some(NotificationDismissal::Stack { revision: 50 }),
                 holder: Some("q2".into()),
                 form: Some(CardForm {
+                    source: mj_client::runtime_feed::CardFormSource::Elicitation,
                     raised_at_ms: 60,
                     request_id: "request".into(),
                     message: "Which approach should we take?\nThe question stays here until you answer or clear it.".into(),
@@ -3296,6 +3306,7 @@ pub(crate) mod tests {
             .get_mut("session-1")
             .unwrap()
             .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut dashboard, "session-1", None, &request);
         dashboard.notifications.size = PaneSize::Maximized;
         dashboard.focus = Focus::Notifications;
         let mut chats = std::collections::BTreeMap::new();
@@ -3807,12 +3818,21 @@ pub(crate) mod tests {
 
         let mut dashboard = dashboard();
         dashboard.notification_dismissals.remove("q1");
+        // Hard-won: 56747ef: an older daemon's plain-text question entered the form loader.
+        assert!(dashboard.notification_form_session().is_none());
+        let lines = drawn(&mut dashboard, 120, 44);
+        assert!(lines.iter().any(|line| line.contains("Quick reply:")));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("Waiting for the session's form update"))
+        );
         assert_eq!(
             dashboard.handle_key(alt(KeyCode::Char('n'))),
             DashboardAction::None
         );
         assert_eq!(
-            dashboard.handle_key(alt(KeyCode::Char('g'))),
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::Open {
                 session_id: "q1".into()
             }
@@ -3983,6 +4003,12 @@ pub(crate) mod tests {
             .get_mut("child-session")
             .unwrap()
             .pending_elicitations = vec![approval.clone()];
+        crate::test_support::serve_form_card(
+            &mut family,
+            &parent,
+            Some("child-session"),
+            &approval,
+        );
         assert_eq!(
             family.notification_message(&parent, AttentionLevel::Waiting),
             approval.message

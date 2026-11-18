@@ -970,11 +970,7 @@ fn notification_card(
                     .find(|request| {
                         !runtime.subagents.contains_key(holder) || !request.goes_to_parent()
                     })
-                    .map(|request| CardForm {
-                        raised_at_ms: raised_at(&request.id),
-                        request_id: request.id.clone(),
-                        message: request.message.clone(),
-                    })
+                    .map(|request| CardForm::elicitation(request, raised_at(&request.id)))
             })
             .or_else(|| {
                 runtime
@@ -987,11 +983,7 @@ fn notification_card(
                     .map(|question| {
                         let raised_at_ms = raised_at(&question.request.id);
                         let request = question.session_request();
-                        CardForm {
-                            raised_at_ms,
-                            request_id: request.id,
-                            message: request.message,
-                        }
+                        CardForm::elicitation(&request, raised_at_ms)
                     })
             })
     });
@@ -1293,6 +1285,23 @@ mod tests {
             fields: vec![],
             tool_permission: None,
         };
+        // Hard-won: 56747ef: opaque harness IDs collided with generated native/verdict prefixes.
+        for opaque_id in ["native.real-request", "review-verdict.real-request"] {
+            let mut primary = runtime.clone();
+            let mut materialized = MaterializedSession::empty("parent");
+            materialized.pending_elicitations = vec![request(opaque_id)];
+            primary.transcripts.insert(
+                "parent".into(),
+                mj_client::runtime_feed::SessionTail::of(&materialized, &Default::default(), 12),
+            );
+            let cards = project_states(&primary, BTreeSet::from(["parent".into()])).cards;
+            let card: mj_client::runtime_feed::NotificationCard =
+                serde_json::from_value(serde_json::to_value(&cards["parent"]).unwrap()).unwrap();
+            let form = card.form.unwrap();
+            assert_eq!(form.request_id, opaque_id);
+            assert!(form.requires_elicitation());
+            assert!(!form.is_native());
+        }
         let mut view = NativeAgentView {
             generation_ordinal: 1,
             agent,

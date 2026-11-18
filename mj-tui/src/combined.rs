@@ -2850,6 +2850,7 @@ mod tests {
             .get_mut("session-1")
             .unwrap()
             .pending_elicitations = vec![request.clone()];
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &request);
         inline
             .session_details
             .get_mut("session-1")
@@ -2898,7 +2899,8 @@ mod tests {
             );
         }
         inline.set_notification_form_error("session-1", None);
-        let (chat, _answers) = crate::notifications_pane::tests::form_chat("session-1", request);
+        let (chat, _answers) =
+            crate::notifications_pane::tests::form_chat("session-1", request.clone());
         let mut chats = BTreeMap::from([("session-1".to_owned(), chat)]);
         let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
         crate::with_no_color_override_for_test(true, || {
@@ -2944,6 +2946,7 @@ mod tests {
                     dismissal: Some(NotificationDismissal::Stack { revision: 1 }),
                     holder: None,
                     form: Some(CardForm {
+                        source: mj_client::runtime_feed::CardFormSource::Elicitation,
                         raised_at_ms: 2,
                         request_id: "mixed-question".into(),
                         message: "Choose a path".into(),
@@ -2989,7 +2992,7 @@ mod tests {
             44,
             &lines,
         );
-        inline.set_notification_cards(None);
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &request);
         inline.notifications.errors.clear();
         inline.clear_notice();
 
@@ -3057,7 +3060,8 @@ mod tests {
             .session_details
             .get_mut("session-1")
             .unwrap()
-            .pending_elicitations = vec![choice];
+            .pending_elicitations = vec![choice.clone()];
+        crate::test_support::serve_form_card(&mut inline, "session-1", None, &choice);
         inline.notifications.size = PaneSize::Minimized;
         terminal
             .draw(|frame| {

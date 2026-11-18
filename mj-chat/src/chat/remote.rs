@@ -13,11 +13,62 @@ use mj_core::relay::RelayCommand;
 
 use super::PromptImage;
 use super::{
-    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, SubmissionKind, TurnControlIntent,
-    queued_prompt_preview,
+    ChatElicitationDraft, ChatState, PlanControl, PlanReviewFollowup, PromptPayload,
+    SubmissionKind, TurnControlIntent, queued_prompt_preview,
 };
 #[cfg(test)]
 use crate::clipboard::ClipboardImage;
+
+// Feedback keys are constructed here; harness request IDs remain opaque.
+fn reviewer_answer_key(role: Option<&str>, request: &ElicitationRequest) -> String {
+    format!("reviewer-answer:{}", serde_json::json!([role, request.id]))
+}
+
+impl ChatState {
+    pub(super) fn has_pending_reviewer_answers(&self) -> bool {
+        self.operation_feedback
+            .keys()
+            .any(|key| key.starts_with("reviewer-answer:"))
+    }
+
+    pub(super) fn reviewer_answer_pending(
+        &self,
+        role: Option<&str>,
+        request: &ElicitationRequest,
+    ) -> bool {
+        self.operation_feedback
+            .contains_key(&reviewer_answer_key(role, request))
+    }
+
+    pub(super) fn report_review_refusal(&mut self, message: String) {
+        match self.turn_review_mut() {
+            Some(review) => {
+                review.report_failure(message);
+            }
+            None => self.set_notice(message),
+        }
+    }
+}
+
+fn finish_reviewer_answer(
+    chat: &mut ChatState,
+    draft: Option<Box<ChatElicitationDraft>>,
+    result: std::result::Result<(), String>,
+) {
+    let Err(error) = result else {
+        return;
+    };
+    if error.contains("is no longer pending") {
+        if draft.is_some() {
+            chat.conversation_notice("The reviewer's request had already ended (answered elsewhere, withdrawn, or expired), so this answer was not delivered.");
+        }
+        return;
+    }
+    if let Some(draft) = draft {
+        chat.restore_failed_reviewer_elicitation(*draft, format!("Answer was not sent: {error}"));
+    }
+    chat.report_review_refusal(error);
+}
 
 const CHAT_REMOTE_QUEUE_CAPACITY: usize = 32;
 const SESSION_ACTOR_REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -70,6 +121,12 @@ pub(super) enum ChatRemoteOperation {
         command: Option<RelayCommand>,
         shell_command_ids: Vec<String>,
     },
+    ReviewerAnswer {
+        role: String,
+        request_id: String,
+        response: ElicitationResponse,
+        draft: Option<Box<ChatElicitationDraft>>,
+    },
     RespondElicitation {
         request: ElicitationRequest,
         response: ElicitationResponse,
@@ -100,6 +157,12 @@ impl ChatRemoteOperation {
                     TurnControlIntent::ApplyQueued => "Applying queued input…",
                 }
                 .into(),
+            )),
+            Self::ReviewerAnswer {
+                draft: Some(draft), ..
+            } => Some((
+                reviewer_answer_key(draft.reviewer_role(), draft.request()),
+                "Sending reviewer answer…".into(),
             )),
             Self::RespondElicitation { request, .. } => {
                 Some((format!("answer:{}", request.id), "Sending answer…".into()))
@@ -157,6 +220,10 @@ pub(super) enum ChatRemoteResult {
         intent: TurnControlIntent,
         result: std::result::Result<(), String>,
     },
+    ReviewerAnswer {
+        draft: Option<Box<ChatElicitationDraft>>,
+        result: std::result::Result<(), String>,
+    },
     RespondElicitation {
         request: ElicitationRequest,
         desired_plan_active: Option<bool>,
@@ -186,6 +253,9 @@ impl ChatRemoteResult {
             Self::SetConfig { key, .. } => Some(format!("config:{key}")),
             Self::PlanCommand { command_id, .. } => Some(format!("plan:{command_id}")),
             Self::Cancel { .. } => Some("turn-control".into()),
+            Self::ReviewerAnswer {
+                draft: Some(draft), ..
+            } => Some(reviewer_answer_key(draft.reviewer_role(), draft.request())),
             Self::RespondElicitation { request, .. } => Some(format!("answer:{}", request.id)),
             _ => None,
         }
@@ -219,6 +289,9 @@ impl ChatRemoteResult {
                 result: Err(error), ..
             }
             | Self::Cancel {
+                result: Err(error), ..
+            }
+            | Self::ReviewerAnswer {
                 result: Err(error), ..
             }
             | Self::RespondElicitation {
@@ -437,6 +510,7 @@ async fn run_chat_remote_worker(
                 }
                 enqueue_chat_remote_operation(
                     &session,
+                    &session_manager,
                     operation,
                     &mut pending,
                     &results,
@@ -460,12 +534,35 @@ async fn run_chat_remote_worker(
 
 async fn enqueue_chat_remote_operation(
     session: &ManagedSessionHandle,
+    session_manager: &SessionManagerControl,
     operation: ChatRemoteOperation,
     pending: &mut tokio::task::JoinSet<()>,
     results: &tokio::sync::mpsc::UnboundedSender<ChatRemoteResult>,
     attached: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     match operation {
+        ChatRemoteOperation::ReviewerAnswer {
+            role,
+            request_id,
+            response,
+            draft,
+        } => {
+            let control = session_manager.clone();
+            let results = results.clone();
+            let attached = attached.clone();
+            pending.spawn(async move {
+                let result = match control.session(role).await {
+                    Ok(handle) => handle.respond_elicitation(request_id, response).await,
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| format!("{error:#}"));
+                publish_chat_remote_result(
+                    &results,
+                    &attached,
+                    ChatRemoteResult::ReviewerAnswer { draft, result },
+                );
+            });
+        }
         ChatRemoteOperation::RecordNotice { id, text } => {
             let session = session.clone();
             let results = results.clone();
@@ -1189,6 +1286,9 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
                 chat.conversation_notice(intent.failure_notice(&error));
             }
         }
+        ChatRemoteResult::ReviewerAnswer { draft, result } => {
+            finish_reviewer_answer(chat, draft, result)
+        }
         ChatRemoteResult::RespondElicitation {
             request,
             desired_plan_active,
@@ -1376,6 +1476,9 @@ pub(super) fn queue_chat_remote_operation(
                     chat.plan_command_pending = false;
                     chat.finish_plan_mode_change(!requested_active);
                     restore_unsent_input(chat, &original);
+                }
+                ChatRemoteOperation::ReviewerAnswer { draft, .. } => {
+                    finish_reviewer_answer(chat, draft, Err("session command queue is full".into()))
                 }
                 ChatRemoteOperation::RespondElicitation { request, .. } => {
                     chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);

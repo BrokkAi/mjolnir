@@ -767,6 +767,24 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         }
     })).unwrap();
     chat.state
+        .set_turn_review(Some(mj_client::review::RuntimeReviewView {
+            child_session_id: None,
+            session_id: "session-deferred-review".into(),
+            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            roles: vec![mj_core::review::driver::RoleStatus {
+                role: "reviewer".into(),
+                label: "Reviewer".into(),
+                state: mj_core::review::driver::RoleState::Running,
+                child_session_id: Some("reviewer-a".into()),
+            }],
+            status: "Review running".into(),
+            verdict: None,
+            questions: vec![mj_client::review::ReviewerQuestion {
+                role: "reviewer-a".into(),
+                request: request.clone(),
+            }],
+        }));
+    chat.state
         .show_review_role_elicitation(Some("reviewer-a".into()), request);
     let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
     terminal
@@ -777,23 +795,13 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     chat.handle_elicitation_event(Event::Paste("kept reviewer answer".into()));
     let draft = chat.state.elicitation_draft().unwrap();
     chat.handle_elicitation_event(Event::Key(key(KeyCode::Enter)));
-    assert!(chat.state.reviewer_elicitation_open());
-    terminal
-        .draw(|frame| {
-            chat.draw_elicitation_in(frame, frame.area(), true);
-        })
-        .unwrap();
-    let text = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(text.contains("Answer was not sent"));
-    assert!(text.contains("kept reviewer answer"));
-    chat.apply_io_update(ChatIoUpdate::ReviewerAnswered {
-        draft: Box::new(draft.clone()),
+    assert!(!chat.state.reviewer_elicitation_open());
+    assert!(
+        chat.has_pending_elicitation_input(),
+        "accepted answer retains its result owner after the form closes"
+    );
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
         result: Err("reviewer lookup failed".into()),
     });
     terminal
@@ -810,6 +818,35 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
         .collect::<String>();
     assert!(text.contains("reviewer lookup failed"));
     assert!(text.contains("kept reviewer answer"));
+    assert!(!chat.has_pending_elicitation_input());
+    // Hard-won: 56747ef: a failed answer resurrected a question removed by the latest review projection.
+    chat.apply_review_view(None);
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("reviewer lookup failed".into()),
+    });
+    assert!(!chat.state.reviewer_elicitation_open());
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
+        result: Err("request is no longer pending".into()),
+    });
+    assert!(!chat.state.reviewer_elicitation_open());
+    assert!(
+        chat.state
+            .conversation_notices
+            .iter()
+            .any(|notice| notice.text.contains("not delivered"))
+    );
+    let notices = chat.state.conversation_notices.len();
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: None,
+        result: Err("request is no longer pending".into()),
+    });
+    assert_eq!(
+        chat.state.conversation_notices.len(),
+        notices,
+        "automatic late plan answers stay quiet"
+    );
     let mut newer = draft.request().clone();
     newer.id = "new-primary-question".into();
     newer.message = "New primary question".into();
@@ -817,8 +854,8 @@ async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
     chat.state.elicitation_is_reviewers = false;
     chat.state.elicitation_role = None;
     chat.state.restore_elicitation(newer);
-    chat.apply_io_update(ChatIoUpdate::ReviewerAnswered {
-        draft: Box::new(draft),
+    chat.apply_remote_result(ChatRemoteResult::ReviewerAnswer {
+        draft: Some(Box::new(draft.clone())),
         result: Err("old failure".into()),
     });
     terminal

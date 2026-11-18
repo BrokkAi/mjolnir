@@ -334,8 +334,22 @@ pub struct NotificationCard {
     pub form: Option<CardForm>,
 }
 
+/// Form provenance is explicit because harness request IDs are opaque.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardFormSource {
+    /// Older publishers did not distinguish requests from notification projections.
+    #[default]
+    Unknown,
+    Elicitation,
+    Native,
+    ReviewFindings,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardForm {
+    #[serde(default)]
+    pub source: CardFormSource,
     #[serde(default)]
     pub raised_at_ms: i64,
     pub request_id: String,
@@ -343,8 +357,20 @@ pub struct CardForm {
 }
 
 impl CardForm {
-    /// Native requests use a reserved identity namespace, since their owner
-    /// chat cannot answer a form projected from a harness-native child.
+    pub fn elicitation(
+        request: &mj_core::elicitation::ElicitationRequest,
+        raised_at_ms: i64,
+    ) -> Self {
+        Self {
+            source: CardFormSource::Elicitation,
+            raised_at_ms,
+            request_id: request.id.clone(),
+            message: request.message.clone(),
+        }
+    }
+
+    /// Native input is a notification projection served through its owner's
+    /// quick reply, rather than an elicitation on the owner chat.
     pub fn native(
         source: &str,
         generation: u64,
@@ -353,6 +379,7 @@ impl CardForm {
         message: String,
     ) -> Self {
         Self {
+            source: CardFormSource::Native,
             raised_at_ms,
             request_id: format!("native.{}:{source}.{generation}.{request}", source.len()),
             message,
@@ -361,6 +388,7 @@ impl CardForm {
 
     pub fn review_findings(reviewer: &str, raised_at_ms: i64, message: String) -> Self {
         Self {
+            source: CardFormSource::ReviewFindings,
             raised_at_ms,
             request_id: format!("review-verdict.{reviewer}.findings"),
             message,
@@ -371,12 +399,12 @@ impl CardForm {
     /// rather than an elicitation that the content session's chat can answer.
     #[must_use]
     pub fn requires_elicitation(&self) -> bool {
-        !self.is_native() && !self.request_id.starts_with("review-verdict.")
+        self.source == CardFormSource::Elicitation
     }
 
     #[must_use]
     pub fn is_native(&self) -> bool {
-        self.request_id.starts_with("native.")
+        self.source == CardFormSource::Native
     }
 }
 
