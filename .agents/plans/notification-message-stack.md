@@ -30,6 +30,8 @@ To see it working, in an isolated instance: run a session whose turn ends with a
 - [x] (2026-11-17) Milestone 5, surfaces: TUI pane and web screen with Previous, Next, position, per-entry text and Clear (slice C).
 - [x] (2026-11-17) Integration: merged in a detached worktree; integrated review clean after two fixes (distinct native request identities, review verdicts on cards) and two declined findings (one form per card; id-less text after a canonical restore). Workspace clippy, the core, client, worker, TUI, CLI dashboard and controller suites and the viewer tests pass, apart from failures that also occur on master or pass alone (the worker suite times out under host load average above 200 and passes with 16 test threads).
 - [x] (2026-11-17) Order cards by their oldest visible item (`since_ms`) and keep the reader's item when a new one arrives (user decision): timestamps 883d5133c and bf2b4a05f, web 3c4e3c1ce, TUI in the following commit. Skip is keyed by session and lasts until the card disappears, so new items in a skipped session do not bring it forward.
+- [ ] Shown `?` cursor (`questions_shown_through`): a shown question never goes back to held.
+- [ ] After 2026-11-20: measure whether the hold still earns its place under wording C.
 - [ ] Install (ask the user first) and check live behavior in an isolated instance.
 
 
@@ -103,6 +105,14 @@ To see it working, in an isolated instance: run a session whose turn ends with a
   - Inside a card, the newest item is shown when the card first appears, as decided before. While the card stays on screen, a newly arrived item does not move the selection away from the item being read; "k of n" updates instead.
   Rationale: the user's decision; the last point applies the same complaint inside a card (parent session's reading, stated to the user).
   Date/Author: 2026-11-17, user and parent session.
+- Decision (2026-11-18, parent session on the Advisor's design, after the user asked for "robustness through simplicity"): a shown `?` never goes back to held.
+  - Problem: held `?` cards flashed for 0.1-0.7 s whenever the own-work snapshot had a gap (a child finishing before its report woke the parent; a parent idling just before a new child's view arrived). A first fix that tracked every own-work source continuously (local 682a5c4, dropped unpushed) kept finding new gaps in review.
+  - A `?` entry is held, shown, or cleared. One monotone per-session cursor in the daemon's `sessions` row, `questions_shown_through`, records how far questions have been shown, mirroring `viewed_through_event_ordinal` for `!`. A `?` entry is on the card while it is in the worker's stack and its completed ordinal is at or below the cursor. Only the person clears (answer, Clear, person message), which empties the stack as before.
+  - The daemon advances the cursor with a `max()` write where it raises a question today (parent idle, no active or queued prompt, hold empty), then publishes. The idle, prompt and hold checks gate only that advance; they no longer hide entries already shown. The hold predicate stays the pre-682a5c4 `waiting_on_own_work`.
+  - The session glyph comes from the same card, so a session with a shown `?` reads `?` while it works. Web Push sends a `?` entry when the cursor first passes it.
+  Rationale: a wrong hold input can then only show a question early, once, never flicker. The #1518 study found about 98% of held questions were still open when shown, so an early release changes timing, not outcome. Tracking every owner of own work continuously multiplies gaps with each work source.
+  Follow-up: after the 2026-11-20 confirmation study, measure whether the hold still removes false `?` under wording C or mostly delays real asks; if the latter, propose deleting the hold to the user (it reverses their 2026-11-13 decision).
+  Date/Author: 2026-11-18, parent session with the Advisor (91233b0e).
 
 ## Outcomes & Retrospective
 
