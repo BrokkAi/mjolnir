@@ -51,9 +51,9 @@ Each round shows fidelity, then the two leak labels with confidences; "cause no 
 On bifrost-dev relation bugs, supplying the complete decisive fact is close to supplying the bug. For 10 of the 17 diffs, no wording within three rounds kept every element of the fact and avoided the Opus/Sol pair flagging the defect. Most were flagged caught or partial in every round they reached the judges. That limits the earlier results:
 
 - Round L's OT lift (+27.5 points) came from briefs that 15 of 17 leak judgments flagged.
-- The no-leak arm's ON − AF lift (+37.3 points) passed a weaker leak rule, Opus-only `missed` at any confidence, with edits that often dropped elements of the fact. This arm shows that keeping the fact complete under the stricter Opus/Sol rule makes most briefs leak again.
+- The no-leak arm's ON − AF lift (+37.3 points) came from briefs that passed a weaker leak rule (Opus-only `missed` at any confidence) with edits that often dropped elements of the fact. The ON briefs were never judged under this arm's strict rule, and several would fail it as they stand. For cpp-template, for example, both ON Opus judges described the mechanism and gave `missed` only at low confidence. This arm changed the wording, the judge pair and the confidence and cause rules together. It therefore shows that only one complete-fact candidate passed all of these gates, not that preserving the complete fact alone is what made the others leak.
 
-So neither lift can be credited to a non-leaking decisive fact. Both measure briefs that state, or come close to stating, the defect. Nothing more is claimed here.
+So, by this arm's standard, neither lift can be credited to a non-leaking decisive fact. Both measure briefs that state, or come close to stating, the defect. Nothing more is claimed here.
 
 The 6 editor-failure diffs are excluded on their final round's fidelity failure, but each had a fidelity-passing brief judged in an earlier round:
 - Five were flagged in those rounds, caught or partial: python-filescope, incompatible-semantic, kotlin-source-constructor, php and unproven-override. This is the same pattern as the leak-gate exclusions, though their final rounds produced no fidelity-passing candidate.
