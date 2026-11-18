@@ -504,6 +504,17 @@ pub fn load_materialized_agent_item_through(
 ) -> Result<Option<TranscriptItem>> {
     let mut reader = open_reader(&database_path())?;
     let connection = reader.transaction()?;
+    materialized_agent_item_through(&connection, session_id, through)
+}
+
+/// The newest agent message of the turn that completed at `through`, bounded
+/// to that turn: a turn that left no text has none, never an earlier turn's.
+/// Every reader of a notification entry without a message id asks this.
+pub(crate) fn materialized_agent_item_through(
+    connection: &Connection,
+    session_id: &str,
+    through: u64,
+) -> Result<Option<TranscriptItem>> {
     let historical_start: Option<u64> = connection
         .query_row(
             "SELECT turn_start_position FROM session_turn_usage
@@ -517,7 +528,7 @@ pub fn load_materialized_agent_item_through(
         Some(start) => Some(start),
         // Restoring a canonical snapshot can supply a last outcome without
         // its historical usage row. Its completion must match exactly too.
-        None => read_materialized_turn_state(&connection, session_id)?
+        None => read_materialized_turn_state(connection, session_id)?
             .and_then(|(_, _, last)| last)
             .filter(|turn| turn.completed_ordinal == through)
             .and_then(|turn| turn.turn_start_position),
@@ -525,7 +536,7 @@ pub fn load_materialized_agent_item_through(
     let Some(start) = start else {
         return Ok(None);
     };
-    last_materialized_agent_item_in(&connection, session_id, start, Some(through), Some(through))
+    last_materialized_agent_item_in(connection, session_id, start, Some(through), Some(through))
 }
 
 /// Whether the stored projection holds a transcript item with this stable id.

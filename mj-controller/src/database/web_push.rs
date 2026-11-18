@@ -305,14 +305,13 @@ fn push_entry_text(
         let stored = load_materialized_transcript_item(entry.session, id)?;
         return Ok(materialized_agent_message_text(stored.iter(), id));
     }
-    Ok(materialized::last_materialized_agent_message_in(
-        db,
-        entry.session,
-        0,
-        None,
-        entry.completed_ordinal,
-    )?
-    .map(|(_, text)| text))
+    // An entry without a message id reads its own turn only, as the cards do.
+    let Some(through) = entry.completed_ordinal else {
+        return Ok(None);
+    };
+    let item = materialized::materialized_agent_item_through(db, entry.session, through)?;
+    Ok(item
+        .and_then(|item| materialized_agent_message_text(std::iter::once(&item), &item.stable_id)))
 }
 
 pub(crate) fn push_recover() -> Result<()> {
@@ -521,6 +520,71 @@ mod tests {
         }));
     }
 
+    fn finished_turn(start: u64, completed: u64) -> MaterializedTurnOutcome {
+        MaterializedTurnOutcome {
+            command_id: format!("turn-{completed}"),
+            accepted_ordinal: Some(start),
+            turn_start_position: Some(start),
+            completed_ordinal: completed,
+            completed_at_ms: completed as i64,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "EndTurn".into(),
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        }
+    }
+
+    fn save_turn_history(db: &Connection, session: &str, turn: &MaterializedTurnOutcome) {
+        db.execute(
+            "INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,turn_start_position,body)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![session, turn.command_id, turn.completed_ordinal, turn.turn_start_position,
+                serialize_turn_outcome(turn).unwrap()],
+        ).unwrap();
+    }
+
+    // Hard-won: integrated review of a1f2e5f67: push read an id-less entry's text from an earlier turn.
+    #[test]
+    fn push_id_less_entry_reads_only_its_own_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push-test.sqlite3");
+        let mut db = open(&path).unwrap();
+        push_subscribe_with(&db, subscription()).unwrap();
+        sessions::save_session_to(&path, &crate::database::tests::session("s", "project")).unwrap();
+
+        let mut transcript = MaterializedSession::empty("s");
+        transcript.applied_event_ordinal = 9;
+        transcript.applied_event_digest = format!("{:064x}", 9);
+        add_message(&mut transcript, "agent:previous", 4, "Earlier turn reply");
+        transcript.last_turn_outcome = Some(finished_turn(8, 9));
+        materialized::save_materialized_session_to(&path, &transcript).unwrap();
+        save_turn_history(&db, "s", &finished_turn(3, 5));
+
+        let mut runtime = runtime(true);
+        assert!(claim(&mut db, &runtime, 0).is_empty()); // Cutover.
+        show(
+            &mut runtime,
+            "s",
+            vec![
+                completion(5, EntryMessage::None),
+                completion(9, EntryMessage::None),
+            ],
+        );
+        let with_text = claim(&mut db, &runtime, 0);
+        assert_eq!(with_text.len(), 1);
+        let notice: Notice = serde_json::from_str(&with_text[0].payload).unwrap();
+        assert_eq!(notice.body, "Earlier turn reply");
+        result(&db, &with_text[0], Some(201), 0);
+
+        let without_text = claim(&mut db, &runtime, 0);
+        assert_eq!(without_text.len(), 1);
+        let notice: Notice = serde_json::from_str(&without_text[0].payload).unwrap();
+        assert_eq!(notice.body, "Needs your input");
+    }
+
     #[test]
     fn push_locator_settles_once_across_working_restart_and_reclassification() {
         let dir = tempfile::tempdir().unwrap();
@@ -588,17 +652,19 @@ mod tests {
         let mut transcript = MaterializedSession::empty("s");
         transcript.applied_event_ordinal = 20;
         transcript.applied_event_digest = format!("{:064x}", 20);
-        add_message(&mut transcript, "agent:first", 1, "First reply");
+        add_message(&mut transcript, "agent:first", 2, "First reply");
         add_message(&mut transcript, "agent:second", 9, "Second reply");
         add_message(&mut transcript, "agent:newer", 19, "Too new for both cards");
         materialized::save_materialized_session_to(&path, &transcript).unwrap();
+        save_turn_history(&db, "s", &finished_turn(1, 3));
+        save_turn_history(&db, "s", &finished_turn(8, 10));
         let mut runtime = runtime(false);
         assert!(claim(&mut db, &runtime, 0).is_empty()); // Cutover.
         show(
             &mut runtime,
             "s",
             vec![
-                completion(2, EntryMessage::None),
+                completion(3, EntryMessage::None),
                 completion(10, EntryMessage::None),
             ],
         );
@@ -618,7 +684,7 @@ mod tests {
         runtime.metadata.operator_presence.away = true;
         let first = claim(&mut db, &runtime, 0);
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].identity, r#"["completion","s",2]"#);
+        assert_eq!(first[0].identity, r#"["completion","s",3]"#);
         assert_eq!(
             serde_json::from_str::<Notice>(&first[0].payload)
                 .unwrap()
