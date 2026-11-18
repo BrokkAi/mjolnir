@@ -139,16 +139,21 @@ def main():
            "bug_precision": BUG_PRECISION, "admission": ADMISSION, "windows": {}}
     for label, (start, wins) in WINDOWS.items():
         per = collections.Counter()
-        for (repo, w), count in n.items():
-            if w not in wins or not sample.get((repo, w)):
+        seen = collections.defaultdict(set)  # repo -> introductions already counted in this window
+        # The counting unit is the introducing change. Cells are visited oldest first, and an
+        # introduction counts only in the first cell whose sample shows it, so one introduced
+        # behind fixes in several half-years counts once. Within a cell this is a ratio
+        # estimate (count x new distinct / sampled), which can still overstate distinct
+        # introductions when repeat fixes cluster; tracing counts exactly.
+        for (repo, w) in sorted((k for k in n if k[1] in wins), key=lambda k: (k[0], wins.index(k[1]))):
+            s = sample.get((repo, w))
+            if not s:
                 continue
-            s = sample[(repo, w)]
-            # The counting unit is the introducing change: several sampled fixes of one
-            # introduction count once.
-            good = len({r["intro_sha"] for r in s if not r.get("error") and r.get("strong")
-                        and r.get("multi_site_proxy") and r.get("trace_complete") is True
-                        and r.get("intro_ct") and r["intro_ct"] >= start.timestamp()})
-            per[repo] += count * good / len(s)
+            new = {r["intro_sha"] for r in s if not r.get("error") and r.get("strong")
+                   and r.get("multi_site_proxy") and r.get("trace_complete") is True
+                   and r.get("intro_ct") and r["intro_ct"] >= start.timestamp()} - seen[repo]
+            seen[repo] |= new
+            per[repo] += n[(repo, w)] * len(new) / len(s)
         # Every clone keeps its own estimate, so a related clone stays eligible when the yield
         # leader turns out costly to index. Cohort selection takes at most one repo per
         # shared-history group; the counts below count each group once, at its best member.
