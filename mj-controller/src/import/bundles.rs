@@ -1,5 +1,6 @@
 use super::*;
 
+pub(crate) use crate::database::setup_style_id;
 pub(crate) use mj_core::repository::RepositoryIdentity;
 
 /// Local Git reads with no network or prompt, so no deadline: a fixed one
@@ -188,20 +189,6 @@ pub fn configured_bundle_for_local(config: &Config, local: &Path) -> Option<Stri
 pub(super) fn same_github_repository(left: &GithubRepository, right: &GithubRepository) -> bool {
     left.owner.eq_ignore_ascii_case(&right.owner)
         && left.repository.eq_ignore_ascii_case(&right.repository)
-}
-
-pub(crate) fn setup_style_id(value: &str) -> String {
-    let mut id = value
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-        .take(64)
-        .collect::<String>();
-    if id.is_empty() || matches!(id.as_str(), "." | "..") {
-        id = "repository".into();
-    }
-    id
 }
 
 pub(crate) fn unique_bundle_id(config: &Config, base: &str) -> String {

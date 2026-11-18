@@ -82,7 +82,7 @@ pub(super) fn insert_create_intent(
     if !holds_create_intent(session.state) {
         return Ok(None);
     }
-    let operation_id = crate::session_manager::new_command_id("create")?;
+    let operation_id = mj_client::session::new_command_id("create")?;
     tx.query_row(
         "INSERT INTO session_create_intents(session_id, operation_id, remember_launch_choices, created_at)
          VALUES (?1, ?2, ?3, ?4)

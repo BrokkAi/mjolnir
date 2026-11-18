@@ -245,7 +245,7 @@ fn probing_stopping_and_closing_a_root_with_an_old_worker_run_the_roots_control_
     // then removes the root, and the control worker with it.
     targets::close_plan(&locator, SESSION)
         .unwrap()
-        .execute(&ProcessExecutor)
+        .execute(&ProcessExecutor, &crate::controller::ControlWorker)
         .unwrap();
     assert!(!root.exists());
 }
@@ -298,7 +298,9 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     // A caller's deadline bounds the command itself: with the deadline already
     // past, nothing runs, nothing is staged and nothing is removed.
     let expired = targets::CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
-    let error = plan.execute(&expired).unwrap_err();
+    let error = plan
+        .execute(&expired, &crate::controller::ControlWorker)
+        .unwrap_err();
     assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     assert!(!control.exists(), "the check ignored the caller's deadline");
     assert!(root.exists(), "the timed-out close removed nothing");
@@ -330,7 +332,8 @@ fn a_close_plan_stages_the_control_worker_itself_on_a_fresh_bare_target() {
     );
     assert_ne!(std::fs::metadata(&hel).unwrap().ino(), hel_inode);
     // With the interface in `hel`, closing needs no staging at all.
-    plan.execute(&ProcessExecutor).unwrap();
+    plan.execute(&ProcessExecutor, &crate::controller::ControlWorker)
+        .unwrap();
     assert!(!root.exists());
 }
 
@@ -6800,7 +6803,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
 
         targets::close_plan(&locator, &session_id)
             .unwrap()
-            .execute(&targets::ProcessExecutor)
+            .execute(&targets::ProcessExecutor, &crate::controller::ControlWorker)
             .unwrap();
 
         assert!(!memory.root.exists(), "{kind:?}: the replica goes");

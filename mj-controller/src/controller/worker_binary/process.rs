@@ -81,28 +81,23 @@ pub fn run_control_command(
     session_id: &str,
     command: &CommandSpec,
 ) -> Result<mj_core::targets::CommandOutput> {
-    let first = caller.execute(command)?;
-    if first.status != targets::WORKER_CONTROL_UNSTAGED_STATUS {
-        return Ok(first);
+    targets::run_staged_control_command(caller, &ControlWorker, locator, session_id, command)
+}
+
+/// Stages the current build's worker as a root's control worker. Every
+/// [`targets::WorkerControlPlan`] is executed with this.
+pub struct ControlWorker;
+
+impl targets::ControlWorkerStager for ControlWorker {
+    fn stage_control_worker(
+        &self,
+        caller: &impl CommandExecutor,
+        locator: &targets::TargetLocator,
+        session_id: &str,
+        root: &str,
+    ) -> Result<()> {
+        stage_control_worker(caller, locator, session_id, root)
     }
-    let root = targets::worker_root(locator, session_id)?;
-    // Publishing a build waits behind other uploads of it and can take
-    // minutes. A resumable operation does not hold daemon admission for that:
-    // a handoff cancels the wait and the next daemon starts it again.
-    let yielded = caller.yield_admission_if_resumable();
-    let staged = stage_control_worker(caller, locator, session_id, &root);
-    if yielded && !caller.cancellation_requested() {
-        caller.end_resumable_work("control worker install")?;
-    }
-    staged?;
-    let second = caller.execute(command)?;
-    ensure!(
-        second.status != targets::WORKER_CONTROL_UNSTAGED_STATUS,
-        "the control worker staged in {root} does not serve {}: {}",
-        command.purpose,
-        String::from_utf8_lossy(&second.stderr).trim()
-    );
-    Ok(second)
 }
 
 fn stage_control_worker(
@@ -768,7 +763,7 @@ pub(in crate::controller) fn probe_worker(
         locator,
         session_id,
     )?
-    .execute(executor)
+    .execute(executor, &crate::controller::ControlWorker)
     .context("the worker probe failed")?
     .pop()
     .context("the worker probe produced no output")?;

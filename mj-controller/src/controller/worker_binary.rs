@@ -86,7 +86,7 @@ mod upgrade;
 pub use upgrade::*;
 mod process;
 pub(super) use process::*;
-pub use process::{recorded_exit_reason, run_control_command};
+pub use process::{ControlWorker, recorded_exit_reason, run_control_command};
 
 #[cfg(test)]
 mod tests;

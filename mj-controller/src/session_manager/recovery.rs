@@ -228,7 +228,7 @@ pub(crate) fn recover_worker_admitted(
         // The probe plan stages the current worker, then runs it.
         let output = plan
             .liveness_probe
-            .execute(executor)
+            .execute(executor, &crate::controller::ControlWorker)
             .context("probe relay worker liveness")?
             .pop()
             .context("the liveness probe produced no output")?;
@@ -351,7 +351,8 @@ fn restart_owned_worker(
             }
         }
     }
-    plan.restart.execute(executor)?;
+    plan.restart
+        .execute(executor, &crate::controller::ControlWorker)?;
     if let Some(owner) = owner.as_ref() {
         crate::database::advance_worker_restart(
             owner.session_id(),

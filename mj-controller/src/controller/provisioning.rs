@@ -1676,7 +1676,7 @@ fn cleanup_failed_provision_named(
         .map(|command| command.purpose.clone())
         .collect::<Vec<_>>()
         .join("; ");
-    let Err(error) = plan.execute(executor) else {
+    let Err(error) = plan.execute(executor, &crate::controller::ControlWorker) else {
         return Some(format!("cleanup succeeded: {purpose}"));
     };
     match targets::cleanup_target_is_confirmed_absent(&locator, session_id, executor) {

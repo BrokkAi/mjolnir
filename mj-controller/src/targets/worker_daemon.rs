@@ -74,6 +74,54 @@ fi
     )
 }
 
+/// Installs the control worker into a worker root. The code that owns worker
+/// binaries lives above this module and implements it; a plan's `execute`
+/// takes one, so no caller can run a control command without the means to
+/// stage what it needs.
+pub trait ControlWorkerStager {
+    fn stage_control_worker(
+        &self,
+        caller: &impl CommandExecutor,
+        locator: &TargetLocator,
+        session_id: &str,
+        root: &str,
+    ) -> Result<()>;
+}
+
+/// Run one control command, staging the control worker and rerunning it once
+/// when the script reports (status 78) that the root has nothing to serve it.
+/// `controller::worker_binary::run_control_command` documents the protocol.
+pub fn run_staged_control_command(
+    caller: &impl CommandExecutor,
+    stager: &impl ControlWorkerStager,
+    locator: &TargetLocator,
+    session_id: &str,
+    command: &CommandSpec,
+) -> Result<CommandOutput> {
+    let first = caller.execute(command)?;
+    if first.status != WORKER_CONTROL_UNSTAGED_STATUS {
+        return Ok(first);
+    }
+    let root = worker_root(locator, session_id)?;
+    // Publishing a build waits behind other uploads of it and can take
+    // minutes. A resumable operation does not hold daemon admission for that:
+    // a handoff cancels the wait and the next daemon starts it again.
+    let yielded = caller.yield_admission_if_resumable();
+    let staged = stager.stage_control_worker(caller, locator, session_id, &root);
+    if yielded && !caller.cancellation_requested() {
+        caller.end_resumable_work("control worker install")?;
+    }
+    staged?;
+    let second = caller.execute(command)?;
+    ensure!(
+        second.status != WORKER_CONTROL_UNSTAGED_STATUS,
+        "the control worker staged in {root} does not serve {}: {}",
+        command.purpose,
+        String::from_utf8_lossy(&second.stderr).trim()
+    );
+    Ok(second)
+}
+
 /// A shell script that carries the root whose control worker it invokes.
 /// Composition and transport wrapping preserve the requirement without parsing shell text.
 #[derive(Debug, Clone)]
@@ -187,8 +235,12 @@ impl WorkerControlPlan {
 
     /// Run every command with `executor`. A command whose script finds nothing
     /// in the root to serve its subcommand (status 78) has the control worker
-    /// staged and is rerun once ([`crate::controller::run_control_command`]).
-    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+    /// staged and is rerun once ([`run_staged_control_command`]).
+    pub fn execute(
+        &self,
+        executor: &impl CommandExecutor,
+        stager: &impl ControlWorkerStager,
+    ) -> Result<Vec<CommandOutput>> {
         let mut outputs = Vec::with_capacity(self.commands.len());
         for command in &self.commands {
             let output = match &self.control {
@@ -197,7 +249,7 @@ impl WorkerControlPlan {
                         Path::new(&worker_root(locator, session_id)?) == root,
                         "control script root differs from the staging target"
                     );
-                    crate::controller::run_control_command(executor, locator, session_id, command)?
+                    run_staged_control_command(executor, stager, locator, session_id, command)?
                 }
                 None => executor.execute(command)?,
             };

@@ -365,7 +365,7 @@ pub(crate) fn store_directory_project(project: &ProjectBundleSnapshot) -> Result
             )?;
             return Ok(id);
         }
-        let base = crate::import::setup_style_id(&project.name());
+        let base = setup_style_id(&project.name());
         let mut id = base.clone();
         for suffix in 2_u32.. {
             let used:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM project_catalog WHERE bundle_id=?1 UNION SELECT 1 FROM project_aliases WHERE bundle_id=?1)",[&id],|row|row.get(0))?;
@@ -476,6 +476,21 @@ pub(crate) fn hide_catalog_project(bundle_id: &str) -> Result<()> {
         )?;
         Ok(())
     })
+}
+
+/// A project name reduced to the characters a bundle id may contain.
+pub fn setup_style_id(value: &str) -> String {
+    let mut id = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .take(64)
+        .collect::<String>();
+    if id.is_empty() || matches!(id.as_str(), "." | "..") {
+        id = "repository".into();
+    }
+    id
 }
 
 #[cfg(test)]

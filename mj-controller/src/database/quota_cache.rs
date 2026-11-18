@@ -1,5 +1,5 @@
 use super::*;
-use crate::quota::ProfileQuota;
+use mj_client::quota::ProfileQuota;
 
 pub fn load_quota_cache(identity: &str) -> Result<Option<ProfileQuota>> {
     load(&*open_reader(&database_path())?, identity)
@@ -51,7 +51,7 @@ fn save_report(connection: &mut Connection, identity: &str, report: &ProfileQuot
     if !report.is_usage_priced()
         && let Some(previous) = load(&transaction, identity)?
     {
-        crate::quota::merge_reset_windows(&mut merged.windows, &previous.windows);
+        mj_client::quota::merge_reset_windows(&mut merged.windows, &previous.windows);
     }
     transaction.execute("INSERT INTO quota_reset_cache(identity, body) VALUES (?1, ?2) ON CONFLICT(identity) DO UPDATE SET body = excluded.body",
         params![identity, serde_json::to_string(&merged)?])?;
@@ -73,7 +73,7 @@ mod tests {
             banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
-            windows: vec![crate::quota::QuotaWindow {
+            windows: vec![mj_client::quota::QuotaWindow {
                 label: "5H".into(),
                 remaining_percent: Some(0),
                 duration_seconds: None,
@@ -119,7 +119,7 @@ mod tests {
         report.refreshed_at_epoch_seconds += 600;
         report.monthly_price_usd = Some(200);
         report.windows[0].resets_at_epoch_seconds = None;
-        report.windows.push(crate::quota::QuotaWindow {
+        report.windows.push(mj_client::quota::QuotaWindow {
             label: "Weekly (model)".into(),
             remaining_percent: None,
             duration_seconds: Some(7 * 24 * 3600),

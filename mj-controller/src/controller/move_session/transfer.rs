@@ -1325,7 +1325,7 @@ impl Controller {
                 id,
                 "stop sealed Move source worker, retaining workspace",
             )?
-            .execute(executor)?;
+            .execute(executor, &crate::controller::ControlWorker)?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::SourceStopped;
             crate::database::save_move_operation(operation)?;

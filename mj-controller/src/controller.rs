@@ -6,7 +6,7 @@ pub use cache_host::CacheHost;
 pub mod checkpoint;
 mod container_upgrade;
 pub mod environment;
-pub(crate) use environment::StoppedWorker;
+pub use crate::database::SessionResumeOptions;
 mod git_cache;
 mod github_app;
 mod interrupted;
@@ -107,7 +107,7 @@ pub use provisioning::{
     CreateKind, GitIdentity, controller_git_identity, set_controller_git_identity,
 };
 pub use worker_binary::{
-    image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
+    ControlWorker, image_worker_label, prepare_recovery_worker_binary, prewarm_profile_content,
     recorded_exit_reason, refresh_target_worker_binary_if_stale, run_control_command,
     shared_content_ssh, worker_source_problem,
 };
@@ -622,13 +622,6 @@ pub struct SessionLaunchOptions {
     pub resource_allocation: Option<SessionResourceAllocation>,
     pub project_directory: Option<PathBuf>,
     pub session_title_override: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct SessionResumeOptions {
-    pub additional_mounts: Option<Vec<AdditionalMount>>,
-    pub resource_allocation: Option<SessionResourceAllocation>,
-    pub discard_queue: bool,
 }
 
 fn selected_host_container_size(

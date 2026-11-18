@@ -640,9 +640,12 @@ impl Controller {
                     "stop failed in-place worker while retaining its environment",
                 )
                 .and_then(|plan| {
-                    plan.execute(&crate::targets::CancellableProcessExecutor::with_timeout(
-                        std::time::Duration::from_secs(15),
-                    ))
+                    plan.execute(
+                        &crate::targets::CancellableProcessExecutor::with_timeout(
+                            std::time::Duration::from_secs(15),
+                        ),
+                        &crate::controller::ControlWorker,
+                    )
                 });
                 let mut retained = previous.clone();
                 let latest = crate::database::load_session_record(session_id)?

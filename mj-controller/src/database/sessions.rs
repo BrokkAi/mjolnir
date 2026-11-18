@@ -682,7 +682,7 @@ pub fn save_resumed_session(
 pub(crate) fn accept_resumed_session(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
-    requests: &crate::controller::SessionResumeOptions,
+    requests: &SessionResumeOptions,
 ) -> Result<()> {
     let session = session.clone();
     let requests = requests.clone();
@@ -751,7 +751,7 @@ fn save_resumed_session_in_environment_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
-    requests: Option<&crate::controller::SessionResumeOptions>,
+    requests: Option<&SessionResumeOptions>,
     close_move: Option<&str>,
 ) -> Result<()> {
     validate_session_record(session)?;
@@ -1999,6 +1999,14 @@ pub fn dismiss_recorded_failure(
         ensure!(changed == 1, "notification is no longer current");
         Ok(())
     })
+}
+
+/// What a resume may change about the session it restarts.
+#[derive(Clone)]
+pub struct SessionResumeOptions {
+    pub additional_mounts: Option<Vec<crate::targets::AdditionalMount>>,
+    pub resource_allocation: Option<mj_core::state::SessionResourceAllocation>,
+    pub discard_queue: bool,
 }
 
 #[cfg(test)]

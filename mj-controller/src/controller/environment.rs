@@ -29,14 +29,14 @@ pub(crate) struct StoppedWorker<'a> {
     target: &'a targets::TargetLocator,
     root: String,
 }
-impl StoppedWorker<'_> {
-    pub fn session_id(&self) -> &str {
+impl targets::StoppedWorkerProof for StoppedWorker<'_> {
+    fn session_id(&self) -> &str {
         self.session_id
     }
-    pub fn target(&self) -> &targets::TargetLocator {
+    fn target(&self) -> &targets::TargetLocator {
         self.target
     }
-    pub fn root(&self) -> &str {
+    fn root(&self) -> &str {
         &self.root
     }
 }
@@ -238,7 +238,7 @@ impl Reclamation {
                     targets::stopped_borrowed_worker_cleanup_plan(
                         self.stopped_worker(worker, target)?,
                     )?
-                    .execute(executor)?;
+                    .execute(executor, &crate::controller::ControlWorker)?;
                 }
             } else if worker.session_id != self.environment.owner_session_id {
                 execute_owned_target_cleanup(self, target, worker, executor)?;
@@ -284,7 +284,7 @@ fn execute_owned_target_cleanup(
     } else {
         targets::close_stopped_target_plan(authority.stopped_worker(worker, target)?)?
     };
-    if let Err(error) = plan.execute(executor) {
+    if let Err(error) = plan.execute(executor, &crate::controller::ControlWorker) {
         if !targets::cleanup_target_is_confirmed_absent(target, session_id, executor)? {
             return Err(error);
         }

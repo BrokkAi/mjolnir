@@ -44,7 +44,7 @@ fn close_plan_scoped(
     locator: &TargetLocator,
     session_id: &str,
     remove_shared_cache: bool,
-    stopped: Option<&crate::controller::StoppedWorker<'_>>,
+    stopped: Option<&dyn StoppedWorkerProof>,
 ) -> Result<WorkerControlPlan> {
     verify_locator(locator, session_id)?;
     ensure!(
@@ -301,7 +301,7 @@ pub fn borrowed_worker_cleanup_plan(
 fn borrowed_worker_cleanup_plan_scoped(
     locator: &TargetLocator,
     child_session_id: &str,
-    stopped: Option<&crate::controller::StoppedWorker<'_>>,
+    stopped: Option<&dyn StoppedWorkerProof>,
 ) -> Result<WorkerControlPlan> {
     verify_locator(locator, child_session_id)?;
     let worker_root = worker_root(locator, child_session_id)?;
@@ -787,19 +787,32 @@ esac
 
 /// Removal follows completed managed Stop and retains the launch permits.
 /// This authority does not assert containment of arbitrary detached writers.
-pub(crate) struct StoppedCleanupPlan<'a> {
-    _proof: crate::controller::StoppedWorker<'a>,
+pub struct StoppedCleanupPlan<P> {
+    _proof: P,
     plan: WorkerControlPlan,
 }
-impl StoppedCleanupPlan<'_> {
-    pub fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
-        self.plan.execute(executor)
+
+/// Proof that the managed Stop of one exact worker completed and that its
+/// launch permits are still held. The lifecycle code that performs the Stop
+/// issues it; nothing in this module can construct one, so a removal plan
+/// that skips the worker's own stop cannot be built from a guess.
+pub trait StoppedWorkerProof {
+    fn session_id(&self) -> &str;
+    fn target(&self) -> &TargetLocator;
+    fn root(&self) -> &str;
+}
+
+impl<P> StoppedCleanupPlan<P> {
+    pub fn execute(
+        &self,
+        executor: &impl CommandExecutor,
+        stager: &impl ControlWorkerStager,
+    ) -> Result<Vec<CommandOutput>> {
+        self.plan.execute(executor, stager)
     }
 }
 
-pub(crate) fn close_stopped_target_plan(
-    proof: crate::controller::StoppedWorker<'_>,
-) -> Result<StoppedCleanupPlan<'_>> {
+pub fn close_stopped_target_plan<P: StoppedWorkerProof>(proof: P) -> Result<StoppedCleanupPlan<P>> {
     ensure!(
         worker_root(proof.target(), proof.session_id())? == proof.root(),
         "stopped worker root changed"
@@ -810,9 +823,9 @@ pub(crate) fn close_stopped_target_plan(
         plan,
     })
 }
-pub(crate) fn retire_stopped_move_target_plan(
-    proof: crate::controller::StoppedWorker<'_>,
-) -> Result<StoppedCleanupPlan<'_>> {
+pub fn retire_stopped_move_target_plan<P: StoppedWorkerProof>(
+    proof: P,
+) -> Result<StoppedCleanupPlan<P>> {
     ensure!(
         worker_root(proof.target(), proof.session_id())? == proof.root(),
         "stopped worker root changed"
@@ -823,9 +836,9 @@ pub(crate) fn retire_stopped_move_target_plan(
         plan,
     })
 }
-pub(crate) fn stopped_borrowed_worker_cleanup_plan(
-    proof: crate::controller::StoppedWorker<'_>,
-) -> Result<StoppedCleanupPlan<'_>> {
+pub fn stopped_borrowed_worker_cleanup_plan<P: StoppedWorkerProof>(
+    proof: P,
+) -> Result<StoppedCleanupPlan<P>> {
     ensure!(
         worker_root(proof.target(), proof.session_id())? == proof.root(),
         "stopped worker root changed"

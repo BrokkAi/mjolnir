@@ -169,7 +169,7 @@ impl WorkerPermit {
         Ok(Self(Arc::new(Admission {
             admission,
             session_id: session_id.to_owned(),
-            operation_id: crate::session_manager::new_command_id("worker-owner")?,
+            operation_id: mj_client::session::new_command_id("worker-owner")?,
         })))
     }
 
