@@ -973,6 +973,7 @@ fn pending_elicitation_snapshot(snapshot: &mut ViewerSnapshot) {
     snapshot.sessions[0].pending_elicitations = vec![sample_elicitation()];
 }
 
+// Hard-won: bbe5c1a01: retained questions intercepted live forms on the compatibility endpoint.
 #[tokio::test]
 async fn notification_message_serves_the_pending_form_request_and_refuses_unknown_sessions() {
     let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
@@ -1039,6 +1040,83 @@ async fn notification_message_serves_the_pending_form_request_and_refuses_unknow
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    // A retained stack question never intercepts a live form, including native
+    // forms whose requests are not in pending_elicitations.
+    for (holder, request) in [
+        ("session-1", "elicitation-1"),
+        ("session-2", "child-approval"),
+        ("session-1", "native.session.1.approval"),
+    ] {
+        let (app, ..) = app_with_snapshot(|snapshot| {
+            pending_elicitation_snapshot(snapshot);
+            let session = &mut snapshot.sessions[0];
+            session.notification_card = Some(mj_client::runtime_feed::NotificationCard {
+                since_ms: 0,
+                badge: mj_core::attention::NotificationKind::NeedsInput,
+                entries: vec![mj_core::attention::NotificationStackEntry {
+                    completed_at_ms: 0,
+                    completed_ordinal: 3,
+                    kind: mj_core::attention::NotificationKind::NeedsInput,
+                    message: mj_core::attention::EntryMessage::Found("agent:retained".into()),
+                }],
+                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 3 }),
+                holder: Some(holder.into()),
+                form: Some(mj_client::runtime_feed::CardForm {
+                    raised_at_ms: 0,
+                    request_id: request.into(),
+                    message: "Approve this action?".into(),
+                }),
+            });
+        });
+        let cookie = login_cookie(&app).await;
+        for query in [
+            String::new(),
+            format!("?holder={holder}&requests={request}"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/api/sessions/session-1/notification-message{query}"
+                    ))
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{holder} {request} {query}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"session_id": holder, "text": "Approve this action?"})
+            );
+        }
+        for query in [
+            format!("?holder={holder}&requests=stale"),
+            format!("?holder=wrong&requests={request}"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/api/sessions/session-1/notification-message{query}"
+                    ))
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
 }
 
 #[tokio::test]

@@ -544,6 +544,8 @@ impl DashboardState {
         if self.notification_cards == cards {
             return;
         }
+        self.card_alerts
+            .retain(|id, _| cards.as_ref().is_some_and(|cards| cards.contains_key(id)));
         if let Some(cards) = &cards {
             for (id, detail) in self.session_details.iter_mut() {
                 if let Some(NotificationDismissalState::Accepted {

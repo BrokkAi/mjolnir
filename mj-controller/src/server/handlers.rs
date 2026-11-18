@@ -241,6 +241,10 @@ pub(super) async fn notification_message(
     // watch borrow before reading stored text.
     enum Message {
         Shown(mj_core::attention::NotificationStackEntry),
+        Form {
+            holder: String,
+            text: String,
+        },
         Fallback {
             holder: String,
             kind: NotificationKind,
@@ -254,37 +258,60 @@ pub(super) async fn notification_message(
     let message = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        let shown = session
-            .notification_card
-            .as_ref()
-            .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
-            .cloned();
-        if let Some(entry) = shown {
-            use mj_core::attention::EntryMessage;
-            let question = match &entry.message {
-                EntryMessage::Found(id) => id.as_str(),
-                _ => "",
-            };
-            if expected.through.is_some()
-                || expected.holder.as_ref().is_some_and(|holder| {
-                    holder != &session_id
-                        || !expected.requests.is_empty()
-                        || expected.question != question
-                })
-            {
-                return Err(ApiError::new(
-                    StatusCode::CONFLICT,
-                    "the notification changed; its message will be read again",
-                )
-                .with_code(Some("notification_changed")));
+        if let Some(card) = &session.notification_card {
+            if let Some(form) = &card.form {
+                let holder = card.item_destination(&session_id, card.entries.len());
+                let holder_session = snapshot.sessions.get(holder).unwrap_or(session);
+                let requests = holder_session
+                    .pending_elicitations
+                    .iter()
+                    .map(|request| request.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let matches_requests = expected.requests == form.request_id
+                    || (expected.requests == requests
+                        && holder_session
+                            .pending_elicitations
+                            .iter()
+                            .any(|request| request.id == form.request_id));
+                if expected.through.is_some()
+                    || expected
+                        .holder
+                        .as_deref()
+                        .is_some_and(|expected| expected != holder)
+                    || ((!expected.requests.is_empty() || expected.holder.is_some())
+                        && !matches_requests)
+                {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "the notification changed; its message will be read again",
+                    )
+                    .with_code(Some("notification_changed")));
+                }
+                Message::Form {
+                    holder: holder.to_owned(),
+                    text: form.message.clone(),
+                }
+            } else if let Some(entry) = card.entries.last() {
+                if expected.holder.is_some()
+                    || !expected.requests.is_empty()
+                    || !expected.question.is_empty()
+                    || expected.through.is_some()
+                {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "the notification changed; select its entry to read it",
+                    )
+                    .with_code(Some("notification_changed")));
+                }
+                Message::Shown(entry.clone())
+            } else {
+                return Err(ApiError::not_found("notification item not found"));
             }
-            Message::Shown(entry)
         } else {
             let holder = session
-                .notification_card
-                .as_ref()
-                .map(|card| card.item_destination(&session_id, card.entries.len()))
-                .or(session.form_holder.as_deref())
+                .form_holder
+                .as_deref()
                 .filter(|holder| snapshot.sessions.get(holder).is_some())
                 .unwrap_or(&session_id)
                 .to_owned();
@@ -353,6 +380,11 @@ pub(super) async fn notification_message(
         supports_open_request,
         through,
     ) = match message {
+        Message::Form { holder, text } => {
+            return Ok(
+                Json(serde_json::json!({"session_id": holder, "text": text})).into_response(),
+            );
+        }
         Message::Shown(entry) => {
             use mj_core::attention::EntryMessage;
             return read_notification_message(session_id, move |id| match entry.message {

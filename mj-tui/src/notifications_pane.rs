@@ -752,37 +752,52 @@ impl DashboardState {
         let Some(card) = &entry.published else {
             return self.notification_card_text(&entry.session_id, entry.level);
         };
-        let index = self.selected_notification_item(entry);
+        self.notification_item_text(
+            &entry.session_id,
+            card,
+            self.selected_notification_item(entry),
+        )
+    }
+
+    pub(crate) fn notification_item_text(
+        &self,
+        session: &str,
+        card: &mj_client::runtime_feed::NotificationCard,
+        index: usize,
+    ) -> String {
+        let destination = card.item_destination(session, index);
         let Some(item) = card.entries.get(index) else {
             return card
                 .form
                 .as_ref()
                 .map(|form| form.message.clone())
                 .or_else(|| {
-                    self.session_review(&entry.session_id)
+                    self.session_review(destination)
                         .and_then(|review| review.activity_label())
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| notification_message_placeholder(card.badge).to_owned());
         };
         if let EntryMessage::Found(id) = &item.message
-            && let Some(text) = self.loaded_notification_text(&entry.session_id, id)
+            && let Some(text) = self.loaded_notification_text(destination, id)
         {
             return text.to_owned();
         }
-        let Some(wanted) = self.notification_read_request(entry) else {
-            return notification_message_placeholder(item.kind).to_owned();
+        let source = match &item.message {
+            EntryMessage::Found(id) => NotificationReadSource::Item(id.clone()),
+            EntryMessage::Locating | EntryMessage::None => {
+                NotificationReadSource::Through(item.completed_ordinal)
+            }
         };
-        let read = self
-            .notifications
-            .message_read
-            .as_ref()
-            .filter(|read| read.request == wanted);
+        let read =
+            self.notifications.message_read.as_ref().filter(|read| {
+                read.request.session_id == destination && read.request.source == source
+            });
         if read.is_some_and(|read| read.status == crate::ingest::TranscriptHydration::Loading) {
             return "loading…".to_owned();
         }
         read.and_then(|read| read.text.clone())
-            .unwrap_or_else(|| match wanted.source {
+            .unwrap_or_else(|| match source {
                 NotificationReadSource::Item(_) => "message not available".to_owned(),
                 NotificationReadSource::Through(_) => {
                     notification_message_placeholder(item.kind).to_owned()

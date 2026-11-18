@@ -33,10 +33,22 @@ pub(crate) struct AttentionEpisode {
     level: AttentionLevel,
     /// The open forms this episode covers.
     forms: std::collections::BTreeSet<String>,
-    /// Question ordinal whose alert delay is currently running.
-    pending_question_ordinal: Option<u64>,
     since_ms: u64,
     reported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CardItemIdentity {
+    Form(String),
+    Question(u64),
+    Important(u64),
+}
+
+#[derive(Debug)]
+pub(crate) struct CardAlert {
+    newest: CardItemIdentity,
+    since_ms: u64,
+    alerted: std::collections::BTreeSet<CardItemIdentity>,
 }
 
 impl DashboardState {
@@ -70,20 +82,16 @@ impl DashboardState {
     /// reported without a notification, so switching away later does not
     /// ring for a question they have seen.
     ///
-    /// Each session's episode follows its own state. A sub-agent child has no
-    /// row of its own, so a child holding an open form has its own episode,
-    /// seen only in the child's conversation, and its notification names the
-    /// parent's row and the child. Two children, or a child and its parent,
-    /// therefore each ring once.
+    /// Published cards alert for their newest item, through that item's
+    /// destination. Older daemons retain the level/form episodes below,
+    /// including promoting a child's form under its parent's name.
     pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
         let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
         let enabled = self.config.notify.mode != NotifyMode::Off;
         let visible = self.current_session_id().map(str::to_owned);
         let mut episodes = std::mem::take(&mut self.attention_episodes);
-        let mut due = Vec::new();
+        let mut due = self.card_notification_events(now_ms);
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
-        self.alerted_question_ordinals
-            .retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
             // An ignored session's attention still renders in its row; it
             // simply never starts or keeps an episode that interrupts.
@@ -114,6 +122,16 @@ impl DashboardState {
                 None if self.waiting_child_of(id).is_some() => AttentionLevel::Inactive,
                 None => self.attention_level(id),
             };
+            if self.notification_cards.is_some()
+                && (self
+                    .notification_cards
+                    .as_ref()
+                    .is_some_and(|cards| cards.contains_key(id))
+                    || matches!(level, AttentionLevel::Waiting | AttentionLevel::Important))
+            {
+                episodes.remove(id);
+                continue;
+            }
             if !level.needs_person() {
                 episodes.remove(id);
                 continue;
@@ -129,32 +147,16 @@ impl DashboardState {
                         .collect()
                 })
                 .unwrap_or_default();
-            let shown_question_ordinal = self
-                .notification_cards
-                .as_ref()
-                .and_then(|cards| cards.get(id))
-                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
-                .map(|entry| entry.completed_ordinal);
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
                 level,
                 forms: Default::default(),
-                pending_question_ordinal: shown_question_ordinal,
                 since_ms: now_ms,
                 reported: false,
             });
-            let new_shown_question = shown_question_ordinal.is_some_and(|ordinal| {
-                self.alerted_question_ordinals
-                    .get(id)
-                    .is_none_or(|alerted| ordinal > *alerted)
-                    && episode.pending_question_ordinal != Some(ordinal)
-            });
-            if episode.level != level || !forms.is_subset(&episode.forms) || new_shown_question {
-                let pending_question_ordinal =
-                    shown_question_ordinal.or(episode.pending_question_ordinal);
+            if episode.level != level || !forms.is_subset(&episode.forms) {
                 *episode = AttentionEpisode {
                     level,
                     forms,
-                    pending_question_ordinal,
                     since_ms: now_ms,
                     reported: false,
                 };
@@ -166,38 +168,16 @@ impl DashboardState {
             if episode.reported {
                 continue;
             }
-            if episode.forms.is_empty()
-                && shown_question_ordinal.is_some_and(|ordinal| {
-                    self.alerted_question_ordinals
-                        .get(id)
-                        .is_some_and(|alerted| ordinal <= *alerted)
-                })
-            {
-                episode.reported = true;
-                continue;
-            }
             // An open conversation shows only its first form, so being on
             // screen sees an episode only when it covers one form.
             if visible.as_deref() == Some(id.as_str()) && episode.forms.len() <= 1 {
                 episode.reported = true;
-                if let Some(ordinal) = shown_question_ordinal {
-                    self.alerted_question_ordinals
-                        .entry(id.clone())
-                        .and_modify(|alerted| *alerted = (*alerted).max(ordinal))
-                        .or_insert(ordinal);
-                }
                 continue;
             }
             if now_ms.saturating_sub(episode.since_ms) < delay_ms {
                 continue;
             }
             episode.reported = true;
-            if let Some(ordinal) = shown_question_ordinal {
-                self.alerted_question_ordinals
-                    .entry(id.clone())
-                    .and_modify(|alerted| *alerted = (*alerted).max(ordinal))
-                    .or_insert(ordinal);
-            }
             if !enabled {
                 continue;
             }
@@ -242,6 +222,78 @@ impl DashboardState {
         due
     }
 
+    fn card_notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
+        let Some(cards) = self.notification_cards.clone() else {
+            return Vec::new();
+        };
+        let visible = self.current_session_id().map(str::to_owned);
+        let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
+        let mut due = Vec::new();
+        for (id, card) in &cards {
+            let Some(session) = self
+                .state
+                .sessions
+                .get(id)
+                .filter(|session| !session.notifications_ignored)
+            else {
+                continue;
+            };
+            let (index, identity, level) = if let Some(form) = &card.form {
+                (
+                    card.entries.len(),
+                    CardItemIdentity::Form(form.request_id.clone()),
+                    AttentionLevel::Waiting,
+                )
+            } else if let Some(entry) = card.entries.last() {
+                let (identity, level) = match entry.kind {
+                    mj_core::attention::NotificationKind::NeedsInput => (
+                        CardItemIdentity::Question(entry.completed_ordinal),
+                        AttentionLevel::Waiting,
+                    ),
+                    mj_core::attention::NotificationKind::Important => (
+                        CardItemIdentity::Important(entry.completed_ordinal),
+                        AttentionLevel::Important,
+                    ),
+                };
+                (card.entries.len() - 1, identity, level)
+            } else {
+                continue;
+            };
+            let alert = self
+                .card_alerts
+                .entry(id.clone())
+                .or_insert_with(|| CardAlert {
+                    newest: identity.clone(),
+                    since_ms: now_ms,
+                    alerted: Default::default(),
+                });
+            if alert.newest != identity {
+                alert.newest = identity.clone();
+                alert.since_ms = now_ms;
+            }
+            if alert.alerted.contains(&identity) {
+                continue;
+            }
+            let destination = card.item_destination(id, index);
+            let on_screen = visible.as_deref() == Some(destination);
+            if !on_screen && now_ms.saturating_sub(alert.since_ms) < delay_ms {
+                continue;
+            }
+            alert.alerted.insert(identity);
+            if on_screen || self.config.notify.mode == NotifyMode::Off {
+                continue;
+            }
+            let text = self.notification_item_text(id, card, index);
+            due.push(Notification {
+                session_id: id.clone(),
+                session_title: session.listed_title().to_owned(),
+                level,
+                body: notification_line(&text),
+            });
+        }
+        due
+    }
+
     pub(crate) fn notification_content_session(
         &self,
         session_id: &str,
@@ -276,53 +328,17 @@ impl DashboardState {
     /// What to say about a session at `level`: the question's own message,
     /// the recorded error, or the last line the agent wrote.
     pub(crate) fn notification_message(&self, session_id: &str, level: AttentionLevel) -> String {
-        if level == AttentionLevel::Waiting
-            && self
-                .session_details
-                .get(session_id)
-                .is_none_or(|detail| detail.pending_elicitations.is_empty())
-            && let Some(entry) = self
+        if matches!(level, AttentionLevel::Waiting | AttentionLevel::Important)
+            && let Some(card) = self
                 .notification_cards
                 .as_ref()
                 .and_then(|cards| cards.get(session_id))
-                .and_then(mj_client::runtime_feed::NotificationCard::shown_question)
         {
-            use mj_core::attention::EntryMessage;
-            let source = match &entry.message {
-                EntryMessage::Found(id) => Some(crate::NotificationReadSource::Item(id.clone())),
-                EntryMessage::None => Some(crate::NotificationReadSource::Through(
-                    entry.completed_ordinal,
-                )),
-                EntryMessage::Locating => None,
-            };
-            let text = match &entry.message {
-                EntryMessage::Found(id) => {
-                    self.session_details.get(session_id).and_then(|detail| {
-                        mj_core::transcript::materialized_agent_message_text(
-                            detail.projection.transcript.iter().map(AsRef::as_ref),
-                            id,
-                        )
-                    })
-                }
-                EntryMessage::None | EntryMessage::Locating => None,
-            };
-            return text
-                .or_else(|| {
-                    self.notifications
-                        .message_read
-                        .as_ref()
-                        .filter(|read| {
-                            read.request.session_id == session_id
-                                && source.as_ref() == Some(&read.request.source)
-                        })
-                        .and_then(|read| read.text.clone())
-                })
-                .unwrap_or_else(|| {
-                    mj_core::notification_message::notification_message_placeholder(
-                        mj_core::attention::NotificationKind::NeedsInput,
-                    )
-                    .to_owned()
-                });
+            return self.notification_item_text(
+                session_id,
+                card,
+                (card.entries.len() + usize::from(card.form.is_some())).saturating_sub(1),
+            );
         }
         let holder = self.notification_content_session(session_id, level);
         let session_id = holder.as_str();
@@ -406,12 +422,7 @@ impl DashboardState {
 
     fn notification_body(&self, session_id: &str, level: AttentionLevel) -> String {
         let text = self.notification_message(session_id, level);
-        let line = text.lines().next().unwrap_or_default().trim();
-        let mut body = line.chars().take(120).collect::<String>();
-        if line.chars().count() > 120 {
-            body.push('…');
-        }
-        body
+        notification_line(&text)
     }
 
     /// Reports that a session's worker cannot be reached, in one plain
@@ -584,6 +595,15 @@ impl DashboardState {
     }
 }
 
+fn notification_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    let mut body = line.chars().take(120).collect::<String>();
+    if line.chars().count() > 120 {
+        body.push('…');
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -696,6 +716,14 @@ mod tests {
                     streaming: false,
                 },
             }));
+        let materialized = crate::test_support::materialized_session_for(
+            "asks",
+            dashboard.session_details["asks"]
+                .projection
+                .transcript
+                .clone(),
+        );
+        dashboard.apply_materialized_session(&materialized);
         dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
             "asks".into(),
             mj_client::runtime_feed::NotificationCard {
@@ -730,7 +758,6 @@ mod tests {
     }
 
     // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.
-    // Hard-won: c27046237: a new approval alert reused an already alerted question's text.
     #[test]
     fn a_new_question_notifies_once_after_the_delay() {
         let mut dashboard = dashboard();
@@ -747,66 +774,6 @@ mod tests {
         assert_eq!(done.body, "All tests pass now.");
         // Reported once; the same episode never repeats.
         assert!(dashboard.notification_events(60_000).is_empty());
-
-        // A later turn contributes a newly shown question without changing
-        // the session's NeedsInput level or opening another form.
-        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
-            "asks".into(),
-            mj_client::runtime_feed::NotificationCard {
-                since_ms: 60_001,
-                badge: mj_core::attention::NotificationKind::NeedsInput,
-                entries: vec![mj_core::attention::NotificationStackEntry {
-                    completed_at_ms: 60_001,
-                    completed_ordinal: 5,
-                    kind: mj_core::attention::NotificationKind::NeedsInput,
-                    message: mj_core::attention::EntryMessage::Found("agent:later".into()),
-                }],
-                dismissal: Some(mj_core::attention::NotificationDismissal::Stack { revision: 5 }),
-                holder: None,
-                form: None,
-            },
-        )])));
-        assert!(dashboard.notification_events(60_001).is_empty());
-        assert_eq!(dashboard.attention_episodes["asks"].since_ms, 60_001);
-        let later = dashboard.notification_events(62_002);
-        assert_eq!(
-            later.len(),
-            1,
-            "only the newly shown question starts an episode"
-        );
-        assert_eq!(later[0].session_id, "asks");
-
-        let mut card = dashboard.notification_cards.as_ref().unwrap()["asks"].clone();
-        card.form = Some(mj_client::runtime_feed::CardForm {
-            raised_at_ms: 62_002,
-            request_id: "masked-form".into(),
-            message: "Another approval".into(),
-        });
-        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
-            "asks".into(),
-            card.clone(),
-        )])));
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .pending_elicitations = vec![question("masked-form")];
-        assert!(dashboard.notification_events(64_001).is_empty());
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .pending_elicitations
-            .clear();
-        card.form = None;
-        dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([(
-            "asks".into(),
-            card,
-        )])));
-        assert!(
-            dashboard.notification_events(66_001).is_empty(),
-            "cancelling the masking form must not alert the already reported question again"
-        );
 
         // Answering and asking again starts a new episode.
         dashboard
@@ -825,10 +792,6 @@ mod tests {
         let again = dashboard.notification_events(63_000);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].session_id, "asks");
-        assert_eq!(
-            again[0].body, "Which branch should I use?",
-            "a new form alerts with its own text, even alongside an already alerted question"
-        );
         dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
         assert!(dashboard.notification_events(64_000).is_empty());
         dashboard
@@ -864,6 +827,131 @@ mod tests {
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].level, AttentionLevel::Unread);
         assert_eq!(interrupted[0].body, "Work was interrupted");
+    }
+
+    // Hard-won: bbe5c1a01: independent form/question alert state suppressed unseen items and native forms.
+    #[test]
+    fn published_cards_alert_only_the_newest_item_and_remember_each_identity() {
+        use mj_client::runtime_feed::{CardForm, NotificationCard};
+        use mj_core::attention::{
+            EntryMessage, NotificationDismissal, NotificationKind, NotificationStackEntry,
+        };
+        // Each step remains the newest item for the full delay. A question under
+        // a form has not been alerted and must still alert after cancellation.
+        for (name, steps) in [
+            (
+                "question then form",
+                vec![
+                    (1, None, Some("question 1")),
+                    (1, Some("approval"), Some("approval")),
+                    (1, None, None),
+                ],
+            ),
+            (
+                "form then question",
+                vec![
+                    (0, Some("approval"), Some("approval")),
+                    (1, Some("approval"), None),
+                    (1, None, Some("question 1")),
+                    (1, Some("approval"), None),
+                ],
+            ),
+            (
+                "form cancelled",
+                vec![
+                    (1, Some("approval"), Some("approval")),
+                    (1, None, Some("question 1")),
+                    (1, None, None),
+                ],
+            ),
+            (
+                "native form",
+                vec![
+                    (1, None, Some("question 1")),
+                    (
+                        1,
+                        Some("native.session.1.approval"),
+                        Some("native.session.1.approval"),
+                    ),
+                    (2, Some("native.session.1.approval"), None),
+                    (2, None, Some("question 2")),
+                ],
+            ),
+        ] {
+            let mut dashboard = dashboard();
+            dashboard
+                .session_details
+                .get_mut("asks")
+                .unwrap()
+                .pending_elicitations
+                .clear();
+            let transcript = [1, 2]
+                .into_iter()
+                .map(|ordinal| {
+                    crate::test_support::agent_message(ordinal, format!("question {ordinal}"))
+                })
+                .collect();
+            dashboard.apply_materialized_session(&crate::test_support::materialized_session_for(
+                "asks", transcript,
+            ));
+            for (step, (ordinal, form, expected)) in steps.into_iter().enumerate() {
+                let card = NotificationCard {
+                    since_ms: 0,
+                    badge: NotificationKind::NeedsInput,
+                    entries: (ordinal > 0)
+                        .then(|| NotificationStackEntry {
+                            completed_at_ms: 0,
+                            completed_ordinal: ordinal,
+                            kind: NotificationKind::NeedsInput,
+                            message: EntryMessage::Found(format!("item-{ordinal}")),
+                        })
+                        .into_iter()
+                        .collect(),
+                    dismissal: Some(NotificationDismissal::Stack { revision: ordinal }),
+                    holder: Some("asks".into()),
+                    form: form.map(|request| CardForm {
+                        raised_at_ms: 0,
+                        request_id: request.into(),
+                        message: request.into(),
+                    }),
+                };
+                dashboard.set_notification_cards(Some(mj_core::snapshot_map::SnapshotMap::from([
+                    ("asks".into(), card),
+                ])));
+                let now = step as u64 * 10_000;
+                assert!(
+                    dashboard
+                        .notification_events(now)
+                        .iter()
+                        .all(|notice| notice.session_id != "asks"),
+                    "{name}"
+                );
+                let notices = dashboard.notification_events(now + 2_000);
+                let text = notices
+                    .iter()
+                    .find(|notice| notice.session_id == "asks")
+                    .map(|notice| notice.body.as_str());
+                assert_eq!(text, expected, "{name}, step {step}");
+                assert!(
+                    dashboard.notification_events(now + 3_000).is_empty(),
+                    "{name}"
+                );
+            }
+            let last_card = dashboard.notification_cards.clone();
+            dashboard.set_notification_cards(Some(Default::default()));
+            dashboard.notification_events(100_000);
+            assert!(
+                dashboard.card_alerts.is_empty(),
+                "{name}: a disappearing card clears the alerted set"
+            );
+            dashboard.set_notification_cards(last_card);
+            assert!(dashboard.notification_events(110_000).is_empty());
+            assert_eq!(
+                dashboard.notification_events(112_000).len(),
+                1,
+                "{name}: a returned card may alert again"
+            );
+        }
     }
 
     #[test]

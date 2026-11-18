@@ -1166,8 +1166,8 @@ pub struct DashboardState {
     /// The sessions currently needing a person and whether each has been
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
-    /// Highest shown question ordinal already alerted for each session.
-    pub(crate) alerted_question_ordinals: BTreeMap<String, u64>,
+    /// Newest-item delay and alerted identities for each published card.
+    pub(crate) card_alerts: BTreeMap<String, crate::notify::CardAlert>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
     pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
@@ -1437,7 +1437,7 @@ impl DashboardState {
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
-            alerted_question_ordinals: BTreeMap::new(),
+            card_alerts: BTreeMap::new(),
             attention_navigation: None,
             rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,
