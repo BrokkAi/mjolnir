@@ -1153,5 +1153,8 @@ Readout: `brief/bifrost-oracle-noleak/READOUT.md`.
   descriptions in 13 of 17 briefs, so some relations reached reviewers less
   explicitly; the blind fact checker still found the decisive fact in each.
 - Unchanged with the hand-check assessor's labels (ON − AF +41.2). Recorded
-  new spend is $18.81 or more at API-equivalent rates. It shows reviewers
-  use a supplied neutral fact, not that Bifrost queries can find it.
+  new spend is $18.81 or more at API-equivalent rates. It shows that
+  supplying the whole neutral brief lifts reviewers, not which of its
+  relations drove the catches, and not that Bifrost queries can find the
+  fact. Six briefs passed the leak check only at low judge confidence;
+  without them ON − AF is +24.2 (+6.1 to +45.5), which reads Partly.

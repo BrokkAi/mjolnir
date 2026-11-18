@@ -2,7 +2,7 @@
 # Waits until the codex profile reads above 25%, then runs the ON/AF jobs (driver re-checks per job).
 set -u
 cd /home/jonathan/Projects/mjolnir/.mj/clones/290e45f22335c0640cdfb32c6f225440/.agents/evals/review-arms || { echo "harness checkout is missing" >&2; exit 2; }
-ENV="$(python3 -c "import json;[print(f'export {k}={v}') for k,v in json.load(open('/mnt/optane/review-arms-bifrost-20261116/arms/environment.json')).items() if k!='REVIEW_ARMS_QUOTA_FLOOR']")" || { echo "study environment did not load" >&2; exit 2; }
+ENV="$(python3 -c "import json,shlex;[print(f'export {k}={shlex.quote(str(v))}') for k,v in json.load(open('/mnt/optane/review-arms-bifrost-20261116/arms/environment.json')).items() if k!='REVIEW_ARMS_QUOTA_FLOOR' and k.isidentifier()]")" || { echo "study environment did not load" >&2; exit 2; }
 [ -n "$ENV" ] || { echo "study environment is empty" >&2; exit 2; }
 eval "$ENV"
 export REVIEW_ARMS_QUOTA_FLOOR=codex=25
