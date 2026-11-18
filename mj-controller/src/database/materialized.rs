@@ -1546,7 +1546,7 @@ pub(super) fn load_materialized_queued_prompts_from(
     Ok(queues)
 }
 
-pub(super) fn load_materialized_session_from(
+pub fn load_materialized_session_from(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<MaterializedSession>> {
@@ -1573,7 +1573,7 @@ pub fn load_materialized_recent_turns(
     load_materialized_recent_turns_from(&database_path(), session_id, turns)
 }
 
-pub(super) fn load_materialized_recent_turns_from(
+pub fn load_materialized_recent_turns_from(
     path: &Path,
     session_id: &str,
     turns: usize,
@@ -1849,10 +1849,7 @@ pub fn save_materialized_session(materialized: &MaterializedSession) -> Result<(
     })
 }
 
-pub(super) fn save_materialized_session_to(
-    path: &Path,
-    materialized: &MaterializedSession,
-) -> Result<()> {
+pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSession) -> Result<()> {
     materialized.validate()?;
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

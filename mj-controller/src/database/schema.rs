@@ -5512,9 +5512,10 @@ mod reader_tests {
         const CHILD: &str = "MJ_TEST_MOVE_CLOSE_MIGRATION";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(module_path!(), NAME),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                NAME,
+            ))
             .isolated_store(directory.path())
             .env(CHILD, "1")
             .run();
@@ -5599,9 +5600,10 @@ mod reader_tests {
         const CHILD: &str = "MJ_TEST_CREATE_INTENT_MIGRATION";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(module_path!(), NAME),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                NAME,
+            ))
             .isolated_store(directory.path())
             .env(CHILD, "1")
             .run();
@@ -6448,12 +6450,10 @@ mod reader_tests {
         const CHILD: &str = "MJ_OPERATOR_AWAY_MIGRATION_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "operator_away_migration_refuses_previous_readers_and_writers",
-                ),
-            )
+            crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+                module_path!(),
+                "operator_away_migration_refuses_previous_readers_and_writers",
+            ))
             .env(CHILD, "1")
             .isolated_store(directory.path())
             .run();

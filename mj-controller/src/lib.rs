@@ -70,6 +70,8 @@ pub mod github_relevance;
 mod jev_transport;
 pub mod mailbox_outbox;
 #[cfg(any(test, feature = "test-support"))]
+pub mod test_isolation;
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_log;
 pub mod upgrade;
 pub mod web_push;

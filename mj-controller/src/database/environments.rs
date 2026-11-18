@@ -995,7 +995,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ownership.sqlite3");
         let mut connection = super::super::schema::open_writer(&path).unwrap();
-        let mut parent = crate::controller::test_support::checkpoint_test_session(
+        let mut parent = crate::database::test_fixtures::checkpoint_test_session(
             "22222222222222222222222222222222",
         );
         parent.target = Some(Box::new(TargetLocator::LocalBare {

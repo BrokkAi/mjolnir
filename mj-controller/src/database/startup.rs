@@ -753,7 +753,7 @@ pub fn api_followup_steps(group_id: &str, followup: StartFollowup) -> Vec<(Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::test_isolation::{IsolatedTest, test_name};
 
     fn delivery(command_id: &str, group_id: Option<&str>) -> StartupDelivery {
         StartupDelivery {

@@ -24,7 +24,8 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mj-contro
 # Lowest first. A module in no layer is above all of them.
 LAYERS = [
     ('targets', {'targets', 'target_storage', 'image_pull_gate', 'streamed_child', 'termination',
-                 'tailscale', 'aws_credentials', 'aws_assume_role', 'signing_key', 'test_log'}),
+                 'tailscale', 'aws_credentials', 'aws_assume_role', 'signing_key', 'test_log',
+                 'test_isolation'}),
     ('store', {'database', 'upgrade', 'recovery_gate', 'worker_lifecycle', 'web_push',
                'mailbox_outbox'}),
 ]

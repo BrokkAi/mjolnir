@@ -1,3 +1,4 @@
+use super::test_fixtures::{event_digest, materialized_session};
 use super::*;
 use mj_core::config::HarnessKind;
 use mj_core::state::{
@@ -518,10 +519,6 @@ fn database_writer_reports_a_fatal_job_panic_without_hanging_shutdown() {
     assert!(shutdown.to_string().contains("intentional writer panic"));
 }
 
-fn event_digest(value: u64) -> String {
-    format!("{value:064x}")
-}
-
 /// Prompt history keeps only sessions that exist, so a test that records
 /// prompts saves its sessions first.
 fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
@@ -532,118 +529,6 @@ fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     super::test_session(id, bundle)
-}
-
-fn materialized_session(session_id: &str) -> MaterializedSession {
-    MaterializedSession {
-        active_turn: None,
-        last_turn_outcome: None,
-        session_id: session_id.into(),
-        applied_event_ordinal: 7,
-        applied_event_digest: event_digest(7),
-        last_activity_at_ms: Some(1_500),
-        execution: MaterializedExecutionState::Running {
-            started_at_ms: 1_000,
-        },
-        session_title: Some("Relay refactor".into()),
-        configuration: mj_core::state::SessionConfiguration {
-            values: BTreeMap::from([
-                ("model".into(), serde_json::json!("gpt-5.6-sol")),
-                ("effort".into(), serde_json::json!("high")),
-            ]),
-            ..Default::default()
-        },
-        transcript: vec![
-            Arc::new(TranscriptItem {
-                stable_id: "user:1".into(),
-                position: 1,
-                latest_content_event_ordinal: None,
-                created_at_ms: 1_000,
-                last_changed_at_ms: 1_000,
-                body: TranscriptBody::User {
-                    content: vec![serde_json::json!({
-                        "type": "text",
-                        "text": "build it"
-                    })],
-                },
-            }),
-            Arc::new(TranscriptItem {
-                stable_id: "agent:2".into(),
-                position: 2,
-                latest_content_event_ordinal: Some(2),
-                created_at_ms: 1_100,
-                last_changed_at_ms: 1_300,
-                body: TranscriptBody::Agent {
-                    chunks: vec![serde_json::json!({
-                        "content": {"type": "text", "text": "Working on it"},
-                        "messageId": "answer-1",
-                        "_meta": {"provider": "test"}
-                    })],
-                    streaming: false,
-                },
-            }),
-            Arc::new(TranscriptItem {
-                stable_id: "tool:call-1".into(),
-                position: 3,
-                latest_content_event_ordinal: None,
-                created_at_ms: 1_200,
-                last_changed_at_ms: 1_400,
-                body: TranscriptBody::Tool {
-                    call: (serde_json::json!({
-                        "toolCallId": "call-1",
-                        "title": "Edit files",
-                        "kind": "edit",
-                        "status": "completed",
-                        "content": [{
-                            "type": "content",
-                            "content": {"type": "text", "text": "done"}
-                        }],
-                        "locations": [{"path": "src/main.rs", "line": 4}],
-                        "rawInput": {"path": "src/main.rs"},
-                        "rawOutput": {"changed": true},
-                        "_meta": {"provider": "test"}
-                    }))
-                    .into(),
-                    terminal_outputs: Vec::new(),
-                    terminal_refs: Vec::new(),
-                    presentation: None,
-                },
-            }),
-            Arc::new(TranscriptItem {
-                stable_id: "plan:1".into(),
-                position: 4,
-                latest_content_event_ordinal: None,
-                created_at_ms: 1_250,
-                last_changed_at_ms: 1_350,
-                body: TranscriptBody::Plan {
-                    plan: serde_json::json!({
-                        "entries": [{
-                            "content": "Implement relay",
-                            "priority": "high",
-                            "status": "in_progress",
-                            "_meta": {"provider": "test"}
-                        }],
-                        "_meta": {"planProvider": "test"}
-                    }),
-                },
-            }),
-        ],
-        queued_prompts: vec![MaterializedQueuedPrompt {
-            accepted_ordinal: None,
-            command_id: "prompt-2".into(),
-            kind: QueuedCommandKind::Prompt,
-            content: vec![serde_json::json!({"type": "text", "text": "then test"})],
-            queued_at_ms: 1_500,
-        }],
-        pending_elicitations: vec![mj_core::elicitation::ElicitationRequest {
-            id: "elicitation-1".into(),
-            message: "Choose one".into(),
-            title: Some("Question".into()),
-            description: None,
-            fields: Vec::new(),
-            tool_permission: None,
-        }],
-    }
 }
 
 #[test]
@@ -2609,79 +2494,6 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
         compact_materialized_transcript_in(&database, "session-1", 15).unwrap(),
         TranscriptRetention::default()
     );
-}
-
-/// GitHub classification renders a session's last turns from a window that
-/// starts at a user message. A reply stored at that message's position but
-/// ordered before it belongs to the previous turn and must stay outside, or
-/// the window would open mid-turn and render differently from the history.
-#[test]
-fn recent_turns_render_from_their_window_as_from_the_whole_history() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    let item = |stable_id: String, position: u64, body: TranscriptBody| {
-        Arc::new(TranscriptItem {
-            latest_content_event_ordinal: matches!(body, TranscriptBody::Agent { .. })
-                .then_some(position),
-            stable_id,
-            position,
-            created_at_ms: 1_000,
-            last_changed_at_ms: 1_000,
-            body,
-        })
-    };
-    let mut materialized = materialized_session("session-1");
-    materialized.applied_event_ordinal = 100;
-    materialized.applied_event_digest = event_digest(100);
-    materialized.transcript = (1..=6)
-        .flat_map(|turn| {
-            [
-                item(
-                    format!("user:{turn}"),
-                    turn * 10,
-                    TranscriptBody::User {
-                        content: vec![
-                            serde_json::json!({"type": "text", "text": format!("ask {turn}")}),
-                        ],
-                    },
-                ),
-                item(
-                    // Same position as the next user message, sorted before it.
-                    format!("agent:{turn}"),
-                    (turn + 1) * 10,
-                    TranscriptBody::Agent {
-                        chunks: vec![serde_json::json!({
-                            "content": {"type": "text", "text": format!("answer {turn}")}
-                        })],
-                        streaming: false,
-                    },
-                ),
-            ]
-        })
-        .collect();
-    save_materialized_session_to(&database, &materialized).unwrap();
-    let render = |materialized: &MaterializedSession| {
-        let canonical =
-            mj_transcript::projection::canonical_session_from_materialized(materialized).unwrap();
-        crate::compaction::render_recent_turns(&canonical, 3)
-    };
-    let whole = load_materialized_session_from(&database, "session-1")
-        .unwrap()
-        .unwrap();
-
-    let recent = load_materialized_recent_turns_from(&database, "session-1", 3)
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(recent.transcript.len(), 6, "three turns, not the history");
-    assert_eq!(recent.transcript[0].stable_id, "user:4");
-    assert!(render(&whole).contains("ask 4"));
-    assert_eq!(render(&recent), render(&whole));
-    let short = load_materialized_recent_turns_from(&database, "session-1", 10)
-        .unwrap()
-        .unwrap();
-    assert_eq!(short.transcript, whole.transcript, "fewer turns load whole");
 }
 
 /// The steady-state poll loads this on every change, so it must cost the
@@ -7952,12 +7764,10 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     const CHILD: &str = "MJ_PARKED_MIGRATION_LOG_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(
-                module_path!(),
-                "the_parked_state_migration_keeps_every_session_and_refuses_older_builds",
-            ),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "the_parked_state_migration_keeps_every_session_and_refuses_older_builds",
+        ))
         .env(CHILD, "1")
         .isolated_store(root.path())
         .run();
@@ -8381,12 +8191,10 @@ fn committed_profile_preferences_track_insert_overwrite_rename_rollback_and_dele
     const CHILD: &str = "MJ_COMMITTED_PROFILE_PREFERENCE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
-            crate::controller::test_support::test_name(
-                module_path!(),
-                "committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete",
-            ),
-        )
+        crate::test_isolation::IsolatedTest::new(crate::test_isolation::test_name(
+            module_path!(),
+            "committed_profile_preferences_track_insert_overwrite_rename_rollback_and_delete",
+        ))
         .env(CHILD, "1")
         .isolated_store(directory.path())
         .run();

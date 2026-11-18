@@ -1571,7 +1571,7 @@ pub(super) fn recover_interrupted_checkpointing_sessions_to(
     Ok(changed)
 }
 
-pub(super) fn save_session_to(path: &Path, session: &SessionRecord) -> Result<()> {
+pub fn save_session_to(path: &Path, session: &SessionRecord) -> Result<()> {
     save_session_with_container_size_to(path, session, None)
 }
 

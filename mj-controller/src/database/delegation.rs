@@ -661,7 +661,7 @@ pub fn prune_acknowledged_delegations() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::test_isolation::{IsolatedTest, test_name};
 
     #[test]
     fn restart_preserves_selected_turn_and_result_until_acknowledged() {
@@ -755,9 +755,9 @@ mod tests {
             return;
         }
         let _writer = install_isolated_test_writer();
-        let parent = crate::controller::test_support::checkpoint_test_session("parent");
+        let parent = crate::database::test_fixtures::checkpoint_test_session("parent");
         save_session(&parent).unwrap();
-        let child = crate::controller::test_support::checkpoint_test_session("child");
+        let child = crate::database::test_fixtures::checkpoint_test_session("child");
         let relation: mj_core::subagent::SubagentRecord = serde_json::from_value(serde_json::json!({
             "child_session_id":"child", "parent_session_id":"parent", "task_name":"audit", "profile_id":"profile",
             "working_directory":"", "initial_prompt":"audit", "request_key":"task", "created_at":"now"
@@ -849,7 +849,7 @@ mod tests {
             return;
         }
         let _writer = install_isolated_test_writer();
-        let parent = crate::controller::test_support::checkpoint_test_session("parent");
+        let parent = crate::database::test_fixtures::checkpoint_test_session("parent");
         save_session(&parent).unwrap();
         let identity: mj_core::subagent::SubagentFinishIdentity = serde_json::from_value(serde_json::json!({
             "kind":"terminal", "state":"completed", "detail":"retained report", "last_completed_ordinal":9
@@ -860,7 +860,7 @@ mod tests {
             "reported_finish": identity
         })).unwrap();
         save_subagent_session(
-            &crate::controller::test_support::checkpoint_test_session("child"),
+            &crate::database::test_fixtures::checkpoint_test_session("child"),
             &relation,
         )
         .unwrap();
@@ -954,7 +954,7 @@ mod tests {
         }
         let _writer = install_isolated_test_writer();
         for target in ["blocked", "ready"] {
-            save_session(&crate::controller::test_support::checkpoint_test_session(
+            save_session(&crate::database::test_fixtures::checkpoint_test_session(
                 target,
             ))
             .unwrap();

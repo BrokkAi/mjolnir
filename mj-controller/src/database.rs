@@ -107,6 +107,8 @@ pub use config_results::*;
 mod projects;
 pub use projects::*;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixtures;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, feature = "test-support"))]

@@ -16,7 +16,7 @@ After this work no crate is over 50,000 lines of Rust (tests included), and crat
 - [x] (2026-11-18) Milestone 1: the HTTP server is `mj-server` (`brokk-mj-server`), 29,241 lines; `mj-daemon` is 104,360. The 964 tests are the same 964, 279 of them now in `mj-server`.
 - [ ] Measure what the `mj-daemon` test unit generates code for (see the code generation entry in Surprises) before choosing Milestone 2's cuts.
 - [x] (2026-11-18) Milestone 2a: no production code in `mj-controller`'s targets layer or store layer names a module above it (16 sites at the start). `scripts/check-controller-layers.py` enforces both boundaries in CI.
-- [ ] Milestone 2b: the test references across those boundaries are gone (22 sites): fixtures move down, tests of higher code move up.
+- [x] (2026-11-18) Milestone 2b: no test crosses those boundaries either (22 sites at the start). `test_name` and `IsolatedTest` are `test_isolation`, in the targets layer; the store's record fixtures are `database::test_fixtures`; two tests of controller functions left `targets/tests.rs` and the test that renders a stored window through `compaction` sits with `compaction`'s tests. The same 1,845 tests run.
 - [ ] Milestone 2c: the targets layer is `mj-targets` (`brokk-mj-targets`) and the store layer is `mj-store` (`brokk-mj-store`, already registered).
 - [ ] Milestone 2: the review host and the pollers leave `mj-daemon`.
 - [ ] Milestone 3: `mj-daemon`'s `daemon` and `server_runtime` modules are separated and the crate is under the budget.
