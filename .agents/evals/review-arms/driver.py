@@ -259,11 +259,12 @@ def finish_set_aside(d):
     # carrier is not yet suspended, and retire the launch records only once it has taken effect.
     # Otherwise the marker stays and the next start retries.
     try:
-        state = session(sid).get("lifecycle")
+        # A destroyed session can still be indexed as a record with no lifecycle: it is gone.
+        state = session(sid).get("lifecycle") or "closed"
     except RuntimeError as e:
         # A carrier destroyed meanwhile is gone, which is what the set-aside needs; any other
         # lookup failure is raised so the next start retries.
-        if "404" not in str(e) and "not found" not in str(e).lower():
+        if not any(m in str(e).lower() for m in ("404", "not found", "no session")):
             raise
         state = "closed"
     if state not in ("suspended", "closed"):
