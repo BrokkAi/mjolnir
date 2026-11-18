@@ -249,7 +249,9 @@ impl RelayCommand {
         command_id: &str,
     ) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         let prompt = self.prompt_blocks()?;
-        if crate::continuation::is_restart_continuation(command_id) {
+        if crate::continuation::is_restart_continuation(command_id)
+            && !crate::acp::prompt_is_slash_command(&prompt)
+        {
             let mut prompt = prompt.into_owned();
             prompt.insert(
                 0,

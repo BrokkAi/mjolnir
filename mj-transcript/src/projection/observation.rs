@@ -311,7 +311,17 @@ pub(super) fn project_observation(
             {
                 let mut queue = current.queued_prompts.clone();
                 let mut entry = queue.remove(queue_index);
-                if mj_core::continuation::is_restart_continuation(command_id) {
+                let slash = entry
+                    .content
+                    .first()
+                    .and_then(|block| block.get("text"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| {
+                        mj_core::acp::prompt_is_slash_command(&[ContentBlock::from(
+                            text.to_owned(),
+                        )])
+                    });
+                if mj_core::continuation::is_restart_continuation(command_id) && !slash {
                     entry.content.insert(
                         0,
                         serde_json::to_value(ContentBlock::from(

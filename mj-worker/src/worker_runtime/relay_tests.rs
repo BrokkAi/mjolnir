@@ -3958,11 +3958,17 @@ fn advertised_steering_enables_automatic_steering() {
     ));
 }
 
+// Hard-won: d2f26b4c6: recovery started before the bridge restart reached the transcript.
 #[test]
 fn harness_restarting_interrupts_in_flight_commands() {
     for control in ["none", "cancel", "steer"] {
         let temp = tempfile::tempdir().unwrap();
         let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+        durable
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         durable.set_steering_delivery_mode(mj_core::config::HarnessKind::Dsh, false);
         submit(&mut durable, "prompt-1", prompt("go"));
         let mut in_flight = BTreeMap::new();
@@ -4025,6 +4031,21 @@ fn harness_restarting_interrupts_in_flight_commands() {
             .position(|event| matches!(event.observation, RelayObservation::SessionRestarted))
             .unwrap();
         assert!(interrupted < restarted);
+        assert!(!events.iter().any(
+            |event| matches!(&event.observation, RelayObservation::CommandStarted { command_id, .. }
+            if mj_core::continuation::is_restart_continuation(command_id))
+        ));
+        assert!(durable.claim_pending_commands(false).unwrap().is_empty());
+        drop(durable);
+        unix::record_runtime_event(
+            &relay,
+            &mut in_flight,
+            RuntimeEvent::SessionConfigured {
+                config_options: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut durable = relay.lock().unwrap();
         let claimed = durable.claim_pending_commands(true).unwrap();
         if control == "cancel" {
             assert!(
@@ -4034,6 +4055,25 @@ fn harness_restarting_interrupts_in_flight_commands() {
         } else {
             assert_eq!(claimed.len(), 1);
             assert!(claimed[0].command_id.starts_with("auto-continue-restart-"));
+            let mut projection = mj_core::state::MaterializedSession::empty(SESSION_ID);
+            for event in durable.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+                let projected =
+                    mj_transcript::projection::project_relay_event(&projection, &event).unwrap();
+                mj_transcript::projection::apply_committed_projection_event(
+                    &mut projection,
+                    &event,
+                    projected.mutation,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                projection.active_turn.as_ref().unwrap().command_id,
+                claimed[0].command_id
+            );
+            assert!(matches!(
+                projection.execution,
+                mj_core::state::MaterializedExecutionState::Running { .. }
+            ));
             if control == "steer" {
                 let state = durable.operational_state();
                 assert_eq!(state.queued_prompts[0].command_id, "queued-input");

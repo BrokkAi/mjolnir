@@ -36,6 +36,8 @@ use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
 mod claude_usage;
 mod goal;
+#[cfg(unix)]
+pub(crate) use goal::relay_goal_admission;
 mod grok_usage;
 #[cfg(test)]
 mod grok_usage_tests;

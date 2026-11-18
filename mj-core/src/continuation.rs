@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 /// Restart prompts retain their original payload; the note is added only when rendered.
-pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. The request for that turn is repeated below. If you had already started on it, continue from where you left off rather than starting over. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
+pub const RESTART_RECOVERY_NOTE: &str = "[HARNESS NOTE: interrupted turn recovery] Your previous turn was interrupted because this session's worker or harness restarted, and running tool calls were lost. The original request that began this turn is repeated below for context. Any corrections or redirections given during the turn, visible in the conversation, take precedence over it. If you had already started, continue from where you left off rather than starting over. Before repeating a command whose result you did not see, check whether it already took effect, especially for anything with external side effects.";
 
 pub fn restart_continuation_id(command_id: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -206,11 +206,14 @@ generated_prompts! {
     ///
     /// A prompt that carries the person's own text (plan-review feedback, image
     /// pastes, startup prompts, `prompt-`, `web-prompt-`) is not generated, and
-    /// neither is a command that is not a prompt (`auto-steer-`, a goal resume).
+    /// neither is an ordinary control command (`auto-steer-`, a user goal resume).
+    /// GoalResume also identifies the worker's automatic non-prompt control.
     /// The id strings are stored in journals and transcripts; do not change them.
     pub enum GeneratedPrompt {
         /// Automatic continuation of unfinished work.
         AutoContinue => "auto-continue-",
+        /// Native goal resumption admitted by the worker after queued input.
+        GoalResume => "auto-goal-resume-",
         /// The retry a quota recovery submits.
         QuotaRetry => "quota-retry-",
         /// Resume a turn whose rejected Claude access token was replaced.

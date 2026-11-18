@@ -1212,6 +1212,9 @@ pub(crate) fn record_runtime_event_with_facts(
             relay.record_observation(RelayObservation::Warning { message })?;
         }
         RuntimeEvent::HarnessRestarting { message } => {
+            // Close admission before interrupting anything: interruption may
+            // otherwise promote a replacement ahead of SessionRestarted.
+            relay.clear_acp_readiness();
             relay.record_observation(RelayObservation::NativeAgent {
                 event: mj_core::native_agent::NativeAgentEvent::Disconnected,
             })?;

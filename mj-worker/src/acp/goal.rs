@@ -7,7 +7,7 @@ type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
 /// Polled by both command loops. Dropping the session drops all request waits;
 /// the relay reports their commands interrupted rather than replaying them.
 #[derive(Default)]
-pub(super) struct PendingControls(Vec<PendingControl>);
+pub(super) struct PendingControls(Vec<(String, PendingControl)>);
 
 impl PendingControls {
     pub(super) fn is_empty(&self) -> bool {
@@ -24,13 +24,20 @@ impl PendingControls {
     ) {
         let connection = connection.clone();
         let session = session.clone();
-        self.0.push(Box::pin(async move {
+        let id = request_id.clone();
+        let automatic = mj_core::continuation::GeneratedPrompt::GoalResume
+            .suffix(&id)
+            .is_some();
+        self.0.push((id, Box::pin(async move {
             // Explicit native resume may answer only when its turn finishes.
             // Do not impose recovery's short acknowledgement timeout here.
-            let response = connection
-                .send_request(control_request(&session, action, expected.as_ref()))
-                .block_task()
-                .await;
+            let request = connection.send_request(control_request(&session, action, expected.as_ref())).block_task();
+            let response = if automatic {
+                match tokio::time::timeout(Duration::from_secs(30), request).await {
+                    Ok(response) => response.map_err(|error| error.to_string()),
+                    Err(_) => Err("goal resume acknowledgement timed out; current execution must be reconciled before retrying".to_owned()),
+                }
+            } else { request.await.map_err(|error| error.to_string()) };
             match response {
                 Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
                 Err(error) => RuntimeEvent::CommandRejected {
@@ -39,13 +46,21 @@ impl PendingControls {
                     message: format!("/goal {} failed: {error}", action.as_str()),
                 },
             }
-        }));
+        })));
+    }
+
+    pub(super) fn blocks_input(&self) -> bool {
+        self.0.iter().any(|(id, _)| {
+            mj_core::continuation::GeneratedPrompt::GoalResume
+                .suffix(id)
+                .is_some()
+        })
     }
 
     pub(super) async fn next(&mut self) -> RuntimeEvent {
         std::future::poll_fn(|cx| {
             for index in 0..self.0.len() {
-                if let std::task::Poll::Ready(event) = self.0[index].as_mut().poll(cx) {
+                if let std::task::Poll::Ready(event) = self.0[index].1.as_mut().poll(cx) {
                     // Keep requests ordered until their first poll sends them.
                     drop(self.0.remove(index));
                     return std::task::Poll::Ready(event);
@@ -57,10 +72,23 @@ impl PendingControls {
     }
 }
 
-/// The identity an automatic quota goal resume sends, so the adapter restarts
-/// only the goal the usage limit stopped and never one whose budget is spent.
+/// Automatic recovery carries the admitted goal identity; quota recovery
+/// carries the goal the usage limit stopped, including its remaining budget.
 /// A user's own `/goal resume` carries none.
 pub(super) fn control_identity(spec: &LaunchSpec, request_id: &str) -> Option<GoalSnapshot> {
+    if mj_core::continuation::GeneratedPrompt::GoalResume
+        .suffix(request_id)
+        .is_some()
+    {
+        return spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .snapshot
+            .clone()
+            .filter(|goal| goal.matches_resume_command(request_id));
+    }
     mj_core::continuation::is_quota_goal_resume(request_id)
         .then(|| {
             spec.goal_recovery
@@ -164,6 +192,12 @@ pub(super) async fn prepare_control(
         && !context.state.resumable_after_quota()
     {
         Some("the goal is no longer stopped by the usage limit".into())
+    } else if mj_core::continuation::GeneratedPrompt::GoalResume
+        .suffix(request_id)
+        .is_some()
+        && control_identity(spec, request_id).is_none()
+    {
+        Some("the goal changed after automatic recovery was admitted".into())
     } else if model_pending && action == mj_core::goal::GoalControlAction::Resume {
         Some("Choose the replacement model before resuming the goal".into())
     } else {
@@ -181,7 +215,11 @@ pub(super) async fn prepare_control(
         .await?;
         return Ok(false);
     }
-    if pending.is_some() || context.state.decision.is_some() || context.asking() {
+    if mj_core::continuation::GeneratedPrompt::GoalResume
+        .suffix(request_id)
+        .is_none()
+        && (pending.is_some() || context.state.decision.is_some() || context.asking())
+    {
         let mut meta = serde_json::json!({"mjGoalDecision":null});
         if let Some(intent) = context.request_id() {
             meta["mjGoalResumeAnswered"] = intent.into();
@@ -240,6 +278,99 @@ async fn control(
     Ok(())
 }
 
+#[cfg(unix)]
+pub(crate) fn relay_goal_admission(
+    relay: Arc<crate::relay::RelayCell>,
+    events: mpsc::Sender<RuntimeEvent>,
+) -> mj_core::goal::GoalResumeAdmission {
+    mj_core::goal::GoalResumeAdmission(Arc::new(move |goal| {
+        let relay = relay.clone();
+        let events = events.clone();
+        Box::pin(async move {
+            let mut changes = relay.releases();
+            let mut admitted: Option<String> = None;
+            loop {
+                changes.borrow_and_update();
+                if let Some(id) = &admitted {
+                    if let Some(result) = relay
+                        .observe()
+                        .expect("relay lock poisoned")
+                        .automatic_goal_resume_result(id)
+                    {
+                        return result;
+                    }
+                } else {
+                    let (needed, ready, existing) = {
+                        let owner = relay.observe().expect("relay lock poisoned");
+                        (
+                            owner.automatic_goal_resume_needed(&goal),
+                            owner.can_admit_automatic_goal_resume(),
+                            owner.existing_automatic_goal_resume(&goal),
+                        )
+                    };
+                    if let Some(id) = existing {
+                        // A prior recovery already reserved this control;
+                        // observe its receipt instead of issuing another RPC.
+                        admitted = Some(id);
+                        continue;
+                    }
+                    if ready && !needed {
+                        emit_runtime_event(&events, RuntimeEvent::Notice { message: "Native goal recovery is no longer needed; the goal was stopped or changed.".to_owned() }).await?;
+                        return Ok(());
+                    }
+                    if ready {
+                        // The owner rechecks and installs the busy control in
+                        // one decision; observing idle never authorizes alone.
+                        let id = relay
+                            .lock()
+                            .expect("relay lock poisoned")
+                            .admit_automatic_goal_resume(&goal)?;
+                        if let Some(id) = id {
+                            admitted = Some(id);
+                            emit_runtime_event(
+                                &events,
+                                RuntimeEvent::Notice {
+                                    message: "Resuming the native goal after queued work."
+                                        .to_owned(),
+                                },
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
+                }
+                changes
+                    .changed()
+                    .await
+                    .context("goal recovery owner stopped")?;
+            }
+        })
+    }))
+}
+
+async fn resume_automatic(
+    connection: &ConnectionTo<Agent>,
+    session: &SessionId,
+    spec: &LaunchSpec,
+    goal: &GoalSnapshot,
+) -> Result<()> {
+    ensure!(
+        goal.control_method.as_deref() == Some("_session/goal"),
+        "goal resume is not supported by this harness"
+    );
+    goal.created_at.context("goal identity is unavailable")?;
+    let admission = spec
+        .goal_recovery
+        .lock()
+        .expect("goal lock poisoned")
+        .admission
+        .clone();
+    match admission {
+        Some(admission) => (admission.0)(goal.clone()).await,
+        None => control(connection, session, goal, true).await,
+    }
+}
+
 pub(super) async fn recover(
     recovery_supported: bool,
     connection: &ConnectionTo<Agent>,
@@ -280,7 +411,11 @@ pub(super) async fn recover(
         if context.state.snapshot.as_ref().is_some_and(|g| {
             g.same_goal(&decision.goal) && matches!(g.status.as_str(), "active" | "paused")
         }) {
-            control(connection, session, &decision.goal, decision.resume).await?;
+            if decision.resume {
+                resume_automatic(connection, session, spec, &decision.goal).await?;
+            } else {
+                control(connection, session, &decision.goal, false).await?;
+            }
         }
         decision_update(spec, events, serde_json::json!({"mjGoalDecision":null})).await?;
         return Ok(None);
@@ -310,7 +445,7 @@ pub(super) async fn recover(
         if !goal.active() || context.state.running() {
             return Ok(None);
         }
-        match control(connection, session, &goal, true).await {
+        match resume_automatic(connection, session, spec, &goal).await {
             Ok(()) => return Ok(None),
             Err(error) => {
                 let message = format!("Goal recovery needs attention: {error:#}");
@@ -437,6 +572,46 @@ pub(super) async fn resolve(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn ordering_spec(
+        root: &tempfile::TempDir,
+        script: &std::path::Path,
+        context: Arc<Mutex<mj_core::goal::GoalRecoveryContext>>,
+    ) -> LaunchSpec {
+        LaunchSpec {
+            operator_away: Default::default(),
+            imported_logins: None,
+            login_identity: Default::default(),
+            bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+            managed_subagent: false,
+            subagent_mcp_socket: None,
+            clear_context_request: None,
+            context_restore: None,
+            goal_recovery: context.clone(),
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            environment: BTreeMap::new(),
+            cwd: root.path().into(),
+            additional_directories: vec![],
+            project_memory: None,
+            extra_mcp_servers: vec![],
+            resume_session: Some("native".into()),
+            native_session_may_have_history: false,
+            accepted_config: Default::default(),
+            initial_model: None,
+            harness: HarnessKind::Codex,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
+            observe_policy: None,
+            acp_activity: Default::default(),
+            step_clock: Default::default(),
+            tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource::Disabled),
+            stall_policy: None,
+        }
+    }
 
     #[tokio::test]
     async fn goal_recovery_resumes_only_when_needed_and_explicit_open_asks() {
@@ -898,5 +1073,148 @@ for line in sys.stdin:
                     .unwrap();
             }
         }
+    }
+
+    // Hard-won: d2f26b4c6: startup goal resume overtook queued input and had no busy owner.
+    #[tokio::test]
+    async fn automatic_goal_resume_waits_for_queued_work_and_owns_the_ack_interval() {
+        use crate::relay::{DurableRelay, RelayCell};
+        use mj_core::relay::*;
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("ordered_goal.py");
+        std::fs::write(&script, r#"
+import json, os, sys, time
+from pathlib import Path
+def emit(x): print(json.dumps(x), flush=True)
+def record(x):
+    with open('order','a') as f: f.write(x+'\n')
+goal={'objective':'finish campaign','status':'active','createdAt':123,'controlMethod':'_session/goal'}
+for line in sys.stdin:
+    r=json.loads(line); m=r.get('method'); i=r.get('id'); p=r.get('params',{})
+    if i is None: continue
+    if m=='initialize':
+        result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'resume':{}}},'_meta':{'jetbrains':{'air':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['resume','pause'],'resumePolicies':['pause','preserve']}}}}}
+    elif m=='session/resume':
+        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'jetbrains':{'air':{'goal':goal}},'execution':{'version':1,'status':'idle'}}}
+    elif m=='session/prompt':
+        text=p['prompt'][0]['text']; record(text)
+        if text=='arriving during resume': assert Path('ack-sent').exists()
+        result={'stopReason':'end_turn'}
+    elif m=='_session/goal':
+        assert p['action']=='resume'
+        assert Path('order').read_text().splitlines()==['queued first']
+        record('resume-started')
+        emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'RESUME_WAIT'}}}})
+        while not Path('allow-ack').exists(): time.sleep(.005)
+        Path('ack-sent').write_text('yes'); record('resume-ack'); result={}
+    else: result={}
+    emit({'jsonrpc':'2.0','id':i,'result':result})
+"#).unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(root.path().join("relay"), "goal-order-session", "test").unwrap(),
+        ));
+        let submit = |id: &str, text: &str| {
+            let response = relay.lock().unwrap().handle(RelayRequestEnvelope {
+                request_id: id.into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::Submit {
+                    command_id: id.into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from(text)],
+                    },
+                },
+            });
+            assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        };
+        submit("queued-first", "queued first");
+        let (tx, rx) = mpsc::channel(8);
+        let (events, mut receive) = mpsc::channel(16);
+        let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext {
+            admission: Some(relay_goal_admission(relay.clone(), events.clone())),
+            ..Default::default()
+        }));
+        let repeated_admission = relay_goal_admission(relay.clone(), events.clone());
+        let spec = ordering_spec(&root, &script, context);
+        let task = tokio::spawn(run(spec, rx, events));
+        let mut repeated_recovery = None;
+        let mut in_flight = BTreeMap::new();
+        let mut closing = false;
+        loop {
+            let event = match tokio::time::timeout(Duration::from_secs(15), receive.recv())
+                .await
+                .unwrap()
+            {
+                Some(event) => event,
+                None => panic!(
+                    "ACP stopped before ordering completed: {:?}",
+                    task.await.unwrap()
+                ),
+            };
+            if matches!(event, RuntimeEvent::CloseApplied { .. }) {
+                break;
+            }
+            let waiting = matches!(&event, RuntimeEvent::SessionUpdate { update } if update.pointer("/content/text").and_then(serde_json::Value::as_str)==Some("RESUME_WAIT"));
+            let last = matches!(&event, RuntimeEvent::PromptFinished { request_id, .. } if request_id=="queued-later");
+            crate::worker_runtime::record_runtime_event(&relay, &mut in_flight, event).unwrap();
+            if waiting {
+                let goal = relay
+                    .observe()
+                    .unwrap()
+                    .operational_state()
+                    .goal
+                    .snapshot
+                    .unwrap();
+                let mut repeated = (repeated_admission.0)(goal);
+                // Drive recovery before allowing the native ACK. A restarted
+                // recovery must reuse the accepted dispatch, not resume twice.
+                std::future::poll_fn(|cx| {
+                    assert!(repeated.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                repeated_recovery = Some(tokio::spawn(repeated));
+                submit("queued-later", "arriving during resume");
+                assert!(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .claim_pending_commands(true)
+                        .unwrap()
+                        .is_empty(),
+                    "the outstanding goal RPC must own admission"
+                );
+                std::fs::write(root.path().join("allow-ack"), "yes").unwrap();
+            }
+            if last {
+                closing = true;
+                tx.send(CommandRequest::Close {
+                    request_id: "test-close".into(),
+                })
+                .await
+                .unwrap();
+            }
+            if !closing {
+                let claimed = {
+                    let mut owner = relay.lock().unwrap();
+                    let ready = owner.is_acp_ready();
+                    owner.claim_pending_commands(ready).unwrap()
+                };
+                for claim in claimed {
+                    in_flight.insert(claim.command_id.clone(), claim.command.clone());
+                    tx.send(crate::worker_runtime::acp_command(&claim).unwrap())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        drop(tx);
+        drop(repeated_admission);
+        repeated_recovery.unwrap().await.unwrap().unwrap();
+        while receive.recv().await.is_some() {}
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("order")).unwrap(),
+            "queued first\nresume-started\nresume-ack\narriving during resume\n"
+        );
     }
 }

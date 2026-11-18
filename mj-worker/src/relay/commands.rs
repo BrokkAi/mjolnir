@@ -1218,7 +1218,11 @@ impl DurableRelay {
                 .dispatches
                 .get(command_id)
                 .is_some_and(|dispatch| mailbox_prompt_eligible(&dispatch.command))
-        }) && !self.snapshot.pending_mailbox_events.is_empty()
+        }) && !self
+            .snapshot
+            .mailbox_prompt_contexts
+            .contains_key(command_id)
+            && !self.snapshot.pending_mailbox_events.is_empty()
         {
             let event_keys = self
                 .snapshot
@@ -1944,16 +1948,60 @@ impl DurableRelay {
         let continuation_id = (reason == mj_core::event_outcome::OutcomeReason::WorkerRestarted)
             .then(|| self.restart_continuation_for(command_id))
             .flatten();
-        let ordinal = self.append_relay_event(
-            Some(command_id),
-            RelayObservation::CommandInterrupted {
-                continuation_id,
-                reason: Some(reason),
-                command_id: command_id.to_owned(),
-                command,
-                message: message.into(),
-            },
-        )?;
+        let observation = RelayObservation::CommandInterrupted {
+            continuation_id,
+            reason: Some(reason),
+            command_id: command_id.to_owned(),
+            command,
+            message: message.into(),
+        };
+        let ordinal = match self.append_relay_event(Some(command_id), observation.clone()) {
+            Ok(ordinal) => ordinal,
+            Err(error)
+                if error
+                    .downcast_ref::<RelayBudgetExceeded>()
+                    .is_some_and(|limit| {
+                        limit.description == "relay snapshot"
+                            && limit.budget == RELAY_SNAPSHOT_BYTE_BUDGET
+                    })
+                    && self.snapshot.dispatches.contains_key(command_id)
+                    && matches!(
+                        &observation,
+                        RelayObservation::CommandInterrupted {
+                            continuation_id: Some(_),
+                            ..
+                        }
+                    ) =>
+            {
+                // Staging rejected the larger receipt before any journal
+                // write. Terminalizing the original releases its payload.
+                let RelayObservation::CommandInterrupted {
+                    continuation_id: _,
+                    reason,
+                    command_id: interrupted,
+                    command,
+                    message,
+                } = observation
+                else {
+                    unreachable!()
+                };
+                let ordinal = self.append_relay_event(
+                    Some(command_id),
+                    RelayObservation::CommandInterrupted {
+                        continuation_id: None,
+                        reason,
+                        command_id: interrupted,
+                        command,
+                        message,
+                    },
+                )?;
+                self.record_observation(RelayObservation::Warning {
+                        message: "The turn could not be resumed automatically because the session's queue is full. Remove queued input or continue the task manually.".to_owned(),
+                    })?;
+                ordinal
+            }
+            Err(error) => return Err(error),
+        };
         self.ensure_initial_commands_succeeded()?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
@@ -1961,7 +2009,9 @@ impl DurableRelay {
             self.promote_held_claude_turn()?;
         }
         self.settle_held_writes()?;
-        self.promote_next_queued_command()?;
+        if reason != mj_core::event_outcome::OutcomeReason::WorkerRestarted || self.is_acp_ready() {
+            self.promote_next_queued_command()?;
+        }
         Ok(ordinal)
     }
 
@@ -1974,21 +2024,8 @@ impl DurableRelay {
         {
             return None;
         }
-        // Native goal recovery owns resumption of this work. Its saved resume
-        // decision and active goal are replayed by acp::goal::recover.
-        let goal = &self.snapshot.goal;
-        if goal.supports(mj_core::goal::GoalControlAction::Resume)
-            && (goal.active()
-                || goal.decision.as_ref().is_some_and(|decision| {
-                    decision.resume
-                        && goal.snapshot.as_ref().is_some_and(|snapshot| {
-                            snapshot.same_goal(&decision.goal)
-                                && matches!(snapshot.status.as_str(), "active" | "paused")
-                        })
-                }))
-        {
-            return None;
-        }
+        // Native goals resume through controls, not generated relay prompts.
+        // They do not replace an ordinary request interrupted alongside them.
         Some(restart_continuation_id(command_id))
     }
 
@@ -2124,6 +2161,88 @@ impl DurableRelay {
         })
     }
 
+    #[cfg(unix)]
+    pub(crate) fn existing_automatic_goal_resume(
+        &self,
+        goal: &mj_core::goal::GoalSnapshot,
+    ) -> Option<String> {
+        self.snapshot
+            .dispatches
+            .keys()
+            .find(|id| goal.matches_resume_command(id))
+            .cloned()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn automatic_goal_resume_needed(&self, goal: &mj_core::goal::GoalSnapshot) -> bool {
+        let state = &self.snapshot.goal;
+        state.snapshot.as_ref().is_some_and(|current| {
+            current.same_goal(goal)
+                && (current.active()
+                    || (matches!(current.status.as_str(), "active" | "paused")
+                        && state.decision.as_ref().is_some_and(|decision| {
+                            decision.resume && current.same_goal(&decision.goal)
+                        })))
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn can_admit_automatic_goal_resume(&self) -> bool {
+        self.is_acp_ready()
+            && !self.checkpoint_only
+            && !self.turn_in_progress()
+            && !self.unfinished_dispatch()
+            && self.snapshot.queued_prompts.is_empty()
+            && !self.mailbox_wake_is_allowed()
+            && !matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+    }
+
+    /// The accepted control is the busy fact before the owner lock is released.
+    #[cfg(unix)]
+    pub(crate) fn admit_automatic_goal_resume(
+        &mut self,
+        goal: &mj_core::goal::GoalSnapshot,
+    ) -> Result<Option<String>> {
+        if !self.can_admit_automatic_goal_resume() || !self.automatic_goal_resume_needed(goal) {
+            return Ok(None);
+        }
+        let id = goal.resume_command_id(self.latest_ordinal())?;
+        self.submit_command(
+            &id,
+            RelayCommand::GoalControl {
+                action: mj_core::goal::GoalControlAction::Resume,
+            },
+        )?
+        .map_err(|error| anyhow!("admit automatic goal resume: {error:?}"))?;
+        Ok(Some(id))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn automatic_goal_resume_result(&self, id: &str) -> Option<Result<()>> {
+        let receipt = self.snapshot.handled_commands.get(id)?;
+        receipt.terminal_ordinal?;
+        Some(if let Some(failure) = &receipt.failure {
+            Err(anyhow!("{failure}"))
+        } else if receipt.outcome == Some(RelayCommandOutcome::GoalControlled) {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "automatic goal resume ended without a control acknowledgement"
+            ))
+        })
+    }
+
+    fn automatic_goal_resume_outstanding(&self) -> bool {
+        self.snapshot.dispatches.iter().any(|(id, _)| {
+            mj_core::continuation::GeneratedPrompt::GoalResume
+                .suffix(id)
+                .is_some()
+        })
+    }
+
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run one at a time; restart recovery precedes previously queued input.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
@@ -2138,6 +2257,8 @@ impl DurableRelay {
         // prompts internally and cancel may discard them; ACP rejects
         // configuration changes while its prompt loop is running.
         if self.checkpoint_only
+            || (recovery.is_some() && !self.is_acp_ready())
+            || self.automatic_goal_resume_outstanding()
             || self.turn_in_progress()
             // A cancel can outlive its prompt result. Drain it before a
             // replacement turn starts, so it cannot reach the newer turn.

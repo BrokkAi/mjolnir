@@ -854,15 +854,26 @@ pub(super) async fn serve_session(
         }
     }
 
-    let mut goal_question = goal::recover(
+    let mut goal_recovery = Some(Box::pin(goal::recover(
         goal_recovery_supported,
         connection,
         &session_id,
         spec,
         events,
         config_recovery.is_some(),
-    )
-    .await?;
+    )));
+    let mut goal_question = None;
+    // Standalone ACP users have no relay queue to admit through. Preserve
+    // their existing serialized startup; workers always install admission.
+    let relay_admission = spec
+        .goal_recovery
+        .lock()
+        .expect("goal lock poisoned")
+        .admission
+        .is_some();
+    if !relay_admission {
+        goal_question = goal_recovery.take().expect("startup goal recovery").await?;
+    }
     let mut goal_controls = goal::PendingControls::default();
     // An idle OpenCode session reloads to import changed logins. Only here,
     // between commands, and only with nothing waiting on an answer, the same
@@ -875,8 +886,17 @@ pub(super) async fn serve_session(
         let may_reload = spec.imported_logins.is_some()
             && goal_controls.is_empty()
             && config_recovery.is_none()
-            && goal_question.is_none();
+            && goal_question.is_none()
+            && goal_recovery.is_none();
         let request = tokio::select! {
+            // Capture recovery intent before the first queued request can
+            // make the native session report that ordinary prompt as running.
+            biased;
+            result = async { goal_recovery.as_mut().expect("guarded goal recovery").await }, if goal_recovery.is_some() => {
+                goal_recovery = None;
+                goal_question = result?;
+                continue;
+            }
             event = goal_controls.next(), if !goal_controls.is_empty() => {
                 emit_runtime_event(events, event).await?;
                 continue;
@@ -894,7 +914,7 @@ pub(super) async fn serve_session(
                 }
                 continue;
             }
-            request = requests.recv() => match request { Some(request) => request, None => break },
+            request = requests.recv(), if !goal_controls.blocks_input() => match request { Some(request) => request, None => break },
         };
         let request = match request {
             CommandRequest::PromptAttachments {

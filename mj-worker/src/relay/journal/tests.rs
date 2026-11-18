@@ -1874,6 +1874,11 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
                 &event.observation, RelayObservation::CommandInterrupted { continuation_id: Some(id), .. } if id == &recovery_id
             )).count(), 1, "recovery mode {cut}"
         );
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         let claimed = relay.claim_pending_commands(true).unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].command_id, recovery_id);
@@ -1898,6 +1903,11 @@ fn restart_continuation_recovery_is_idempotent_and_preserves_never_delivered_blo
         // still ahead of the user's queued work, without a retry budget.
         drop(relay);
         relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         let second = relay.claim_pending_commands(true).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].command_id, restart_continuation_id(&recovery_id));
@@ -1966,25 +1976,49 @@ fn restart_continuation_honors_cancellation_even_when_the_worker_dies_before_ack
     }
 }
 
+// Hard-won: d2f26b4c6: goal recovery suppressed ordinary interrupted requests.
 #[test]
-fn restart_continuation_leaves_native_goal_recovery_as_the_only_resume_owner() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate": "session_info_update", "_meta": {
-            "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
-            "goal": {"objective": "finish campaign", "status": "active", "createdAt": 123},
-            "execution": {"version": 1, "status": "running"}
+fn restart_continuation_preserves_ordinary_user_work_alongside_a_native_goal() {
+    for native_id in [None, Some("native-goal-session")] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        if let Some(id) = native_id {
+            relay
+                .record_observation(RelayObservation::SessionOpened {
+                    native_session_id: id.into(),
+                    resumed: true,
+                    native_continuity_lost: false,
+                    replaced_unused_native_session_id: None,
+                })
+                .unwrap();
         }
-    })).unwrap()).unwrap();
-    assert!(relay.snapshot.goal.active());
-    submit_relay(&mut relay, "interrupted-turn", prompt("finish the task"));
-    relay.claim_pending_commands(true).unwrap();
-    drop(relay);
-    let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    assert!(relay.snapshot.queued_prompts.is_empty());
-    assert!(relay.snapshot.active_prompt.is_none());
-    assert!(relay.snapshot.goal.active());
+        relay.record_session_update(serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "session_info_update", "_meta": {
+                "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
+                "goal": {"objective": "finish campaign", "status": "active", "createdAt": 123, "controlMethod":"_session/goal"},
+                "execution": {"version": 1, "status": "running"}
+            }
+        })).unwrap()).unwrap();
+        submit_relay(
+            &mut relay,
+            "interrupted-turn",
+            prompt("Write the requested documentation"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let recovered = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].command,
+            prompt("Write the requested documentation")
+        );
+    }
 }
 
 // Hard-won: 1c150431b: recovery discarded requests never persisted by the harness.
@@ -2021,6 +2055,11 @@ fn restart_continuation_moves_a_maximum_request_when_the_durable_queue_is_near_f
     for _ in 0..3 {
         drop(relay);
         relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         let recovered = relay.claim_pending_commands(true).unwrap();
         assert_eq!(recovered.len(), 1);
         mj_core::relay::ensure_serialized_budget(
@@ -2082,6 +2121,11 @@ fn restart_continuation_preserves_mailbox_wake_content_without_redelivering_its_
     for attempt in 0..2 {
         drop(relay);
         relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         let recovered = relay.claim_pending_commands(true).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
@@ -2108,5 +2152,150 @@ fn restart_continuation_preserves_mailbox_wake_content_without_redelivering_its_
         }
         assert_eq!(relay.snapshot.delivered_mailbox_event_keys, deliveries);
         assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    }
+}
+
+// Hard-won: d2f26b4c6: a second mailbox claim wedged an inherited recovery ID.
+#[test]
+fn restart_continuation_keeps_an_existing_mailbox_claim_and_leaves_new_mail_pending() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let event = |key: &str| mj_core::mailbox::MailboxEvent {
+        key: key.into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage { text: key.into() },
+    };
+    // Queue the prompt first so the mailbox rides its claim, rather than
+    // starting a separate wake before the prompt is accepted.
+    submit_relay(&mut relay, "user-request", prompt("continue the task"));
+    submit_relay(
+        &mut relay,
+        "deliver-first",
+        RelayCommand::DeliverMailboxEvent {
+            event: event("first"),
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let original_context = claimed[0].hidden_prompt_context.clone();
+    submit_relay(
+        &mut relay,
+        "deliver-second",
+        RelayCommand::DeliverMailboxEvent {
+            event: event("second"),
+        },
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let recovery = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(recovery[0].hidden_prompt_context, original_context);
+    assert_eq!(relay.snapshot.pending_mailbox_events, vec![event("second")]);
+    finish_prompt(&mut relay, &recovery[0].command_id);
+    let wake = relay.claim_pending_commands(true).unwrap();
+    assert!(
+        matches!(&wake[0].command, RelayCommand::MailboxWake { events } if events == &vec![event("second")])
+    );
+}
+
+// Hard-won: d2f26b4c6: recovery metadata could exceed a completely full snapshot.
+#[test]
+fn restart_continuation_reports_queue_exhaustion_without_wedging_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let large = prompt(&"x".repeat(
+        mj_core::relay::RELAY_COMMAND_BYTE_BUDGET - serde_json::to_vec(&prompt("")).unwrap().len(),
+    ));
+    submit_relay(&mut relay, "interrupted-full", large.clone());
+    relay.claim_pending_commands(true).unwrap();
+    let mut n = 0;
+    while relay
+        .submit_command(&format!("queued-full-{n}"), large.clone())
+        .is_ok()
+    {
+        n += 1;
+    }
+    let projected_size = |length| {
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V2,
+            ordinal: relay.latest_ordinal() + 1,
+            previous_digest: String::new(),
+            digest: String::new(),
+            recorded_at_ms: epoch_millis(),
+            command_id: Some("fill-remainder".into()),
+            observation: RelayObservation::CommandQueued {
+                command_id: "fill-remainder".into(),
+                command: prompt(&"z".repeat(length)),
+                created_at_ms: epoch_millis(),
+            },
+        };
+        event.digest = relay_event_digest(&event).unwrap();
+        let mut snapshot = relay.snapshot.clone();
+        apply_relay_event(&mut snapshot, &event).unwrap();
+        serde_json::to_vec(&snapshot).unwrap().len()
+    };
+    let remaining = mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET - projected_size(0);
+    // The accepted command is stored in receipt, dispatch, and queue.
+    submit_relay(
+        &mut relay,
+        "fill-remainder",
+        prompt(&"z".repeat(remaining / 3)),
+    );
+    assert!(
+        mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET
+            - serde_json::to_vec(&relay.snapshot).unwrap().len()
+            < 3
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(retained_events(&relay).iter().any(|event| matches!(&event.observation,
+        RelayObservation::Warning { message } if message.contains("could not be resumed automatically") && message.contains("queue is full"))));
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .keys()
+            .any(|id| mj_core::continuation::is_restart_continuation(id))
+    );
+    drop(relay);
+    DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+}
+
+// Hard-won: d2f26b4c6: adding a note changed slash-command routing after restart.
+#[test]
+fn restart_continuation_preserves_slash_command_routing() {
+    for text in ["/compact", "/review changes"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        submit_relay(&mut relay, "slash-command", prompt(text));
+        relay.claim_pending_commands(true).unwrap();
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let recovery = relay.claim_pending_commands(true).unwrap();
+        let blocks = recovery[0]
+            .command
+            .prompt_blocks_for_command(&recovery[0].command_id)
+            .unwrap();
+        assert_eq!(
+            blocks.as_ref(),
+            prompt(text).prompt_blocks().unwrap().as_ref()
+        );
+        assert!(mj_core::acp::prompt_is_slash_command(&blocks));
     }
 }

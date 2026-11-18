@@ -66,6 +66,27 @@ impl GoalSnapshot {
     pub fn active(&self) -> bool {
         self.status == "active"
     }
+    /// Bind automatic admission to the goal identity, not whichever goal is
+    /// current when an already accepted control reaches the adapter.
+    pub fn resume_command_id(&self, serial: u64) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let identity = serde_json::to_vec(&(&self.objective, self.created_at))?;
+        Ok(
+            crate::continuation::GeneratedPrompt::GoalResume.command_id(format!(
+                "{}-{serial}",
+                crate::hex::lower_hex(Sha256::digest(identity))
+            )),
+        )
+    }
+    pub fn matches_resume_command(&self, id: &str) -> bool {
+        crate::continuation::GeneratedPrompt::GoalResume
+            .suffix(id)
+            .and_then(|suffix| suffix.rsplit_once('-'))
+            .and_then(|(_, serial)| serial.parse::<u64>().ok())
+            .and_then(|serial| self.resume_command_id(serial).ok())
+            .is_some_and(|expected| expected == id)
+    }
+
     pub fn same_goal(&self, other: &Self) -> bool {
         self.objective == other.objective && self.created_at == other.created_at
     }
@@ -293,11 +314,24 @@ impl std::fmt::Debug for GoalJournal {
     }
 }
 
+pub type GoalResumeWait = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+/// Process-local bridge to the worker's serialized command admission.
+#[derive(Clone)]
+pub struct GoalResumeAdmission(
+    pub std::sync::Arc<dyn Fn(GoalSnapshot) -> GoalResumeWait + Send + Sync>,
+);
+impl std::fmt::Debug for GoalResumeAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GoalResumeAdmission")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GoalRecoveryContext {
     pub state: GoalState,
     pub request: Option<String>,
     pub journal: Option<GoalJournal>,
+    pub admission: Option<GoalResumeAdmission>,
 }
 impl GoalRecoveryContext {
     pub fn asking(&self) -> bool {

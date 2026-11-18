@@ -351,6 +351,8 @@ pub(crate) mod review_capture;
 pub(crate) mod subagents;
 #[cfg(unix)]
 mod unix;
+#[cfg(all(test, unix))]
+pub(crate) use unix::acp_command;
 
 #[cfg(not(unix))]
 pub fn lead_process_group() {}

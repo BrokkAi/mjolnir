@@ -2115,64 +2115,72 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     );
 }
 
+// Hard-won: d2f26b4c6: a recovery note broke slash-command presentation.
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
-    let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
-    let mut session = MaterializedSession::empty("session");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::from("go")],
+    for original in ["go", "/compact"] {
+        let recovery_id = mj_core::continuation::restart_continuation_id("prompt");
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from(original)],
+                },
+                created_at_ms: 10,
             },
-            created_at_ms: 10,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: "prompt".into(),
-            started_at_ms: 20,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandInterrupted {
-            continuation_id: Some(recovery_id.clone()),
-            reason: None,
-            command_id: "prompt".into(),
-            command: mj_core::relay::RelayCommandKind::Prompt,
-            message: "worker restarted".into(),
-        },
-    );
-    let interrupted_at = session.applied_event_ordinal;
-    apply_observation(&mut session, RelayObservation::SessionRestarted);
-    assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
-    assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
-    apply_observation(&mut session, RelayObservation::SessionRestarted);
-    assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: recovery_id.clone(),
-            started_at_ms: 30,
-        },
-    );
-    let item = session
-        .transcript
-        .iter()
-        .find(|item| item.stable_id == format!("user:{recovery_id}"))
-        .unwrap();
-    let TranscriptBody::User { content } = &item.body else {
-        panic!("missing recovery prompt");
-    };
-    assert_eq!(
-        content[0]["text"],
-        mj_core::continuation::RESTART_RECOVERY_NOTE
-    );
-    assert_eq!(content[1]["text"], "go");
-    assert_eq!(content.len(), 2);
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt".into(),
+                started_at_ms: 20,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandInterrupted {
+                continuation_id: Some(recovery_id.clone()),
+                reason: None,
+                command_id: "prompt".into(),
+                command: mj_core::relay::RelayCommandKind::Prompt,
+                message: "worker restarted".into(),
+            },
+        );
+        let interrupted_at = session.applied_event_ordinal;
+        apply_observation(&mut session, RelayObservation::SessionRestarted);
+        assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+        assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
+        apply_observation(&mut session, RelayObservation::SessionRestarted);
+        assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: recovery_id.clone(),
+                started_at_ms: 30,
+            },
+        );
+        let item = session
+            .transcript
+            .iter()
+            .find(|item| item.stable_id == format!("user:{recovery_id}"))
+            .unwrap();
+        let TranscriptBody::User { content } = &item.body else {
+            panic!("missing recovery prompt");
+        };
+        if original.starts_with('/') {
+            assert_eq!(content.len(), 1);
+            assert_eq!(content[0]["text"], original);
+        } else {
+            assert_eq!(
+                content[0]["text"],
+                mj_core::continuation::RESTART_RECOVERY_NOTE
+            );
+            assert_eq!(content[1]["text"], original);
+            assert_eq!(content.len(), 2);
+        }
+    }
 }
 
 /// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
