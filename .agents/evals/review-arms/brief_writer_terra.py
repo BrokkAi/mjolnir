@@ -165,10 +165,15 @@ def leak_build(n, scope):
     out = out_dir(scope)
     corpus = driver.CORPUS
     if scope["kind"] == "oracle-noleak":
-        # Only diffs whose round-n edit passed the fact check have a round-n text.
-        bugs = [b for b in scope["diffs"] if brief_path(scope, b, n).is_file()]
-        if not bugs:
-            raise SystemExit(f"no fact-checked round-{n} texts")
+        # The collected fact check decides the round's diffs; every accepted text must exist.
+        results = pathlib.Path(scope["brief_root"]).parent / f"round-{n}" / "check-results.json"
+        if not results.is_file():
+            raise SystemExit(f"round {n} fact check is not collected: {results}")
+        decisions = json.loads(results.read_text())["decisions"]
+        bugs = [b for b in scope["diffs"] if (decisions.get(b) or {}).get("decision") == "carries"]
+        absent = [b for b in bugs if not brief_path(scope, b, n).is_file()]
+        if absent or not bugs:
+            raise SystemExit(f"round {n}: accepted texts missing {absent}, or none accepted")
     elif n == 0:
         bugs = list(scope["diffs"])
     elif scope["kind"] == "oracle":

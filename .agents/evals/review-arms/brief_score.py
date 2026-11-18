@@ -155,8 +155,10 @@ def build(arms, per_batch):
         # Check the reference before freezing the round: score compares the same sessions, and
         # finding a mismatch only then would orphan completed verdicts.
         ref_path = ROOT / "private" / f"key-{REFERENCE_ROUND}.json"
-        if not ref_path.exists() or not (ROOT / REFERENCE_ROUND / "merged.jsonl").exists():
-            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key or merged verdicts")
+        if not ref_path.exists():
+            raise SystemExit(f"reference round {REFERENCE_ROUND} has no key")
+        import brief_writer_terra
+        brief_writer_terra.judged_round(REFERENCE_ROUND)  # final, hand-checked labels must already exist
         ref = json.loads(ref_path.read_text())["outputs"].values()
         ref_arms = READINGS[READING]["reference_arms"]
         bugs = {r["bug"] for r in rows}

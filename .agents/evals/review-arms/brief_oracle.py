@@ -532,7 +532,12 @@ def noleak_state(bug, upto):
         if decision is None:
             continue  # not active in round n
         if decision["decision"] != "carries":
-            previous = {"kind": "fact check rejected the last edit", "why": decision["why"]}
+            # Keep the leak reasons for the text that is retried: they permit and direct the
+            # next edit; the rejection says what the failed edit lost.
+            leak_reasons = previous if previous and previous.get("kind") == "leak judges" else \
+                (previous or {}).get("leak")
+            previous = {"kind": "fact check rejected the last edit", "why": decision["why"],
+                        "leak": leak_reasons}
             continue
         text = (W / "texts" / bug / f"round-{n}.md").read_text()
         if hashlib.sha256(text.encode()).hexdigest() != decision["brief_sha256"]:
@@ -687,8 +692,6 @@ def noleak_check_collect(n):
     noleak_require_scope()
     edits = {r["id"]: r for r in json.loads((W / f"round-{n}" / "edit-results.json").read_text())["results"]}
     out_path = W / f"round-{n}" / "check-results.json"
-    if out_path.exists():
-        raise SystemExit(f"{out_path} exists")
     rows = [json.loads(line) for line in
             (W / f"round-{n}" / "check" / "factcheck" / "factcheck.jsonl").read_text().splitlines() if line.strip()]
     if sorted(r.get("id") for r in rows) != sorted(edits):
@@ -704,14 +707,18 @@ def noleak_check_collect(n):
                 raise SystemExit(f"{r['id']}: carrying item is not a complete line of the checked brief")
         decisions[r["id"]] = {"decision": r["decision"], "item": r.get("item"), "why": r.get("why"),
                               "brief_sha256": e["brief_sha256"]}
+    if out_path.exists() and json.loads(out_path.read_text()) != {"round": n, "decisions": decisions}:
+        raise SystemExit(f"{out_path} holds different decisions")
+    # The results file is written first and is the leak builder's record of completion; the
+    # texts follow from it, and a rerun after an interruption writes only the missing ones.
+    save(out_path, {"round": n, "decisions": decisions})
     for bug, d in decisions.items():
         if d["decision"] == "carries":
             path = W / "texts" / bug / f"round-{n}.md"
-            if path.exists():
-                raise SystemExit(f"{path} exists")
+            if path.exists() and path.read_text() != edits[bug]["brief"]:
+                raise SystemExit(f"{path} holds other text")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(edits[bug]["brief"])
-    save(out_path, {"round": n, "decisions": decisions})
     print(json.dumps({"round": n, "carries": sorted(b for b, d in decisions.items() if d["decision"] == "carries"),
                       "rejected": sorted(b for b, d in decisions.items() if d["decision"] != "carries")}))
 
