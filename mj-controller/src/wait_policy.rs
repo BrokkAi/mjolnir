@@ -182,12 +182,7 @@ impl WaitObservation {
     /// and the retry's own ending is what answers for the turn. A restart
     /// continuation likewise carries out the interrupted request.
     fn resubmits(&self, outcome: &MaterializedTurnOutcome) -> bool {
-        let retries = |command_id: &str| {
-            let carried = mj_core::continuation::carried_command(command_id);
-            mj_core::relay::retried_turn(carried) == Some(outcome.completed_ordinal)
-                || (carried != command_id
-                    && carried == mj_core::continuation::carried_command(&outcome.command_id))
-        };
+        let retries = |command_id: &str| outcome.is_resubmitted_by(command_id);
         self.capacity_retry
             .as_ref()
             .is_some_and(|retry| !retry.submitted && retries(&retry.command_id))

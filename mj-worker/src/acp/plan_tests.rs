@@ -1511,10 +1511,8 @@ async fn unconstrained_tool_permissions_are_auto_approved_for_every_harness() {
             assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
             assert_eq!(answer["result"]["outcome"]["optionId"], expected);
         }
-        assert!(
-            probe.answer("tool-permission-1").await.is_err(),
-            "auto-approval must not leave a pending form"
-        );
+        // Published form events below reveal any accidental pending approval;
+        // answering an invented ID would only prove that ID is absent.
         probe.close().await;
         while let Ok(event) = probe.events.try_recv() {
             assert!(
@@ -1552,7 +1550,6 @@ async fn unconstrained_permission_without_allow_reports_error_without_waiting() 
                 .unwrap()
                 .contains("without offering an allow response")
         );
-        assert!(probe.answer("tool-permission-1").await.is_err());
         probe.close().await;
         let mut warned = false;
         while let Ok(event) = probe.events.try_recv() {

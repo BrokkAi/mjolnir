@@ -115,7 +115,15 @@ pub(super) fn derive(
         }
         _ => {}
     }
-    if let Some(turn) = &mutation.last_turn_outcome {
+    let queued = mutation
+        .queued_prompts
+        .as_deref()
+        .unwrap_or(&current.queued_prompts);
+    if let Some(turn) = &mutation.last_turn_outcome
+        && !queued
+            .iter()
+            .any(|prompt| turn.is_resubmitted_by(&prompt.command_id))
+    {
         if turn.result().kind == TurnResultKind::InputRequired {
             events.push(ApiEventData::InputRequired {
                 request: None,
@@ -240,5 +248,28 @@ mod tests {
             events.as_slice(),
             [ApiEventData::TurnEnded { .. }]
         ));
+        // Ordinary queued input must not hide a terminal event, including a
+        // plain interruption for which no continuation could be queued.
+        let mut mutation = mutation;
+        mutation.queued_prompts = Some(vec![mj_core::state::MaterializedQueuedPrompt {
+            command_id: "unrelated-user-request".into(),
+            kind: Default::default(),
+            content: Vec::new(),
+            queued_at_ms: 1000,
+            accepted_ordinal: Some(2),
+        }]);
+        for interrupted in [false, true] {
+            if interrupted {
+                mutation.last_turn_outcome.as_mut().unwrap().outcome =
+                    TurnOutcomeKind::Interrupted {
+                        reason: Some(OutcomeReason::WorkerRestarted),
+                        message: "queue full".into(),
+                    };
+            }
+            assert!(matches!(
+                derive(&current, &event, &mutation).as_slice(),
+                [ApiEventData::TurnEnded { .. }]
+            ));
+        }
     }
 }
