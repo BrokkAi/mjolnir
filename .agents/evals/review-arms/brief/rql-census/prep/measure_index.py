@@ -71,6 +71,11 @@ class Cancelled(RuntimeError):
     """The operator cancelled the batch; the current server is torn down normally."""
 
 
+class IncompatibleServer(RuntimeError):
+    """The server's readiness reply lacks the fields this driver needs: every repo would fail
+    the same way, so the batch halts instead of timing out once per repo."""
+
+
 class TeardownUnconfirmed(RuntimeError):
     """A server tree may still be alive. The batch must halt without touching its files."""
 
@@ -216,6 +221,10 @@ class Server:
             payload = result.get("structuredContent")
             if payload is None:
                 payload = json.loads((result.get("content") or [{}])[0].get("text", "null"))
+            needed = ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")
+            missing = [k for k in needed if not isinstance(payload, dict) or k not in payload]
+            if missing:  # e.g. a Bifrost from before these readiness fields existed
+                raise IncompatibleServer(f"get_active_workspace reply lacks {missing}")
             status = (payload.get("workspace_build") or {}).get("status")
             if status == "failed":
                 raise RuntimeError(f"workspace build failed: {json.dumps(payload)[:1000]}")
@@ -356,7 +365,8 @@ def phase(binary, root, cache, log):
                    ready=True, readiness={k: payload.get(k) for k in
                                           ("analyzer_ready", "usage_index_ready", "semantic_packs_ready", "workspace_build")})
     except Exception as e:
-        rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000])
+        rec.update(wall=time.monotonic() - t0, ready=False, error=repr(e)[:1000],
+                   incompatible=isinstance(e, IncompatibleServer))
     rec["exit"] = server.stop()
     if cancelled():
         # Torn down. Keep what was measured (the peak and OOM result are why an operator stops
@@ -557,6 +567,9 @@ def main():
         "cpu_affinity": len(os.sched_getaffinity(0)),
         "scope_cpu_max": read_scope_cpu_max(),
         # Thread-pool settings Bifrost inherits (BIFROST_*, RAYON_NUM_THREADS and similar).
+        # The measurement procedure itself: a change to this driver (readiness rule, server options)
+        # makes earlier records unreusable, so one ranking never mixes procedures.
+        "driver_sha256": hashlib.file_digest(open(__file__, "rb"), "sha256").hexdigest(),
         "thread_env": {k: v for k, v in sorted(os.environ.items())
                        if k.startswith("BIFROST_") or k.startswith("RAYON_") or k.endswith("_THREADS")},
     }
@@ -655,6 +668,7 @@ def main():
             rec["traceback"] = traceback.format_exc()[-2000:]
             rec["teardown_unconfirmed"] = isinstance(e, TeardownUnconfirmed)
             rec["cancelled"] = isinstance(e, Cancelled)
+            rec["incompatible"] = isinstance(e, IncompatibleServer)
         append_record(results, rec)  # saved before cleanup, so an interrupted cleanup loses nothing
         # Keep disk bounded after success and recoverable failures alike (sizes are recorded).
         # After an unconfirmed teardown a server may still use these files: leave them for the
@@ -664,6 +678,8 @@ def main():
         print(json.dumps({"repo": repo, "error": rec.get("error"), **{
             ph: {k: (rec.get(ph) or {}).get(k) for k in ("ready", "skipped", "scope_result", "peak_tree_kib", "error")}
             for ph in ("cold", "warm_restart")}}), flush=True)
+        if rec.get("incompatible") or (rec.get("cold") or {}).get("incompatible"):
+            sys.exit(f"{repo}: the Bifrost binary's readiness reply is incompatible; batch halted")
         if rec.get("cancelled"):
             sys.exit(f"{repo}: cancelled; its server was torn down and the batch stopped")
         if rec.get("teardown_unconfirmed"):
