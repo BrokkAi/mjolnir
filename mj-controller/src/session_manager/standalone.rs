@@ -126,212 +126,26 @@ impl StandaloneSession {
             history_active: Default::default(),
         };
         if adopting && connection.materialized.applied_event_ordinal == 0 {
-            match connection
-                .client
-                .attach(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
-                .await
-            {
-                Ok(_) => {}
-                Err(error)
-                    if relay_desynchronized(&error)
-                        && protocol >= mj_core::relay::RELAY_COMMAND_RETENTION_PROTOCOL =>
-                {
-                    let (snapshot, queue, questions, unavailable_questions) =
-                        connection.read_adoption_state().await?;
-                    ensure!(
-                        snapshot.session_id == target.session_id,
-                        "adoption snapshot belongs to another session"
-                    );
-                    connection
-                        .client
-                        .attach(snapshot.latest_ordinal, &snapshot.latest_digest)
-                        .await?;
-                    let (mut projection, replay) =
-                        connection.read_adoption_transcript(&snapshot).await?;
-                    projection.configuration.values = snapshot
-                        .config
-                        .iter()
-                        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-                        .collect();
-                    projection.configuration.values.extend(
-                        mj_transcript::projection::configuration_values(&snapshot.config_options)?,
-                    );
-                    // Accepted selectors use canonical keys, while an adapter
-                    // may publish its current value under a different option ID.
-                    for canonical in ["model", "effort", "mode"] {
-                        if let Some(option) = mj_core::acp::find_session_config_option(
-                            &snapshot.config_options,
-                            canonical,
-                        ) && let Some(current) = projection
-                            .configuration
-                            .values
-                            .get(&option.id.to_string())
-                            .cloned()
-                            && projection.configuration.values.contains_key(canonical)
-                        {
-                            projection
-                                .configuration
-                                .values
-                                .insert(canonical.into(), current);
-                        }
-                    }
-                    projection
-                        .configuration
-                        .values
-                        .remove(mj_core::goal::PROJECTION_KEY);
-                    projection
-                        .configuration
-                        .values
-                        .remove(mj_transcript::handoff::HANDOFF_STATE_KEY);
-                    projection.configuration.goal =
-                        snapshot.goal.known.then(|| Box::new(snapshot.goal.clone()));
-                    projection.execution = match snapshot.execution {
-                        mj_core::relay::RelayExecutionState::Idle => {
-                            mj_core::state::MaterializedExecutionState::Idle
-                        }
-                        mj_core::relay::RelayExecutionState::Running => {
-                            mj_core::state::MaterializedExecutionState::Running {
-                                started_at_ms: snapshot
-                                    .active_prompt
-                                    .as_ref()
-                                    .map(|active| active.started_at_ms)
-                                    .or(snapshot.activity_turn_started_at_ms)
-                                    .or(match projection.execution {
-                                        mj_core::state::MaterializedExecutionState::Running {
-                                            started_at_ms,
-                                        } => Some(started_at_ms),
-                                        _ => None,
-                                    })
-                                    .unwrap_or_else(mj_core::clock::epoch_millis),
-                            }
-                        }
-                        mj_core::relay::RelayExecutionState::Closing => {
-                            mj_core::state::MaterializedExecutionState::Closing
-                        }
-                        mj_core::relay::RelayExecutionState::Closed => {
-                            mj_core::state::MaterializedExecutionState::Closed
-                        }
-                    };
-                    let reconstructed = projection.active_turn.take();
-                    projection.active_turn = snapshot.active_prompt.as_ref().map(|active| {
-                        if let Some(turn) =
-                            reconstructed.filter(|turn| turn.belongs_to(&active.command_id))
-                        {
-                            return turn;
-                        }
-                        mj_core::state::MaterializedTurn {
-                            command_id: active.command_id.clone(),
-                            accepted_ordinal: None,
-                            turn_start_position: snapshot.acknowledged_through,
-                            started_at_ms: active.started_at_ms,
-                            steered_into: None,
-                        }
-                    });
-                    projection.queued_prompts = queue;
-                    projection.pending_elicitations = questions;
-                    // Save the notice and seed atomically. A crash cannot
-                    // advance the projection past an unprojected warning.
-                    let adopted_at = mj_core::clock::epoch_millis();
-                    projection.last_activity_at_ms = Some(adopted_at);
-                    projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
-                        stable_id: mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID.into(),
-                        // Conservatively fence the current native conversation,
-                        // including a pre-ACK prompt dispatched after a clear.
-                        position: snapshot.latest_ordinal,
-                        latest_content_event_ordinal: None,
-                        created_at_ms: adopted_at,
-                        last_changed_at_ms: adopted_at,
-                        body: mj_core::transcript::TranscriptBody::System {
-                            text: format!("Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact. Recovered transcript starts after event {}.", snapshot.acknowledged_through),
-                        },
-                    }));
-                    if unavailable_questions > 0 {
-                        projection.transcript.push(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
-                            stable_id: "system:adoption-questions-unavailable".into(),
-                            position: snapshot.acknowledged_through,
-                            latest_content_event_ordinal: None,
-                            created_at_ms: adopted_at,
-                            last_changed_at_ms: adopted_at,
-                            body: mj_core::transcript::TranscriptBody::System {
-                                text: "An earlier pending question could not be recovered because its saved history was discarded. Ask the agent to repeat it.".into(),
-                            },
-                        }));
-                    }
-                    projection.transcript.sort_by(|a, b| {
-                        (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id))
-                    });
-                    // Persist the exact cursor before ACKing any replacement
-                    // history. Native-use proof stays with its owning worker.
-                    if crate::database::seed_adopted_materialized_session(&projection, replay)? {
-                        connection.window = mj_core::state::ProjectionWindow::of(&projection);
-                        connection.materialized = projection;
-                        connection.window.trim(
-                            &mut connection.materialized,
-                            crate::database::PROJECTION_TAIL_ITEMS,
-                        );
-                    } else {
-                        // Another attachment owns the durable frontier. Never ACK
-                        // the losing seed; reload its window and projection together.
-                        (connection.materialized, connection.window) =
-                            load_projection(&target.session_id).await?;
-                    }
+            let baseline = connection.client.live_session_baseline().await?;
+            ensure!(
+                baseline.state.session_id == target.session_id,
+                "live recovery baseline belongs to another session"
+            );
+            for queued in &baseline.queue {
+                if let Some(prompt) = queued.command.prompt_blocks() {
+                    connection.cache_prompt_attachments(&prompt).await?;
                 }
-                Err(error) => return Err(error),
             }
+            let projection =
+                mj_transcript::projection::materialized_session_from_live_baseline(&baseline)?;
+            crate::database::install_live_session_baseline(&projection, baseline)?;
+            // A concurrent installer may own the cursor already. Load its
+            // durable result, then use ordinary reattachment.
+            (connection.materialized, connection.window) =
+                load_projection(&target.session_id).await?;
         }
         connection.sync_in_place().await?;
         Ok(connection)
-    }
-
-    async fn read_adoption_transcript(
-        &mut self,
-        state: &RelayOperationalState,
-    ) -> Result<(MaterializedSession, crate::database::AdoptionReplay)> {
-        let mut replay = crate::database::AdoptionReplay {
-            after: RelayCursor {
-                ordinal: state.acknowledged_through,
-                digest: state.acknowledged_digest.clone(),
-            },
-            native_agents: state.native_agents.clone(),
-            events: Vec::new(),
-        };
-        let mut projection = MaterializedSession::empty(&state.session_id);
-        projection.applied_event_ordinal = state.acknowledged_through;
-        projection.applied_event_digest = state.acknowledged_digest.clone();
-        let frontier = RelayCursor {
-            ordinal: state.latest_ordinal,
-            digest: state.latest_digest.clone(),
-        };
-        while projection.applied_event_ordinal < frontier.ordinal {
-            let after = RelayCursor {
-                ordinal: projection.applied_event_ordinal,
-                digest: projection.applied_event_digest.clone(),
-            };
-            let page = self.client.next_catch_up_page(&after, &frontier).await?;
-            self.cache_event_attachments(&page.events).await?;
-            (projection, replay) = tokio::task::spawn_blocking(move || -> Result<_> {
-                let mut index = ProjectionIndex::new(&projection);
-                for event in page.events {
-                    let mutation = mj_transcript::projection::project_retained_relay_event_indexed(
-                        &projection,
-                        &index,
-                        &event,
-                    )?
-                    .mutation;
-                    replay.events.push((event.clone(), mutation.clone()));
-                    apply_committed_projection_event_indexed(
-                        &mut projection,
-                        &mut index,
-                        &event,
-                        mutation,
-                    )?;
-                }
-                Ok((projection, replay))
-            })
-            .await
-            .context("project retained adoption transcript")??;
-        }
-        Ok((projection, replay))
     }
 
     async fn cache_prompt_attachments(
@@ -360,79 +174,6 @@ impl StandaloneSession {
             }
         }
         Ok(())
-    }
-
-    async fn read_adoption_state(
-        &mut self,
-    ) -> Result<(
-        RelayOperationalState,
-        Vec<mj_core::state::MaterializedQueuedPrompt>,
-        Vec<mj_core::elicitation::ElicitationRequest>,
-        usize,
-    )> {
-        loop {
-            let (state, _native_use_evidence, question_ids, unavailable_questions) =
-                self.client.adoption_snapshot().await?;
-            let mut queue = Vec::with_capacity(state.queued_prompts.len());
-            for identity in &state.queued_prompts {
-                let (command, accepted_ordinal) = self
-                    .client
-                    .read_queued_command(identity.command_id.clone())
-                    .await?;
-                let (kind, content) = match command {
-                    Some(RelayCommand::SetConfig { key, value }) => {
-                        let content = vec![serde_json::json!({
-                            "type": "text", "text": mj_core::state::config_command_text(&key, &value)
-                        })];
-                        (
-                            mj_core::state::QueuedCommandKind::SetConfig { key, value },
-                            content,
-                        )
-                    }
-                    None => break, // It completed between the snapshot and read.
-                    Some(command) => {
-                        let prompt = command
-                            .prompt_blocks()
-                            .context("worker returned a non-queue command during adoption")?;
-                        self.cache_prompt_attachments(&prompt).await?;
-                        (
-                            mj_core::state::QueuedCommandKind::Prompt,
-                            prompt
-                                .iter()
-                                .map(serde_json::to_value)
-                                .collect::<serde_json::Result<Vec<_>>>()?,
-                        )
-                    }
-                };
-                queue.push(mj_core::state::MaterializedQueuedPrompt {
-                    command_id: identity.command_id.clone(),
-                    kind,
-                    content,
-                    queued_at_ms: identity.created_at_ms,
-                    accepted_ordinal,
-                });
-            }
-            let mut questions = Vec::with_capacity(question_ids.len());
-            for id in &question_ids {
-                if let Some(request) = self.client.read_pending_elicitation(id.clone()).await? {
-                    questions.push(request);
-                }
-            }
-            let (current, _, current_questions, current_unavailable) =
-                self.client.adoption_snapshot().await?;
-            if current.queued_prompts == state.queued_prompts
-                && current.active_prompt == state.active_prompt
-                && current_questions == question_ids
-                && current_unavailable == unavailable_questions
-                && queue.len() == state.queued_prompts.len()
-                && questions.len() == question_ids.len()
-            {
-                return Ok((state, queue, questions, unavailable_questions));
-            }
-            // Queue mutation ended this attempt. Reuse the reconnect cadence
-            // before reading another snapshot; never hold or stop the worker.
-            tokio::time::sleep(RECONNECT_INTERVAL).await;
-        }
     }
 
     pub(crate) async fn connect_adopting(spec: &CommandSpec, session_id: &str) -> Result<Self> {

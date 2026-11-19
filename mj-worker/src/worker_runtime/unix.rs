@@ -2405,6 +2405,7 @@ pub(super) async fn serve_client_with_memory(
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
     let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
+    let mut live_baseline_download = None;
     let serving_result = async {
         while let Some(line) =
             read_bounded_line(&mut reader, mj_core::relay::MAX_FRAME_BYTES).await?
@@ -2503,6 +2504,25 @@ pub(super) async fn serve_client_with_memory(
                     body: RelayResponseBody::Ok { payload: RelayResponsePayload::Status(state) },
                 };
                 write_logged_response(&mut writer, &response, &session_id, "set_operator_away").await?;
+                continue;
+            }
+            if matches!(&envelope.request, RelayRequest::BeginLiveBaseline | RelayRequest::ReadLiveBaselinePage { .. } | RelayRequest::AbortLiveBaseline) {
+                let cut = if matches!(envelope.request, RelayRequest::BeginLiveBaseline) {
+                    Some(relay.lock().expect("relay state lock poisoned").live_session_baseline()?)
+                } else { None };
+                let request_id = envelope.request_id.clone();
+                let protocol_version = envelope.protocol_version;
+                let mut download = live_baseline_download.take();
+                let (result, download) = tokio::task::spawn_blocking(move || {
+                    let result = mj_core::relay::live_baseline_reply(&envelope.request, cut, &mut download, &envelope.request_id, protocol_version);
+                    (result, download)
+                }).await.context("live recovery baseline download task failed")?;
+                live_baseline_download = download;
+                let body = match result {
+                    Ok(payload) => RelayResponseBody::Ok { payload },
+                    Err(error) => compaction_error(RelayErrorCode::InvalidRequest, &format!("{error:#}")),
+                };
+                write_logged_response(&mut writer, &RelayResponseEnvelope { request_id, protocol_version, body }, &session_id, "live_baseline").await?;
                 continue;
             }
             if matches!(

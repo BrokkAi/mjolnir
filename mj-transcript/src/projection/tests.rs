@@ -31,51 +31,6 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
     apply(session, next);
 }
 
-// Hard-won: b62fe3b: adoption skipped recoverable output when its earlier queue prefix was gone.
-#[test]
-fn retained_replay_skips_missing_prefix_steering_without_fabricating_a_prompt() {
-    let mut projection = MaterializedSession::empty("retained-adoption");
-    projection.applied_event_ordinal = 5;
-    projection.applied_event_digest = "a".repeat(64);
-    let outcome = event(
-        &projection,
-        RelayObservation::CommandCompleted {
-            barrier_command_id: None,
-            command: None,
-            command_id: "steer-before-loss".into(),
-            outcome: RelayCommandOutcome::Steered {
-                queued_command_id: "prompt-before-loss".into(),
-            },
-        },
-    );
-    let encoded = serde_json::to_vec(&outcome).unwrap();
-    let persisted: RelayEvent = serde_json::from_slice(&encoded).unwrap();
-    let mut index = ProjectionIndex::new(&projection);
-    assert!(project_relay_event_indexed(&projection, &index, &persisted).is_err());
-    let mutation = project_retained_relay_event_indexed(&projection, &index, &persisted)
-        .unwrap()
-        .mutation;
-    apply_committed_projection_event_indexed(&mut projection, &mut index, &persisted, mutation)
-        .unwrap();
-    assert!(projection.transcript.is_empty());
-    apply_observation(&mut projection, RelayObservation::SessionUpdate {
-        update: Box::new(serde_json::from_value(json!({
-            "sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"retained output"}
-        })).unwrap()),
-    });
-    assert!(
-        serde_json::to_string(&projection)
-            .unwrap()
-            .contains("retained output")
-    );
-    assert!(
-        !projection
-            .transcript
-            .iter()
-            .any(|item| matches!(item.body, TranscriptBody::User { .. }))
-    );
-}
-
 #[test]
 fn hidden_handoff_state_survives_prompt_delivery_and_canonical_export() {
     use crate::handoff::{

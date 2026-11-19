@@ -8688,56 +8688,79 @@ fn agent_message_through_an_ordinal_ignores_newer_replies() {
     assert_eq!(through(Some(1)), None);
 }
 
-// Hard-won: c4688b4: a slower adoption overwrote a newer already acknowledged projection.
+// Hard-won: c4688b4: an interrupted or slower adoption must not replace a committed cut.
 #[test]
-fn adoption_seed_cannot_replace_another_attachments_durable_frontier() {
+fn live_baseline_install_rolls_back_and_retries_without_overwriting_a_winner() {
+    use mj_core::native_agent::{NativeAgent, NativeAgentCapabilities, NativeAgentState};
+    use mj_core::relay::{LiveSessionBaseline, RelaySnapshot};
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    let older = materialized_session("session-1");
-    let mut newer = older.clone();
-    newer.applied_event_ordinal += 1;
-    newer.applied_event_digest = event_digest(newer.applied_event_ordinal);
-    let empty_replay = || AdoptionReplay {
-        after: mj_core::relay::RelayCursor {
-            ordinal: 0,
-            digest: RELAY_EVENT_GENESIS_DIGEST.into(),
-        },
-        native_agents: Vec::new(),
-        events: Vec::new(),
+    let mut state = RelaySnapshot::new("session-1".into()).operational_state();
+    state.latest_ordinal = 7;
+    state.latest_digest = event_digest(7);
+    state.execution = mj_core::relay::RelayExecutionState::Running;
+    state.activity_turn_started_at_ms = Some(1234);
+    let child = NativeAgent {
+        owner_session_id: "session-1".into(),
+        session_id: "child".into(),
+        parent_session_id: None,
+        name: "child".into(),
+        task: "work".into(),
+        capabilities: NativeAgentCapabilities::default(),
+        state: NativeAgentState::Running,
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
     };
-    assert!(
-        materialized::seed_adopted_materialized_session_to(&database, &newer, empty_replay())
-            .unwrap()
+    state.native_agents.push(child.clone());
+    let mut wrong_owner = child.clone();
+    wrong_owner.owner_session_id = "wrong-owner".into();
+    let mut baseline = LiveSessionBaseline {
+        state,
+        queue: Vec::new(),
+        questions: Vec::new(),
+        unavailable_questions: 0,
+        active_turn: None,
+        native_agent_replay: Some(vec![wrong_owner]),
+        native_use_evidence: None,
+    };
+    let projection =
+        mj_transcript::projection::materialized_session_from_live_baseline(&baseline).unwrap();
+    assert_eq!(
+        projection.execution,
+        MaterializedExecutionState::Running {
+            started_at_ms: 1234
+        }
     );
-    // The older attachment was paused after reading the worker but before its
-    // seed write. Even its side effects must not apply after the newer seed.
-    let invalid_side_effect = mj_core::relay::RelayEvent {
-        format: 2,
-        previous_digest: String::new(),
-        command_id: None,
-        ordinal: older.applied_event_ordinal,
-        digest: older.applied_event_digest.clone(),
-        recorded_at_ms: 1,
-        observation: mj_core::relay::RelayObservation::Notice {
-            message: "must never apply as a native event".into(),
-        },
-    };
+    // Fail after published identities were written but before the cut commits.
     assert!(
-        !materialized::seed_adopted_materialized_session_to(
-            &database,
-            &older,
-            AdoptionReplay {
-                events: vec![(invalid_side_effect, MaterializedSessionMutation::default())],
-                ..empty_replay()
-            }
-        )
-        .unwrap()
+        materialized::install_live_session_baseline_to(&database, &projection, &baseline).is_err()
+    );
+    let saved = load_materialized_session_from(&database, "session-1").unwrap();
+    assert!(saved.is_none_or(|saved| saved.applied_event_ordinal == 0));
+    let connection = open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM native_agents WHERE owner='session-1'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    baseline.native_agent_replay = Some(vec![child]);
+    assert!(
+        materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
+    );
+    assert!(
+        !materialized::install_live_session_baseline_to(&database, &projection, &baseline).unwrap()
     );
     assert_eq!(
         load_materialized_session_from(&database, "session-1")
             .unwrap()
             .unwrap(),
-        newer
+        projection
     );
 }

@@ -5,6 +5,26 @@ use super::*;
 /// an event key, so the two can never share an identity.
 const EXTERNAL_EVENTS_ITEM_PREFIX: &str = "system:mailbox:delivered:";
 
+/// Queue presentation shared by ordinary replay and current-state recovery.
+pub fn queued_command_content(command: &RelayCommand) -> Result<Vec<Value>> {
+    if matches!(command, RelayCommand::MailboxWake { .. }) {
+        return Ok(Vec::new());
+    }
+    if let RelayCommand::SetConfig { key, value } = command {
+        return Ok(vec![serde_json::to_value(ContentBlock::Text(
+            TextContent::new(config_command_text(key, value)),
+        ))?]);
+    }
+    let prompt = command
+        .prompt_blocks()
+        .context("command is not a queued prompt")?;
+    prompt
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 fn project_steered_prompt(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -12,15 +32,11 @@ fn project_steered_prompt(
     queue: &mut Vec<MaterializedQueuedPrompt>,
     queued_prompt_id: &str,
     mutation: &mut MaterializedSessionMutation,
-    allow_missing_queue_references: bool,
 ) -> Result<()> {
     let Some(queue_index) = queue
         .iter()
         .position(|queued| queued.command_id == queued_prompt_id)
     else {
-        if allow_missing_queue_references {
-            return Ok(());
-        }
         bail!("steered prompt is missing from the materialized queue");
     };
     let entry = queue.remove(queue_index);
@@ -62,7 +78,6 @@ pub(super) fn project_observation(
     index: &ProjectionIndex,
     event: &RelayEvent,
     mutation: &mut MaterializedSessionMutation,
-    allow_missing_queue_references: bool,
 ) -> Result<()> {
     match &event.observation {
         RelayObservation::SteeringUnconfirmed { .. } => {}
@@ -221,7 +236,6 @@ pub(super) fn project_observation(
             // transcript shows what the harness was told. Mjolnir's own
             // prompts (a handback reminder, a quota resume) included.
             command if command.prompt_blocks().is_some() => {
-                let prompt = command.prompt_blocks().expect("prompt command");
                 if let RelayCommand::ContinueAuthorizedWork { attempt, .. } = command {
                     push_system(
                         mutation,
@@ -234,14 +248,7 @@ pub(super) fn project_observation(
                     delivered_messages(index, event, events, mutation);
                     delivered_external_events(index, event, events, mutation);
                 }
-                let content = if mailbox_wake {
-                    Vec::new()
-                } else {
-                    prompt
-                        .iter()
-                        .map(serde_json::to_value)
-                        .collect::<serde_json::Result<Vec<_>>>()?
-                };
+                let content = queued_command_content(command)?;
                 if current.session_title.is_none() && !mailbox_wake {
                     let prompt_text = crate::transcript::materialized_content_text(&content);
                     if let Some(title) = current
@@ -273,9 +280,7 @@ pub(super) fn project_observation(
                         key: key.clone(),
                         value: value.clone(),
                     },
-                    content: vec![serde_json::to_value(ContentBlock::Text(TextContent::new(
-                        config_command_text(key, value),
-                    )))?],
+                    content: queued_command_content(command)?,
                     queued_at_ms: *created_at_ms,
                     accepted_ordinal: Some(event.ordinal),
                 });
@@ -485,7 +490,6 @@ pub(super) fn project_observation(
                         &mut queue,
                         queued_command_id,
                         mutation,
-                        allow_missing_queue_references,
                     )?;
                 }
                 mj_core::relay::RelayCommandOutcome::Configured => {
@@ -917,7 +921,6 @@ pub(super) fn project_observation(
                     &mut queue,
                     &steering.queued_prompt_id,
                     mutation,
-                    allow_missing_queue_references,
                 )?;
                 mutation.queued_prompts = Some(queue);
             }

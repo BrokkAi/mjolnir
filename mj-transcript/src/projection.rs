@@ -1,6 +1,8 @@
 //! Controller-owned projection of the durable ACP relay stream.
 
+mod live;
 mod materialize;
+pub use live::*;
 mod observation;
 mod session_update;
 mod terminals;
@@ -303,25 +305,6 @@ pub fn project_relay_event_indexed(
     index: &ProjectionIndex,
     event: &RelayEvent,
 ) -> Result<ProjectedRelayEvent> {
-    project_relay_event_with_history(current, index, event, false)
-}
-
-/// Replay verified retained history after its earlier queue references were
-/// lost. Unknown pre-prefix commands produce no fabricated transcript rows.
-pub fn project_retained_relay_event_indexed(
-    current: &MaterializedSession,
-    index: &ProjectionIndex,
-    event: &RelayEvent,
-) -> Result<ProjectedRelayEvent> {
-    project_relay_event_with_history(current, index, event, true)
-}
-
-fn project_relay_event_with_history(
-    current: &MaterializedSession,
-    index: &ProjectionIndex,
-    event: &RelayEvent,
-    allow_missing_queue_references: bool,
-) -> Result<ProjectedRelayEvent> {
     validate_relay_event(
         current.applied_event_ordinal,
         &current.applied_event_digest,
@@ -332,13 +315,7 @@ fn project_relay_event_with_history(
         last_activity_at_ms: Some(event.recorded_at_ms),
         ..MaterializedSessionMutation::default()
     };
-    project_observation(
-        current,
-        index,
-        event,
-        &mut mutation,
-        allow_missing_queue_references,
-    )?;
+    project_observation(current, index, event, &mut mutation)?;
     mutation.api_events = api_events::derive(current, event, &mutation);
     Ok(ProjectedRelayEvent { mutation })
 }

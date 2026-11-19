@@ -350,6 +350,77 @@ pub struct DurableRelay {
 }
 
 impl DurableRelay {
+    /// Capture all live recovery facts in the same serialized relay decision.
+    pub fn live_session_baseline(&self) -> Result<mj_core::relay::LiveSessionBaseline> {
+        use mj_core::relay::{LiveQueuedCommand, LiveSessionBaseline};
+        let state = self.operational_state();
+        let queue = self
+            .snapshot
+            .queued_prompts
+            .iter()
+            .map(|queued| {
+                let command = self
+                    .snapshot
+                    .dispatches
+                    .get(&queued.command_id)
+                    .with_context(|| {
+                        format!("queued command {} has no dispatch", queued.command_id)
+                    })?
+                    .command
+                    .clone();
+                Ok(LiveQueuedCommand {
+                    command_id: queued.command_id.clone(),
+                    command,
+                    created_at_ms: queued.created_at_ms,
+                    accepted_ordinal: self
+                        .snapshot
+                        .handled_commands
+                        .get(&queued.command_id)
+                        .map(|receipt| receipt.accepted_ordinal),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let active_turn =
+            state
+                .active_prompt
+                .as_ref()
+                .map(|active| mj_core::state::MaterializedTurn {
+                    command_id: active.command_id.clone(),
+                    accepted_ordinal: self
+                        .snapshot
+                        .handled_commands
+                        .get(&active.command_id)
+                        .map(|receipt| receipt.accepted_ordinal),
+                    turn_start_position: state.latest_ordinal,
+                    started_at_ms: active.started_at_ms,
+                    steered_into: None,
+                });
+        Ok(LiveSessionBaseline {
+            state,
+            queue,
+            active_turn,
+            questions: self
+                .snapshot
+                .pending_elicitations
+                .values()
+                .flatten()
+                .cloned()
+                .collect(),
+            unavailable_questions: self
+                .snapshot
+                .pending_elicitations
+                .values()
+                .filter(|body| body.is_none())
+                .count(),
+            native_agent_replay: self
+                .snapshot
+                .native_agent_replay
+                .as_ref()
+                .map(|agents| agents.values().cloned().collect()),
+            native_use_evidence: self.snapshot.native_use_evidence.clone(),
+        })
+    }
+
     /// The Unix worker is the only production caller; the helper stays
     /// compiled on Windows so the relay tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]

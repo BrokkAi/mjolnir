@@ -211,7 +211,7 @@ pub fn project_memory_transfer_request_chunk_bytes(
             },
         },
     };
-    transfer_chunk_capacity(&envelope)
+    relay_transfer_chunk_capacity(&envelope)
 }
 
 /// Largest raw byte slice that fits in a protocol-59 snapshot-page response,
@@ -235,21 +235,21 @@ pub fn project_memory_transfer_response_chunk_bytes(
             },
         },
     };
-    transfer_chunk_capacity(&envelope)
+    relay_transfer_chunk_capacity(&envelope)
 }
 
-fn transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
+pub fn relay_transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
     // The base64 field is empty in the serialized template, so its encoded
     // length can be added without JSON escaping. Include the newline because
     // the worker's bounded reader counts it against the frame budget.
     let overhead = serde_json::to_vec(envelope)?.len().saturating_add(1);
     let remaining = MAX_FRAME_BYTES
         .checked_sub(overhead)
-        .context("project memory transfer envelope exceeds relay frame budget")?;
+        .context("snapshot transfer envelope exceeds relay frame budget")?;
     let capacity = (remaining / 4) * 3;
     anyhow::ensure!(
         capacity > 0,
-        "project memory transfer envelope leaves no room for a chunk"
+        "snapshot transfer envelope leaves no room for a chunk"
     );
     Ok(capacity)
 }
@@ -285,8 +285,12 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     CommandRetentionStatus,
-    /// Seed orphan adoption after acknowledged history has been collected.
-    AdoptionSnapshot,
+    /// Freeze a coherent current-state recovery cut on this connection.
+    BeginLiveBaseline,
+    ReadLiveBaselinePage {
+        offset: u64,
+    },
+    AbortLiveBaseline,
     ReadQueuedCommand {
         command_id: String,
     },
@@ -588,7 +592,9 @@ impl RelayRequest {
             Self::Submit { .. } => "submit",
             Self::ReadPendingElicitation { .. } => "read_pending_elicitation",
             Self::ReadQueuedCommand { .. } => "read_queued_command",
-            Self::AdoptionSnapshot => "adoption_snapshot",
+            Self::BeginLiveBaseline => "begin_live_baseline",
+            Self::ReadLiveBaselinePage { .. } => "read_live_baseline_page",
+            Self::AbortLiveBaseline => "abort_live_baseline",
             Self::CommandRetentionStatus => "command_retention_status",
             Self::UpdateCommandRetention { .. } => "update_command_retention",
             Self::Status => "status",
@@ -670,9 +676,11 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
+            Self::BeginLiveBaseline
+            | Self::ReadLiveBaselinePage { .. }
+            | Self::AbortLiveBaseline => super::RELAY_LIVE_BASELINE_PROTOCOL,
             Self::ReadPendingElicitation { .. }
             | Self::ReadQueuedCommand { .. }
-            | Self::AdoptionSnapshot
             | Self::CommandRetentionStatus
             | Self::UpdateCommandRetention { .. } => super::RELAY_COMMAND_RETENTION_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
@@ -966,12 +974,13 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
-    AdoptionSnapshot {
-        state: RelayOperationalState,
-        native_use_evidence: Option<super::snapshot::NativeSessionUseEvidence>,
-        pending_elicitation_ids: std::collections::BTreeSet<String>,
-        unavailable_elicitations: usize,
+    LiveBaselineStarted {
+        total_bytes: u64,
     },
+    LiveBaselinePage {
+        page: super::FrozenSnapshotPage,
+    },
+    LiveBaselineAborted,
     QueuedCommand {
         command: Option<RelayCommand>,
         accepted_ordinal: Option<u64>,

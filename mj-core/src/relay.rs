@@ -177,7 +177,9 @@ pub const RELAY_AUTHENTICATION_RETRY_INTENT_PROTOCOL: u32 = 70;
 pub const RELAY_NOTIFICATION_STACK_PROTOCOL: u32 = 71;
 /// Operation-owned command retention and acknowledgement-only journal GC.
 pub const RELAY_COMMAND_RETENTION_PROTOCOL: u32 = 72;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_COMMAND_RETENTION_PROTOCOL;
+/// 73 serves coherent, connection-owned live recovery baselines.
+pub const RELAY_LIVE_BASELINE_PROTOCOL: u32 = 73;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_LIVE_BASELINE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -432,3 +434,6 @@ pub fn clear_native_session_identity(root: &Path) -> Result<()> {
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
 }
+
+mod live_baseline;
+pub use live_baseline::*;

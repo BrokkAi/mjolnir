@@ -100,6 +100,7 @@ fn move_queue_relay_child() {
     let crash_after_first = !marker.exists();
     // The delegation-only connection must not open a second journal writer.
     let mut relay = None;
+    let mut baseline_download = None;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
@@ -182,6 +183,53 @@ fn move_queue_relay_child() {
             }
             relay
         });
+        if matches!(
+            request.request,
+            RelayRequest::BeginLiveBaseline
+                | RelayRequest::ReadLiveBaselinePage { .. }
+                | RelayRequest::AbortLiveBaseline
+        ) {
+            let cut = matches!(request.request, RelayRequest::BeginLiveBaseline)
+                .then(|| relay.live_session_baseline().unwrap());
+            if let Some(cut) = &cut {
+                fs::write(
+                    root.join("baseline-frontier"),
+                    cut.state.latest_ordinal.to_string(),
+                )
+                .unwrap();
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                    "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"after recovery cut"}
+                })).unwrap()).unwrap();
+                relay.record_observation(mj_core::relay::RelayObservation::NativeAgent { event: mj_core::native_agent::NativeAgentEvent::Update {
+                    session_id: "staged-child".into(), update: Box::new(serde_json::from_value(serde_json::json!({
+                        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"child after recovery cut"}
+                    })).unwrap()),
+                }}).unwrap();
+                relay
+                    .record_observation(mj_core::relay::RelayObservation::NativeAgent {
+                        event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                    })
+                    .unwrap();
+            }
+            let payload = mj_core::relay::live_baseline_reply(
+                &request.request,
+                cut,
+                &mut baseline_download,
+                &request.request_id,
+                request.protocol_version,
+            )
+            .unwrap();
+            write_relay_frame(
+                &mut output,
+                &RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                },
+            )
+            .unwrap();
+            continue;
+        }
         if let RelayRequest::Submit {
             command_id,
             command,
@@ -235,463 +283,6 @@ fn move_queue_relay_child() {
             return;
         }
     }
-}
-
-#[cfg(unix)]
-// Hard-won: 581ae9e: adopting a live worker required journal genesis after ACK pruning.
-// Hard-won: b62fe3b: adoption lost retained output, queued blobs and current selectors.
-#[test]
-fn adoption_seeds_a_pruned_live_worker_without_replacing_native_history() {
-    let name = test_name("adoption_seeds_a_pruned_live_worker_without_replacing_native_history");
-    if !isolated_test_child(&name, "MJ_PRUNED_ADOPTION_CHILD") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    let marker = directory.path().join("adoption.marker");
-    install_move_queue_relay_worker(&root, &marker, true);
-    let mut image_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-    image_bytes.extend(vec![0; 70 * 1024]);
-    let image =
-        mj_core::attachment::AttachmentRef::new(&image_bytes, "image/png".into(), 1, 1).unwrap();
-    mj_core::attachment::AttachmentStore::worker(&root)
-        .install(&image, &image_bytes)
-        .unwrap();
-    assert!(
-        !mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID)
-            .unwrap()
-            .contains(&image)
-            .unwrap()
-    );
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
-    relay
-        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-            native_session_id: "surviving-native-conversation".into(),
-            resumed: true,
-            native_continuity_lost: false,
-            replaced_unused_native_session_id: None,
-        })
-        .unwrap();
-    relay
-        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
-            key: "model".into(),
-            value: "accepted-model-before-loss".into(),
-        })
-        .unwrap();
-    relay
-        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
-            key: "reasoning_effort".into(),
-            value: "high".into(),
-        })
-        .unwrap();
-    relay
-        .record_observation(mj_core::relay::RelayObservation::ConfigurationUpdated {
-            key: "effort".into(),
-            value: "high".into(),
-        })
-        .unwrap();
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate": "config_option_update", "configOptions": [
-            {"id":"model", "name":"Model", "type":"select", "currentValue":"current-model-before-loss",
-             "options":[{"value":"current-model-before-loss","name":"Current"},{"value":"original-model","name":"Queued"}]},
-            {"id":"reasoning_effort", "name":"Effort", "type":"select", "currentValue":"medium",
-             "options":[{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]}
-        ]
-    })).unwrap()).unwrap();
-    for command_id in ["active-before-loss", "surviving-queue", "surviving-config"] {
-        let command = if command_id == "surviving-config" {
-            RelayCommand::SetConfig {
-                key: "model".into(),
-                value: "original-model".into(),
-            }
-        } else {
-            let mut prompt = vec![ContentBlock::from("work survives".repeat(6000))];
-            if command_id == "surviving-queue" {
-                prompt.push(image.content_block());
-            }
-            RelayCommand::Prompt { prompt }
-        };
-        relay.handle(mj_core::relay::RelayRequestEnvelope {
-            request_id: command_id.into(),
-            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::Submit {
-                command_id: command_id.into(),
-                command,
-            },
-        });
-    }
-    relay.record_observation(mj_core::relay::RelayObservation::ElicitationRequested {
-        request: mj_core::elicitation::ElicitationRequest::from_acp_params("question-before-loss", serde_json::json!({
-            "mode":"form", "sessionId":MOVE_QUEUE_SESSION_ID, "message":"Which destination?", "requestedSchema":{"type":"object", "properties":{}}
-        })).unwrap(),
-    }).unwrap();
-    let frontier = relay.latest_ordinal();
-    let digest = relay.latest_digest().to_owned();
-    relay.handle(mj_core::relay::RelayRequestEnvelope {
-        request_id: "ack-before-loss".into(),
-        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Acknowledge {
-            through_ordinal: frontier,
-            through_digest: digest,
-        },
-    });
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"unacknowledged work survives adoption"}
-    })).unwrap()).unwrap();
-    drop(relay);
-    let mut snapshot_before: mj_core::relay::RelaySnapshot =
-        serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
-            .unwrap();
-    snapshot_before
-        .assessment_questions
-        .insert("unavailable-legacy-question".into());
-    snapshot_before
-        .pending_elicitations
-        .insert("unavailable-legacy-question".into(), None);
-    fs::write(
-        root.join(mj_core::relay::RELAY_STATE_FILE),
-        serde_json::to_vec(&snapshot_before).unwrap(),
-    )
-    .unwrap();
-    let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
-    crate::database::save_session(&session).unwrap();
-    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let projection = runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_adopting(&spec, MOVE_QUEUE_SESSION_ID).await.unwrap();
-        assert_eq!(connection.operational().native_session_id.as_deref(), Some("surviving-native-conversation"));
-        let projection = connection.snapshot().materialized;
-        assert!(projection.applied_event_ordinal >= frontier);
-        assert!(serde_json::to_string(&projection).unwrap().contains("unacknowledged work survives adoption"));
-        assert_eq!(mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID).unwrap().read(&image).unwrap(), image_bytes);
-        assert_eq!(projection.pending_elicitations.len(), 1);
-        assert!(serde_json::to_string(&projection).unwrap().contains("An earlier pending question could not be recovered"));
-        assert_eq!(projection.pending_elicitations[0].id, "question-before-loss");
-        assert_eq!(projection.pending_elicitations[0].message, "Which destination?");
-        assert_eq!(projection.configuration.values["model"], "current-model-before-loss");
-        assert_eq!(projection.configuration.values["reasoning_effort"], "medium");
-        assert_eq!(projection.queued_prompts[0].command_id, "surviving-queue");
-        assert_eq!(projection.queued_prompts[0].content[0]["text"], "work survives".repeat(6000));
-        assert_eq!(projection.queued_prompts[1].kind, QueuedCommandKind::SetConfig { key: "model".into(), value: "original-model".into() });
-        assert_eq!(projection.active_turn.as_ref().unwrap().command_id, "active-before-loss");
-        assert!(serde_json::to_string(&projection).unwrap().contains("Earlier transcript was not recoverable after the daemon's store was lost; the agent's own conversation is intact."));
-        projection
-    });
-    let snapshot_after: mj_core::relay::RelaySnapshot =
-        serde_json::from_slice(&fs::read(root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap())
-            .unwrap();
-    assert_eq!(
-        snapshot_before.native_use_evidence,
-        snapshot_after.native_use_evidence
-    );
-    // Exercise the suspend archive / resume restore boundary: neither a queue
-    // prompt nor a typed configuration command may come from a display label.
-    let mut input = crate::controller::test_support::checkpoint_archive_input(
-        MOVE_QUEUE_SESSION_ID,
-        projection.applied_event_ordinal,
-        Vec::new(),
-        mj_core::attachment::AttachmentStore::worker(&root)
-            .archive_artifacts()
-            .unwrap(),
-    );
-    input.canonical_session =
-        mj_transcript::projection::canonical_session_from_materialized(&projection).unwrap();
-    // Suspend seals only after stopping the active turn. This integration
-    // starts at that idle cut and checks the independently persisted queue.
-    input.canonical_session.session.execution = CanonicalExecutionState::Idle;
-    let archive = directory.path().join("adopted-suspend.hel.zip");
-    write_archive_atomic(&archive, &input).unwrap();
-    let restored_root = directory.path().join("resumed-worker");
-    fs::create_dir_all(directory.path().join("resumed-workspace")).unwrap();
-    mj_checkpoint::checkpoint::restore_checkpoint(
-        &mj_checkpoint::checkpoint::CheckpointRestoreSpec {
-            archive_path: archive,
-            workspace_root: directory.path().join("resumed-workspace"),
-            report_root: None,
-            relay_root: restored_root.clone(),
-            harness_home: directory.path().join("resumed-native"),
-            restore_repositories: false,
-            restore_native: false,
-            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
-            primary_repository_root: None,
-        },
-        &mj_checkpoint::archive::SystemGit,
-    )
-    .unwrap();
-    let mut resumed = DurableRelay::open(&restored_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
-    let verified = mj_checkpoint::archive::verify_archive_streaming(
-        &directory.path().join("adopted-suspend.hel.zip"),
-    )
-    .unwrap();
-    assert_eq!(
-        verified.canonical_session.session.configuration.values["model"],
-        "current-model-before-loss"
-    );
-    assert_eq!(
-        verified.canonical_session.session.configuration.values["reasoning_effort"],
-        "medium"
-    );
-    let accepted = mj_core::acp::AcceptedSessionConfig::from_archived_values(
-        &verified.canonical_session.session.configuration.values,
-    );
-    assert_eq!(
-        accepted.get("model").map(String::as_str),
-        Some("current-model-before-loss")
-    );
-    assert_eq!(accepted.get("effort").map(String::as_str), Some("medium"));
-    let prompts = resumed.claim_pending_commands(true).unwrap();
-    assert!(
-        prompts
-            .iter()
-            .any(|claimed| claimed.command_id == "surviving-queue"
-                && claimed.command
-                    == RelayCommand::Prompt {
-                        prompt: vec![
-                            ContentBlock::from("work survives".repeat(6000)),
-                            image.content_block()
-                        ],
-                    })
-    );
-    resumed
-        .record_command_completed(
-            "surviving-queue",
-            mj_core::relay::RelayCommandOutcome::Prompt {
-                work_facts: None,
-                diagnostic: None,
-                stop_reason: "end_turn".into(),
-                usage: None,
-            },
-        )
-        .unwrap();
-    let controls = resumed.claim_pending_commands(true).unwrap();
-    assert!(
-        controls
-            .iter()
-            .any(|claimed| claimed.command_id == "surviving-config"
-                && claimed.command
-                    == RelayCommand::SetConfig {
-                        key: "model".into(),
-                        value: "original-model".into(),
-                    })
-    );
-}
-
-#[cfg(unix)]
-// Hard-won: 92ab7be/c4688b4: adoption lost retained turn metadata and native-child history.
-#[test]
-fn adoption_preserves_a_turn_started_in_retained_history() {
-    let name = test_name("adoption_preserves_a_turn_started_in_retained_history");
-    if !isolated_test_child(&name, "MJ_ADOPT_RETAINED_TURN_CHILD") {
-        return;
-    }
-    adoption_retained_history_scenario(false);
-}
-
-#[cfg(unix)]
-// Hard-won: 98f204d: pre-ACK native spawns and prompt starts prevented complete adoption.
-#[test]
-fn adoption_preserves_pre_ack_child_identity_and_reply_span() {
-    let name = test_name("adoption_preserves_pre_ack_child_identity_and_reply_span");
-    if !isolated_test_child(&name, "MJ_ADOPT_PRE_ACK_CHILD") {
-        return;
-    }
-    adoption_retained_history_scenario(true);
-}
-
-#[cfg(unix)]
-fn adoption_retained_history_scenario(ack_after_start: bool) {
-    let _writer = crate::database::install_isolated_test_writer();
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
-    install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
-    relay
-        .record_observation(mj_core::relay::RelayObservation::Notice {
-            message: "acknowledged prefix".into(),
-        })
-        .unwrap();
-    let ack = relay.latest_ordinal();
-    let digest = relay.latest_digest().to_owned();
-    relay.handle(mj_core::relay::RelayRequestEnvelope {
-        request_id: "ack".into(),
-        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Acknowledge {
-            through_ordinal: ack,
-            through_digest: digest,
-        },
-    });
-    // Hard-won: 98f204d: retained completed turns were ACKed without usage rows.
-    for index in 0..2 {
-        let command_id = format!("completed-turn-{index}");
-        relay.handle(mj_core::relay::RelayRequestEnvelope {
-            request_id: command_id.clone(),
-            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::Submit {
-                command_id: command_id.clone(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::from("metered work")],
-                },
-            },
-        });
-        relay.claim_pending_commands(true).unwrap();
-        relay
-            .record_command_completed(
-                &command_id,
-                mj_core::relay::RelayCommandOutcome::Prompt {
-                    stop_reason: "end_turn".into(),
-                    diagnostic: None,
-                    work_facts: None,
-                    usage: Some(mj_core::usage::TokenUsage {
-                        scope: mj_core::usage::UsageScope::Turn,
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        total_tokens: 15,
-                        thought_tokens: None,
-                        cached_read_tokens: None,
-                        cached_write_tokens: None,
-                        provider_details: None,
-                    }),
-                },
-            )
-            .unwrap();
-    }
-    let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
-        request_id: "prompt".into(),
-        protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Submit {
-            command_id: "retained-turn".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::from("retained prompt")],
-            },
-        },
-    });
-    let mj_core::relay::RelayResponseBody::Ok {
-        payload: mj_core::relay::RelayResponsePayload::Accepted { ordinal, .. },
-    } = response.body
-    else {
-        panic!("prompt refused")
-    };
-    let started = relay.latest_ordinal();
-    use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
-    relay
-        .record_observation(mj_core::relay::RelayObservation::NativeAgent {
-            event: NativeAgentEvent::Spawned {
-                session_id: "retained-child".into(),
-                parent_session_id: None,
-                name: "child".into(),
-                task: "retained work".into(),
-                capabilities: NativeAgentCapabilities {
-                    cancel: true,
-                    close: false,
-                },
-            },
-        })
-        .unwrap();
-    let span_start = if ack_after_start {
-        let frontier = relay.latest_ordinal();
-        relay.handle(mj_core::relay::RelayRequestEnvelope {
-            request_id: "ack-starts".into(),
-            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::Acknowledge {
-                through_ordinal: frontier,
-                through_digest: relay.latest_digest().to_owned(),
-            },
-        });
-        frontier
-    } else {
-        started
-    };
-    relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"before adoption"}
-    })).unwrap()).unwrap();
-    relay.record_observation(mj_core::relay::RelayObservation::NativeAgent {
-        event: NativeAgentEvent::Update {
-            session_id: "retained-child".into(),
-            update: Box::new(serde_json::from_value(serde_json::json!({
-                "sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"retained child reply"}
-            })).unwrap()),
-        },
-    }).unwrap();
-    drop(relay);
-    crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
-    let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_adopting(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        let turn = connection.snapshot().materialized.active_turn.unwrap();
-        assert_eq!(turn.accepted_ordinal, (!ack_after_start).then_some(ordinal));
-        assert_eq!(turn.turn_start_position, span_start);
-    });
-    if !ack_after_start {
-        let usage = crate::database::load_session_usage(MOVE_QUEUE_SESSION_ID, 0, 100)
-            .unwrap()
-            .unwrap();
-        assert_eq!(usage.turns.len(), 2);
-        assert!(usage.turns.iter().all(|turn| {
-            turn.usage
-                .as_ref()
-                .is_some_and(|usage| usage.total_tokens == 15)
-        }));
-    }
-    let child =
-        crate::database::load_native_agent_view(MOVE_QUEUE_SESSION_ID, "retained-child", 100)
-            .unwrap()
-            .unwrap();
-    assert!(
-        serde_json::to_string(&child)
-            .unwrap()
-            .contains("retained child reply")
-    );
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
-    relay.claim_pending_commands(true).unwrap();
-    relay
-        .record_command_completed(
-            "retained-turn",
-            mj_core::relay::RelayCommandOutcome::Prompt {
-                stop_reason: "end_turn".into(),
-                diagnostic: None,
-                usage: None,
-                work_facts: None,
-            },
-        )
-        .unwrap();
-    drop(relay);
-    runtime.block_on(async {
-        let connection = crate::session_manager::StandaloneSession::connect_command(
-            &spec,
-            MOVE_QUEUE_SESSION_ID,
-        )
-        .await
-        .unwrap();
-        let outcome = connection
-            .snapshot()
-            .materialized
-            .last_turn_outcome
-            .unwrap();
-        assert_eq!(
-            outcome.accepted_ordinal,
-            (!ack_after_start).then_some(ordinal)
-        );
-        assert_eq!(outcome.turn_start_position, Some(span_start));
-    });
-    assert_eq!(
-        crate::database::load_materialized_finished_turn_message(MOVE_QUEUE_SESSION_ID)
-            .unwrap()
-            .as_deref(),
-        Some("before adoption")
-    );
 }
 
 #[test]
@@ -6676,37 +6267,143 @@ fn recording_executor() -> RecordingProcessExecutor {
 }
 
 #[cfg(unix)]
-// Hard-won: c4688b4: adoption replaced an autonomous turn's clock with the Unix epoch.
+// Hard-won: a70ead9: orphan recovery must use one live cut, including native staging and queue semantics.
 #[test]
-fn adoption_preserves_an_autonomous_turn_clock() {
-    let name = test_name("adoption_preserves_an_autonomous_turn_clock");
-    if !isolated_test_child(&name, "MJ_ADOPT_AUTONOMOUS_CLOCK_CHILD") {
+fn adoption_installs_a_coherent_live_baseline_and_reattaches_normally() {
+    use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
+    use mj_core::relay::{RelayObservation, RelayRequestEnvelope, RelayResponseBody};
+    let name = test_name("adoption_installs_a_coherent_live_baseline_and_reattaches_normally");
+    if !isolated_test_child(&name, "MJ_LIVE_BASELINE_CHILD") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
     install_move_queue_relay_worker(&root, &directory.path().join("marker"), true);
+    let mut image_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    image_bytes.extend(vec![0; 70 * 1024]);
+    let image =
+        mj_core::attachment::AttachmentRef::new(&image_bytes, "image/png".into(), 1, 1).unwrap();
+    mj_core::attachment::AttachmentStore::worker(&root)
+        .install(&image, &image_bytes)
+        .unwrap();
     let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "test").unwrap();
     relay
-        .record_observation(mj_core::relay::RelayObservation::Notice {
-            message: "prefix".into(),
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "surviving-native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
-    relay.handle(mj_core::relay::RelayRequestEnvelope {
+    let submit = |relay: &mut DurableRelay, id: &str, command| {
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: id.into(),
+                command,
+            },
+        });
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { .. }),
+            "{:?}",
+            response.body
+        );
+    };
+    submit(
+        &mut relay,
+        "active-prompt",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("active work")],
+        },
+    );
+    submit(
+        &mut relay,
+        "queued-prompt",
+        RelayCommand::Prompt {
+            prompt: vec![
+                ContentBlock::from("queued payload".repeat(6000)),
+                image.content_block(),
+            ],
+        },
+    );
+    submit(
+        &mut relay,
+        "queued-config",
+        RelayCommand::SetConfig {
+            key: "effort".into(),
+            value: "high".into(),
+        },
+    );
+    let mail = mj_core::mailbox::MailboxEvent {
+        key: "recovery-mail".into(),
+        source: "operator".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::OperatorBack {
+            requests: vec!["pending work".into()],
+        },
+    };
+    submit(
+        &mut relay,
+        "deliver-mail",
+        RelayCommand::DeliverMailboxEvent {
+            event: mail.clone(),
+        },
+    );
+    submit(
+        &mut relay,
+        "queued-mailbox",
+        RelayCommand::MailboxWake { events: vec![mail] },
+    );
+    let question = mj_core::elicitation::ElicitationRequest::from_acp_params("pending-question", serde_json::json!({
+        "mode":"form", "sessionId":MOVE_QUEUE_SESSION_ID, "message":"Approve?", "requestedSchema":{"type":"object", "properties":{}}
+    })).unwrap();
+    relay
+        .record_observation(RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        })
+        .unwrap();
+    relay.record_observation(RelayObservation::SessionConfigured { config_options: vec![serde_json::from_value(serde_json::json!({
+        "id":"mode", "name":"Mode", "type":"select", "currentValue":"old", "options":[{"value":"old","name":"Old"},{"value":"new","name":"New"}]
+    })).unwrap()] }).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(
+                serde_json::json!({"sessionUpdate":"current_mode_update", "currentModeId":"new"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::ReplayBegin,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::Spawned {
+                session_id: "staged-child".into(),
+                parent_session_id: None,
+                name: "child".into(),
+                task: "work".into(),
+                capabilities: NativeAgentCapabilities::default(),
+            },
+        })
+        .unwrap();
+    let cut = relay.live_session_baseline().unwrap();
+    assert!(cut.native_use_evidence.is_some());
+    let frontier = cut.state.latest_ordinal;
+    let digest = cut.state.latest_digest.clone();
+    relay.handle(RelayRequestEnvelope {
         request_id: "ack".into(),
         protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
         request: RelayRequest::Acknowledge {
-            through_ordinal: relay.latest_ordinal(),
-            through_digest: relay.latest_digest().to_owned(),
+            through_ordinal: frontier,
+            through_digest: digest.clone(),
         },
     });
-    relay
-        .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
-            started_at_ms: 1234,
-        })
-        .unwrap();
-    assert!(relay.operational_state().active_prompt.is_none());
     drop(relay);
     crate::database::save_session(&checkpoint_test_session(MOVE_QUEUE_SESSION_ID)).unwrap();
     let spec = CommandSpec::new(root.join("hel").to_str().unwrap(), Vec::<String>::new());
@@ -6715,17 +6412,78 @@ fn adoption_preserves_an_autonomous_turn_clock() {
         .build()
         .unwrap()
         .block_on(async {
-            let connection = crate::session_manager::StandaloneSession::connect_adopting(
+            let mut connection = crate::session_manager::StandaloneSession::connect_adopting(
                 &spec,
                 MOVE_QUEUE_SESSION_ID,
             )
             .await
             .unwrap();
+            let projection = connection.snapshot().materialized;
+            let notice = projection
+                .transcript
+                .iter()
+                .find(|item| {
+                    item.stable_id == mj_core::transcript::ADOPTION_HISTORY_UNAVAILABLE_ITEM_ID
+                })
+                .unwrap();
+            assert_eq!(notice.position, frontier);
+            assert!(
+                serde_json::to_string(notice)
+                    .unwrap()
+                    .contains("History before recovery unavailable")
+            );
+            assert_eq!(projection.applied_event_ordinal, frontier + 3);
+            assert!(
+                mj_core::attachment::AttachmentStore::controller(MOVE_QUEUE_SESSION_ID)
+                    .unwrap()
+                    .contains(&image)
+                    .unwrap()
+            );
+            let queued = projection
+                .queued_prompts
+                .iter()
+                .find(|q| q.command_id == "queued-prompt")
+                .unwrap();
+            assert_eq!(queued.content[0]["text"], "queued payload".repeat(6000));
+            assert_eq!(queued.content.len(), 2);
+            assert_eq!(projection.queued_prompts.len(), 3);
+            assert!(
+                projection
+                    .queued_prompts
+                    .iter()
+                    .find(|q| q.command_id == "queued-mailbox")
+                    .unwrap()
+                    .content
+                    .is_empty()
+            );
+            assert_eq!(projection.pending_elicitations, vec![question]);
+            assert_eq!(projection.configuration.values["mode"], "new");
+            assert_eq!(projection.active_turn.unwrap().command_id, "active-prompt");
             assert_eq!(
-                connection.snapshot().materialized.execution,
-                mj_core::state::MaterializedExecutionState::Running {
-                    started_at_ms: 1234
-                }
+                projection
+                    .transcript
+                    .iter()
+                    .filter(|item| matches!(
+                        item.body,
+                        mj_core::transcript::TranscriptBody::Agent { .. }
+                    ))
+                    .count(),
+                1
+            );
+            let before = serde_json::to_string(&projection.transcript).unwrap();
+            assert!(before.contains("after recovery cut"));
+            connection.sync().await.unwrap();
+            assert_eq!(
+                serde_json::to_string(&connection.snapshot().materialized.transcript).unwrap(),
+                before
             );
         });
+    let child = crate::database::load_native_agent_view(MOVE_QUEUE_SESSION_ID, "staged-child", 100)
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_string(&child)
+            .unwrap()
+            .contains("child after recovery cut")
+    );
 }

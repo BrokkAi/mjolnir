@@ -917,28 +917,59 @@ impl RelayClient {
         }
     }
 
-    pub async fn adoption_snapshot(
-        &mut self,
-    ) -> Result<(
-        RelayOperationalState,
-        Option<mj_core::relay::NativeSessionUseEvidence>,
-        BTreeSet<String>,
-        usize,
-    )> {
-        match self.call(RelayRequest::AdoptionSnapshot).await? {
-            RelayResponsePayload::AdoptionSnapshot {
-                state,
-                native_use_evidence,
-                pending_elicitation_ids,
-                unavailable_elicitations,
-            } => Ok((
-                state,
-                native_use_evidence,
-                pending_elicitation_ids,
-                unavailable_elicitations,
-            )),
-            _ => bail!("relay returned an unexpected adoption snapshot"),
+    pub async fn live_session_baseline(&mut self) -> Result<mj_core::relay::LiveSessionBaseline> {
+        anyhow::ensure!(
+            self.protocol_version() >= mj_core::relay::RELAY_LIVE_BASELINE_PROTOCOL,
+            "this worker cannot provide a live recovery baseline; restart that worker on the current binary, then adopt"
+        );
+        let RelayResponsePayload::LiveBaselineStarted { total_bytes } =
+            self.call(RelayRequest::BeginLiveBaseline).await?
+        else {
+            bail!("relay returned an unexpected live baseline response")
+        };
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        loop {
+            let RelayResponsePayload::LiveBaselinePage { page } = self
+                .call(RelayRequest::ReadLiveBaselinePage { offset })
+                .await?
+            else {
+                bail!("relay returned an unexpected live baseline page")
+            };
+            anyhow::ensure!(
+                page.offset == offset && page.next_offset <= total_bytes,
+                "live baseline page cursor mismatch"
+            );
+            use base64::Engine as _;
+            let chunk = tokio::task::spawn_blocking(move || {
+                base64::engine::general_purpose::STANDARD.decode(page.chunk)
+            })
+            .await
+            .context("decode live baseline page task failed")??;
+            anyhow::ensure!(
+                page.next_offset == offset + u64::try_from(chunk.len())?,
+                "live baseline page length mismatch"
+            );
+            anyhow::ensure!(
+                page.complete || !chunk.is_empty(),
+                "live baseline download made no progress"
+            );
+            bytes.extend(chunk);
+            offset = page.next_offset;
+            if page.complete {
+                anyhow::ensure!(offset == total_bytes, "live baseline download ended early");
+                break;
+            }
+            anyhow::ensure!(
+                offset < total_bytes,
+                "live baseline download made no progress"
+            );
         }
+        tokio::task::spawn_blocking(move || {
+            serde_json::from_slice(&bytes).context("decode live recovery baseline")
+        })
+        .await
+        .context("live recovery baseline decode task failed")?
     }
 
     pub async fn command_retention_status(&mut self) -> Result<Option<(bool, BTreeSet<String>)>> {

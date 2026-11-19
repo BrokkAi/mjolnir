@@ -134,23 +134,11 @@ impl DurableRelay {
                         .flatten(),
                 }
             }
-            RelayRequest::AdoptionSnapshot => RelayResponsePayload::AdoptionSnapshot {
-                state: self.operational_state(),
-                native_use_evidence: self.snapshot.native_use_evidence.clone(),
-                pending_elicitation_ids: self
-                    .snapshot
-                    .pending_elicitations
-                    .iter()
-                    .filter(|(_, body)| body.is_some())
-                    .map(|(id, _)| id.clone())
-                    .collect(),
-                unavailable_elicitations: self
-                    .snapshot
-                    .pending_elicitations
-                    .values()
-                    .filter(|body| body.is_none())
-                    .count(),
-            },
+            RelayRequest::BeginLiveBaseline
+            | RelayRequest::ReadLiveBaselinePage { .. }
+            | RelayRequest::AbortLiveBaseline => {
+                bail!("live baseline download requires its owning connection")
+            }
             RelayRequest::CommandRetentionStatus => RelayResponsePayload::CommandRetentionState {
                 legacy_pending: self.snapshot.legacy_command_retention,
                 operation_ids: self.snapshot.command_retention.keys().cloned().collect(),

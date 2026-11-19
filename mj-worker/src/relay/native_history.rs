@@ -326,21 +326,15 @@ mod tests {
             .remove("pending_elicitations");
         fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
         for _ in 0..2 {
-            let mut relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();
+            let relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();
             assert!(relay.snapshot.assessment_questions.contains(&question.id));
             assert_eq!(
                 relay.snapshot.pending_elicitations.get(&question.id),
                 Some(&None)
             );
-            let response = relay.handle(relay_request(
-                "adopt-with-unavailable-question",
-                RelayRequest::AdoptionSnapshot,
-            ));
-            assert!(
-                matches!(response.body, RelayResponseBody::Ok { payload: RelayResponsePayload::AdoptionSnapshot {
-                pending_elicitation_ids, unavailable_elicitations: 1, ..
-            } } if pending_elicitation_ids.is_empty())
-            );
+            let baseline = relay.live_session_baseline().unwrap();
+            assert_eq!(baseline.unavailable_questions, 1);
+            assert!(baseline.questions.is_empty());
         }
         let mut relay = DurableRelay::open(temp.path(), SESSION, "upgraded").unwrap();
         relay

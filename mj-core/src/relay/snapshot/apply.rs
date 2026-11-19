@@ -533,9 +533,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         }
         RelayObservation::SessionConfigured { config_options } => {
             snapshot.config_options = std::sync::Arc::new(config_options.clone());
+            record_catalogue_mode(snapshot);
         }
         RelayObservation::SessionModesConfigured { modes } => {
             snapshot.modes = modes.clone();
+            if let Some(modes) = modes {
+                snapshot
+                    .config
+                    .insert("mode".into(), modes.current_mode_id.to_string());
+            }
         }
         RelayObservation::CommandQueued {
             command_id,
@@ -1723,6 +1729,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
                 snapshot.config_options = std::sync::Arc::new(update.config_options.clone());
+                record_catalogue_mode(snapshot);
             }
             SessionUpdate::CurrentModeUpdate(update) => {
                 if let Some(modes) = snapshot.modes.as_mut() {
@@ -2619,5 +2626,14 @@ mod work_liveness_tests {
             named.minimum_protocol(),
             crate::relay::RELAY_WORK_LIVENESS_PROTOCOL
         );
+    }
+}
+
+// A catalogue and a legacy CurrentModeUpdate are both ordered relay facts.
+// Keep one effective value so a later recovery cut need not guess precedence.
+fn record_catalogue_mode(snapshot: &mut RelaySnapshot) {
+    if let Some(mode) = crate::acp::surface::config_current_value(&snapshot.config_options, "mode")
+    {
+        snapshot.config.insert("mode".into(), mode);
     }
 }

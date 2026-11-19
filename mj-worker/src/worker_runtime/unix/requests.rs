@@ -561,8 +561,7 @@ enum ActiveProjectMemoryTransfer {
     None,
     Download {
         transfer_id: u64,
-        bytes: Vec<u8>,
-        next_offset: u64,
+        download: mj_core::relay::FrozenSnapshotDownload,
     },
     Upload {
         transfer_id: u64,
@@ -616,8 +615,7 @@ fn apply_project_memory_transfer_request(
             let transfer_id = transfer.allocate_id()?;
             transfer.active = ActiveProjectMemoryTransfer::Download {
                 transfer_id,
-                bytes,
-                next_offset: 0,
+                download: mj_core::relay::FrozenSnapshotDownload::new(bytes),
             };
             Ok(RelayResponsePayload::ProjectMemoryTransfer {
                 result: ResultKind::SnapshotStarted {
@@ -632,8 +630,7 @@ fn apply_project_memory_transfer_request(
         } => {
             let ActiveProjectMemoryTransfer::Download {
                 transfer_id: active_id,
-                bytes,
-                next_offset,
+                download,
             } = &mut transfer.active
             else {
                 anyhow::bail!("this connection has no project-memory snapshot transfer")
@@ -642,33 +639,22 @@ fn apply_project_memory_transfer_request(
                 transfer_id == active_id,
                 "project-memory snapshot transfer ID does not match this connection"
             );
-            anyhow::ensure!(
-                offset == next_offset,
-                "project-memory snapshot page offset mismatch: expected {next_offset}, got {offset}"
-            );
             let capacity = mj_core::relay::project_memory_transfer_response_chunk_bytes(
                 protocol_version,
                 request_id,
             )?;
-            let start = usize::try_from(*offset)
-                .context("project-memory snapshot offset exceeds addressable memory")?;
-            let end = start.saturating_add(capacity).min(bytes.len());
-            let chunk = base64::engine::general_purpose::STANDARD.encode(&bytes[start..end]);
-            let next = u64::try_from(end)
-                .context("project-memory snapshot offset exceeds the transfer range")?;
-            let complete = end == bytes.len();
+            let page = download.read(*offset, capacity)?;
             let id = *active_id;
-            *next_offset = next;
-            if complete {
+            if page.complete {
                 transfer.active = ActiveProjectMemoryTransfer::None;
             }
             Ok(RelayResponsePayload::ProjectMemoryTransfer {
                 result: ResultKind::SnapshotPage {
                     transfer_id: id,
-                    offset: *offset,
-                    next_offset: next,
-                    complete,
-                    chunk,
+                    offset: page.offset,
+                    next_offset: page.next_offset,
+                    complete: page.complete,
+                    chunk: page.chunk,
                 },
             })
         }

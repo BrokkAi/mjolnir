@@ -1861,32 +1861,30 @@ pub fn save_materialized_session_to(path: &Path, materialized: &MaterializedSess
     Ok(())
 }
 
-/// Replay effects recovered after a lost controller store. The normal page
-/// writer remains the owner of usage, native children, and API side effects.
-pub struct AdoptionReplay {
-    pub after: mj_core::relay::RelayCursor,
-    pub native_agents: Vec<mj_core::native_agent::NativeAgent>,
-    pub events: Vec<(mj_core::relay::RelayEvent, MaterializedSessionMutation)>,
-}
-
-/// Install recovered history only while no other attachment has established a cursor.
-/// Native-child effects and the owner frontier commit together before any ACK.
-pub fn seed_adopted_materialized_session(
+/// Install one current-state cut only before any attachment establishes history.
+/// The notice, live owner state, and both native replay phases commit together.
+pub fn install_live_session_baseline(
     materialized: &MaterializedSession,
-    replay: AdoptionReplay,
+    baseline: mj_core::relay::LiveSessionBaseline,
 ) -> Result<bool> {
     let materialized = materialized.clone();
-    submit_database_write("seed_adopted_materialized_session", move |_| {
-        seed_adopted_materialized_session_to(&database_path(), &materialized, replay)
+    submit_database_write("install_live_session_baseline", move |_| {
+        install_live_session_baseline_to(&database_path(), &materialized, &baseline)
     })
 }
 
-pub(super) fn seed_adopted_materialized_session_to(
+pub(super) fn install_live_session_baseline_to(
     path: &Path,
     materialized: &MaterializedSession,
-    replay: AdoptionReplay,
+    baseline: &mj_core::relay::LiveSessionBaseline,
 ) -> Result<bool> {
     materialized.validate()?;
+    ensure!(
+        materialized.session_id == baseline.state.session_id
+            && materialized.applied_event_ordinal == baseline.state.latest_ordinal
+            && materialized.applied_event_digest == baseline.state.latest_digest,
+        "live baseline projection does not match its worker cut"
+    );
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     if !session_exists(&tx, &materialized.session_id)? {
@@ -1902,30 +1900,32 @@ pub(super) fn seed_adopted_materialized_session_to(
     if frontier.is_some_and(|ordinal| ordinal > 0) {
         return Ok(false);
     }
-    let mut base = MaterializedSession::empty(&materialized.session_id);
-    base.applied_event_ordinal = replay.after.ordinal;
-    base.applied_event_digest = replay.after.digest.clone();
-    write_materialized_session(&tx, &base)?;
+    let cursor = mj_core::relay::RelayCursor {
+        ordinal: baseline.state.latest_ordinal,
+        digest: baseline.state.latest_digest.clone(),
+    };
     native_agents::seed_adopted_native_agents(
         &tx,
         &materialized.session_id,
-        &replay.native_agents,
-        &replay.after,
+        &baseline.state.native_agents,
+        &cursor,
+        0,
     )?;
-    let mut page = load_projection_page(tx, &materialized.session_id)?;
-    for (event, mutation) in replay.events {
-        page.apply(
-            event.ordinal,
-            &event.previous_digest,
-            &event.digest,
-            &mutation,
+    if let Some(staged) = &baseline.native_agent_replay {
+        tx.execute(
+            "INSERT OR IGNORE INTO native_agent_replay(owner) VALUES (?1)",
+            [&materialized.session_id],
+        )?;
+        native_agents::seed_adopted_native_agents(
+            &tx,
+            &materialized.session_id,
+            staged,
+            &cursor,
+            1,
         )?;
     }
-    page.flush()?;
-    // Overlay authoritative current owner state only after the ordinary writer
-    // has preserved every retained event's historical side effects.
-    write_materialized_session(&page.transaction, materialized)?;
-    commit_projection_page(page)?;
+    write_materialized_session(&tx, materialized)?;
+    tx.commit()?;
     Ok(true)
 }
 

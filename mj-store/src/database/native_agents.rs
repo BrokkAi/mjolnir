@@ -97,6 +97,7 @@ pub(super) fn seed_adopted_native_agents(
     owner: &str,
     agents: &[NativeAgent],
     cursor: &mj_core::relay::RelayCursor,
+    staging: i64,
 ) -> Result<()> {
     for agent in agents {
         ensure!(
@@ -122,7 +123,7 @@ pub(super) fn seed_adopted_native_agents(
                 projection,
                 pending_input_times: Default::default(),
             },
-            0,
+            staging,
         )?;
     }
     Ok(())
