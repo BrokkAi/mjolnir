@@ -1784,7 +1784,7 @@ async fn prepare_and_start_harness(
             .home;
         config
             .harness
-            .configure_home_environment(&home, &mut config.environment);
+            .configure_staged_home_environment(&home, &mut config.environment);
     }
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());

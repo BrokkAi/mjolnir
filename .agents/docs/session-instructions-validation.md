@@ -230,3 +230,24 @@ Checks outside the sandbox on the dev profile, with inherited MJ_CONFIG_DIR and 
 - `cargo clippy -p brokk-mj-controller -p brokk-mj-daemon --all-targets -- -D warnings`: passed (`memory-instructions-review7-clippy.log`).
 
 No still-failing checks. Formatting/diff checks are clean. No default instance, live harness acceptance or push was used. Diagnostic logs remain untracked; the final candidate is submitted for re-review.
+
+
+## Eighth review: legacy profiles, host login and memory data
+
+Parent rulings: no legacy profile migration in this lane. For Kimi/OpenCode/Grok, a symlinked legacy staged home now returns the same unsupported-channel outcome as unavailable append capability: ordinary sessions continue with a Warning naming the shared home and “Suspend this session, then Resume it” to restage privately; automated reviewer/brief-writer roles fail visibly. The I/O thread detects the link before any managed-section write and retains the write lease through the operation. Shared files and the profile link remain unchanged.
+
+configure_home_environment remains suitable for host/profile commands and preserves OPENCODE_CONFIG_DIR. configure_staged_home_environment applies the existing private config pin for staged launch configuration, retained worker preparation and native-file delivery tests. Host login therefore retains its configured provider/plugin directory.
+
+Project memory remains in the approved system append. A single escape_prompt_data helper encodes ampersands and angle brackets in file contents, so closing/opening memory tags and any other tag text stay data. MEMORY_GUIDANCE now states that the index is data written by agents, to verify against current instructions/code rather than obey. All five role goldens include a hostile closing memory-index tag plus an imperative; the output contains escaped tag data inside the sole real index block.
+
+Source and goldens were saved in local WIP checkpoints before long builds, then amended into the final candidate. Checks ran outside the sandbox on the dev profile, clearing inherited MJ_CONFIG_DIR/MJ_DATA_DIR:
+
+- `MJ_UPDATE_GOLDEN=1 cargo test -p brokk-mj-worker-runtime golden_session_instructions_by_durable_role`: 1 passed, regenerated five goldens (`memory-instructions-review8-golden-update.log`).
+- `cargo test -p brokk-mj-worker-runtime legacy_native_profile_links_warn_without_writing_shared_home`: 1 passed across three harnesses, including automated-role failures (`memory-instructions-review8-legacy-test.log`).
+- `cargo test -p brokk-mj-worker-runtime session_instructions`: 4 passed, including non-update golden validation, native-file ownership and pinned-adapter lifecycle (`memory-instructions-review8-worker-tests.log`).
+- `cargo test -p brokk-mj-core only_claude_on_macos_keeps_its_own_home_for_profile_commands`: 1 passed, preserving the explicit host config override (`memory-instructions-review8-host-test.log`).
+- `cargo test -p brokk-mj-core every_harness_is_pointed_at_its_staged_home`: 1 passed (`memory-instructions-review8-staged-test.log`).
+- `cargo test -p brokk-mj-core project_memory::tests`: 12 passed (`memory-instructions-review8-memory-tests.log`).
+- `cargo clippy -p brokk-mj-core -p brokk-mj-worker-runtime -p brokk-mj-worker-staging --all-targets -- -D warnings`: passed (`memory-instructions-review8-clippy.log`).
+
+Formatting/diff checks are clean. No still-failing checks, default-instance operations, schema/wire changes, pushes or Milestone 3 acceptance. Logs remain untracked. No findings from this round were overridden; the final candidate is submitted for re-review.

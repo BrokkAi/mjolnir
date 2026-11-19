@@ -14,6 +14,8 @@ After this change there is one composer that builds a session's standing instruc
 
 ## Progress
 
+- [x] (2026-11-19) Eighth review: parent ruled that legacy symlinked native homes visibly degrade without writes or migration (automated reviewer/brief exceptions still fail); OpenCode's config pin is staged-only; system append remains approved and shared memory is escaped as agent-written data. Added legacy-link security regression and hostile closing-tag role golden input; legacy regression (1), instruction tests (4), host/staged-home checks (1 each), project-memory tests (12) and core/worker/staging clippy pass. Source and updated goldens were checkpointed before long builds; amend the WIP into the final commit and request re-review.
+
 - [x] (2026-11-19) Seventh review: recover_creates now restores manager-owned mailbox routing for durable child creates before restarting their lifecycle and before serving sends. Restoration is idempotent. A deterministic replacement regression persists an initial queued message/create intent, replaces the manager, and sends another message before any worker attachment. The first run exposed missing intent setup in the fixture; the seed now uses the cleanup/retry owner transaction. Local checkpoint 5604ba37b was saved before long validation because WSL restarts kill processes. Recovery (1), registration failure (1), reservation (1), no-attachment routing (1), outbox (3) tests and controller/daemon clippy pass; amend the checkpoint into the final commit and request re-review.
 
 - [x] (2026-11-18) Sixth review: parent replaced the state-based terminal rule. Only the non-retry cleanup owner's archived outcome settles failed-startup messages; record removal handles destruction. StartupCleanup, Destroying and ordinary Error preserve pending work. Registration persists through retry and hands over to a published worker protocol. Retry, worker acceptance, archived late-enqueue, reservation and no-attachment routing regressions pass (1 each); existing outbox tests (3), store mailbox tests (4) and controller/store/daemon clippy pass. No findings are overridden.
@@ -67,6 +69,10 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Decision Log
+
+- Decision: legacy native-file sessions whose staged home links to the original shared profile open without the composed instructions and emit the unsupported-channel Warning, naming that home and the exact restaging step (Suspend, then Resume). Reviewer/brief-writer exceptions fail as before. No profile migration happens during worker upgrade. OpenCode's config-dir pin applies only to staged sessions; host login preserves the selected override. Memory stays in the persistent append, with file contents escaped by one shared helper and MEMORY_GUIDANCE explicitly classifying agent-written index data as material to verify rather than obey.
+  Rationale: preserve legacy upgrades without writing shared homes, preserve host authentication/plugin selection, and prevent file data from ending composer-owned delimiters.
+  Date/Author: 2026-11-19, parent rulings after eighth review.
 
 - Decision: finality is an owner outcome, not an intermediate session state. The non-retry cleanup outcome writes archived and settles failed-startup ParentMessages in the same save_startup_cleanup_outcome transaction; enqueue reads that same durable archived failure. Destruction settles through existing record removal/TargetGone. Retryable cleanup preserves the queue and registration. Worker acknowledgements and settlement retain accepted_at IS NULL arbitration, and accepted messages are never overwritten by failure.
   Rationale: provisioning can automatically retry the same child after StartupCleanup, and Destroying may precede a valid worker receipt. No marker or migration is needed; the existing archived outcome distinguishes a final failed launch from a recoverable Error.
@@ -125,6 +131,8 @@ After this change there is one composer that builds a session's standing instruc
 
 
 ## Outcomes & Retrospective
+
+Eighth-review corrections pass: legacy native profile links degrade visibly without writes/migration; staged OpenCode pins no longer affect host login; shared memory data cannot close prompt tags and is explicitly described as agent-written data to verify. The hostile closing-tag golden, existing ACP/native-file tests, legacy filesystem boundary, host/staged-home checks, memory suite and edited-crate clippy pass. No findings are overridden in this round; no push or Milestone 3 acceptance was performed.
 
 Seventh-review recovery routing is implemented and validated. Durable child creates restore manager ownership before their recovered lifecycle starts and before startup serves sends. The existing owner handles idempotent restoration; no persistence or route predicate was added. The deterministic manager-replacement test and affected registration/reservation/outbox tests pass, as does edited controller/daemon clippy. Tests clear inherited MJ_CONFIG_DIR/MJ_DATA_DIR and use their isolated-store helper. The WIP source checkpoint is amended into the final reviewed candidate; no push or Milestone 3 acceptance was performed.
 

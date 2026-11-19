@@ -418,11 +418,6 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
-        if self == Self::OpenCode {
-            // OpenCode replaces its XDG global config root with this override.
-            // Both variables must name the session-owned staged profile.
-            environment.insert("OPENCODE_CONFIG_DIR".into(), crate::target_path::text(home));
-        }
         if self == Self::Antigravity {
             // The managed pin owns updates, including during login/discovery.
             environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());
@@ -435,6 +430,20 @@ impl HarnessKind {
             // every later prompt. One harness owns each staged home, so the
             // lock has no second writer to guard against.
             environment.insert("KIMI_CODE_SESSION_LOCK".into(), "0".into());
+        }
+    }
+
+    /// Pin global instructions to a session-owned staged copy.
+    pub fn configure_staged_home_environment(
+        self,
+        home: &Path,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        self.configure_home_environment(home, environment);
+        if self == Self::OpenCode {
+            // OpenCode replaces its XDG global config root with this override.
+            // Both variables must name the session-owned staged profile.
+            environment.insert("OPENCODE_CONFIG_DIR".into(), crate::target_path::text(home));
         }
     }
 
