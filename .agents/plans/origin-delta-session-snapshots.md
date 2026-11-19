@@ -29,9 +29,13 @@ To see it working, use an isolated test instance named `snapshot-test`:
 
 - [x] (2026-11-18) Read-only audit of suspend capture, checkpoint triggers, lifecycle verbs and their surfaces, moves, managed checkouts, transcript coupling and harness compaction signals. User decisions recorded in the Decision Log.
 - [ ] Milestone 1: git-native snapshot capture, restore and inventory in `mj-checkpoint`, with integration tests against real Git.
+  - [x] (2026-11-19) Implemented in worktree `snapshot-m1` through commit 7b2e5aa5a: capture, restore and inventory with authoritative blockers, the structural teardown guard, shallow refusal, branch-owner normalization with displaced refs, abort prediction including autostash, and origin queries from the source repository. 112 `snapshot::` integration tests and all-target clippy pass.
+  - [ ] Code review (blocked 2026-11-19: reviewer quota exhausted on every Codex profile), then integration onto master.
 - [ ] Milestone 2: suspend and resume use the new snapshot; raw launch-ref record; resume conversions; old-archive and legacy-worktree restore onto a fresh managed clone.
 - [ ] Milestone 3: suspend warnings and consent on every surface; `suspend --without-checkpoint`; consolidation of the lifecycle verbs.
 - [ ] Milestone 4: suspend is the only checkpoint producer; periodic copies, the explicit checkpoint action, export side effects and checkpoint-based agent restart are removed; new journal-retention and tool-output-compaction triggers.
+  - [x] (2026-11-19) Journal retention, startup-receipt pins and their legacy migration, and adoption after pruning implemented in worktree `suspend-only-m4a` through commit f30ad6477. Adoption waits for quiescence with no interrupt, installs a current operational cut with a history notice, and uses ordinary reattach for genesis journals. Relay protocol 74, daemon protocol 108, no migration. Worker and controller adoption tests and clippy on 8 crates pass. The container end-to-end test is ignored pending #1603.
+  - [ ] Code review (blocked 2026-11-19: reviewer quota exhausted), then integration onto master. The remaining Milestone 4 items (removing periodic copies, the explicit checkpoint action and checkpoint-based restart, and tool-output compaction) are not yet started.
 - [ ] Milestone 5: Move on the shared snapshot, with direct transport and the target-side snapshot cache.
 - [ ] Milestone 6: `mj purge-untracked`; retire legacy-worktree creation, branch-deletion options, the Move file picker and other dead capture code.
 - [x] (2026-11-18) Asked session 5992a212 whether Move needs `--with-untracked`. Its answer led to the `.mj/keep/` decision instead.
